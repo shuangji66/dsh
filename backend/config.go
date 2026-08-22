@@ -74,7 +74,7 @@ func loadRuntimeEnv() RuntimeEnv {
 }
 
 func defaultConfig() AppConfig {
-	dshPort := atoi(envOr("dsh_port", envOr("TARGET_PORT", "13080")))
+	dshPort := atoi(envOr("dsh_port", envOr("TARGET_PORT", "3080")))
 	authEnabled := envBool(envOr("auth_mode", envOr("PROXY_AUTH", "true")))
 	proxyEnabled := os.Getenv("proxy_mode") == "1"
 	return AppConfig{

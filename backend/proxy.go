@@ -218,7 +218,7 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	headers.Set("Host", upstream)
 	headers.Set("Connection", "Upgrade")
 	headers.Set("Upgrade", "websocket")
-	headers.Del("Sec-WebSocket-Key") // keep the client's original key
+	// headers.Del("Sec-WebSocket-Key") // keep the client's original key
 	for k, vv := range headers {
 		for _, v := range vv {
 			b.WriteString(k + ": " + v + "\r\n")

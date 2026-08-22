@@ -17,8 +17,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: app/frontend/package-lock.json
 
       - name: Setup Go 1.26
         uses: actions/setup-go@v7

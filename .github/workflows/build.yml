@@ -1,0 +1,50 @@
+name: Build Harness
+
+on:
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]          # 构建两种架构
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: app/frontend/package-lock.json
+
+      - name: Setup Go 1.26
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+
+      - name: Build frontend
+        run: |
+          cd app/frontend
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Prepare embed directory
+        run: |
+          mkdir -p app/backend/embed
+          cp -r app/frontend/dist/* app/backend/embed/
+
+      - name: Build Go binary for ${{ matrix.arch }}
+        run: |
+          cd app/backend
+          GOOS=linux GOARCH=${{ matrix.arch }} CGO_ENABLED=0 \
+            go build -trimpath -ldflags="-s -w" -o harness-${{ matrix.arch }} .
+        # CGO_ENABLED=0 保证静态链接，便于跨平台编译
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-linux-${{ matrix.arch }}
+          path: app/backend/harness-${{ matrix.arch }}

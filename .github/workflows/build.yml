@@ -25,18 +25,18 @@ jobs:
 
       - name: Build frontend
         run: |
-          cd app/frontend
+          cd frontend
           npm install --no-audit --no-fund
           npm run build
 
       - name: Prepare embed directory
         run: |
-          mkdir -p app/backend/embed
-          cp -r app/frontend/dist/* app/backend/embed/
+          mkdir -p backend/embed
+          cp -r frontend/dist/* backend/embed/
 
       - name: Build Go binary for ${{ matrix.arch }}
         run: |
-          cd app/backend
+          cd backend
           GOOS=linux GOARCH=${{ matrix.arch }} CGO_ENABLED=0 \
             go build -trimpath -ldflags="-s -w" -o harness-${{ matrix.arch }} .
         # CGO_ENABLED=0 保证静态链接，便于跨平台编译
@@ -45,4 +45,4 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: harness-linux-${{ matrix.arch }}
-          path: app/backend/harness-${{ matrix.arch }}
+          path: backend/harness-${{ matrix.arch }}

@@ -52,7 +52,7 @@ onMounted(() => store.load())
   <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-3xl mx-auto">
     <!-- 页头 -->
     <header class="mb-8">
-      <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">DeepSeek Harness · 控制台</p>
+      <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">控制台</p>
     </header>
 
     <!-- dsh 生命周期 -->
@@ -94,7 +94,7 @@ onMounted(() => store.load())
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">代理地址</label>
           <input v-model="config.proxyAddr" placeholder="http:// 或 socks5:// 代理地址" class="g-input" />
           <p v-if="!config.proxyAddr" class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
-            可填写 http 或 socks5 代理，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
+            可填写http代理，例如 http://127.0.0.1:7890，socks5代理仅为实验性
           </p>
         </div>
 
@@ -141,6 +141,27 @@ onMounted(() => store.load())
               <svg v-else xmlns="http://www.w3.org/2000/svg" class="w-4.5 h-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
           </div>
+        </div>
+
+        <!-- 登录有效期（小时） -->
+        <div class="py-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
+            登录有效期 <span class="text-ink-faint">(小时)</span>
+          </label>
+          <div class="flex items-center gap-2">
+            <input
+              v-model.number="config.authTTLHours"
+              type="number"
+              min="1"
+              max="720"
+              step="1"
+              class="g-input max-w-40"
+            />
+            <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">小时</span>
+          </div>
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
+            登录鉴权默认有效期 2 小时，超过后将要求重新登录
+          </p>
         </div>
       </div>
 

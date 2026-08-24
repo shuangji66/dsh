@@ -15,7 +15,6 @@ import (
 
 const (
 	authCookie   = "harness_session"
-	authTTL      = 2 * 60 * 60 // 2 hours
 	authLogin    = "/_login"
 	authLogout   = "/_logout"
 	safePunctStr = ".,-_:/@%^=+~"
@@ -139,34 +138,60 @@ func safeNext(next string) string {
 const loginPageHTML = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 - Harness Proxy</title>
+<title>登录 - DeepSeek Harness</title>
 <style>
-  *{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;
-    align-items:center;justify-content:center;font-family:-apple-system,
-    "Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
-    background:#0f172a;color:#e2e8f0}
-  .card{width:340px;padding:32px 28px;background:#1e293b;border:1px solid #334155;
-    border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,.4)}
-  h1{margin:0 0 8px;font-size:20px;font-weight:600;text-align:center;color:#f8fafc}
-  .sub{margin:0 0 24px;font-size:13px;color:#94a3b8;text-align:center}
-  label{display:block;margin:0 0 6px;font-size:13px;color:#cbd5e1}
-  input{width:100%;padding:10px 12px;border:1px solid #475569;border-radius:8px;
-    background:#0f172a;color:#f8fafc;font-size:14px;outline:none}
-  input:focus{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.25)}
-  button{width:100%;margin-top:18px;padding:11px;border:none;border-radius:8px;
-    background:#6366f1;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
-  button:hover{background:#4f46e5}
-  .err{margin-top:14px;padding:10px 12px;background:#7f1d1d;border:1px solid #991b1b;
-    border-radius:8px;font-size:13px;color:#fecaca;text-align:center;word-break:break-all}
-</style></head><body><div class="card">
-  <h1>登录</h1><p class="sub">访问受密码保护</p>
-  <form method="POST" action="/_login">
-    <label for="pw">密码</label>
-    <input id="pw" name="password" type="password" autofocus required
-           autocomplete="current-password">
-    <button type="submit">登录</button>
-  </form>
-  __ERROR_SLOT__
+  :root{
+    --brand:#6366F1;--brand-hover:#4F46E5;--brand-soft:rgba(99,102,241,.12);
+    --bg:#FAFAFA;--surface:#FFFFFF;--line:#E8E8EC;
+    --ink:#0A0A0A;--ink-soft:#6B6B6B;--ink-faint:#9C9C9C;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    font-family:'DM Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,
+      'PingFang SC','Microsoft YaHei',sans-serif;
+    background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
+    padding:24px}
+  .wrap{width:100%;max-width:380px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+    padding:36px 32px;box-shadow:0 2px 10px rgba(0,0,0,.04);overflow:hidden}
+  .logo{width:44px;height:44px;margin:0 auto 20px;border-radius:12px;
+    background:var(--brand);display:flex;align-items:center;justify-content:center;
+    box-shadow:0 4px 12px rgba(99,102,241,.3)}
+  .logo svg{width:22px;height:22px;display:block}
+  h1{margin:0 0 6px;font-size:24px;font-weight:600;text-align:center;
+    font-family:'General Sans','DM Sans',ui-sans-serif,system-ui,sans-serif;
+    letter-spacing:-.03em;color:var(--ink)}
+  .sub{margin:0 0 28px;font-size:13px;color:var(--ink-soft);text-align:center}
+  label{display:block;margin:0 0 8px;font-size:13px;font-weight:500;color:var(--ink)}
+  input{width:100%;padding:10px 14px;border:1px solid var(--line);border-radius:6px;
+    background:var(--surface);color:var(--ink);font-size:14px;outline:none;
+    transition:border-color .15s ease,box-shadow .15s ease}
+  input::placeholder{color:var(--ink-faint)}
+  input:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+  button{width:100%;margin-top:20px;padding:11px;border:none;border-radius:6px;
+    background:var(--brand);color:#fff;font-size:14px;font-weight:600;cursor:pointer;
+    transition:background .15s ease,transform .15s ease,box-shadow .15s ease}
+  button:hover{background:var(--brand-hover);transform:translateY(-1px);
+    box-shadow:0 4px 12px rgba(99,102,241,.35)}
+  button:active{transform:translateY(0)}
+  .err{margin-top:18px;padding:10px 12px;background:rgba(239,68,68,.08);
+    border:1px solid rgba(239,68,68,.35);border-radius:6px;font-size:13px;
+    color:#dc2626;text-align:center;word-break:break-all}
+  .foot{margin-top:16px;text-align:center;font-size:12px;color:var(--ink-faint)}
+</style></head><body><div class="wrap">
+  <div class="card">
+    <div class="logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
+    <h1>欢迎回来</h1><p class="sub">访问受密码保护，请输入登录密码</p>
+    <form method="POST" action="/_login">
+      <label for="pw">密码</label>
+      <input id="pw" name="password" type="password" autofocus required
+             autocomplete="current-password" placeholder="请输入访问密码">
+      <button type="submit">登 录</button>
+    </form>
+    __ERROR_SLOT__
+  </div>
+  <div class="foot">DeepSeek Harness</div>
 </div></body></html>`
 
 func serveLoginPage(w http.ResponseWriter, errMsg string) {
@@ -205,10 +230,15 @@ func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request) bool {
 				serveLoginPage(w, "密码错误")
 				return true
 			}
-			expire := time.Now().Unix() + authTTL
+			// 登录有效期取配置中的 AuthTTLHours（小时）；未配置或非法时回退到 2 小时
+			ttlSeconds := c.AuthTTLHours * 3600
+			if ttlSeconds <= 0 {
+				ttlSeconds = 2 * 60 * 60
+			}
+			expire := time.Now().Unix() + int64(ttlSeconds)
 			token := hmacToken(c.Password, expire)
 			next := safeNext(r.URL.Query().Get("next"))
-			w.Header().Set("Set-Cookie", fmt.Sprintf("%s=%d.%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d", authCookie, expire, token, authTTL))
+			w.Header().Set("Set-Cookie", fmt.Sprintf("%s=%d.%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d", authCookie, expire, token, ttlSeconds))
 			http.Redirect(w, r, next, http.StatusFound)
 			return true
 		}

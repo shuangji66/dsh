@@ -39,6 +39,7 @@ export interface AppConfig {
   proxyAddr: string
   authEnabled: boolean
   password?: string
+  authTTLHours: number
 }
 
 export interface DshStatus {

@@ -184,6 +184,15 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 校验登录有效期（小时）：必须为正整数，且不超过 720 小时（30 天）
+	if req.Config.AuthTTLHours <= 0 {
+		writeErr(w, "登录有效期必须大于 0 小时", http.StatusBadRequest)
+		return
+	}
+	if req.Config.AuthTTLHours > 720 {
+		writeErr(w, "登录有效期不能超过 720 小时（30 天）", http.StatusBadRequest)
+		return
+	}
 	locked := m.dsh.Running()
 	if err := SaveConfig(m.renv, req.Config, locked); err != nil {
 		writeErr(w, "保存失败: "+err.Error(), http.StatusInternalServerError)

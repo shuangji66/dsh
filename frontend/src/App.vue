@@ -133,9 +133,11 @@ onMounted(() => {
       </button>
     </nav>
 
-    <!-- ===== 主内容区域 ===== -->
+    <!-- ===== 主内容区域（使用 KeepAlive 缓存终端组件） ===== -->
     <main class="pl-0 pb-14 md:pb-0 transition-all duration-300" :class="collapsed ? 'md:pl-16' : 'md:pl-44'">
-      <RouterView />
+      <KeepAlive>
+        <RouterView />
+      </KeepAlive>
     </main>
   </div>
 </template>

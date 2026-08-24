@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/creack/pty"
@@ -115,8 +117,31 @@ func (t *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch op {
 		case opText, opBin:
-			// Write payload to PTY master.
-			f.Write(payload)
+			// 检查是否为 resize 控制消息
+			s := string(payload)
+			if strings.HasPrefix(s, "\x1b]resize;") && strings.HasSuffix(s, "\x07") {
+				// 解析 cols 和 rows
+				trimmed := strings.TrimSuffix(strings.TrimPrefix(s, "\x1b]resize;"), "\x07")
+				parts := strings.Split(trimmed, ";")
+				if len(parts) == 2 {
+					cols, err1 := strconv.Atoi(parts[0])
+					rows, err2 := strconv.Atoi(parts[1])
+					if err1 == nil && err2 == nil && cols > 0 && rows > 0 {
+						// 调整 PTY 大小（使用 pty.Setsize）
+						winSize := &pty.Winsize{
+							Rows: uint16(rows),
+							Cols: uint16(cols),
+						}
+						if err := pty.Setsize(f, winSize); err != nil {
+							// 可选：记录错误
+							logger().Printf("[terminal] resize error: %v", err)
+						}
+					}
+				}
+			} else {
+				// 普通数据写入 PTY master
+				f.Write(payload)
+			}
 		case opPing:
 			conn.Write(wsFrame(opPong, payload))
 		case opClose:

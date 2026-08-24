@@ -17,5 +17,8 @@ const views: Record<string, ReturnType<typeof defineAsyncComponent>> = {
 </script>
 
 <template>
-  <component :is="views[view] || views.settings" />
+  <!-- KeepAlive 缓存已挂载的子页面，切换标签时保留终端会话/输入内容，不被销毁重建 -->
+  <KeepAlive include="TerminalView">
+    <component :is="views[view] || views.settings" />
+  </KeepAlive>
 </template>

@@ -51,10 +51,26 @@ h1, h2, h3, h4 {
   height: 100%;
   width: 100%;
 }
+/* 终端复制/粘贴反馈气泡 */
+.term-copy-toast {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 30;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: rgba(10, 10, 10, 0.78);
+  color: #ffffff;
+  font-size: 12px;
+  font-family: 'DM Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+  transition: opacity 200ms ease;
+  pointer-events: none;
+}
+/* 移除 .term-container .xterm 的 padding-bottom，或改为通过内部 div 实现 */
 .term-container .xterm {
   height: 100%;
-  /* 底部内边距，使文字与底部保持距离，背景色同时延伸 */
-  padding-bottom: 20px;
+  /* padding-bottom: 20px; */ /* 注释掉，避免影响 fit 计算 */
   box-sizing: border-box;
 }
 

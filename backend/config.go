@@ -10,11 +10,12 @@ import (
 
 // AppConfig holds the settings editable from the frontend.
 type AppConfig struct {
-	DshPort      int    `json:"dshPort"`
-	ProxyEnabled bool   `json:"proxyEnabled"`
-	ProxyAddr    string `json:"proxyAddr"`
-	AuthEnabled  bool   `json:"authEnabled"`
-	Password     string `json:"password,omitempty"`
+	DshPort       int    `json:"dshPort"`
+	ProxyEnabled  bool   `json:"proxyEnabled"`
+	ProxyAddr     string `json:"proxyAddr"`
+	AuthEnabled   bool   `json:"authEnabled"`
+	Password      string `json:"password,omitempty"`
+	AuthTTLHours  int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 2
 }
 
 // RuntimeEnv 添加 ProxyPort
@@ -85,7 +86,18 @@ func defaultConfig() AppConfig {
 		ProxyAddr:    envOr("proxy_addr", "http://127.0.0.1:7890"),
 		AuthEnabled:  authEnabled,
 		Password:     os.Getenv("password"),
+		AuthTTLHours: envOrInt("auth_ttl_hours", 2),
 	}
+}
+
+// envOrInt reads an integer env var, falling back to def if empty/invalid.
+func envOrInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
 
 func atoi(s string) int {
@@ -124,6 +136,10 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	var v AppConfig
 	if err := json.Unmarshal(data, &v); err != nil {
 		return def
+	}
+	// 旧配置文件中可能没有该字段（反序列化为 0），回退到默认 2 小时
+	if v.AuthTTLHours <= 0 {
+		v.AuthTTLHours = 2
 	}
 	return &v
 }

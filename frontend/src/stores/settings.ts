@@ -9,7 +9,8 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyEnabled: false,
     proxyAddr: 'http://127.0.0.1:7890',
     authEnabled: true,
-    password: ''
+    password: '',
+    authTTLHours: 2
   })
   const runtime = ref<RuntimeInfo | null>(null)
   const status = ref<DshStatus | null>(null)

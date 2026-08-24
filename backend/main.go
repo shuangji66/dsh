@@ -89,77 +89,86 @@ func removePidFile(path string) {
 }
 
 func main() {
-	renv := loadRuntimeEnv()
+    renv := loadRuntimeEnv()
 
-	// 配置日志文件输出（HARNESS_LOG_FILE）；主进程停止时删除日志
-	cleanupLog := setupLogFile()
-	defer cleanupLog()
+    cleanupLog := setupLogFile()
+    defer cleanupLog()
 
-	// Write PID file if environment variable is set
-	pidFile := os.Getenv("HARNESS_PID_FILE")
-	if pidFile != "" {
-		if err := writePidFile(pidFile, os.Getpid()); err != nil {
-			logger().Printf("failed to write pid file %s: %v", pidFile, err)
-		} else {
-			logger().Printf("pid written to %s", pidFile)
-		}
-		defer removePidFile(pidFile)
-	}
+    pidFile := os.Getenv("HARNESS_PID_FILE")
+    if pidFile != "" {
+        if err := writePidFile(pidFile, os.Getpid()); err != nil {
+            logger().Printf("failed to write pid file %s: %v", pidFile, err)
+        } else {
+            logger().Printf("pid written to %s", pidFile)
+        }
+        defer removePidFile(pidFile)
+    }
 
-	if _, err := net.Dial("unix", renv.AdminSock); err == nil {
-		logger().Printf("Admin socket %s is already in use, another instance is running. Exiting.", renv.AdminSock)
-		os.Exit(1)
-	}
-	os.Remove(renv.AdminSock)
-	logger().Printf("Harness backend starting (pid=%d)", os.Getpid())
+    if _, err := net.Dial("unix", renv.AdminSock); err == nil {
+        logger().Printf("Admin socket %s is already in use, another instance is running. Exiting.", renv.AdminSock)
+        os.Exit(1)
+    }
+    os.Remove(renv.AdminSock)
+    logger().Printf("Harness backend starting (pid=%d)", os.Getpid())
 
-	cfg := LoadConfig(&renv)
-	initConfig(&cfg)
+    cfg := LoadConfig(&renv)
+    initConfig(&cfg)
 
-	auth := NewAuth()
-	if cfg.AuthEnabled {
-		if cfg.Password == "" {
-			logger().Printf("[Auth] 未设置密码 —— 鉴权未启用，任何人都可访问。")
-		} else if v := validatePassword(cfg.Password); v != "" {
-			logger().Printf("[Auth] 密码校验失败: %s —— 鉴权未启用。", v)
-		} else {
-			logger().Printf("[Auth] 密码校验通过，登录鉴权已启用。")
-		}
-	} else {
-		logger().Printf("[Auth] 鉴权已禁用（AuthEnabled=false）。")
-	}
+    auth := NewAuth()
+    if cfg.AuthEnabled {
+        if cfg.Password == "" {
+            logger().Printf("[Auth] 未设置密码 —— 鉴权未启用，任何人都可访问。")
+        } else if v := validatePassword(cfg.Password); v != "" {
+            logger().Printf("[Auth] 密码校验失败: %s —— 鉴权未启用。", v)
+        } else {
+            logger().Printf("[Auth] 密码校验通过，登录鉴权已启用。")
+        }
+    } else {
+        logger().Printf("[Auth] 鉴权已禁用（AuthEnabled=false）。")
+    }
 
-	dsh := NewDshManager(&renv)
-	admin := newAdminMux(&renv, dsh, auth)
-	admin.SetSPA(embeddedFrontend())
+    dsh := NewDshManager(&renv)
+    admin := newAdminMux(&renv, dsh, auth)
+    admin.SetSPA(embeddedFrontend())
 
-	go func() {
-		if err := serveAdminSocket(admin); err != nil {
-			logger().Printf("admin socket server: %v", err)
-		}
-	}()
-	logger().Printf("admin console on unix socket %s baseurl %q", renv.AdminSock, renv.AdminBaseURL)
+    // 启动 admin socket（非阻塞）
+    go func() {
+        if err := serveAdminSocket(admin); err != nil {
+            logger().Printf("admin socket server: %v", err)
+        }
+    }()
+    logger().Printf("admin console on unix socket %s baseurl %q", renv.AdminSock, renv.AdminBaseURL)
 
-	startProxy(renv.ProxyPort, auth)
+    // 启动反向代理（非阻塞）
+    startProxy(renv.ProxyPort, auth)
 
-	if os.Getenv("HARNESS_AUTOSTART") != "0" {
-		if err := dsh.Start(); err != nil {
-			logger().Printf("autostart dsh: %v", err)
-		}
-	}
+    // 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
+    if os.Getenv("HARNESS_AUTOSTART") != "0" {
+        if err := dsh.Start(); err != nil {
+            logger().Printf("autostart dsh: %v", err)
+        } else {
+            // dsh 启动成功，执行 node-pty 安装（会等待目录生成）
+            if err := ensureNodePty(&renv); err != nil {
+                logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
+            }
+        }
+    } else {
+        logger().Printf("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
+    }
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	select {
-	case s := <-sig:
-		logger().Printf("received signal %v, shutting down", s)
-	case <-stopCh:
-		logger().Printf("shutdown requested, stopping")
-	}
+    // 等待退出信号
+    sig := make(chan os.Signal, 1)
+    signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+    select {
+    case s := <-sig:
+        logger().Printf("received signal %v, shutting down", s)
+    case <-stopCh:
+        logger().Printf("shutdown requested, stopping")
+    }
 
-	dsh.Stop()
-	os.Remove(renv.AdminSock)
-	logger().Printf("backend stopped")
+    dsh.Stop()
+    os.Remove(renv.AdminSock)
+    logger().Printf("backend stopped")
 }
 
 // initConfig applies a config as the process-wide singleton.

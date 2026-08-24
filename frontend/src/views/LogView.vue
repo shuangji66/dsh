@@ -68,7 +68,6 @@ onBeforeUnmount(() => {
     <header class="flex items-center justify-between gap-4 mb-6 flex-wrap">
       <div>
         <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">日志</p>
-        <h1 class="font-display text-2xl font-semibold text-ink dark:text-white mt-1">运行日志</h1>
       </div>
       <div class="flex items-center gap-3">
         <button class="g-btn-ghost" @click="load" :disabled="loading">刷新</button>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, onActivated, onDeactivated, ref, nextTick } from 'vue'
+  import { onMounted, onBeforeUnmount, onActivated, onDeactivated, ref, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -448,7 +448,8 @@ function showToast(msg: string) {
 <template>
   <div class="flex flex-col h-[calc(100dvh-56px)] md:h-[100dvh]">
     <!-- 工具栏 -->
-    <div class="flex items-center justify-between px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
+    <div
+      class="flex items-center justify-between px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
       <div class="flex items-center gap-2">
         <span class="w-2 h-2 rounded-full bg-success animate-pulse"></span>
         <span class="text-sm font-medium text-ink dark:text-white">终端</span>
@@ -462,42 +463,53 @@ function showToast(msg: string) {
     </div>
 
     <!-- 终端容器，绑定触摸事件（相对定位，承载复制提示气泡） -->
-    <div
-      ref="el"
-      class="flex-1 term-container p-2 overflow-hidden relative"
-      @touchstart="onTouchStart"
-      @touchmove="onTouchMove"
-      @touchend="onTouchEnd"
-      @touchcancel="onTouchEnd"
-    >
+    <div ref="el" class="flex-1 term-container p-2 overflow-hidden relative" @touchstart="onTouchStart"
+      @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd">
       <!-- 复制/粘贴反馈提示 -->
-      <div class="term-copy-toast absolute bottom-2 right-2 z-20 px-3 py-1.5 rounded-md bg-black/70 dark:bg-white/85 text-white dark:text-black text-xs font-medium shadow-card opacity-0 pointer-events-none transition-opacity duration-200 whitespace-nowrap"></div>
+      <div
+        class="term-copy-toast absolute bottom-2 right-2 z-20 px-3 py-1.5 rounded-md bg-black/70 dark:bg-white/85 text-white dark:text-black text-xs font-medium shadow-card opacity-0 pointer-events-none transition-opacity duration-200 whitespace-nowrap">
+      </div>
     </div>
 
     <!-- 移动端功能键（两行） -->
     <div
       class="flex md:hidden flex-col gap-1 px-3 py-2.5 pb-4 bg-bg dark:bg-[#0B0B0F] border-t border-line dark:border-[#2A2A32]"
-      style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);"
-    >
+      style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);">
+      <!-- 第一行 -->
       <div class="flex items-center justify-around gap-1 flex-wrap">
-        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="ctrlPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('ctrl')">Ctrl</button>
-        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="altPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('alt')">Alt</button>
-        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="shiftPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('shift')">Shift</button>
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\t')">Tab</button>
+        <!-- ESC -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\x1b')">ESC</button>
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\x1b[2~')">Insert</button>
-        <!-- 移动端粘贴：读取剪贴板并发送到终端 -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @click="pasteClipboard">粘贴</button>
-      </div>
-      <div class="flex items-center justify-around gap-1 flex-wrap">
+        <!-- ↑ 上方向键（长按重复） -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[A')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[A')" @touchend="stopRepeat" @touchcancel="stopRepeat">↑</button>
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[B')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[B')" @touchend="stopRepeat" @touchcancel="stopRepeat">↓</button>
+        <!-- Tab -->
+        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\t')">Tab</button>
+        <!-- Ctrl -->
+        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="ctrlPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('ctrl')">Ctrl</button>
+        <!-- Shift -->
+        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="shiftPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('shift')">Shift</button>
+        <!-- Alt -->
+        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="altPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('alt')">Alt</button>
+        <!-- Insert -->
+        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\x1b[2~')">Insert</button>
+      </div>
+
+      <!-- 第二行 -->
+      <div class="flex items-center justify-around gap-1 flex-wrap">
+        <!-- ← 左方向键 -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[D')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[D')" @touchend="stopRepeat" @touchcancel="stopRepeat">←</button>
+        <!-- ↓ 下方向键 -->
+        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[B')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[B')" @touchend="stopRepeat" @touchcancel="stopRepeat">↓</button>
+        <!-- → 右方向键 -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[C')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[C')" @touchend="stopRepeat" @touchcancel="stopRepeat">→</button>
+        <!-- . -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('.')">.</button>
+        <!-- / -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('/')">/</button>
-        <!-- 新增 " 和 = 键，注意单引号包裹 -->
+        <!-- - 新增 -->
+        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('-')">-</button>
+        <!-- " -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click='sendKey("\"")'>"</button>
+        <!-- = -->
         <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('=')">=</button>
       </div>
     </div>

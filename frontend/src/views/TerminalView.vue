@@ -451,8 +451,7 @@ function showToast(msg: string) {
     <div
       class="flex items-center justify-between px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
       <div class="flex items-center gap-2">
-        <span class="w-2 h-2 rounded-full bg-success animate-pulse"></span>
-        <span class="text-sm font-medium text-ink dark:text-white">终端</span>
+        <span class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">终端</span>
       </div>
       <div class="flex items-center gap-1">
         <button class="g-btn-ghost hidden sm:inline-flex" title="复制选中内容" @click="copySelection">复制</button>

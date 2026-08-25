@@ -161,10 +161,13 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !p.auth.isAuthed(r) {
+		// 鉴权失效：自动重定向到登录页（dsh 网页打开时下一次请求即被重定向）
 		next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
 		http.Redirect(w, r, authLogin+"?next="+url.QueryEscape(next), http.StatusFound)
 		return
 	}
+	// 记录访客（IP、最近访问时间、登录有效期）
+	p.auth.recordVisitor(r)
 	p.forward(w, r, checker)
 }
 

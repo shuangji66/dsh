@@ -11,6 +11,12 @@ function runtimeBase(): string {
   return import.meta.env.BASE_URL.replace(/\/$/, '') || ''
 }
 
+// sseUrl builds an absolute URL for a Server-Sent Events endpoint under the
+// runtime base path (used by the overview visitor list and the log view).
+export function sseUrl(path: string): string {
+  return runtimeBase() + path
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(runtimeBase() + path, {
     headers: { 'Content-Type': 'application/json' },
@@ -49,6 +55,13 @@ export interface DshStatus {
   dshPort: number
   proxyPort: number
   locked: boolean
+}
+
+export interface Visitor {
+  id: string
+  ip: string
+  lastAccess: string
+  expiresAt: string
 }
 
 export interface SettingsPayload {
@@ -113,5 +126,13 @@ export const api = {
       }
     ),
   fnosPlatformConfig: () =>
-    request<{ ok: boolean; data: Record<string, unknown> }>('/api/fnos/platform-config')
+    request<{ ok: boolean; data: Record<string, unknown> }>('/api/fnos/platform-config'),
+  // 概览页：访客列表
+  visitors: () => request<{ ok: boolean; visitors: Visitor[] }>('/api/visitors'),
+  // 概览页：注销访客（该访客需重新登录）
+  deleteVisitor: (id: string) =>
+    request<{ ok: boolean; deleted: boolean; msg: string }>('/api/visitors', {
+      method: 'DELETE',
+      body: JSON.stringify({ id })
+    })
 }

@@ -114,15 +114,74 @@ func (a *Auth) isAuthed(r *http.Request) bool {
 		return false
 	}
 	expected := hmacToken(c.Password, expireTs)
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(raw[dot+1:])) == 1
+	if subtle.ConstantTimeCompare([]byte(expected), []byte(raw[dot+1:])) != 1 {
+		return false
+	}
+	// 访客被删除（需重新登录）后，其会话令牌被吊销，视为未鉴权
+	if a.visitors.isRevokedToken(raw) {
+		return false
+	}
+	return true
+}
+
+// cookieSession parses the session cookie into (expireTs, rawToken). Returns
+// (0, "") when no valid session cookie is present.
+func (a *Auth) cookieSession(r *http.Request) (int64, string) {
+	raw := parseCookies(r.Header.Get("Cookie"))[authCookie]
+	dot := strings.Index(raw, ".")
+	if dot == -1 {
+		return 0, ""
+	}
+	et, err := strconv.ParseInt(raw[:dot], 10, 64)
+	if err != nil {
+		return 0, ""
+	}
+	return et, raw
+}
+
+// recordVisitor updates the reverse-proxy visitor registry for the request.
+func (a *Auth) recordVisitor(r *http.Request) {
+	et, token := a.cookieSession(r)
+	if token == "" {
+		return
+	}
+	a.visitors.record(token, realIP(r), et)
+}
+
+// Visitors returns a snapshot of the reverse-proxy visitors.
+func (a *Auth) Visitors() []Visitor {
+	return a.visitors.List()
+}
+
+// RevokeVisitor logs out the visitor identified by session token.
+func (a *Auth) RevokeVisitor(token string) bool {
+	return a.visitors.Revoke(token)
+}
+
+// realIP returns the client IP, honoring an upstream reverse proxy that sets
+// X-Forwarded-For. The leftmost (original client) entry is used when present,
+// otherwise the direct connection address is used.
+func realIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		for _, part := range strings.Split(xff, ",") {
+			if s := strings.TrimSpace(part); s != "" {
+				return strings.TrimPrefix(s, "::ffff:")
+			}
+		}
+	}
+	if xr := r.Header.Get("X-Real-Ip"); xr != "" {
+		return strings.TrimPrefix(strings.TrimSpace(xr), "::ffff:")
+	}
+	return ip(r)
 }
 
 type Auth struct {
 	validateErr string
+	visitors    *VisitorTracker
 }
 
 func NewAuth() *Auth {
-	return &Auth{validateErr: ""}
+	return &Auth{validateErr: "", visitors: NewVisitorTracker()}
 }
 
 func safeNext(next string) string {
@@ -141,9 +200,33 @@ const loginPageHTML = `<!DOCTYPE html>
 <title>登录 - DeepSeek Harness</title>
 <style>
   :root{
-    --brand:#6366F1;--brand-hover:#4F46E5;--brand-soft:rgba(99,102,241,.12);
-    --bg:#FAFAFA;--surface:#FFFFFF;--line:#E8E8EC;
-    --ink:#0A0A0A;--ink-soft:#6B6B6B;--ink-faint:#9C9C9C;
+    --brand:#6366F1;
+    --brand-hover:#4F46E5;
+    --brand-soft:rgba(99,102,241,.12);
+    --bg:#FAFAFA;
+    --surface:#FFFFFF;
+    --line:#E8E8EC;
+    --ink:#0A0A0A;
+    --ink-soft:#6B6B6B;
+    --ink-faint:#9C9C9C;
+    --shadow:0 2px 10px rgba(0,0,0,.04);
+    --err-bg:rgba(239,68,68,.08);
+    --err-border:rgba(239,68,68,.35);
+    --err-color:#dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0B0B0F;
+      --surface:#111115;
+      --line:#2A2A32;
+      --ink:#EDEDF0;
+      --ink-soft:#A6A6AD;
+      --ink-faint:#8A8A92;
+      --shadow:0 2px 10px rgba(0,0,0,.5);
+      --err-bg:rgba(248,113,113,.12);
+      --err-border:rgba(248,113,113,.35);
+      --err-color:#f87171;
+    }
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -154,7 +237,7 @@ const loginPageHTML = `<!DOCTYPE html>
     padding:24px}
   .wrap{width:100%;max-width:380px}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
-    padding:36px 32px;box-shadow:0 2px 10px rgba(0,0,0,.04);overflow:hidden}
+    padding:36px 32px;box-shadow:var(--shadow);overflow:hidden}
   .logo{width:44px;height:44px;margin:0 auto 20px;border-radius:12px;
     background:var(--brand);display:flex;align-items:center;justify-content:center;
     box-shadow:0 4px 12px rgba(99,102,241,.3)}
@@ -175,9 +258,9 @@ const loginPageHTML = `<!DOCTYPE html>
   button:hover{background:var(--brand-hover);transform:translateY(-1px);
     box-shadow:0 4px 12px rgba(99,102,241,.35)}
   button:active{transform:translateY(0)}
-  .err{margin-top:18px;padding:10px 12px;background:rgba(239,68,68,.08);
-    border:1px solid rgba(239,68,68,.35);border-radius:6px;font-size:13px;
-    color:#dc2626;text-align:center;word-break:break-all}
+  .err{margin-top:18px;padding:10px 12px;background:var(--err-bg);
+    border:1px solid var(--err-border);border-radius:6px;font-size:13px;
+    color:var(--err-color);text-align:center;word-break:break-all}
   .foot{margin-top:16px;text-align:center;font-size:12px;color:var(--ink-faint)}
 </style></head><body><div class="wrap">
   <div class="card">

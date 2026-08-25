@@ -5,7 +5,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 
 const store = useSettingsStore()
-const { config, status, locked, loading } = storeToRefs(store)
+const { config, locked, loading } = storeToRefs(store)
 const toast = useToastStore()
 
 // 访问密码明文/密文切换
@@ -51,28 +51,10 @@ onMounted(() => store.load())
 <template>
   <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-3xl mx-auto">
     <!-- 页头 -->
-    <header class="mb-8">
-      <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">控制台</p>
+    <header class="flex items-center justify-between mb-8 flex-wrap gap-3">
+      <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">设置</p>
+      <button class="g-btn-primary" :disabled="loading" @click="submit()">保存配置</button>
     </header>
-
-    <!-- dsh 生命周期 -->
-    <section class="g-card g-card-hover p-6 mb-6">
-      <div class="flex items-center justify-between mb-2">
-        <h2 class="font-display text-lg font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-        <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
-          :class="status?.running ? 'bg-success/10 text-success' : 'bg-ink-faint/10 text-ink-soft dark:text-[#A6A6AD]'">
-          <span class="inline-block w-2 h-2 rounded-full"
-            :class="status?.running ? 'bg-success' : 'bg-ink-faint'"></span>
-          {{ status?.running ? '运行中' : '已停止' }}
-        </span>
-      </div>
-      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-5">管理 dsh 服务的启动、停止与重启。</p>
-      <div class="flex gap-3">
-        <button v-if="!status?.running" class="g-btn-primary bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">启动</button>
-        <button v-else class="g-btn-danger" :disabled="loading" @click="store.stopDsh()">停止</button>
-        <button class="g-btn-secondary" :disabled="loading" @click="store.restartDsh()">重启</button>
-      </div>
-    </section>
 
     <!-- 反向代理与鉴权 -->
     <section class="g-card g-card-hover p-6 mb-6">
@@ -164,8 +146,6 @@ onMounted(() => store.load())
           </p>
         </div>
       </div>
-
-      <button class="g-btn-primary mt-6" :disabled="loading" @click="submit()">保存配置</button>
     </section>
   </div>
 </template>

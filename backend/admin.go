@@ -254,6 +254,31 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
     writeJSON(w, m.dsh.Status())
 }
 
+// --- Visitor API (overview page) ---
+func (m *AdminMux) handleGetVisitors(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]interface{}{
+		"ok":       true,
+		"visitors": m.auth.Visitors(),
+	})
+}
+
+type deleteVisitorReq struct {
+	ID string `json:"id"`
+}
+
+func (m *AdminMux) handleDeleteVisitor(w http.ResponseWriter, r *http.Request) {
+	var body deleteVisitorReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeErr(w, "缺少 id", http.StatusBadRequest)
+		return
+	}
+	if !m.auth.RevokeVisitor(body.ID) {
+		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "该访客不存在"})
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "deleted": true, "msg": "已注销该访客"})
+}
+
 // --- fnOS proxy ---
 func (m *AdminMux) handleFnos(w http.ResponseWriter, r *http.Request) {
 	p := strings.TrimPrefix(r.URL.Path, "/api/fnos/")
@@ -353,6 +378,14 @@ func (m *AdminMux) buildHandler() http.Handler {
             m.handleConvertPath(w, r)
 		case p == "/api/logs" && r.Method == http.MethodGet:
 			m.handleGetLogs(w, r)
+		case p == "/api/visitors" && r.Method == http.MethodGet:
+			m.handleGetVisitors(w, r)
+		case p == "/api/visitors" && r.Method == http.MethodDelete:
+			m.handleDeleteVisitor(w, r)
+		case p == "/api/visitors/stream" && r.Method == http.MethodGet:
+			m.handleVisitorsStream(w, r)
+		case p == "/api/logs/stream" && r.Method == http.MethodGet:
+			m.handleLogsStream(w, r)
 		case strings.HasPrefix(p, "/api/fnos/"):
 			m.handleFnos(w, r)
 		default:

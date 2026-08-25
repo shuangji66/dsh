@@ -4,11 +4,12 @@ import { useRoute } from 'vue-router'
 
 const route = useRoute()
 
-// 当前子页面由 URL 的 ?view= 查询参数决定；默认进入控制台
-const view = computed(() => (route.query.view as string) || 'settings')
+// 当前子页面由 URL 的 ?view= 查询参数决定；默认进入概览页
+const view = computed(() => (route.query.view as string) || 'overview')
 
-// 懒加载三个子页面，保持按需分包
+// 懒加载子页面，保持按需分包
 const views: Record<string, ReturnType<typeof defineAsyncComponent>> = {
+  overview: defineAsyncComponent(() => import('@/views/OverviewView.vue')),
   settings: defineAsyncComponent(() => import('@/views/SettingsView.vue')),
   directory: defineAsyncComponent(() => import('@/views/DirectoryView.vue')),
   terminal: defineAsyncComponent(() => import('@/views/TerminalView.vue')),

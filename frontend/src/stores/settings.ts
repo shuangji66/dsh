@@ -2,15 +2,17 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, type AppConfig, type DshStatus, type RuntimeInfo, type SettingsPayload } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
+import { useI18n } from '@/composables/useI18n'
 
 export const useSettingsStore = defineStore('settings', () => {
   const config = ref<AppConfig>({
-    dshPort: 3080,
+    dshPort: 13080,
     proxyEnabled: false,
     proxyAddr: 'http://127.0.0.1:7890',
     authEnabled: true,
     password: '',
-    authTTLHours: 2
+    authTTLHours: 2,
+    dshMemLimit: 2048
   })
   const runtime = ref<RuntimeInfo | null>(null)
   const status = ref<DshStatus | null>(null)
@@ -18,6 +20,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const loading = ref(false)
 
   const toast = useToastStore()
+  const { t } = useI18n()
 
   async function load() {
     loading.value = true
@@ -50,9 +53,9 @@ export const useSettingsStore = defineStore('settings', () => {
         oldProxyEnabled !== submitted.proxyEnabled ||
         oldProxyAddr !== submitted.proxyAddr
       if (status.value?.running && proxyChanged) {
-        toast.show('配置已保存，代理设置已变更，请重启 dsh 服务使配置生效', 'info', 5000)
+        toast.show(t('saved_proxy_restart'), 'info', 5000)
       } else {
-        toast.show('配置已保存', 'success')
+        toast.show(t('saved'), 'success')
       }
       await load()
     } catch (e) {
@@ -66,7 +69,7 @@ export const useSettingsStore = defineStore('settings', () => {
     try {
       status.value = await api.dshStart()
       locked.value = status.value.running
-      toast.show('dsh 已启动', 'success')
+      toast.show(t('dsh_started'), 'success')
       await load()
     } catch (e) {
       toast.show((e as Error).message, 'error')
@@ -77,7 +80,7 @@ export const useSettingsStore = defineStore('settings', () => {
     try {
       status.value = await api.dshStop()
       locked.value = status.value.running
-      toast.show('dsh 已停止', 'success')
+      toast.show(t('dsh_stopped'), 'success')
       await load()
     } catch (e) {
       toast.show((e as Error).message, 'error')
@@ -89,7 +92,7 @@ export const useSettingsStore = defineStore('settings', () => {
       loading.value = true
       status.value = await api.dshRestart()
       locked.value = status.value.running
-      toast.show('dsh 已重启', 'success')
+      toast.show(t('dsh_restarted'), 'success')
       await load()
     } catch (e) {
       toast.show((e as Error).message, 'error')

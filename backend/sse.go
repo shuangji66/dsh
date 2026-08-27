@@ -54,11 +54,31 @@ func (m *AdminMux) handleVisitorsStream(w http.ResponseWriter, r *http.Request) 
 		case <-ch:
 			sseSend(w, "visitors", sseJSON(m.auth.Visitors()))
 		case <-keepalive.C:
-			// 心跳注释，防止代理因空闲关闭长连接
-			fmt.Fprint(w, ": keepalive\n\n")
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
+			// 心跳：顺带清理已过期的访客并重新推送，保证过期记录自动消失
+			m.auth.visitors.PurgeExpired(time.Now())
+			sseSend(w, "visitors", sseJSON(m.auth.Visitors()))
+		}
+	}
+}
+
+// handleDshStream 每秒推送一次 dsh 状态（运行状态、CPU 使用率、内存占用等），
+// 供概览页实时刷新 CPU / 内存占用，取代客户端轮询。
+func (m *AdminMux) handleDshStream(w http.ResponseWriter, r *http.Request) {
+	setSSEHeaders(w)
+	ctx := r.Context()
+
+	// 初始快照
+	sseSend(w, "status", sseJSON(m.dsh.Status()))
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sseSend(w, "status", sseJSON(m.dsh.Status()))
 		}
 	}
 }

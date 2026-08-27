@@ -3,13 +3,31 @@ import { onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
+import { useI18n, setLocale } from '@/composables/useI18n'
+import { useTheme } from '@/composables/useTheme'
+import { useConsolePrefs, type DefaultPage } from '@/composables/useConsolePrefs'
 
 const store = useSettingsStore()
 const { config, locked, loading } = storeToRefs(store)
 const toast = useToastStore()
+const { t } = useI18n()
+const { themeMode, setTheme } = useTheme()
+const { locale } = useI18n()
+const { defaultPage, setDefaultPage } = useConsolePrefs()
 
 // 访问密码明文/密文切换
 const showPassword = ref(false)
+
+// 控制台设置变更：实时生效，仅保存在浏览器 localStorage，不持久化到后端
+function onThemeChange() {
+  setTheme(themeMode.value)
+}
+function onLanguageChange() {
+  setLocale(locale.value)
+}
+function onDefaultPageChange() {
+  setDefaultPage(defaultPage.value as DefaultPage)
+}
 
 // 安全标点：与后端 auth.go 的 safePunctStr 保持一致
 const SAFE_PUNCT = new Set('.,-_:/@%^=+~')
@@ -35,8 +53,9 @@ function validatePassword(pwd: string): string {
 
 // 保存前校验：只要填写了密码，就必须满足强度要求（≥8位，含字母、数字、标点）
 function submit() {
-  if (config.password) {
-    const err = validatePassword(config.password)
+  const pwd = config.value.password
+  if (pwd) {
+    const err = validatePassword(pwd)
     if (err) {
       toast.show(err, 'error')
       return
@@ -52,19 +71,19 @@ onMounted(() => store.load())
   <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-3xl mx-auto">
     <!-- 页头 -->
     <header class="flex items-center justify-between mb-8 flex-wrap gap-3">
-      <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">设置</p>
-      <button class="g-btn-primary" :disabled="loading" @click="submit()">保存配置</button>
+      <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('settings_title') }}</p>
+      <button class="g-btn-primary" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </header>
 
     <!-- 反向代理与鉴权 -->
     <section class="g-card g-card-hover p-6 mb-6">
-      <h2 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">设置</h2>
-      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-6">配置代理、端口与登录鉴权。</p>
+      <h2 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">{{ t('settings_title') }}</h2>
+      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-6">{{ t('settings_desc') }}</p>
 
       <div class="divide-y divide-line dark:divide-[#2A2A32]">
         <!-- 启用外部代理（开关） -->
         <label class="flex items-center justify-between py-4 cursor-pointer">
-          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">启用代理</span>
+          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_enable_proxy') }}</span>
           <div class="relative inline-flex items-center">
             <input type="checkbox" v-model="config.proxyEnabled" class="sr-only peer">
             <div class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></div>
@@ -73,15 +92,15 @@ onMounted(() => store.load())
         </label>
 
         <div v-if="config.proxyEnabled" class="py-4">
-          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">代理地址</label>
-          <input v-model="config.proxyAddr" placeholder="http:// 或 socks5:// 代理地址" class="g-input" />
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
+          <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" />
           <p v-if="!config.proxyAddr" class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
-            可填写http代理，例如 http://127.0.0.1:7890，socks5代理仅为实验性
+            {{ t('settings_proxy_hint') }}
           </p>
         </div>
 
         <div class="py-4">
-          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">dsh 端口</label>
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_dsh_port') }}</label>
           <input
             v-model.number="config.dshPort"
             type="number"
@@ -92,9 +111,30 @@ onMounted(() => store.load())
           />
         </div>
 
+        <!-- dsh 内存限制（MB） -->
+        <div class="py-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
+            {{ t('settings_dsh_mem_limit') }} <span class="text-ink-faint">{{ t('settings_dsh_mem_mb') }}</span>
+          </label>
+          <div class="flex items-center gap-2">
+            <input
+              v-model.number="config.dshMemLimit"
+              type="number"
+              min="1"
+              max="65536"
+              step="64"
+              class="g-input max-w-40"
+            />
+            <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">MB</span>
+          </div>
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
+            {{ t('settings_dsh_mem_hint') }}
+          </p>
+        </div>
+
         <!-- 启用登录鉴权（开关） -->
         <label class="flex items-center justify-between py-4 cursor-pointer">
-          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">启用登录鉴权</span>
+          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_enable_auth') }}</span>
           <div class="relative inline-flex items-center">
             <input type="checkbox" v-model="config.authEnabled" class="sr-only peer">
             <div class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></div>
@@ -104,20 +144,20 @@ onMounted(() => store.load())
 
         <div class="py-4">
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
-            访问密码 <span class="text-ink-faint">(≥8位，含字母/数字/标点)</span>
+            {{ t('settings_password') }} <span class="text-ink-faint">{{ t('settings_password_hint') }}</span>
           </label>
           <div class="relative">
             <input
               :type="showPassword ? 'text' : 'password'"
               v-model="config.password"
-              placeholder="留空则鉴权不生效"
+              :placeholder="t('settings_password_placeholder')"
               class="g-input pr-10"
             />
             <button
               type="button"
               @click="showPassword = !showPassword"
               class="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center rounded-md text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-              :title="showPassword ? '隐藏密码' : '显示密码'"
+              :title="showPassword ? t('settings_hide_password') : t('settings_show_password')"
             >
               <svg v-if="showPassword" xmlns="http://www.w3.org/2000/svg" class="w-4.5 h-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
               <svg v-else xmlns="http://www.w3.org/2000/svg" class="w-4.5 h-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -128,7 +168,7 @@ onMounted(() => store.load())
         <!-- 登录有效期（小时） -->
         <div class="py-4">
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
-            登录有效期 <span class="text-ink-faint">(小时)</span>
+            {{ t('settings_auth_ttl') }} <span class="text-ink-faint">{{ t('settings_auth_ttl_hour') }}</span>
           </label>
           <div class="flex items-center gap-2">
             <input
@@ -139,11 +179,46 @@ onMounted(() => store.load())
               step="1"
               class="g-input max-w-40"
             />
-            <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">小时</span>
+            <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">h</span>
           </div>
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
-            登录鉴权默认有效期 2 小时，超过后将要求重新登录
+            {{ t('settings_auth_ttl_hint') }}
           </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 控制台设置 -->
+    <section class="g-card g-card-hover p-6 mb-6">
+      <h2 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">{{ t('console_title') }}</h2>
+      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-6">{{ t('console_desc') }}</p>
+
+      <div class="divide-y divide-line dark:divide-[#2A2A32]">
+        <div class="py-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('console_theme') }}</label>
+          <select v-model="themeMode" @change="onThemeChange" class="g-input">
+            <option value="light">{{ t('theme_light') }}</option>
+            <option value="dark">{{ t('theme_dark') }}</option>
+            <option value="system">{{ t('theme_system') }}</option>
+          </select>
+        </div>
+        <div class="py-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('console_language') }}</label>
+          <select v-model="locale" @change="onLanguageChange" class="g-input">
+            <option value="zh">{{ t('lang_zh') }}</option>
+            <option value="en">{{ t('lang_en') }}</option>
+          </select>
+        </div>
+        <div class="py-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('console_default_page') }}</label>
+          <select v-model="defaultPage" @change="onDefaultPageChange" class="g-input">
+            <option value="overview">{{ t('default_overview') }}</option>
+            <option value="last">{{ t('default_last') }}</option>
+            <option value="settings">{{ t('default_settings') }}</option>
+            <option value="directory">{{ t('default_directory') }}</option>
+            <option value="terminal">{{ t('default_terminal') }}</option>
+            <option value="logs">{{ t('default_logs') }}</option>
+          </select>
         </div>
       </div>
     </section>

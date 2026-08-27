@@ -47,6 +47,16 @@ func writeErr(w http.ResponseWriter, msg string, status int) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})
 }
 
+// inSet reports whether s is one of the allowed values.
+func inSet(s string, allowed ...string) bool {
+	for _, a := range allowed {
+		if s == a {
+			return true
+		}
+	}
+	return false
+}
+
 // spaHandler serves the embedded SPA assets.
 func spaHandler(fsys fs.FS, baseurl string) http.Handler {
 	sub, err := fs.Sub(fsys, "embed")
@@ -193,6 +203,15 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "登录有效期不能超过 720 小时（30 天）", http.StatusBadRequest)
 		return
 	}
+	// 校验 dsh 内存限制（MB）：必须为正整数，且不超过 65536 MB（64GB）
+	if req.Config.DshMemLimit <= 0 {
+		writeErr(w, "dsh 内存限制必须大于 0 MB", http.StatusBadRequest)
+		return
+	}
+	if req.Config.DshMemLimit > 65536 {
+		writeErr(w, "dsh 内存限制不能超过 65536 MB（64GB）", http.StatusBadRequest)
+		return
+	}
 	locked := m.dsh.Running()
 	if err := SaveConfig(m.renv, req.Config, locked); err != nil {
 		writeErr(w, "保存失败: "+err.Error(), http.StatusInternalServerError)
@@ -218,6 +237,29 @@ func (m *AdminMux) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "path": path, "content": string(data), "exists": true})
+}
+
+// handleDownloadLog 以附件形式下发日志原文件，供前端“导出”按钮下载。
+func (m *AdminMux) handleDownloadLog(w http.ResponseWriter, r *http.Request) {
+	path := os.Getenv("HARNESS_LOG_FILE")
+	if path == "" {
+		writeErr(w, "日志文件未配置", http.StatusNotFound)
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeErr(w, "日志文件不存在", http.StatusNotFound)
+			return
+		}
+		writeErr(w, "读取日志失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	fname := filepath.Base(path)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Write(data)
 }
 func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 	if m.dsh.Running() {
@@ -384,8 +426,12 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleDeleteVisitor(w, r)
 		case p == "/api/visitors/stream" && r.Method == http.MethodGet:
 			m.handleVisitorsStream(w, r)
+		case p == "/api/dsh/stream" && r.Method == http.MethodGet:
+			m.handleDshStream(w, r)
 		case p == "/api/logs/stream" && r.Method == http.MethodGet:
 			m.handleLogsStream(w, r)
+		case p == "/api/logs/download" && r.Method == http.MethodGet:
+			m.handleDownloadLog(w, r)
 		case strings.HasPrefix(p, "/api/fnos/"):
 			m.handleFnos(w, r)
 		default:

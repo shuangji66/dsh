@@ -2,14 +2,30 @@
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useToastStore } from '@/stores/toast'
 import { sseUrl } from '@/serverapi'
+import { useI18n } from '@/composables/useI18n'
 
 const toast = useToastStore()
+const { t } = useI18n()
 const logContent = ref('')
 const logPath = ref('')
 const loading = ref(true)
 const error = ref('')
 const stickToBottom = ref(true) // 是否跟随底部自动滚动
 let logES: EventSource | null = null
+
+// 导出日志原文件：浏览器下载后端附件
+function exportLog() {
+  if (!logPath.value) {
+    toast.show(t('log_not_configured'), 'error')
+    return
+  }
+  const a = document.createElement('a')
+  a.href = sseUrl('/api/logs/download')
+  a.download = ''
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
 
 const el = ref<HTMLElement | null>(null)
 
@@ -80,7 +96,10 @@ onBeforeUnmount(() => {
   <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-5xl mx-auto">
     <header class="flex items-center justify-between gap-4 mb-6 flex-wrap">
       <div>
-        <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">日志</p>
+        <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('logs_title') }}</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="g-btn-secondary !h-9" @click="exportLog">{{ t('log_export') }}</button>
       </div>
     </header>
 
@@ -90,20 +109,20 @@ onBeforeUnmount(() => {
 
     <div v-else class="g-card overflow-hidden">
       <div class="flex items-center justify-between gap-3 px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
-        <span class="font-mono text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ logPath || '（未配置日志文件，未设置 HARNESS_LOG_FILE）' }}</span>
+        <span class="font-mono text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ logPath || t('log_no_file') }}</span>
         <button
           @click="stickToBottom = !stickToBottom"
           class="g-btn-ghost text-xs flex-shrink-0"
-          :title="stickToBottom ? '暂停自动滚动' : '恢复自动滚动'"
+          :title="stickToBottom ? t('log_pause_scroll') : t('log_resume_scroll')"
         >
-          {{ stickToBottom ? '自动滚动：开' : '自动滚动：关' }}
+          {{ stickToBottom ? t('log_auto_scroll_on') : t('log_auto_scroll_off') }}
         </button>
       </div>
       <pre
         ref="el"
         @scroll="onScroll"
         class="h-[62vh] overflow-auto p-4 bg-[#0f1115] text-[#d6dce4] text-xs leading-5 font-mono whitespace-pre-wrap break-all m-0"
-      >{{ logContent || '暂无日志内容' }}</pre>
+      >{{ logContent || t('log_empty') }}</pre>
     </div>
   </div>
 </template>

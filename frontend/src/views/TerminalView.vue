@@ -3,8 +3,10 @@
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { useI18n } from '@/composables/useI18n'
 
 defineOptions({ name: 'TerminalView' })
+const { t } = useI18n()
 
 const el = ref<HTMLElement | null>(null)
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -14,6 +16,7 @@ const wsEndpoint = basePath + '/terminal'
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let sock: WebSocket | null = null
+let termOpened = false
 let resizeObserver: ResizeObserver | null = null
 let resizeTimeout: number | null = null
 let fitRetryTimer: number | null = null
@@ -245,11 +248,34 @@ onMounted(() => {
   })
   fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
-  term.open(el.value)
 
-  nextTick(() => {
-    requestAnimationFrame(fitAndResize)
-  })
+  // 等待等宽字体加载完成后再 open + fit，确保 xterm 首次测量到的字符
+  // 单元格宽度是准确的。若过早 open，xterm 会用一个尚未加载完成的回退
+  // 字体测量 cell 宽度并缓存，导致 cols 计算错误（文字提前换行 / 命令重叠）。
+  const openAndFit = () => {
+    try {
+      term?.open(el.value as HTMLElement)
+      termOpened = true
+    } catch {
+      /* 已 open 则忽略 */
+    }
+    nextTick(() => {
+      requestAnimationFrame(() => {
+        fitAndResize()
+      })
+    })
+  }
+  if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
+    const fallback = window.setTimeout(() => {
+      if (!termOpened) openAndFit()
+    }, 800)
+    document.fonts.ready.then(() => {
+      window.clearTimeout(fallback)
+      if (!termOpened) openAndFit()
+    })
+  } else {
+    openAndFit()
+  }
 
   term.onResize(({ cols, rows }) => {
     // 不重复发送，由 fitAndResize 统一处理
@@ -278,17 +304,22 @@ onMounted(() => {
   sock = new WebSocket(wsUrl())
   sock.binaryType = 'arraybuffer'
 
+  sock.onopen = () => {
+    // 连接建立后重新 fit 并同步 PTY 尺寸，确保后端 bash 的 cols/rows 与
+    // 前端渲染一致，避免换行错位、命令重叠。
+    fitAndResize()
+  }
   sock.onmessage = (ev) => {
     const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)
     term?.write(data)
     scrollToBottom()
   }
   sock.onclose = () => {
-    term?.writeln('\r\n\x1b[31m连接已关闭。刷新页面重连。\x1b[0m')
+    term?.writeln('\r\n\x1b[31m' + t('term_conn_closed') + '\x1b[0m')
     scrollToBottom()
   }
   sock.onerror = () => {
-    term?.writeln('\r\n\x1b[31mWebSocket 错误。\x1b[0m')
+    term?.writeln('\r\n\x1b[31m' + t('term_ws_error') + '\x1b[0m')
     scrollToBottom()
   }
 
@@ -372,16 +403,16 @@ const reconnect = () => {
       scrollToBottom()
     }
     sock.onopen = () => {
-      term?.writeln('已重新连接')
+      term?.writeln('' + t('term_reconnected') + '')
       scrollToBottom()
       fitAndResize()
     }
     sock.onclose = () => {
-      term?.writeln('\r\n\x1b[31m连接已关闭。刷新页面重连。\x1b[0m')
+      term?.writeln('\r\n\x1b[31m' + t('term_conn_closed') + '\x1b[0m')
       scrollToBottom()
     }
     sock.onerror = () => {
-      term?.writeln('\r\n\x1b[31mWebSocket 错误。\x1b[0m')
+      term?.writeln('\r\n\x1b[31m' + t('term_ws_error') + '\x1b[0m')
       scrollToBottom()
     }
   }, 200)
@@ -399,15 +430,15 @@ async function copySelection() {
   if (!term) return
   const sel = term.getSelection()
   if (!sel) {
-    showToast('没有选中内容')
+    showToast('' + t('term_no_selection') + '')
     return
   }
   try {
     await navigator.clipboard.writeText(sel)
-    showToast('已复制到剪贴板')
+    showToast('' + t('term_copied') + '')
   } catch {
     // 剪贴板 API 不可用（如非安全上下文）时退回选中态
-    showToast('请直接框选文本复制')
+    showToast('' + t('term_select_hint') + '')
   }
   term.focus()
 }
@@ -415,7 +446,7 @@ async function copySelection() {
 // ---------- 粘贴：读取剪贴板并发送到终端 ----------
 async function pasteClipboard() {
   if (!term || !sock || sock.readyState !== WebSocket.OPEN) {
-    showToast('终端未连接')
+    showToast('' + t('term_not_connected') + '')
     return
   }
   try {
@@ -451,18 +482,18 @@ function showToast(msg: string) {
     <div
       class="flex items-center justify-between px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
       <div class="flex items-center gap-2">
-        <span class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">终端</span>
+        <span class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('terminal_title') }}</span>
       </div>
       <div class="flex items-center gap-1">
-        <button class="g-btn-ghost hidden sm:inline-flex" title="复制选中内容" @click="copySelection">复制</button>
-        <button class="g-btn-ghost" title="粘贴到终端" @click="pasteClipboard">粘贴</button>
-        <button class="g-btn-ghost" @click="reconnect">重连</button>
-        <button class="g-btn-ghost" @click="clearTerminal">清空</button>
+        <button class="g-btn-ghost hidden sm:inline-flex" :title="t('term_copy')" @click="copySelection">{{ t('term_copy') }}</button>
+        <button class="g-btn-ghost" :title="t('term_paste')" @click="pasteClipboard">{{ t('term_paste') }}</button>
+        <button class="g-btn-ghost" @click="reconnect">{{ t('term_reconnect') }}</button>
+        <button class="g-btn-ghost" @click="clearTerminal">{{ t('term_clear') }}</button>
       </div>
     </div>
 
     <!-- 终端容器，绑定触摸事件（相对定位，承载复制提示气泡） -->
-    <div ref="el" class="flex-1 term-container p-2 overflow-hidden relative" @touchstart="onTouchStart"
+    <div ref="el" class="flex-1 term-container overflow-hidden relative" @touchstart="onTouchStart"
       @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd">
       <!-- 复制/粘贴反馈提示 -->
       <div

@@ -16,6 +16,8 @@ type AppConfig struct {
 	AuthEnabled   bool   `json:"authEnabled"`
 	Password      string `json:"password,omitempty"`
 	AuthTTLHours  int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 2
+	// dsh 进程内存限制（MB），默认 2048；通过 NODE_OPTIONS 生效
+	DshMemLimit int `json:"dshMemLimit"`
 }
 
 // RuntimeEnv 添加 ProxyPort
@@ -77,16 +79,17 @@ func loadRuntimeEnv() RuntimeEnv {
 }
 
 func defaultConfig() AppConfig {
-	dshPort := atoi(envOr("dsh_port", envOr("TARGET_PORT", "3080")))
+	dshPort := atoi(envOr("dsh_port", envOr("TARGET_PORT", "13080")))
 	authEnabled := envBool(envOr("auth_mode", envOr("PROXY_AUTH", "true")))
 	proxyEnabled := os.Getenv("proxy_mode") == "1"
 	return AppConfig{
-		DshPort:      dshPort,
-		ProxyEnabled: proxyEnabled,
-		ProxyAddr:    envOr("proxy_addr", "http://127.0.0.1:7890"),
-		AuthEnabled:  authEnabled,
-		Password:     os.Getenv("password"),
-		AuthTTLHours: envOrInt("auth_ttl_hours", 2),
+		DshPort:       dshPort,
+		ProxyEnabled:  proxyEnabled,
+		ProxyAddr:     envOr("proxy_addr", "http://127.0.0.1:7890"),
+		AuthEnabled:   authEnabled,
+		Password:      os.Getenv("password"),
+		AuthTTLHours:  envOrInt("auth_ttl_hours", 2),
+		DshMemLimit:   2048,
 	}
 }
 
@@ -137,9 +140,12 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	if err := json.Unmarshal(data, &v); err != nil {
 		return def
 	}
-	// 旧配置文件中可能没有该字段（反序列化为 0），回退到默认 2 小时
+	// 旧配置文件中可能没有这些字段，回退到默认值
 	if v.AuthTTLHours <= 0 {
 		v.AuthTTLHours = 2
+	}
+	if v.DshMemLimit <= 0 {
+		v.DshMemLimit = 2048
 	}
 	return &v
 }

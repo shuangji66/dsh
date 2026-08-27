@@ -1,15 +1,20 @@
 <script setup lang="ts">
-  import { RouterView, useRoute } from 'vue-router'
+import { RouterView, useRoute } from 'vue-router'
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useTheme } from '@/composables/useTheme'
+import { useI18n } from '@/composables/useI18n'
+import { useConsolePrefs } from '@/composables/useConsolePrefs'
+import { useSettingsStore } from '@/stores/settings'
 import Toast from '@/components/Toast.vue'
-import router from './router' 
+import router from './router'
 
 const route = useRoute()
-const current = computed(() => (route.query.view as string) || 'overview')
-const { themeMode, cycleTheme } = useTheme()
+const { t } = useI18n()
+const settings = useSettingsStore()
+const { defaultPage } = useConsolePrefs()
+useTheme() // 初始化/跟随系统主题
 
-// ===== 侧边栏折叠状态 =====
+// 侧边栏折叠状态
 const collapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
 watch(collapsed, (val) => {
   localStorage.setItem('sidebar-collapsed', String(val))
@@ -19,26 +24,51 @@ const toggleCollapse = () => {
   collapsed.value = !collapsed.value
 }
 
+// 导航项：label 用 i18n 翻译
 const nav = [
-  { name: 'overview', label: '概览', icon: 'overview' },
-  { name: 'settings', label: '设置', icon: 'settings' },
-  { name: 'directory', label: '工作区', icon: 'folder' },
-  { name: 'terminal', label: '终端', icon: 'terminal' },
-  { name: 'logs', label: '日志', icon: 'logs' }
+  { name: 'overview', labelKey: 'nav_overview', icon: 'overview' },
+  { name: 'settings', labelKey: 'nav_settings', icon: 'settings' },
+  { name: 'directory', labelKey: 'nav_directory', icon: 'folder' },
+  { name: 'terminal', labelKey: 'nav_terminal', icon: 'terminal' },
+  { name: 'logs', labelKey: 'nav_logs', icon: 'logs' }
 ]
 
-// 子页面统一在 / 路径下通过 ?view= 切换；用 replace 避免产生历史记录
+// 打开时的默认页面
+function defaultView(): string {
+  if (defaultPage.value === 'last') {
+    return localStorage.getItem('last-view') || 'overview'
+  }
+  if (defaultPage.value) return defaultPage.value
+  return 'overview'
+}
+
+// 当前子页面：优先 URL 查询参数，否则用配置的默认页面
+const current = computed(() => {
+  const q = route.query.view as string | undefined
+  if (q && nav.some((n) => n.name === q)) return q
+  return defaultView()
+})
+
+// 子页面统一在 / 路径下通过 ?view= 切换；用 replace 避免产生历史记录。
+// 同时记录“最后访问的页面”，供“保持退出时的页面”使用。
 function navigate(name: string) {
+  localStorage.setItem('last-view', name)
   router.replace({ path: '/', query: { view: name } })
 }
 
-const themeIconName = computed(() => {
-  switch (themeMode.value) {
-    case 'light': return 'sun'
-    case 'dark': return 'moon'
-    default: return 'auto'
-  }
-})
+let appliedDefault = false
+// 配置加载完成后，若 URL 未指定子页面，则跳转到默认页面
+watch(
+  () => settings.config,
+  (c) => {
+    if (appliedDefault) return
+    appliedDefault = true
+    if (!route.query.view) {
+      router.replace({ path: '/', query: { view: defaultView() } })
+    }
+  },
+  { immediate: true }
+)
 
 // ===== 细线风格 SVG 图标（stroke 1.5，与设计语言一致） =====
 const icons = {
@@ -48,10 +78,6 @@ const icons = {
   folder: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`,
   terminal: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
   logs: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16"/><path d="M4 14h16"/><path d="M7 11.5h0M7 16.5h0"/></svg>`,
-  // 主题图标
-  sun: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`,
-  moon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
-  auto: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 16 L12 8 L16 16 M10 14 L14 14"/></svg>`,
   // 汉堡折叠图标
   menu: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>`,
   close: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`
@@ -96,23 +122,11 @@ onMounted(() => {
             current === item.name
               ? 'bg-brand text-white shadow-glow'
               : 'text-ink-soft dark:text-[#A6A6AD] hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink dark:hover:text-white'
-          ]" :title="item.label">
+          ]" :title="t(item.labelKey)">
           <span class="w-5 h-5 flex-shrink-0 inline-block" v-html="icons[item.icon]"></span>
-          <span v-if="!collapsed" class="whitespace-nowrap">{{ item.label }}</span>
+          <span v-if="!collapsed" class="whitespace-nowrap">{{ t(item.labelKey) }}</span>
         </button>
       </nav>
-
-      <!-- 底部主题切换 -->
-      <div class="mt-auto w-full px-2">
-        <button
-          @click="cycleTheme"
-          class="flex items-center justify-center gap-2.5 w-full px-2 py-2.5 rounded-lg text-sm font-medium transition hover:bg-black/5 dark:hover:bg-white/5 text-ink-soft dark:text-[#A6A6AD]"
-          :title="`主题：${themeMode}`"
-        >
-          <span class="w-5 h-5 flex-shrink-0 inline-block" v-html="icons[themeIconName]"></span>
-          <span v-if="!collapsed" class="whitespace-nowrap">主题</span>
-        </button>
-      </div>
     </aside>
 
     <!-- ===== 移动端：底部导航栏 (小于 md) ===== -->
@@ -122,16 +136,8 @@ onMounted(() => {
       <button v-for="item in nav" :key="item.name" @click="navigate(item.name)"
         class="flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xl transition hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
         :class="current === item.name ? 'text-brand' : 'text-ink-soft dark:text-[#A6A6AD]'"
-        :title="item.label">
+        :title="t(item.labelKey)">
         <span class="w-6 h-6 inline-block" v-html="icons[item.icon]"></span>
-      </button>
-      <!-- 主题切换按钮（移动端） -->
-      <button
-        @click="cycleTheme"
-        class="flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xl transition hover:bg-black/5 dark:hover:bg-white/5 text-ink-soft dark:text-[#A6A6AD]"
-        :title="`主题：${themeMode}`"
-      >
-        <span class="w-6 h-6 inline-block" v-html="icons[themeIconName]"></span>
       </button>
     </nav>
 

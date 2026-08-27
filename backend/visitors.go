@@ -97,8 +97,29 @@ func (t *VisitorTracker) record(token, ip string, expireTs int64) {
 	}
 }
 
-// List returns a snapshot of all active visitors.
+// PurgeExpired removes visitor records whose login has expired, revoking their
+// tokens so they must log in again. Returns the number of records removed.
+func (t *VisitorTracker) PurgeExpired(now time.Time) int {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	t.mu.Lock()
+	removed := 0
+	for tok, v := range t.byToken {
+		if !v.ExpiresAt.IsZero() && v.ExpiresAt.Before(now) {
+			delete(t.byToken, tok)
+			t.revoked[tok] = true
+			removed++
+		}
+	}
+	t.mu.Unlock()
+	return removed
+}
+
+// List returns a snapshot of all active visitors. Expired records are purged
+// first so the login list never shows stale entries.
 func (t *VisitorTracker) List() []Visitor {
+	t.PurgeExpired(time.Now())
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make([]Visitor, 0, len(t.byToken))

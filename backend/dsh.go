@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -12,12 +15,19 @@ import (
 // DshManager owns the dsh process lifecycle. Started dsh keeps the ports that
 // were active at launch-time; changing them requires a full stop first.
 type DshManager struct {
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	startedAt time.Time
-	renv      *RuntimeEnv
-	logf      func(string, ...interface{})
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	startedAt   time.Time
+	renv        *RuntimeEnv
+	logf        func(string, ...interface{})
+	statsMu     sync.Mutex
+	lastCpu     float64 // 最近一次采样的 CPU 使用率（%）
+	lastMemory  int64   // 最近一次采样的常驻内存（MB）
+	lastStatsAt time.Time
 }
+
+// clkTCK 为 Linux 的时钟频率（每秒时钟滴答数，通常为 100）。
+const clkTCK = 100.0
 
 func NewDshManager(renv *RuntimeEnv) *DshManager {
 	return &DshManager{
@@ -53,6 +63,99 @@ func (m *DshManager) PID() int {
 		return m.cmd.Process.Pid
 	}
 	return 0
+}
+
+// procCPUTicks reads a process's utime and stime (clock ticks) from /proc/<pid>/stat.
+// It locates the comm field by scanning past the last ')' so a name containing
+// spaces or parens does not confuse the parse.
+func procCPUTicks(pid int) (uint64, uint64, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, 0, false
+	}
+	s := string(data)
+	idx := strings.LastIndexByte(s, ')')
+	if idx == -1 || idx+2 > len(s) {
+		return 0, 0, false
+	}
+	fields := strings.Fields(s[idx+2:])
+	// After state: fields[0]=state, [11]=utime, [12]=stime
+	if len(fields) < 13 {
+		return 0, 0, false
+	}
+	utime, err1 := strconv.ParseUint(fields[11], 10, 64)
+	stime, err2 := strconv.ParseUint(fields[12], 10, 64)
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return utime, stime, true
+}
+
+// procRSSMB reads a process's resident set size (MB) from /proc/<pid>/status.
+func procRSSMB(pid int) int64 {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, err := strconv.ParseInt(fields[1], 10, 64)
+				if err == nil {
+					return kb / 1024
+				}
+			}
+			return 0
+		}
+	}
+	return 0
+}
+
+// Stats returns the dsh process CPU usage (%) and resident memory (MB). The
+// CPU% is computed from a short sampling window and cached for ~1 second so
+// frequent callers (SSE heartbeat / settings poll) do not each block on a sleep.
+func (m *DshManager) Stats() (float64, int64) {
+	m.statsMu.Lock()
+	defer m.statsMu.Unlock()
+	if time.Since(m.lastStatsAt) < time.Second {
+		return m.lastCpu, m.lastMemory
+	}
+	if m.cmd == nil || m.cmd.Process == nil {
+		m.lastCpu, m.lastMemory, m.lastStatsAt = 0, 0, time.Now()
+		return 0, 0
+	}
+	pid := m.cmd.Process.Pid
+	u1, s1, ok1 := procCPUTicks(pid)
+	time.Sleep(300 * time.Millisecond)
+	u2, s2, ok2 := procCPUTicks(pid)
+	if !ok1 || !ok2 {
+		m.lastMemory = procRSSMB(pid)
+		m.lastStatsAt = time.Now()
+		return m.lastCpu, m.lastMemory
+	}
+	deltaTicks := float64(int64(u2-u1) + int64(s2-s1))
+	// 若 delta 为负（进程在采样窗口内被替换 / PID 复用，utime 回退），按 0 处理。
+	if deltaTicks < 0 {
+		deltaTicks = 0
+	}
+	// /proc/<pid>/stat 的 utime/stime 聚合了进程所有线程的 CPU 时间，因此
+	// 多线程进程可得 > 100%（每核 100%）。除以 CPU 核心数归一到“占整机 CPU
+	// 的百分比”，并 clamp 到 [0, 100]，避免概览页显示超过 100% 的使用率。
+	numCPU := float64(runtime.NumCPU())
+	if numCPU <= 0 {
+		numCPU = 1
+	}
+	cpu := deltaTicks / clkTCK / 0.3 * 100 / numCPU
+	if cpu < 0 {
+		cpu = 0
+	} else if cpu > 100 {
+		cpu = 100
+	}
+	m.lastCpu = cpu
+	m.lastMemory = procRSSMB(pid)
+	m.lastStatsAt = time.Now()
+	return m.lastCpu, m.lastMemory
 }
 
 // buildEnv constructs the child environment, capturing PATH/HOME/PNPM_HOME plus
@@ -123,6 +226,10 @@ func (m *DshManager) buildEnv() []string {
 	}
 
 	set("DSH_WEB_URL=", fmt.Sprintf("http://127.0.0.1:%d", cfg.DshPort))
+	// 通过 NODE_OPTIONS 设置 dsh 进程的内存上限（--max-old-space-size）
+	if cfg.DshMemLimit > 0 {
+		set("NODE_OPTIONS=", "--max-old-space-size="+strconv.Itoa(cfg.DshMemLimit))
+	}
 	return env
 }
 
@@ -234,13 +341,16 @@ func (m *DshManager) Status() map[string]interface{} {
 		pid = m.cmd.Process.Pid
 	}
 	cfg := GetConfig()
+	cpu, mem := m.Stats()
 	return map[string]interface{}{
-		"running":   running,
-		"pid":       pid,
-		"startedAt": m.startedAt.Format(time.RFC3339),
-		"dshPort":   cfg.DshPort,
-		"proxyPort": m.renv.ProxyPort,
-		"locked":    running,
+		"running":    running,
+		"pid":        pid,
+		"startedAt":  m.startedAt.Format(time.RFC3339),
+		"dshPort":    cfg.DshPort,
+		"proxyPort":  m.renv.ProxyPort,
+		"locked":     running,
+		"cpuPercent": cpu,
+		"memoryMB":   mem,
 	}
 }
 

@@ -67,12 +67,9 @@ h1, h2, h3, h4 {
   transition: opacity 200ms ease;
   pointer-events: none;
 }
-/* 移除 .term-container .xterm 的 padding-bottom，或改为通过内部 div 实现 */
-.term-container .xterm {
-  height: 100%;
-  /* padding-bottom: 20px; */ /* 注释掉，避免影响 fit 计算 */
-  box-sizing: border-box;
-}
+/* 注意：不要给 .term-container 或其 .xterm 子元素设置 padding / margin /
+   height:100% / box-sizing，否则会干扰 xterm FitAddon 的尺寸测量，导致
+   cols/rows 计算偏差（文字提前换行或命令重叠）。xterm 会自行管理自身尺寸。 */
 
 .icon-svg {
   display: inline-block;

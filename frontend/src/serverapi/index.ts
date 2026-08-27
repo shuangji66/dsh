@@ -46,6 +46,7 @@ export interface AppConfig {
   authEnabled: boolean
   password?: string
   authTTLHours: number
+  dshMemLimit: number
 }
 
 export interface DshStatus {
@@ -55,6 +56,8 @@ export interface DshStatus {
   dshPort: number
   proxyPort: number
   locked: boolean
+  cpuPercent?: number
+  memoryMB?: number
 }
 
 export interface Visitor {

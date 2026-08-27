@@ -5,11 +5,13 @@ import { useDirectoryStore } from '@/stores/directory'
 import { useSettingsStore } from '@/stores/settings'
 import { TrimApp } from '@trimjs/web-app'
 import { useToastStore } from '@/stores/toast'
+import { useI18n } from '@/composables/useI18n'
 
 const store = useDirectoryStore()
 const settings = useSettingsStore()
 const { paths, loading, convertedPaths } = storeToRefs(store)
 const toast = useToastStore()
+const { t } = useI18n()
 
 const sdk = new TrimApp()
 const authState = ref('')
@@ -27,16 +29,16 @@ function handleAuthCallback(event: MessageEvent) {
   if (result) {
     if (result.status === 'success' && result.method === 'pickUserFile') {
       store.load()
-      toast.show('授权成功', 'success')
+      toast.show(t('directory_auth_success'), 'success')
       return
     }
     if (result.status === 'cancel' || result.error === 'access_denied') {
-      toast.show('已取消授权', 'info')
+      toast.show(t('directory_auth_cancel'), 'info')
       return
     }
   }
   store.load()
-  toast.show('授权目录已更新', 'success')
+  toast.show(t('directory_auth_updated'), 'success')
 }
 
 async function openPicker() {
@@ -51,7 +53,7 @@ async function openPicker() {
         appName = settings.runtime?.appName
       }
       if (!appName) {
-        toast.show('无法获取应用标识，请稍后重试', 'error')
+        toast.show(t('directory_appid_missing'), 'error')
         return
       }
       // 回调地址指向本应用基路径下的 callback.html（由后端托管提供）
@@ -61,22 +63,22 @@ async function openPicker() {
         appName,
         redirectUri,
         directory: true,
-        title: '选择授权目录',
-        okText: '确认授权',
+        title: t('directory_pick_title'),
+        okText: t('directory_pick_ok'),
         sidebarGroup: ['myFiles', 'otherShare', 'favorites'],
       })
-      toast.show('已打开授权窗口，完成选择后将自动刷新', 'info', 4000)
+      toast.show(t('directory_open_window'), 'info', 4000)
     } else {
       // iframe/桥接模式：SDK 选择用户文件并授权给当前应用
       const result = await sdk.pickUserFile({
         directory: true,
-        title: '选择授权目录',
-        okText: '确认授权',
+        title: t('directory_pick_title'),
+        okText: t('directory_pick_ok'),
         sidebarGroup: ['myFiles', 'otherShare', 'favorites'],
       })
       if (result?.data?.length) {
         await store.load()
-        toast.show('授权成功', 'success')
+        toast.show(t('directory_auth_success'), 'success')
       }
     }
   } catch (err) {
@@ -88,7 +90,7 @@ async function openFileManager(path: string) {
   try {
     await sdk.openFileManager(path)
   } catch (err) {
-    toast.show(`打开文件管理器失败: ${(err as Error).message}`, 'error')
+    toast.show(t('directory_open_failed', { msg: (err as Error).message }), 'error')
   }
 }
 
@@ -101,14 +103,14 @@ onBeforeUnmount(() => {
   <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-3xl mx-auto">
     <header class="flex items-center justify-between mb-8">
       <div>
-        <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">工作区</p>
+        <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('directory_title') }}</p>
       </div>
-      <button class="g-btn-primary flex-shrink-0" @click="openPicker()">添加</button>
+      <button class="g-btn-primary flex-shrink-0" @click="openPicker()">{{ t('directory_add') }}</button>
     </header>
 
     <div v-if="loading" class="flex items-center justify-center py-16 text-ink-faint text-sm">
       <span class="w-4 h-4 rounded-full border-2 border-line border-t-brand animate-spin mr-2"></span>
-      加载中...
+      {{ t('directory_loading') }}
     </div>
 
     <div v-else-if="paths.length === 0"
@@ -116,8 +118,8 @@ onBeforeUnmount(() => {
       <div class="w-12 h-12 rounded-full bg-brand/10 flex items-center justify-center mb-4">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="w-6 h-6 text-brand" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       </div>
-      <p class="text-sm font-medium text-ink dark:text-white">暂无已授权的目录</p>
-      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mt-1">点击添加按钮授权你的飞牛目录。</p>
+      <p class="text-sm font-medium text-ink dark:text-white">{{ t('directory_empty') }}</p>
+      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mt-1">{{ t('directory_empty_desc') }}</p>
     </div>
 
     <div v-else class="flex flex-col gap-3">
@@ -129,8 +131,8 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <div class="flex items-center gap-2 mt-3 pt-3 border-t border-line dark:border-[#2A2A32]">
-          <button class="g-btn-secondary h-8 px-3 text-xs" @click="openFileManager(p)">打开</button>
-          <button class="g-btn-danger h-8 px-3 text-xs" @click="store.remove(p)">移除</button>
+          <button class="g-btn-secondary h-8 px-3 text-xs" @click="openFileManager(p)">{{ t('directory_open') }}</button>
+          <button class="g-btn-danger h-8 px-3 text-xs" @click="store.remove(p)">{{ t('directory_remove') }}</button>
         </div>
       </div>
     </div>

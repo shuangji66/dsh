@@ -6,6 +6,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { TrimApp } from '@trimjs/web-app'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
+import { api, type PluginInfo } from '@/serverapi'
 
 const store = useDirectoryStore()
 const settings = useSettingsStore()
@@ -16,8 +17,64 @@ const { t } = useI18n()
 const sdk = new TrimApp()
 const authState = ref('')
 
+// 插件管理状态
+const plugins = ref<PluginInfo[]>([])
+const pluginsLoading = ref(false)
+const removingPlugin = ref<string | null>(null)
+const resetting = ref(false)
+
+async function loadPlugins() {
+  pluginsLoading.value = true
+  try {
+    const p = await api.listPlugins()
+    plugins.value = p.plugins || []
+  } catch (e) {
+    toast.show((e as Error).message, 'error')
+  } finally {
+    pluginsLoading.value = false
+  }
+}
+
+async function removePlugin(name: string) {
+  removingPlugin.value = name
+  try {
+    const p = await api.removePlugin(name)
+    if (p.ok) {
+      plugins.value = plugins.value.filter((pl) => pl.name !== name)
+      toast.show(t('plugin_removed', { name: p.removed }), 'success')
+    } else {
+      toast.show(p.msg || t('plugin_remove_failed'), 'error')
+    }
+  } catch (e) {
+    toast.show((e as Error).message, 'error')
+  } finally {
+    removingPlugin.value = null
+  }
+}
+
+async function resetPlugins() {
+  resetting.value = true
+  try {
+    const p = await api.resetPlugins()
+    if (p.ok) {
+      const failed = (p.results || []).filter((r) => !r.ok)
+      if (failed.length > 0) {
+        toast.show(t('plugin_reset_partial', { n: String(failed.length) }), 'error')
+      } else {
+        toast.show(t('plugin_reset_done'), 'success')
+      }
+    }
+  } catch (e) {
+    toast.show((e as Error).message, 'error')
+  } finally {
+    resetting.value = false
+    await loadPlugins()
+  }
+}
+
 onMounted(() => {
   store.load()
+  loadPlugins()
   window.addEventListener('message', handleAuthCallback)
 })
 
@@ -136,5 +193,46 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- 插件管理 -->
+    <section class="g-card g-card-hover p-6 mt-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-display text-lg font-semibold text-ink dark:text-white">{{ t('plugin_title') }}</h2>
+        <div class="flex items-center gap-2">
+          <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="loadPlugins">
+            {{ t('plugin_refresh') }}
+          </button>
+          <button class="g-btn-danger h-8 px-3 text-xs" :disabled="resetting || pluginsLoading" @click="resetPlugins">
+            {{ t('plugin_reset') }}
+          </button>
+        </div>
+      </div>
+      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-5">{{ t('plugin_desc') }}</p>
+
+      <div v-if="pluginsLoading" class="flex items-center justify-center py-8 text-ink-faint text-sm">
+        <span class="w-4 h-4 rounded-full border-2 border-line border-t-brand animate-spin mr-2"></span>
+        {{ t('plugin_loading') }}
+      </div>
+
+      <div v-else-if="plugins.length === 0" class="py-8 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
+        {{ t('plugin_empty') }}
+      </div>
+
+      <ul v-else class="divide-y divide-line dark:divide-[#2A2A32]">
+        <li v-for="p in plugins" :key="p.name" class="py-3 flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ p.name }}</div>
+            <div class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ p.version }}</div>
+          </div>
+          <button
+            class="g-btn-danger h-8 px-3 text-xs flex-shrink-0"
+            :disabled="removingPlugin === p.name || resetting"
+            @click="removePlugin(p.name)"
+          >
+            {{ removingPlugin === p.name ? t('plugin_removing') : t('plugin_uninstall') }}
+          </button>
+        </li>
+      </ul>
+    </section>
   </div>
 </template>

@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,10 +30,126 @@ type DshManager struct {
 	lastCpu     float64 // 最近一次采样的 CPU 使用率（%）
 	lastMemory  int64   // 最近一次采样的常驻内存（MB）
 	lastStatsAt time.Time
+	tokenMu     sync.RWMutex
+	token       string // 新版 dsh 启动时在日志输出的一次性访问 token
+	authMu      sync.RWMutex
+	authCookie  string // 用 token 换取到的 dsh 会话 cookie（形如 "dsh-auth-xxx=yyy"）
 }
 
 // clkTCK 为 Linux 的时钟频率（每秒时钟滴答数，通常为 100）。
 const clkTCK = 100.0
+
+// tokenRe 匹配新版 dsh 启动日志中的一次性访问 token，例如：
+//
+//	dsh web: http://127.0.0.1:3080/?token=EGnsMjoK9i596LEuPZYn-KguZxCD6B7blhdfp2KHotU
+var tokenRe = regexp.MustCompile(`[?&]token=([A-Za-z0-9_-]{8,})`)
+
+// tokenScanner 是一个 io.Writer：它把 dsh 子进程的输出原样转发到下游
+// （logOut），同时扫描其中的 token，命中后通过回调上报给 DshManager。
+type tokenScanner struct {
+	dst io.Writer
+	mu  sync.Mutex
+	buf bytes.Buffer
+	cb  func(token string)
+}
+
+func (s *tokenScanner) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	if s.cb != nil {
+		s.buf.Write(p)
+		// 限制缓冲大小，避免 token 尚未出现时无限增长
+		if s.buf.Len() > 8192 {
+			excess := s.buf.Len() - 4096
+			s.buf.Next(excess)
+		}
+		if m := tokenRe.FindSubmatch(s.buf.Bytes()); m != nil {
+			s.cb(string(m[1]))
+			s.cb = nil // 只上报一次
+		}
+	}
+	n, err := s.dst.Write(p)
+	s.mu.Unlock()
+	return n, err
+}
+
+// Token returns the latest one-shot access token captured from the dsh startup
+// log, or "" when none has been observed yet (e.g. dsh not started / old dsh).
+func (m *DshManager) Token() string {
+	m.tokenMu.RLock()
+	defer m.tokenMu.RUnlock()
+	return m.token
+}
+
+// WaitToken blocks until a token is captured from the dsh startup log or the
+// timeout elapses. It returns the token (possibly empty on timeout). Old dsh
+// versions that never print a token cause this to wait out the full timeout
+// (or return early once dsh has exited) and return "".
+func (m *DshManager) WaitToken(timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if tok := m.Token(); tok != "" {
+			return tok
+		}
+		// 若 dsh 进程已退出，不再等待。
+		if !m.Running() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return m.Token()
+}
+
+// AuthCookie returns the dsh session cookie (e.g. "dsh-auth-xxx=yyy") that the
+// proxy carries when forwarding to dsh. Empty until ExchangeToken succeeds or
+// for old dsh versions that don't use a token/cookie flow.
+func (m *DshManager) AuthCookie() string {
+	m.authMu.RLock()
+	defer m.authMu.RUnlock()
+	return m.authCookie
+}
+
+func (m *DshManager) setAuthCookie(ck string) {
+	m.authMu.Lock()
+	m.authCookie = ck
+	m.authMu.Unlock()
+}
+
+// ExchangeToken 用启动日志中捕获的一次性 token 访问一次带 token 的 dsh 地址
+// （http://127.0.0.1:<dshPort>/?token=XXX），从响应头的 Set-Cookie 中提取
+// dsh 会话 cookie（dsh-auth-*）并保存。此后反代访问 dsh 时携带该 cookie、
+// 访问不带 token 的地址即可。旧版 dsh（无 token）时此方法直接返回。
+func (m *DshManager) ExchangeToken() error {
+	tok := m.Token()
+	if tok == "" {
+		return nil
+	}
+	port := GetConfig().DshPort
+	target := fmt.Sprintf("http://127.0.0.1:%d/?token=%s", port, url.QueryEscape(tok))
+	// 用 CookieJar 自动收集访问链路中所有 Set-Cookie（含重定向响应），
+	// 确保能取到 dsh 下发的认证 cookie（dsh-auth-*）。
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Jar:     jar,
+	}
+	resp, err := client.Get(target)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	cookies := jar.Cookies(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", port)})
+	for _, c := range cookies {
+		if strings.HasPrefix(c.Name, "dsh-auth-") && c.Value != "" {
+			m.setAuthCookie(c.Name + "=" + c.Value)
+			m.logf("dsh auth cookie captured: %s", c.Name)
+			return nil
+		}
+	}
+	return nil
+}
 
 func NewDshManager(renv *RuntimeEnv) *DshManager {
 	return &DshManager{
@@ -246,12 +368,28 @@ func (m *DshManager) Start() error {
 	if bin == "" {
 		bin = "dsh"
 	}
+	// 每次启动都重置 token 与会话 cookie，避免复用上一次启动的旧凭据。
+	m.tokenMu.Lock()
+	m.token = ""
+	m.tokenMu.Unlock()
+	m.setAuthCookie("")
+
 	cmd := exec.Command(bin, "web", "--no-open", "--port", fmt.Sprintf("%d", cfg.DshPort))
 	cmd.Dir = m.renv.DshWorkDir
 	cmd.Env = m.buildEnv()
-	// 将 dsh 子进程的 stdout/stderr 接到全局日志输出（stdout + 可选日志文件）
-	cmd.Stdout = logOut
-	cmd.Stderr = logOut
+	// 拦截 dsh 子进程的 stdout/stderr：既照常写到全局日志，又扫描其中的
+	// 一次性访问 token（新版 dsh 启动时会打印 "dsh web: http://...?token=XXX"）。
+	scanner := &tokenScanner{
+		dst: logOut,
+		cb: func(tok string) {
+			m.tokenMu.Lock()
+			m.token = tok
+			m.tokenMu.Unlock()
+			m.logf("dsh access token captured: %s", tok)
+		},
+	}
+	cmd.Stdout = scanner
+	cmd.Stderr = scanner
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -309,6 +447,12 @@ func (m *DshManager) Stop() error {
         m.fallbackKill()
     }
 
+    // 停止后清空访问 token 与会话 cookie，避免把已失效的旧凭据继续用于反代转发。
+    m.tokenMu.Lock()
+    m.token = ""
+    m.tokenMu.Unlock()
+    m.setAuthCookie("")
+
     m.cmd = nil
     return nil
 }
@@ -355,3 +499,93 @@ func (m *DshManager) Status() map[string]interface{} {
 }
 
 func (m *DshManager) setStarted(t time.Time) { m.startedAt = t }
+
+// PluginInfo 描述一个 dsh 插件依赖条目。
+type PluginInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Resolved string `json:"resolved"`
+}
+
+// runPluginCmd 以 dsh 的运行环境执行 `dsh plugin --profile web <args...>`，
+// 返回合并后的 stdout/stderr 输出。
+func (m *DshManager) runPluginCmd(args ...string) (string, error) {
+	bin := m.renv.DshBin
+	if bin == "" {
+		bin = "dsh"
+	}
+	cmdArgs := append([]string{"plugin", "--profile", "web"}, args...)
+	cmd := exec.Command(bin, cmdArgs...)
+	cmd.Env = m.buildEnv()
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return strings.TrimSpace(out.String()), err
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+// parsePluginList 解析 `dsh plugin --profile web list` 的输出，返回
+// "dependencies:" 区块下的插件列表（插件名、版本），跳过 node-pty。
+// 实际输出形如：
+//
+//	Legend: production dependency, optional only, dev only
+//	dsh-profile-web /vol1/@appshare/... (PRIVATE)
+//	│
+//	│ dependencies:
+//	├── dsh-mobile-hanui@0.2.5
+//	├── dsh-vision-router@2.0.1
+//	└── node-pty@1.1.0
+//	3 packages
+func parsePluginList(output string) []PluginInfo {
+	var plugins []PluginInfo
+	lines := strings.Split(output, "\n")
+	inDeps := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "dependencies:") {
+			inDeps = true
+			continue
+		}
+		if !inDeps {
+			continue
+		}
+		if trimmed == "" {
+			continue
+		}
+		// 汇总行，如 "(3 packages)" 或 "3 packages"
+		if strings.HasSuffix(trimmed, "packages)") || strings.HasSuffix(trimmed, " packages") {
+			break
+		}
+		// 去除树形前缀（├── └── │ 等），取实际条目内容
+		entry := stripTreePrefix(trimmed)
+		if entry == "" {
+			continue
+		}
+		// 用最后一个 @ 分割 name 和 version（scoped 包名可能含 @）
+		at := strings.LastIndex(entry, "@")
+		if at <= 0 {
+			continue
+		}
+		name := entry[:at]
+		ver := entry[at+1:]
+		if name == "node-pty" {
+			continue
+		}
+		plugins = append(plugins, PluginInfo{Name: name, Version: ver})
+	}
+	return plugins
+}
+
+// stripTreePrefix 移除行首的树形符号（空格、├、└、│、─ 等），返回实际内容。
+func stripTreePrefix(s string) string {
+	for {
+		t := strings.TrimLeft(s, " ├└│─")
+		if t == s {
+			break
+		}
+		s = t
+	}
+	return strings.TrimSpace(s)
+}

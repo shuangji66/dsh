@@ -67,6 +67,12 @@ export interface Visitor {
   expiresAt: string
 }
 
+export interface PluginInfo {
+  name: string
+  version: string
+  resolved?: string
+}
+
 export interface SettingsPayload {
   config: AppConfig
   locked: boolean
@@ -137,5 +143,16 @@ export const api = {
     request<{ ok: boolean; deleted: boolean; msg: string }>('/api/visitors', {
       method: 'DELETE',
       body: JSON.stringify({ id })
+    }),
+  // 插件管理：列表 / 卸载 / 重置（dsh plugin --profile web）
+  listPlugins: () => request<{ ok: boolean; plugins: PluginInfo[]; raw?: string }>('/api/plugins'),
+  removePlugin: (name: string) =>
+    request<{ ok: boolean; removed: string; msg: string }>('/api/plugins/remove', {
+      method: 'POST',
+      body: JSON.stringify({ name })
+    }),
+  resetPlugins: () =>
+    request<{ ok: boolean; results: Array<{ name: string; ok: boolean; error?: string }> }>('/api/plugins/reset', {
+      method: 'POST'
     })
 }

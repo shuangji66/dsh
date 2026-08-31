@@ -139,15 +139,26 @@ func main() {
     }()
     logger().Printf("admin console on unix socket %s baseurl %q", renv.AdminSock, renv.AdminBaseURL)
 
-    // 启动反向代理（非阻塞）
-    startProxy(renv.ProxyPort, auth)
-
     // 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
     if os.Getenv("HARNESS_AUTOSTART") != "0" {
         if err := dsh.Start(); err != nil {
             logger().Printf("autostart dsh: %v", err)
         } else {
-            // dsh 启动成功，执行 node-pty 安装（会等待目录生成）
+            // dsh 启动成功，等待并捕获其一次性访问 token（新版 dsh 会打印
+            // "dsh web: http://127.0.0.1:<port>/?token=XXX"）。
+            if tok := dsh.WaitToken(15 * time.Second); tok != "" {
+                logger().Printf("dsh access token ready: %s", tok)
+                // 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话
+                // cookie，供反代转发时携带（访问不带 token 的 dsh 地址）。
+                if err := dsh.ExchangeToken(); err != nil {
+                    logger().Printf("dsh token exchange failed: %v", err)
+                } else if dsh.AuthCookie() == "" {
+                    logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
+                }
+            } else {
+                logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)，反代将不带凭据")
+            }
+            // 执行 node-pty 安装（会等待目录生成）
             if err := ensureNodePty(&renv); err != nil {
                 logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
             }
@@ -155,6 +166,9 @@ func main() {
     } else {
         logger().Printf("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
     }
+
+    // 先启动 dsh 并换取会话 cookie，再启动反向代理，使反代能携带 cookie 反代 dsh。
+    startProxy(renv.ProxyPort, auth, dsh)
 
     // 等待退出信号
     sig := make(chan os.Signal, 1)
@@ -185,7 +199,7 @@ func netListen(network, addr string) (net.Listener, error) {
 
 var proxyServer *http.Server
 
-func startProxy(port int, auth *Auth) {
+func startProxy(port int, auth *Auth, dsh *DshManager) {
 	if proxyServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -194,7 +208,7 @@ func startProxy(port int, auth *Auth) {
 	addr := ":" + strconv.Itoa(port)
 	proxyServer = &http.Server{
 		Addr:    addr,
-		Handler: newReverseProxy(auth),
+		Handler: newReverseProxy(auth, dsh),
 	}
 	go func() {
 		logger().Printf("reverse proxy listening on %s", addr)

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // AdminMux serves the admin SPA, settings API, fnOS proxy, and terminal on the
@@ -261,6 +262,10 @@ func (m *AdminMux) handleDownloadLog(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Write(data)
 }
+
+// checkAgentsBusy 及 /api/dsh/agents-busy 接口已废弃并移除：
+// 概览页停止/重启现在总是二次确认，不再探测 agent 任务是否繁忙。
+
 func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 	if m.dsh.Running() {
 		writeErr(w, "dsh 已在运行", http.StatusConflict)
@@ -270,6 +275,20 @@ func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "启动失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// 启动后等待并捕获一次性访问 token（新版 dsh 打印在启动日志里），
+	// 并用 token 换取 dsh 会话 cookie（反代转发时携带该 cookie）。
+	go func() {
+		if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
+			logger().Printf("dsh access token ready: %s", tok)
+			if err := m.dsh.ExchangeToken(); err != nil {
+				logger().Printf("dsh token exchange failed: %v", err)
+			} else if m.dsh.AuthCookie() == "" {
+				logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
+			}
+		} else {
+			logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)")
+		}
+	}()
 	writeJSON(w, m.dsh.Status())
 }
 
@@ -293,7 +312,81 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
         writeErr(w, "启动失败: "+err.Error(), http.StatusInternalServerError)
         return
     }
+    // 重启后等待并捕获新的访问 token（每次启动 dsh 都会生成新的 token），
+    // 并用 token 换取 dsh 会话 cookie（反代转发时携带该 cookie）。
+    go func() {
+        if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
+            logger().Printf("dsh access token ready: %s", tok)
+            if err := m.dsh.ExchangeToken(); err != nil {
+                logger().Printf("dsh token exchange failed: %v", err)
+            } else if m.dsh.AuthCookie() == "" {
+                logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
+            }
+        } else {
+            logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)")
+        }
+    }()
     writeJSON(w, m.dsh.Status())
+}
+
+// --- Plugin management (work 区插件卡片) ---
+
+// handleListPlugins 返回 dsh 的 web 插件列表（解析 `dsh plugin --profile web list`）。
+func (m *AdminMux) handleListPlugins(w http.ResponseWriter, r *http.Request) {
+	out, err := m.dsh.runPluginCmd("list")
+	if err != nil {
+		writeErr(w, "执行插件列表失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "plugins": parsePluginList(out), "raw": out})
+}
+
+type removePluginReq struct {
+	Name string `json:"name"`
+}
+
+// handleRemovePlugin 卸载指定插件（`dsh plugin --profile web remove <name>`）。
+func (m *AdminMux) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
+	var body removePluginReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, "缺少插件名", http.StatusBadRequest)
+		return
+	}
+	out, err := m.dsh.runPluginCmd("remove", body.Name)
+	if err != nil {
+		writeErr(w, "卸载失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "removed": body.Name, "msg": out})
+}
+
+// handleResetPlugins 依次卸载当前 web 插件列表中的全部插件（跳过 node-pty），
+// 并返回每一步的结果。
+func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
+	out, err := m.dsh.runPluginCmd("list")
+	if err != nil {
+		writeErr(w, "执行插件列表失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	plugins := parsePluginList(out)
+	type stepResult struct {
+		Name  string `json:"name"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	results := make([]stepResult, 0, len(plugins))
+	for _, p := range plugins {
+		if p.Name == "node-pty" {
+			continue
+		}
+		o, rerr := m.dsh.runPluginCmd("remove", p.Name)
+		if rerr != nil {
+			results = append(results, stepResult{Name: p.Name, OK: false, Error: strings.TrimSpace(o)})
+		} else {
+			results = append(results, stepResult{Name: p.Name, OK: true})
+		}
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "results": results})
 }
 
 // --- Visitor API (overview page) ---
@@ -432,6 +525,12 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleLogsStream(w, r)
 		case p == "/api/logs/download" && r.Method == http.MethodGet:
 			m.handleDownloadLog(w, r)
+		case p == "/api/plugins" && r.Method == http.MethodGet:
+			m.handleListPlugins(w, r)
+		case p == "/api/plugins/remove" && r.Method == http.MethodPost:
+			m.handleRemovePlugin(w, r)
+		case p == "/api/plugins/reset" && r.Method == http.MethodPost:
+			m.handleResetPlugins(w, r)
 		case strings.HasPrefix(p, "/api/fnos/"):
 			m.handleFnos(w, r)
 		default:

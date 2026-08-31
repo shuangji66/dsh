@@ -5,6 +5,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
 defineOptions({ name: 'OverviewView' })
 
@@ -18,6 +19,26 @@ const visitorsLoading = ref(false)
 const deleting = ref<string | null>(null)
 let visitorES: EventSource | null = null
 let statusES: EventSource | null = null
+
+// 停止/重启的二次确认弹窗：无论是否忙碌，每次点击都先弹窗确认
+const lifecycleAction = ref<'stop' | 'restart' | null>(null)
+const lifecycleDialogVisible = ref(false)
+
+function openLifecycleConfirm(action: 'stop' | 'restart') {
+  lifecycleAction.value = action
+  lifecycleDialogVisible.value = true
+}
+
+async function executeLifecycle(action: 'stop' | 'restart') {
+  if (action === 'stop') await store.stopDsh()
+  else await store.restartDsh()
+}
+
+function onLifecycleConfirm() {
+  const action = lifecycleAction.value
+  lifecycleAction.value = null
+  if (action) executeLifecycle(action)
+}
 
 // 格式化最近访问时间 / 登录有效期至
 function fmt(iso: string): string {
@@ -141,11 +162,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
-      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-5">{{ t('dsh_manage') }}</p>
-      <div class="flex gap-3">
+      <div class="flex gap-3 mt-4">
         <button v-if="!status?.running" class="g-btn-primary bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
-        <button v-else class="g-btn-danger" :disabled="loading" @click="store.stopDsh()">{{ t('dsh_stop') }}</button>
-        <button class="g-btn-secondary" :disabled="loading" @click="store.restartDsh()">{{ t('dsh_restart') }}</button>
+        <button v-else class="g-btn-danger" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
+        <button class="g-btn-secondary" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
       </div>
     </section>
 
@@ -185,5 +205,16 @@ onBeforeUnmount(() => {
         </li>
       </ul>
     </section>
+
+    <!-- 停止/重启确认弹窗 -->
+    <ConfirmDialog
+      v-model:visible="lifecycleDialogVisible"
+      :title="lifecycleAction === 'restart' ? t('confirm_restart_title') : t('confirm_stop_title')"
+      :message="lifecycleAction === 'restart' ? t('confirm_restart_msg') : t('confirm_stop_msg')"
+      :confirm-text="t('confirm_ok')"
+      :cancel-text="t('confirm_cancel')"
+      danger
+      @confirm="onLifecycleConfirm"
+    />
   </div>
 </template>

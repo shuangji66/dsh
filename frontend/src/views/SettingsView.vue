@@ -110,22 +110,33 @@ onMounted(() => store.load())
 
         <!-- dsh 内存限制（MB） -->
         <div class="py-4">
-          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
-            {{ t('settings_dsh_mem_limit') }} <span class="text-ink-faint">{{ t('settings_dsh_mem_mb') }}</span>
-          </label>
+          <div class="flex items-center justify-between gap-3 mb-1.5">
+            <label class="block text-sm text-ink-soft dark:text-[#A6A6AD]">
+              {{ t('settings_dsh_mem_limit') }} <span class="text-ink-faint">{{ t('settings_dsh_mem_mb') }}</span>
+            </label>
+            <!-- 自动设置开关：打开时不传 NODE_OPTIONS，由系统 node 自动分配内存 -->
+            <label class="flex items-center gap-2 cursor-pointer select-none">
+              <span class="text-sm text-ink dark:text-[#EDEDF0]">{{ t('settings_dsh_mem_auto') }}</span>
+              <div class="relative inline-flex items-center">
+                <input type="checkbox" v-model="config.dshMemAuto" class="sr-only peer">
+                <div class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></div>
+                <div class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+              </div>
+            </label>
+          </div>
           <div class="flex items-center gap-2">
             <input
               v-model.number="config.dshMemLimit"
               type="number"
               min="1"
               max="65536"
-              step="64"
-              class="g-input max-w-40"
+              :disabled="config.dshMemAuto"
+              class="g-input max-w-40 disabled:cursor-not-allowed"
             />
             <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">MB</span>
           </div>
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
-            {{ t('settings_dsh_mem_hint') }}
+            {{ config.dshMemAuto ? t('settings_dsh_mem_auto_hint') : t('settings_dsh_mem_hint') }}
           </p>
         </div>
 

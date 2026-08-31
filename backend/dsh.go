@@ -322,6 +322,7 @@ func (m *DshManager) buildEnv() []string {
 		set("HTTPS_PROXY=", cfg.ProxyAddr)
 		set("all_proxy=", cfg.ProxyAddr)
 		set("ALL_PROXY=", cfg.ProxyAddr)
+		set("NODE_USE_ENV_PROXY=", "1")
 	} else {
 		out := env[:0]
 		for _, e := range env {
@@ -339,7 +340,7 @@ func (m *DshManager) buildEnv() []string {
 			key = e[:idx]
 			switch key {
 			case "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
-				"all_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy":
+				"all_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY":
 				continue
 			}
 			out = append(out, e)
@@ -348,8 +349,9 @@ func (m *DshManager) buildEnv() []string {
 	}
 
 	set("DSH_WEB_URL=", fmt.Sprintf("http://127.0.0.1:%d", cfg.DshPort))
-	// 通过 NODE_OPTIONS 设置 dsh 进程的内存上限（--max-old-space-size）
-	if cfg.DshMemLimit > 0 {
+	// 通过 NODE_OPTIONS 设置 dsh 进程的内存上限（--max-old-space-size）。
+	// 仅当“自动设置”关闭时才传递内存限制；打开时由系统 node 自动分配，不传该变量。
+	if !cfg.DshMemAuto && cfg.DshMemLimit > 0 {
 		set("NODE_OPTIONS=", "--max-old-space-size="+strconv.Itoa(cfg.DshMemLimit))
 	}
 	return env

@@ -46,6 +46,7 @@ export interface AppConfig {
   password?: string
   authTTLHours: number
   dshMemLimit: number
+  dshMemAuto: boolean
 }
 
 export interface DshStatus {

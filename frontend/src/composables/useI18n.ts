@@ -49,6 +49,8 @@ const zh: Record<string, string> = {
   settings_dsh_mem_limit: 'dsh 内存限制',
   settings_dsh_mem_mb: '(MB)',
   settings_dsh_mem_hint: '仅在 node 栈内存溢出时适当增大',
+  settings_dsh_mem_auto: '自动设置',
+  settings_dsh_mem_auto_hint: '由系统 node 自动分配内存',
   settings_show_password: '显示密码',
   settings_hide_password: '隐藏密码',
   // 控制台设置
@@ -189,6 +191,8 @@ const en: Record<string, string> = {
   settings_dsh_mem_limit: 'dsh memory limit',
   settings_dsh_mem_mb: '(MB)',
   settings_dsh_mem_hint: 'Increase only when node stack runs out of memory',
+  settings_dsh_mem_auto: 'Auto',
+  settings_dsh_mem_auto_hint: 'Let system Node allocate memory automatically',
   settings_show_password: 'Show password',
   settings_hide_password: 'Hide password',
   console_title: 'Console Settings',

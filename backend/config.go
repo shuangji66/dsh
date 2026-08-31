@@ -16,8 +16,10 @@ type AppConfig struct {
 	AuthEnabled   bool   `json:"authEnabled"`
 	Password      string `json:"password,omitempty"`
 	AuthTTLHours  int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 2
-	// dsh 进程内存限制（MB），默认 2048；通过 NODE_OPTIONS 生效
-	DshMemLimit int `json:"dshMemLimit"`
+	// dsh 进程内存限制（MB），默认 2048；通过 NODE_OPTIONS 生效。
+	// DshMemAuto 为 true（默认）时由系统 node 自动分配内存，不传 NODE_OPTIONS。
+	DshMemLimit int  `json:"dshMemLimit"`
+	DshMemAuto  bool `json:"dshMemAuto"`
 }
 
 // RuntimeEnv 添加 ProxyPort
@@ -86,6 +88,7 @@ func defaultConfig() AppConfig {
 		Password:      os.Getenv("password"),
 		AuthTTLHours:  envOrInt("auth_ttl_hours", 2),
 		DshMemLimit:   2048,
+		DshMemAuto:    true,
 	}
 }
 
@@ -132,7 +135,9 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	if err != nil {
 		return def
 	}
-	var v AppConfig
+	// 先用默认值播种，再反序列化覆盖：文件里缺失的字段保留默认值。
+	// 例如旧配置没有 dshMemAuto 时仍保持默认 true（由系统 node 自动分配内存）。
+	v := *def
 	if err := json.Unmarshal(data, &v); err != nil {
 		return def
 	}

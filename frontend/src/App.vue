@@ -9,7 +9,7 @@ import Toast from '@/components/Toast.vue'
 import router from './router'
 
 const route = useRoute()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const settings = useSettingsStore()
 const { defaultPage } = useConsolePrefs()
 useTheme() // 初始化/跟随系统主题
@@ -48,6 +48,16 @@ const current = computed(() => {
   if (q && nav.some((n) => n.name === q)) return q
   return defaultView()
 })
+
+// 控制台 HTML 标题随子页面切换动态显示（只显示子页面标题，如“概览/设置”，无前缀）
+watch(
+  [current, () => locale.value],
+  () => {
+    const item = nav.find((n) => n.name === current.value)
+    document.title = item ? t(item.labelKey) : ''
+  },
+  { immediate: true }
+)
 
 // 子页面统一在 / 路径下通过 ?view= 切换；用 replace 避免产生历史记录。
 // 同时记录“最后访问的页面”，供“保持退出时的页面”使用。

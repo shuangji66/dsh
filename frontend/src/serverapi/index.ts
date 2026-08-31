@@ -30,7 +30,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface RuntimeInfo {
-  dshBin: string
   configFile: string
   adminSock: string
   adminBaseURL: string
@@ -152,7 +151,13 @@ export const api = {
       body: JSON.stringify({ name })
     }),
   resetPlugins: () =>
-    request<{ ok: boolean; results: Array<{ name: string; ok: boolean; error?: string }> }>('/api/plugins/reset', {
+    request<{
+      ok: boolean
+      started?: boolean
+      error?: string
+      profileDeleted?: boolean
+      profilesDir?: string
+    }>('/api/plugins/reset', {
       method: 'POST'
     })
 }

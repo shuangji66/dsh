@@ -150,7 +150,14 @@ onBeforeUnmount(() => {
     <section class="g-card g-card-hover p-6 mb-6">
       <div class="flex items-center justify-between mb-2">
         <h2 class="font-display text-lg font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-        <!-- dsh 进程资源使用情况（CPU / 内存） -->
+      </div>
+      <div class="flex items-center justify-between gap-3 flex-wrap mt-4">
+        <div class="flex gap-3">
+          <button v-if="!status?.running" class="g-btn-primary bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
+          <button v-else class="g-btn-danger" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
+          <button class="g-btn-secondary" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
+        </div>
+        <!-- dsh 进程资源使用情况（CPU / 内存），与操作按钮同行 -->
         <div class="flex items-center gap-5">
           <div class="text-right">
             <div class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('cpu_usage') }}</div>
@@ -161,11 +168,6 @@ onBeforeUnmount(() => {
             <div class="text-sm font-semibold text-ink dark:text-[#EDEDF0] font-mono">{{ fmtMem(status?.memoryMB) }}</div>
           </div>
         </div>
-      </div>
-      <div class="flex gap-3 mt-4">
-        <button v-if="!status?.running" class="g-btn-primary bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
-        <button v-else class="g-btn-danger" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
-        <button class="g-btn-secondary" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
       </div>
     </section>
 

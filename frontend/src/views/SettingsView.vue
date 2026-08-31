@@ -77,8 +77,6 @@ onMounted(() => store.load())
 
     <!-- 反向代理与鉴权 -->
     <section class="g-card g-card-hover p-6 mb-6">
-      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-6">{{ t('settings_desc') }}</p>
-
       <div class="divide-y divide-line dark:divide-[#2A2A32]">
         <!-- 启用外部代理（开关） -->
         <label class="flex items-center justify-between py-4 cursor-pointer">

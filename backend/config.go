@@ -22,11 +22,9 @@ type AppConfig struct {
 
 // RuntimeEnv 添加 ProxyPort
 type RuntimeEnv struct {
-	DshBin       string
 	ConfigFile   string
 	AdminSock    string
 	AdminBaseURL string
-	DshWorkDir   string
 	LogFile      string // 日志文件输出路径（HARNESS_LOG_FILE），为空则不落盘
 	TRIMApiToken string
 	TRIMAppDest  string
@@ -61,11 +59,9 @@ func loadRuntimeEnv() RuntimeEnv {
 		}
 	}
 	return RuntimeEnv{
-		DshBin:       envOr("HARNESS_DSH_BIN", ""),
 		ConfigFile:   envOr("HARNESS_CONFIG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "config.json")),
 		AdminSock:    envOr("HARNESS_ADMIN_SOCK", filepath.Join(appDest, "app.sock")),
 		AdminBaseURL: envOr("HARNESS_ADMIN_BASEURL", appDest),
-		DshWorkDir:   envOr("HARNESS_DSH_WORKDIR", appDest),
 		LogFile:      os.Getenv("HARNESS_LOG_FILE"),
 		TRIMApiToken: os.Getenv("TRIM_API_TOKEN"),
 		TRIMAppDest:  appDest,

@@ -364,10 +364,8 @@ func (m *DshManager) Start() error {
 	}
 
 	cfg := GetConfig()
-	bin := m.renv.DshBin
-	if bin == "" {
-		bin = "dsh"
-	}
+	// dsh 可执行文件统一按 PATH 解析（node_modules/.bin/dsh），不再用额外覆盖。
+	bin := "dsh"
 	// 每次启动都重置 token 与会话 cookie，避免复用上一次启动的旧凭据。
 	m.tokenMu.Lock()
 	m.token = ""
@@ -375,7 +373,7 @@ func (m *DshManager) Start() error {
 	m.setAuthCookie("")
 
 	cmd := exec.Command(bin, "web", "--no-open", "--port", fmt.Sprintf("%d", cfg.DshPort))
-	cmd.Dir = m.renv.DshWorkDir
+	cmd.Dir = m.renv.TRIMAppDest
 	cmd.Env = m.buildEnv()
 	// 拦截 dsh 子进程的 stdout/stderr：既照常写到全局日志，又扫描其中的
 	// 一次性访问 token（新版 dsh 启动时会打印 "dsh web: http://...?token=XXX"）。
@@ -397,7 +395,7 @@ func (m *DshManager) Start() error {
 	}
 	m.cmd = cmd
 	m.startedAt = time.Now()
-	m.logf("dsh started pid=%d port=%d workdir=%s", cmd.Process.Pid, cfg.DshPort, m.renv.DshWorkDir)
+	m.logf("dsh started pid=%d port=%d", cmd.Process.Pid, cfg.DshPort)
 	return nil
 }
 
@@ -510,10 +508,8 @@ type PluginInfo struct {
 // runPluginCmd 以 dsh 的运行环境执行 `dsh plugin --profile web <args...>`，
 // 返回合并后的 stdout/stderr 输出。
 func (m *DshManager) runPluginCmd(args ...string) (string, error) {
-	bin := m.renv.DshBin
-	if bin == "" {
-		bin = "dsh"
-	}
+	// dsh 可执行文件统一按 PATH 解析（node_modules/.bin/dsh）。
+	bin := "dsh"
 	cmdArgs := append([]string{"plugin", "--profile", "web"}, args...)
 	cmd := exec.Command(bin, cmdArgs...)
 	cmd.Env = m.buildEnv()

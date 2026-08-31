@@ -143,6 +143,110 @@ func rewriteJSBundle(buf []byte) []byte {
 	return []byte(s)
 }
 
+// waitingPageHTML is served while the forwarded dsh backend is not yet ready.
+// Its look mirrors the auth login page (see loginPageHTML), and it shows both
+// Chinese and English text at once. A spinner replaces the previous hourglass
+// glyph. Inline JS records when the wait started (sessionStorage) and reveals a
+// timeout message once dsh has been unavailable for a while.
+const waitingPageHTML = `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#FAFAFA">
+<title>服务启动中</title>
+<style>
+  :root{
+    --brand:#6366F1;
+    --brand-soft:rgba(99,102,241,.12);
+    --bg:#FAFAFA;
+    --surface:#FFFFFF;
+    --line:#E8E8EC;
+    --ink:#0A0A0A;
+    --ink-soft:#6B6B6B;
+    --ink-faint:#9C9C9C;
+    --shadow:0 2px 10px rgba(0,0,0,.04);
+    --err-bg:rgba(239,68,68,.08);
+    --err-border:rgba(239,68,68,.35);
+    --err-color:#dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0B0B0F;
+      --surface:#111115;
+      --line:#2A2A32;
+      --ink:#EDEDF0;
+      --ink-soft:#A6A6AD;
+      --ink-faint:#8A8A92;
+      --shadow:0 2px 10px rgba(0,0,0,.5);
+      --err-bg:rgba(248,113,113,.12);
+      --err-border:rgba(248,113,113,.35);
+      --err-color:#f87171;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    font-family:'DM Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,
+      'PingFang SC','Microsoft YaHei',sans-serif;
+    background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
+    padding:24px}
+  .wrap{width:100%;max-width:400px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+    padding:40px 32px;box-shadow:var(--shadow);overflow:hidden;text-align:center}
+  .spinner{width:36px;height:36px;margin:0 auto 20px;border-radius:50%;
+    border:3px solid var(--brand-soft);border-top-color:var(--brand);
+    animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  h1{margin:0 0 8px;font-size:22px;font-weight:600;
+    font-family:'General Sans','DM Sans',ui-sans-serif,system-ui,sans-serif;
+    letter-spacing:-.02em;color:var(--ink)}
+  .sub{margin:0;font-size:13px;color:var(--ink-soft);line-height:1.6}
+  .sub .en{display:block;color:var(--ink-faint);margin-top:4px}
+  .err{display:none;margin-top:20px;padding:10px 12px;background:var(--err-bg);
+    border:1px solid var(--err-border);border-radius:6px;font-size:13px;
+    color:var(--err-color);text-align:left;line-height:1.6;word-break:break-all}
+  .err .en{display:block;color:var(--err-color);opacity:.8;margin-top:4px}
+</style></head><body><div class="wrap">
+  <div class="card">
+    <div class="spinner"></div>
+    <h1>服务启动中 / Starting service</h1>
+    <p class="sub">dsh web 尚未就绪，页面将每隔 2 秒自动重试…
+      <span class="en">dsh web is not ready yet. This page will retry every 2 seconds.</span>
+    </p>
+    <div class="err" id="timeout">
+      dsh 服务启动失败，请检查日志，卸载不兼容的插件后重试
+      <span class="en">Failed to start dsh. Please check the logs, uninstall incompatible plugins and retry.</span>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var KEY='dsh_start_wait_ts';
+  var now=Date.now();
+  var start=0;
+  try{ start=parseInt(sessionStorage.getItem(KEY)||'0',10)||0; }catch(e){}
+  if(!start){ start=now; try{ sessionStorage.setItem(KEY,String(start)); }catch(e){} }
+  var waited=now-start;
+  var timeoutEl=document.getElementById('timeout');
+  var LIMIT=10000; // 10s
+  if(!timeoutEl) return;
+  if(waited>=LIMIT){ timeoutEl.style.display='block'; }
+  else {
+    setTimeout(function(){ timeoutEl.style.display='block'; }, LIMIT-waited+250);
+  }
+})();
+</script>
+</body></html>`
+
+// serveWaitingPage writes the styled "starting" page used while the upstream
+// dsh backend is not ready yet. It auto-refreshes every 2 seconds.
+func serveWaitingPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Refresh", "2; url="+r.URL.RequestURI())
+	w.WriteHeader(200)
+	io.WriteString(w, waitingPageHTML)
+}
+
 // BackendChecker performs reachability checks on the upstream dsh port.
 type BackendChecker struct {
 	port int
@@ -202,10 +306,7 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	checker := p.getChecker()
 	if !checker.quick(500 * time.Millisecond) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Refresh", "2; url="+r.URL.RequestURI())
-		w.WriteHeader(200)
-		io.WriteString(w, `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>服务启动中</title><style>body{font-family:sans-serif;text-align:center;padding:50px;}</style></head><body><h1>⏳ 服务正在启动中，请稍候...</h1><p>dsh web 尚未就绪，页面将每隔2秒自动重试。</p></body></html>`)
+		serveWaitingPage(w, r)
 		return
 	}
 	if !p.isInternalRequest(r) && !p.auth.isAuthed(r) {

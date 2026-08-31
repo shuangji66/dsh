@@ -1,7 +1,7 @@
 // directory.ts
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/serverapi'
+import { api, type PluginInfo } from '@/serverapi'
 import { TrimApp } from '@trimjs/web-app'
 import { useToastStore } from '@/stores/toast'
 
@@ -11,7 +11,34 @@ export const useDirectoryStore = defineStore('directory', () => {
   const loading = ref(false)
   const uid = ref<number>(0)
 
+  // 插件列表缓存：模块单例（store 常驻），切换子页面不重复命令拉取；
+  // 打开控制台/手动刷新（整页重新加载）会重建 store，缓存随之清空，
+  // 卸载/重置插件后通过 clearPluginsCache()+loadPlugins(true) 主动重拉。
+  const plugins = ref<PluginInfo[]>([])
+  const pluginsLoading = ref(false)
+  let pluginsCached = false
+
   const toast = useToastStore()
+
+  async function loadPlugins(force = false): Promise<PluginInfo[]> {
+    if (!force && pluginsCached) return plugins.value
+    pluginsLoading.value = true
+    try {
+      const p = await api.listPlugins()
+      plugins.value = p.plugins || []
+      pluginsCached = true
+    } catch (e) {
+      toast.show((e as Error).message, 'error')
+    } finally {
+      pluginsLoading.value = false
+    }
+    return plugins.value
+  }
+
+  function clearPluginsCache() {
+    pluginsCached = false
+    plugins.value = []
+  }
 
   async function load() {
     loading.value = true
@@ -55,5 +82,5 @@ export const useDirectoryStore = defineStore('directory', () => {
     }
   }
 
-  return { paths, convertedPaths, loading, uid, load, remove }
+  return { paths, convertedPaths, loading, uid, plugins, pluginsLoading, load, remove, loadPlugins, clearPluginsCache }
 })

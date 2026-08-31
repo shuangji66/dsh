@@ -6,33 +6,41 @@ import { useSettingsStore } from '@/stores/settings'
 import { TrimApp } from '@trimjs/web-app'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
-import { api, type PluginInfo } from '@/serverapi'
+import { api } from '@/serverapi'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
 const store = useDirectoryStore()
 const settings = useSettingsStore()
-const { paths, loading, convertedPaths } = storeToRefs(store)
+const { paths, loading, convertedPaths, plugins, pluginsLoading } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
 
 const sdk = new TrimApp()
 const authState = ref('')
 
-// 插件管理状态
-const plugins = ref<PluginInfo[]>([])
-const pluginsLoading = ref(false)
+// 卸载/重置插件的确认弹窗状态
+const uninstallDialogVisible = ref(false)
+const uninstallTarget = ref<string | null>(null)
+const resetDialogVisible = ref(false)
 const removingPlugin = ref<string | null>(null)
 const resetting = ref(false)
 
-async function loadPlugins() {
-  pluginsLoading.value = true
-  try {
-    const p = await api.listPlugins()
-    plugins.value = p.plugins || []
-  } catch (e) {
-    toast.show((e as Error).message, 'error')
-  } finally {
-    pluginsLoading.value = false
-  }
+// 移除授权目录的确认弹窗状态
+const removeDirDialogVisible = ref(false)
+const removeDirTarget = ref<string | null>(null)
+
+function onRemoveDirClick(path: string) {
+  removeDirTarget.value = path
+  removeDirDialogVisible.value = true
+}
+
+function onUninstallClick(name: string) {
+  uninstallTarget.value = name
+  uninstallDialogVisible.value = true
+}
+
+function onResetClick() {
+  resetDialogVisible.value = true
 }
 
 async function removePlugin(name: string) {
@@ -40,7 +48,9 @@ async function removePlugin(name: string) {
   try {
     const p = await api.removePlugin(name)
     if (p.ok) {
-      plugins.value = plugins.value.filter((pl) => pl.name !== name)
+      // 卸载后清除缓存并重新拉取列表
+      store.clearPluginsCache()
+      await store.loadPlugins(true)
       toast.show(t('plugin_removed', { name: p.removed }), 'success')
     } else {
       toast.show(p.msg || t('plugin_remove_failed'), 'error')
@@ -57,24 +67,25 @@ async function resetPlugins() {
   try {
     const p = await api.resetPlugins()
     if (p.ok) {
-      const failed = (p.results || []).filter((r) => !r.ok)
-      if (failed.length > 0) {
-        toast.show(t('plugin_reset_partial', { n: String(failed.length) }), 'error')
-      } else {
-        toast.show(t('plugin_reset_done'), 'success')
-      }
+      // 重置请求已返回，后台正在重启 dsh 并触发 node-pty 自动 patch，提示用户
+      toast.show(t('plugin_reset_started'), 'success')
+    } else {
+      toast.show(p.error || t('plugin_reset_failed'), 'error')
     }
   } catch (e) {
     toast.show((e as Error).message, 'error')
   } finally {
     resetting.value = false
-    await loadPlugins()
+    // 重置后清除缓存并重新拉取列表
+    store.clearPluginsCache()
+    await store.loadPlugins(true)
   }
 }
 
 onMounted(() => {
   store.load()
-  loadPlugins()
+  // 命中缓存则直接使用，避免切换子页面时重复命令拉取
+  store.loadPlugins()
   window.addEventListener('message', handleAuthCallback)
 })
 
@@ -189,7 +200,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="flex items-center gap-2 mt-3 pt-3 border-t border-line dark:border-[#2A2A32]">
           <button class="g-btn-secondary h-8 px-3 text-xs" @click="openFileManager(p)">{{ t('directory_open') }}</button>
-          <button class="g-btn-danger h-8 px-3 text-xs" @click="store.remove(p)">{{ t('directory_remove') }}</button>
+          <button class="g-btn-danger h-8 px-3 text-xs" @click="onRemoveDirClick(p)">{{ t('directory_remove') }}</button>
         </div>
       </div>
     </div>
@@ -199,10 +210,10 @@ onBeforeUnmount(() => {
       <div class="flex items-center justify-between mb-4">
         <h2 class="font-display text-lg font-semibold text-ink dark:text-white">{{ t('plugin_title') }}</h2>
         <div class="flex items-center gap-2">
-          <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="loadPlugins">
+          <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="store.loadPlugins(true)">
             {{ t('plugin_refresh') }}
           </button>
-          <button class="g-btn-danger h-8 px-3 text-xs" :disabled="resetting || pluginsLoading" @click="resetPlugins">
+          <button class="g-btn-danger h-8 px-3 text-xs" :disabled="resetting || pluginsLoading" @click="onResetClick">
             {{ t('plugin_reset') }}
           </button>
         </div>
@@ -227,12 +238,45 @@ onBeforeUnmount(() => {
           <button
             class="g-btn-danger h-8 px-3 text-xs flex-shrink-0"
             :disabled="removingPlugin === p.name || resetting"
-            @click="removePlugin(p.name)"
+            @click="onUninstallClick(p.name)"
           >
             {{ removingPlugin === p.name ? t('plugin_removing') : t('plugin_uninstall') }}
           </button>
         </li>
       </ul>
     </section>
+
+    <!-- 移除授权目录确认弹窗 -->
+    <ConfirmDialog
+      v-model:visible="removeDirDialogVisible"
+      :title="t('confirm_directory_remove_title')"
+      :message="t('confirm_directory_remove_msg', { path: removeDirTarget || '' })"
+      :confirm-text="t('confirm_ok')"
+      :cancel-text="t('confirm_cancel')"
+      danger
+      @confirm="removeDirTarget && store.remove(removeDirTarget)"
+    />
+
+    <!-- 卸载插件确认弹窗 -->
+    <ConfirmDialog
+      v-model:visible="uninstallDialogVisible"
+      :title="t('confirm_plugin_uninstall_title')"
+      :message="t('confirm_plugin_uninstall_msg', { name: uninstallTarget || '' })"
+      :confirm-text="t('confirm_ok')"
+      :cancel-text="t('confirm_cancel')"
+      danger
+      @confirm="uninstallTarget && removePlugin(uninstallTarget)"
+    />
+
+    <!-- 重置全部插件确认弹窗 -->
+    <ConfirmDialog
+      v-model:visible="resetDialogVisible"
+      :title="t('confirm_plugin_reset_title')"
+      :message="t('confirm_plugin_reset_msg')"
+      :confirm-text="t('confirm_ok')"
+      :cancel-text="t('confirm_cancel')"
+      danger
+      @confirm="resetPlugins()"
+    />
   </div>
 </template>

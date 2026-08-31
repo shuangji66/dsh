@@ -35,7 +35,6 @@ const zh: Record<string, string> = {
   // 设置页
   settings_title: '设置',
   settings_save: '保存配置',
-  settings_desc: '配置代理、端口与登录鉴权。',
   settings_enable_proxy: '启用代理',
   settings_proxy_addr: '代理地址',
   settings_proxy_hint: '可填写http代理，例如 http://127.0.0.1:7890，socks5代理仅为实验性',
@@ -104,6 +103,8 @@ const zh: Record<string, string> = {
   directory_empty_desc: '点击添加按钮授权你的飞牛目录。',
   directory_open: '打开',
   directory_remove: '移除',
+  confirm_directory_remove_title: '移除授权目录',
+  confirm_directory_remove_msg: '确定要移除授权的目录「{path}」吗？移除后将无法通过该应用访问此目录。',
   directory_auth_success: '授权成功',
   directory_auth_cancel: '已取消授权',
   directory_auth_updated: '授权目录已更新',
@@ -115,7 +116,7 @@ const zh: Record<string, string> = {
 
   // 插件管理
   plugin_title: '插件管理',
-  plugin_desc: 'dsh启动失败时可卸载不兼容插件或重置清除所有插件。',
+  plugin_desc: 'dsh启动失败时可卸载不兼容插件，或重置删除所有插件。',
   plugin_refresh: '刷新',
   plugin_reset: '重置',
   plugin_loading: '加载中…',
@@ -124,8 +125,12 @@ const zh: Record<string, string> = {
   plugin_removing: '卸载中…',
   plugin_removed: '已卸载 {name}',
   plugin_remove_failed: '卸载失败',
-  plugin_reset_done: '已重置全部插件',
-  plugin_reset_partial: '有 {n} 个插件重置失败',
+  plugin_reset_started: '已开始重置，正在重启服务并修补 node-pty…',
+  plugin_reset_failed: '重置失败',
+  confirm_plugin_uninstall_title: '卸载插件',
+  confirm_plugin_uninstall_msg: '确定要卸载插件「{name}」吗？',
+  confirm_plugin_reset_title: '重置全部插件',
+  confirm_plugin_reset_msg: '确定要重置吗？将删除插件目录（保留KEY、插件配置和对话消息）。',
 
   // 日志页
   logs_title: '日志',
@@ -170,7 +175,6 @@ const en: Record<string, string> = {
 
   settings_title: 'Settings',
   settings_save: 'Save',
-  settings_desc: 'Configure proxy, port and login authentication.',
   settings_enable_proxy: 'Enable proxy',
   settings_proxy_addr: 'Proxy address',
   settings_proxy_hint: 'e.g. http://127.0.0.1:7890 (socks5 is experimental)',
@@ -237,6 +241,8 @@ const en: Record<string, string> = {
   directory_empty_desc: 'Click Add to authorize your fnOS directory.',
   directory_open: 'Open',
   directory_remove: 'Remove',
+  confirm_directory_remove_title: 'Remove authorized directory',
+  confirm_directory_remove_msg: 'Are you sure you want to remove authorized directory "{path}"? This app will no longer access it.',
   directory_auth_success: 'Authorization succeeded',
   directory_auth_cancel: 'Authorization canceled',
   directory_auth_updated: 'Authorized directories updated',
@@ -248,7 +254,7 @@ const en: Record<string, string> = {
 
   // 插件管理
   plugin_title: 'Plugins',
-  plugin_desc: 'Uninstall incompatible plugins or reset to clear all plugins when dsh fails to start.',
+  plugin_desc: 'Uninstall incompatible plugins, or reset to remove all plugins when dsh fails to start.',
   plugin_refresh: 'Refresh',
   plugin_reset: 'Reset',
   plugin_loading: 'Loading…',
@@ -257,8 +263,12 @@ const en: Record<string, string> = {
   plugin_removing: 'Uninstalling…',
   plugin_removed: 'Removed {name}',
   plugin_remove_failed: 'Remove failed',
-  plugin_reset_done: 'All plugins reset',
-  plugin_reset_partial: '{n} plugin(s) failed to reset',
+  plugin_reset_started: 'Reset started — restarting service and patching node-pty…',
+  plugin_reset_failed: 'Reset failed',
+  confirm_plugin_uninstall_title: 'Uninstall Plugin',
+  confirm_plugin_uninstall_msg: 'Are you sure you want to uninstall plugin "{name}"?',
+  confirm_plugin_reset_title: 'Reset All Plugins',
+  confirm_plugin_reset_msg: 'Reset? This deletes the plugins directory (preserving KEY, plugin config and chat messages).',
 
   logs_title: 'Logs',
   log_auto_scroll_on: 'Auto-scroll: on',

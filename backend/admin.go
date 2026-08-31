@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -167,7 +168,6 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"config": cfg,
 		"locked": locked,
 		"runtime": map[string]interface{}{
-			"dshBin":        m.renv.DshBin,
 			"configFile":    m.renv.ConfigFile,
 			"adminSock":     m.renv.AdminSock,
 			"adminBaseURL":  m.renv.AdminBaseURL,
@@ -300,33 +300,39 @@ func (m *AdminMux) handleDshStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, m.dsh.Status())
 }
 
-// handleDshRestart 重启 dsh 服务（先停止再启动）
+// restartDsh 停止并重新启动 dsh 服务，重启后异步捕获新的访问 token 并换取
+// dsh 会话 cookie（供反代转发时携带）。
+func (m *AdminMux) restartDsh() error {
+	if err := m.dsh.Stop(); err != nil {
+		return fmt.Errorf("停止失败: %w", err)
+	}
+	if err := m.dsh.Start(); err != nil {
+		return fmt.Errorf("启动失败: %w", err)
+	}
+	// 重启后等待并捕获新的访问 token（每次启动 dsh 都会生成新的 token），
+	// 并用 token 换取 dsh 会话 cookie。
+	go func() {
+		if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
+			logger().Printf("dsh access token ready: %s", tok)
+			if err := m.dsh.ExchangeToken(); err != nil {
+				logger().Printf("dsh token exchange failed: %v", err)
+			} else if m.dsh.AuthCookie() == "" {
+				logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
+			}
+		} else {
+			logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)")
+		}
+	}()
+	return nil
+}
+
+// handleDshRestart 重启 dsh 服务（先停止再启动）。
 func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
-    // 先停止
-    if err := m.dsh.Stop(); err != nil {
-        writeErr(w, "停止失败: "+err.Error(), http.StatusInternalServerError)
-        return
-    }
-    // 再启动
-    if err := m.dsh.Start(); err != nil {
-        writeErr(w, "启动失败: "+err.Error(), http.StatusInternalServerError)
-        return
-    }
-    // 重启后等待并捕获新的访问 token（每次启动 dsh 都会生成新的 token），
-    // 并用 token 换取 dsh 会话 cookie（反代转发时携带该 cookie）。
-    go func() {
-        if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
-            logger().Printf("dsh access token ready: %s", tok)
-            if err := m.dsh.ExchangeToken(); err != nil {
-                logger().Printf("dsh token exchange failed: %v", err)
-            } else if m.dsh.AuthCookie() == "" {
-                logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
-            }
-        } else {
-            logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)")
-        }
-    }()
-    writeJSON(w, m.dsh.Status())
+	if err := m.restartDsh(); err != nil {
+		writeErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, m.dsh.Status())
 }
 
 // --- Plugin management (work 区插件卡片) ---
@@ -360,33 +366,76 @@ func (m *AdminMux) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"ok": true, "removed": body.Name, "msg": out})
 }
 
-// handleResetPlugins 依次卸载当前 web 插件列表中的全部插件（跳过 node-pty），
-// 并返回每一步的结果。
+// handleResetPlugins 删除 $HOME/.dsh/profiles 目录（dsh 的 profiles 数据，
+// 连同插件与配置一并清空），并在后台重启 harness（dsh）服务并触发一次
+// node-pty 自动 patch。注意：不再逐个卸载插件，直接清除 profiles 目录即可。
+//
+// 关键：重启 + node-pty patch 会长期阻塞（ensureNodePty 要轮询等待 pnpm 与
+// web 目录，最长可达数分钟），因此改为立即返回、把重活交给后台 goroutine，
+// 避免请求线程被拖垮而触发前端网关的 502 Bad Gateway。
 func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
-	out, err := m.dsh.runPluginCmd("list")
-	if err != nil {
-		writeErr(w, "执行插件列表失败: "+err.Error(), http.StatusInternalServerError)
+	// 删除 $HOME/.dsh/profiles 目录
+	home := m.renv.Home
+	if home == "" {
+		home = os.Getenv("HOME")
+	}
+	if home == "" {
+		if h, herr := os.UserHomeDir(); herr == nil && h != "" {
+			home = h
+		}
+	}
+	profilesDir := ""
+	if home != "" {
+		profilesDir = filepath.Join(home, ".dsh", "profiles")
+	}
+	profileDeleted := false
+	if profilesDir != "" {
+		if derr := os.RemoveAll(profilesDir); derr != nil {
+			logger().Printf("删除 profiles 目录失败 %s: %v", profilesDir, derr)
+		} else {
+			profileDeleted = true
+		}
+	} else {
+		logger().Printf("未确定 HOME，无法定位 profiles 目录，重置中止")
+	}
+
+	// 仅当 ~/.dsh/profiles 删除成功后才继续；失败则立即返回，不重启也不 patch。
+	if !profileDeleted {
+		writeJSON(w, map[string]interface{}{
+			"ok":             false,
+			"error":          "profiles 目录删除失败",
+			"profileDeleted": false,
+			"profilesDir":    profilesDir,
+		})
 		return
 	}
-	plugins := parsePluginList(out)
-	type stepResult struct {
-		Name  string `json:"name"`
-		OK    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
-	}
-	results := make([]stepResult, 0, len(plugins))
-	for _, p := range plugins {
-		if p.Name == "node-pty" {
-			continue
+
+	// 删除成功：把「重启 dsh + node-pty 自动 patch」放到后台执行，立即回包。
+	// 这样三者仍严格按“删除成功 → 重启 dsh → patch”的顺序发生，且不阻塞请求。
+	go func() {
+		if rerr := m.restartDsh(); rerr != nil {
+			logger().Printf("reset 后 dsh 重启失败: %v", rerr)
+			return
 		}
-		o, rerr := m.dsh.runPluginCmd("remove", p.Name)
-		if rerr != nil {
-			results = append(results, stepResult{Name: p.Name, OK: false, Error: strings.TrimSpace(o)})
+		if perr := m.patchNodePty(); perr != nil {
+			logger().Printf("node-pty auto-patch after reset failed: %v", perr)
 		} else {
-			results = append(results, stepResult{Name: p.Name, OK: true})
+			logger().Printf("node-pty auto-patch after reset completed")
 		}
-	}
-	writeJSON(w, map[string]interface{}{"ok": true, "results": results})
+	}()
+
+	writeJSON(w, map[string]interface{}{
+		"ok":             true,
+		"started":        true,
+		"profileDeleted": true,
+		"profilesDir":    profilesDir,
+	})
+}
+
+// patchNodePty 触发一次 node-pty 的自动 patch（重新执行 dsh 的 node-pty 安装/修补）。
+// 供插件重置后独立调用；后端的冷启动路径仍由 run 中的 ensureNodePty 承担，顺序不变。
+func (m *AdminMux) patchNodePty() error {
+	return ensureNodePty(m.renv)
 }
 
 // --- Visitor API (overview page) ---

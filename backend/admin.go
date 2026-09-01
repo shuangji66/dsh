@@ -335,6 +335,17 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, m.dsh.Status())
 }
 
+// handleDshVersion 执行 `dsh -V` 获取 dsh 版本号，供概览页在标题右侧展示。
+func (m *AdminMux) handleDshVersion(w http.ResponseWriter, r *http.Request) {
+	out, err := m.dsh.runDshCmd("-V")
+	if err != nil {
+		// 命令失败（如 dsh 未安装/未就绪）时不阻塞页面，返回空版本
+		writeJSON(w, map[string]interface{}{"ok": true, "version": strings.TrimSpace(out)})
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "version": strings.TrimSpace(out)})
+}
+
 // --- Plugin management (work 区插件卡片) ---
 
 // handleListPlugins 返回 dsh 的 web 插件列表（解析 `dsh plugin --profile web list`）。
@@ -555,6 +566,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleDshStop(w, r)
 		case p == "/api/dsh/status" && r.Method == http.MethodGet:
 			writeJSON(w, m.dsh.Status())
+		case p == "/api/dsh/version" && r.Method == http.MethodGet:
+			m.handleDshVersion(w, r)
 		// 在 buildHandler 的 switch 中添加
         case p == "/api/dsh/restart" && r.Method == http.MethodPost:
             m.handleDshRestart(w, r)

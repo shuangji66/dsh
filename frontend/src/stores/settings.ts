@@ -20,8 +20,26 @@ export const useSettingsStore = defineStore('settings', () => {
   const locked = ref(false)
   const loading = ref(false)
 
+  // dsh 版本号（来自后端 `dsh -V`）。模块级缓存：切换子页面不重复命令拉取；
+  // 打开控制台/手动刷新（整页重新加载）会重建 store，缓存随之清空并重新拉取。
+  const dshVersion = ref<string>('')
+  let dshVersionLoaded = false
+
   const toast = useToastStore()
   const { t } = useI18n()
+
+  async function loadDshVersion(force = false): Promise<string> {
+    if (!force && dshVersionLoaded) return dshVersion.value
+    try {
+      const p = await api.dshVersion()
+      dshVersion.value = (p.version || '').trim()
+      dshVersionLoaded = true
+    } catch {
+      // 版本号仅用于展示，获取失败时静默忽略，不弹错误提示
+      dshVersionLoaded = true
+    }
+    return dshVersion.value
+  }
 
   async function load() {
     loading.value = true
@@ -102,5 +120,5 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  return { config, runtime, status, locked, loading, load, save, startDsh, stopDsh, restartDsh }
+  return { config, runtime, status, locked, loading, dshVersion, load, loadDshVersion, save, startDsh, stopDsh, restartDsh }
 })

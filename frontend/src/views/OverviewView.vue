@@ -126,6 +126,7 @@ async function removeVisitor(id: string) {
 
 onMounted(() => {
   store.load()
+  store.loadDshVersion() // 命中缓存则直接使用，避免切换子页面重复命令拉取
   initialLoad()
   connectVisitorStream()
   connectStatusStream()
@@ -148,8 +149,10 @@ onBeforeUnmount(() => {
 
     <!-- dsh 生命周期 -->
     <section class="g-card g-card-hover p-6 mb-6">
-      <div class="flex items-center justify-between mb-2">
+      <div class="flex items-center justify-between gap-3 mb-2">
         <h2 class="font-display text-lg font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
+        <!-- dsh 版本号（右对齐） -->
+        <span v-if="store.dshVersion" class="font-mono text-xs text-ink-soft dark:text-[#A6A6AD] whitespace-nowrap">{{ store.dshVersion }}</span>
       </div>
       <div class="flex items-center justify-between gap-3 flex-wrap mt-4">
         <div class="flex gap-3">

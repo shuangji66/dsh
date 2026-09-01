@@ -105,6 +105,8 @@ export const api = {
   dshStop: () => request<DshStatus>('/api/dsh/stop', { method: 'POST' }),
   dshRestart: () => request<DshStatus>('/api/dsh/restart', { method: 'POST' }),
   dshStatus: () => request<DshStatus>('/api/dsh/status'),
+  // 读取 dsh 版本号（`dsh -V`），供概览页标题右侧展示
+  dshVersion: () => request<{ ok: boolean; version: string }>('/api/dsh/version'),
   // 读取日志文件内容
   logs: () => request<{ ok: boolean; path: string; content: string; exists: boolean }>('/api/logs'),
   // 用户授权相关（已存在，确认导出）

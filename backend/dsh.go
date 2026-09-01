@@ -510,10 +510,15 @@ type PluginInfo struct {
 // runPluginCmd 以 dsh 的运行环境执行 `dsh plugin --profile web <args...>`，
 // 返回合并后的 stdout/stderr 输出。
 func (m *DshManager) runPluginCmd(args ...string) (string, error) {
-	// dsh 可执行文件统一按 PATH 解析（node_modules/.bin/dsh）。
-	bin := "dsh"
-	cmdArgs := append([]string{"plugin", "--profile", "web"}, args...)
-	cmd := exec.Command(bin, cmdArgs...)
+	// 注意：Go 不允许向变参函数混合传字面量与 slice...，需先拼成一个切片再一次性展开。
+	all := append([]string{"plugin", "--profile", "web"}, args...)
+	return m.runDshCmd(all...)
+}
+
+// runDshCmd 以 dsh 的运行环境执行 `dsh <args...>`（如 `dsh -V` 获取版本号），
+// 返回合并后的 stdout/stderr 输出。dsh 可执行文件统一按 PATH 解析。
+func (m *DshManager) runDshCmd(args ...string) (string, error) {
+	cmd := exec.Command("dsh", args...)
 	cmd.Env = m.buildEnv()
 	var out bytes.Buffer
 	cmd.Stdout = &out

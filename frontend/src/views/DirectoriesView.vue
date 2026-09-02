@@ -112,6 +112,8 @@ async function confirmSetHome() {
     const p = await api.dshSetHome(path, migrateConfig.value)
     if (p.ok) {
       toast.show(t('directory_home_switched', { path }), 'success')
+      // 主动刷新：重新拉取后端 settings 以获取最新 homeDir，再刷新目录列表
+      await settings.load()
       await loadHomeInfo()
       await store.load()
     } else {

@@ -456,7 +456,13 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 // patchNodePty 触发一次 node-pty 的自动 patch（重新执行 dsh 的 node-pty 安装/修补）。
 // 供插件重置后独立调用；后端的冷启动路径仍由 run 中的 ensureNodePty 承担，顺序不变。
 func (m *AdminMux) patchNodePty() error {
-	return ensureNodePty(m.renv)
+	return ensureNodePty(m.renv, m.dsh.effectiveHome())
+}
+
+// patchNodePtyHome 触发指定主目录的 node-pty 自动 patch，用于切换主目录后
+// 在新 HOME 下重新执行 node-pty 安装/修补。
+func (m *AdminMux) patchNodePtyHome(home string) error {
+	return ensureNodePty(m.renv, home)
 }
 
 // defaultHomeSemantic 返回默认主目录的“相对/语义”路径。它是本应用的 shares 目录，
@@ -539,13 +545,19 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 	}
 	logger().Printf("set-home: homeDir switched to %s", dest)
 
-	// 后台重启 dsh，使新的 HOME 环境变量生效（避免阻塞请求线程）。
+	// 后台重启 dsh，使新的 HOME 环境变量生效（避免阻塞请求线程）；
+	// 重启后触发 node-pty 自动 patch，确保新 HOME 的 .dsh/profiles 下 node-pty 正常。
 	go func() {
 		if err := m.restartDsh(); err != nil {
 			logger().Printf("set-home: restart dsh failed: %v", err)
 			return
 		}
 		logger().Printf("set-home: dsh restarted with new HOME=%s", dest)
+		if perr := m.patchNodePtyHome(dest); perr != nil {
+			logger().Printf("set-home: node-pty patch after switch failed: %v", perr)
+		} else {
+			logger().Printf("set-home: node-pty patch after switch completed")
+		}
 	}()
 
 	writeJSON(w, map[string]interface{}{

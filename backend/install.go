@@ -12,10 +12,13 @@ import (
 
 // ensureNodePty 检测并安装 node-pty 预构建文件。
 // 等待 dsh 自动创建 $HOME/.dsh/profiles/web 目录，然后执行 pnpm 安装和修补。
-func ensureNodePty(renv *RuntimeEnv) error {
+// home 为当前生效的主目录路径（dsh 切换主目录后会变化）。
+func ensureNodePty(renv *RuntimeEnv, home string) error {
     logger().Printf("[node-pty] starting installation check")
 
-    home := renv.Home
+    if home == "" {
+        home = renv.Home
+    }
     if home == "" {
         home = os.Getenv("HOME")
         if home == "" {

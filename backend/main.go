@@ -159,7 +159,7 @@ func main() {
                 logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)，反代将不带凭据")
             }
             // 执行 node-pty 安装（会等待目录生成）
-            if err := ensureNodePty(&renv); err != nil {
+            if err := ensureNodePty(&renv, renv.Home); err != nil {
                 logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
             }
         }

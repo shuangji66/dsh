@@ -11,7 +11,8 @@ const view = computed(() => (route.query.view as string) || 'overview')
 const views: Record<string, ReturnType<typeof defineAsyncComponent>> = {
   overview: defineAsyncComponent(() => import('@/views/OverviewView.vue')),
   settings: defineAsyncComponent(() => import('@/views/SettingsView.vue')),
-  directory: defineAsyncComponent(() => import('@/views/DirectoryView.vue')),
+  directory: defineAsyncComponent(() => import('@/views/DirectoriesView.vue')),
+  plugins: defineAsyncComponent(() => import('@/views/PluginsView.vue')),
   terminal: defineAsyncComponent(() => import('@/views/TerminalView.vue')),
   logs: defineAsyncComponent(() => import('@/views/LogView.vue')),
 }

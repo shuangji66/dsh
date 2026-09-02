@@ -13,7 +13,8 @@ export const useSettingsStore = defineStore('settings', () => {
     password: '',
     authTTLHours: 2,
     dshMemLimit: 2048,
-    dshMemAuto: true
+    dshMemAuto: true,
+    homeDir: ''
   })
   const runtime = ref<RuntimeInfo | null>(null)
   const status = ref<DshStatus | null>(null)

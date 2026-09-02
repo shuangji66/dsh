@@ -20,6 +20,10 @@ type AppConfig struct {
 	// DshMemAuto 为 true（默认）时由系统 node 自动分配内存，不传 NODE_OPTIONS。
 	DshMemLimit int  `json:"dshMemLimit"`
 	DshMemAuto  bool `json:"dshMemAuto"`
+	// HomeDir 是 dsh 进程的 HOME 环境变量（实际系统目录）。空表示使用启动时的
+	// 默认主目录（= /var/apps/Harness/shares/Harness 的实际路径 /vol1/@appshare/Harness）。
+	// 资源页可把某个已授权目录设为新的主目录，保存后重启 dsh 生效。
+	HomeDir string `json:"homeDir"`
 }
 
 // RuntimeEnv 添加 ProxyPort

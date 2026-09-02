@@ -145,6 +145,19 @@ html, body {
     transform: translateY(-1px);
   }
 
+  /* 警告按钮：橙字橙框（同危险按钮结构，仅颜色不同） */
+  .g-btn-warning {
+    @apply inline-flex items-center justify-center gap-2 bg-transparent
+      border border-[#F59E0B] text-[#F59E0B]
+      font-medium rounded-md px-4 h-10 text-sm
+      hover:bg-[#F59E0B]/10
+      disabled:opacity-50 disabled:cursor-not-allowed
+      transition-all duration-150;
+  }
+  .g-btn-warning:hover:not(:disabled) {
+    transform: translateY(-1px);
+  }
+
   /* 输入框 */
   .g-input {
     @apply w-full bg-surface border border-[#E8E8EC] dark:border-[#2A2A32] dark:bg-[#16161B]

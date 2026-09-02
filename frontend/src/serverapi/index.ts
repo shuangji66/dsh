@@ -36,6 +36,10 @@ export interface RuntimeInfo {
   appName: string
   fnosAvailable: boolean
   proxyPort: number
+  // 主目录相关（资源页）：
+  defaultHomeSemantic: string // 默认主目录的相对/语义路径，如 /var/apps/Harness/shares/Harness
+  defaultHomeDir: string // 默认主目录的实际系统路径
+  homeDir: string // 当前生效的主目录（dsh 的 HOME 实际路径）
 }
 
 export interface AppConfig {
@@ -47,6 +51,7 @@ export interface AppConfig {
   authTTLHours: number
   dshMemLimit: number
   dshMemAuto: boolean
+  homeDir?: string // 当前设置的主目录实际路径（用于保存配置时保留）
 }
 
 export interface DshStatus {
@@ -104,6 +109,25 @@ export const api = {
   dshStart: () => request<DshStatus>('/api/dsh/start', { method: 'POST' }),
   dshStop: () => request<DshStatus>('/api/dsh/stop', { method: 'POST' }),
   dshRestart: () => request<DshStatus>('/api/dsh/restart', { method: 'POST' }),
+  // 资源页：把某个已授权目录设为 dsh 的 HOME（可选迁移 ~/.dsh 配置），确认后重启 dsh
+  dshSetHome: (path: string, migrate: boolean) =>
+    request<{
+      ok: boolean
+      changed?: boolean
+      unchanged?: boolean
+      homeDir?: string
+      error?: string
+      status?: DshStatus
+    }>('/api/dsh/set-home', {
+      method: 'POST',
+      body: JSON.stringify({ path, migrate })
+    }),
+  // 目录页：备份当前 HOME 的 ~/.dsh 到 <home>/dsh-backup-<分钟时间戳>.zip
+  dshBackup: () =>
+    request<{ ok: boolean; name?: string; path?: string; size?: number; error?: string }>(
+      '/api/dsh/backup',
+      { method: 'POST' }
+    ),
   dshStatus: () => request<DshStatus>('/api/dsh/status'),
   // 读取 dsh 版本号（`dsh -V`），供概览页标题右侧展示
   dshVersion: () => request<{ ok: boolean; version: string }>('/api/dsh/version'),

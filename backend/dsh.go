@@ -34,6 +34,11 @@ type DshManager struct {
 	token       string // 新版 dsh 启动时在日志输出的一次性访问 token
 	authMu      sync.RWMutex
 	authCookie  string // 用 token 换取到的 dsh 会话 cookie（形如 "dsh-auth-xxx=yyy"）
+	// livePidMu 保护对 livePid 的并发读写。
+	livePidMu sync.Mutex
+	livePid   int // 实际在运行的 dsh 进程 pid。dsh 装插件自重启后 m.cmd 的 pid 会失效，
+	// 此时用它记录在 /proc 中重新发现的实时 dsh pid（0 表示未知/未发现）。
+	pidCheckedAt time.Time   // 上次扫描 /proc 发现 dsh pid 的时间（避免频繁扫描）
 }
 
 // clkTCK 为 Linux 的时钟频率（每秒时钟滴答数，通常为 100）。
@@ -160,11 +165,28 @@ func NewDshManager(renv *RuntimeEnv) *DshManager {
 	}
 }
 
+// effectiveHome returns the HOME directory that dsh should run with. When the
+// user has switched home directories via the resource page the configured value
+// (AppConfig.HomeDir) wins; otherwise it falls back to the launch-time default
+// HOME (the real path behind /var/apps/Harness/shares/Harness).
+func (m *DshManager) effectiveHome() string {
+	if h := GetConfig().HomeDir; h != "" {
+		return h
+	}
+	return m.renv.Home
+}
+
 // Running reports whether dsh is currently active.
 func (m *DshManager) Running() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.cmd != nil && m.cmd.Process != nil && !m.stopped()
+	trackedAlive := m.cmd != nil && m.cmd.Process != nil && !m.stopped()
+	m.mu.Unlock()
+	if trackedAlive {
+		return true
+	}
+	// dsh 装插件自重启：m.cmd 里的旧进程已退出，但在 /proc 中可能还有新的 dsh
+	// 进程在运行，此时仍视为 running（避免概览页误判为已停止、CPU/内存读不到）。
+	return m.effectivePID() > 0
 }
 
 func (m *DshManager) stopped() bool {
@@ -179,12 +201,108 @@ func (m *DshManager) stopped() bool {
 
 // PID returns the current dsh pid or 0.
 func (m *DshManager) PID() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cmd != nil && m.cmd.Process != nil {
-		return m.cmd.Process.Pid
+	return m.effectivePID()
+}
+
+// findDshPid 在 /proc 中扫描当前在运行的 dsh 进程 pid。dsh 装插件自重启后，
+// 新进程由 dsh 自己拉起，PID 会变化，此时 m.cmd 记录的旧 PID 已失效，需要
+// 通过匹配命令行（`dsh web --no-open --port <port>`）重新发现。返回 0 表示未找到。
+func (m *DshManager) findDshPid() int {
+	port := strconv.Itoa(GetConfig().DshPort)
+	best := 0
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
 	}
-	return 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pidStr := e.Name()
+		if pidStr[0] < '0' || pidStr[0] > '9' {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid <= 0 {
+			continue
+		}
+		// 跳过自身（harness 是 Go 二进制，不会是 dsh，但排除自身更稳妥）。
+		data, err := os.ReadFile("/proc/" + pidStr + "/cmdline")
+		if err != nil {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
+		if len(args) < 2 {
+			continue
+		}
+		hasDsh := false
+		hasWeb := false
+		hasPort := false
+		for _, a := range args {
+			base := a
+			if i := strings.LastIndexByte(base, '/'); i >= 0 {
+				base = base[i+1:]
+			}
+			if base == "dsh" || base == "dsh.js" {
+				hasDsh = true
+			}
+			if a == "web" {
+				hasWeb = true
+			}
+			if a == port {
+				hasPort = true
+			}
+		}
+		if hasDsh && hasWeb && (hasPort) {
+			// 取最大 pid，通常是最新启动的 dsh 实例。
+			if pid > best {
+				best = pid
+			}
+		}
+	}
+	return best
+}
+
+// processAlive reports whether /proc/<pid> still exists.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
+	return err == nil
+}
+
+// effectivePID returns the dsh pid that should be used for stats/lifecycle.
+// 它优先取 m.cmd 记录的 PID；若该 PID 已失效（如 dsh 装插件自重启），则尝试在
+// /proc 中重新发现实时 dsh 进程（结果缓存在 livePid，避免频繁扫描 /proc）。
+// 注意：这里只做只读发现，不修改 m.cmd——Stop/Start 仍以 m.cmd 为准。
+func (m *DshManager) effectivePID() int {
+	m.mu.Lock()
+	tracked := 0
+	if m.cmd != nil && m.cmd.Process != nil {
+		tracked = m.cmd.Process.Pid
+	}
+	m.mu.Unlock()
+
+	m.livePidMu.Lock()
+	defer m.livePidMu.Unlock()
+	// 每 2 秒最多重新扫描一次 /proc，避免高频调用拖慢接口。
+	if m.livePid > 0 && time.Since(m.pidCheckedAt) < 2*time.Second && processAlive(m.livePid) {
+		return m.livePid
+	}
+	if tracked > 0 && processAlive(tracked) {
+		m.livePid = tracked
+		m.pidCheckedAt = time.Now()
+		return tracked
+	}
+	// 被跟踪的 PID 已失效，重新发现实时 dsh 进程。
+	found := m.findDshPid()
+	m.livePid = found
+	m.pidCheckedAt = time.Now()
+	if found > 0 && found != tracked {
+		m.logf("dsh pid changed: tracked=%d -> live=%d", tracked, found)
+	}
+	return found
 }
 
 // procCPUTicks reads a process's utime and stime (clock ticks) from /proc/<pid>/stat.
@@ -243,11 +361,13 @@ func (m *DshManager) Stats() (float64, int64) {
 	if time.Since(m.lastStatsAt) < time.Second {
 		return m.lastCpu, m.lastMemory
 	}
-	if m.cmd == nil || m.cmd.Process == nil {
+	// 优先用 m.cmd 记录的 PID；若已失效（dsh 装插件自重启），自动在 /proc 中
+	// 重新发现实时 dsh 进程，避免因 PID 变化导致概览页 CPU/内存读不到。
+	pid := m.effectivePID()
+	if pid <= 0 {
 		m.lastCpu, m.lastMemory, m.lastStatsAt = 0, 0, time.Now()
 		return 0, 0
 	}
-	pid := m.cmd.Process.Pid
 	u1, s1, ok1 := procCPUTicks(pid)
 	time.Sleep(300 * time.Millisecond)
 	u2, s2, ok2 := procCPUTicks(pid)
@@ -308,8 +428,10 @@ func (m *DshManager) buildEnv() []string {
 	if m.renv.Path != "" {
 		set("PATH=", m.renv.Path)
 	}
-	if m.renv.Home != "" {
-		set("HOME=", m.renv.Home)
+	// HOME 使用“当前主目录”（可能已在资源页被切换为某个已授权目录的实际路径），
+	// 默认为主机启动时的 HOME（/var/apps/Harness/shares/Harness 的实际路径）。
+	if h := m.effectiveHome(); h != "" {
+		set("HOME=", h)
 	}
 	if m.renv.PnpmHome != "" {
 		set("PNPM_HOME=", m.renv.PnpmHome)
@@ -478,18 +600,21 @@ func (m *DshManager) fallbackKill() {
 // Status summarizes lifecycle state for the API.
 func (m *DshManager) Status() map[string]interface{} {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	running := m.cmd != nil && m.cmd.Process != nil && !m.stopped()
-	pid := 0
-	if running {
-		pid = m.cmd.Process.Pid
+	trackedRunning := m.cmd != nil && m.cmd.Process != nil && !m.stopped()
+	startedAt := m.startedAt
+	m.mu.Unlock()
+	pid := m.effectivePID()
+	running := trackedRunning || pid > 0
+	if !trackedRunning && pid > 0 {
+		// m.cmd 旧进程已退出但 /proc 中发现新 dsh 进程（自重启），按运行中处理。
+		running = true
 	}
 	cfg := GetConfig()
 	cpu, mem := m.Stats()
 	return map[string]interface{}{
 		"running":    running,
 		"pid":        pid,
-		"startedAt":  m.startedAt.Format(time.RFC3339),
+		"startedAt":  startedAt.Format(time.RFC3339),
 		"dshPort":    cfg.DshPort,
 		"proxyPort":  m.renv.ProxyPort,
 		"locked":     running,

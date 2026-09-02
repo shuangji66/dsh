@@ -140,9 +140,10 @@ install:
     return nil
 }
 
-// copyDir 递归拷贝目录（保持权限）
+// copyDir 递归拷贝目录（保持权限，保留符号链接本身）。既用于 node-pty 预构建
+// 拷贝，也用于资源页把当前 HOME 的 ~/.dsh 迁移到新的主目录。
 func copyDir(src, dst string) error {
-    srcInfo, err := os.Stat(src)
+    srcInfo, err := os.Lstat(src)
     if err != nil {
         return err
     }
@@ -159,11 +160,26 @@ func copyDir(src, dst string) error {
     for _, entry := range entries {
         srcPath := filepath.Join(src, entry.Name())
         dstPath := filepath.Join(dst, entry.Name())
-        if entry.IsDir() {
+        fi, err := os.Lstat(srcPath)
+        if err != nil {
+            return err
+        }
+        switch {
+        case fi.Mode()&os.ModeSymlink != 0:
+            // 复制符号链接本身，避免迁移后链接被解析内容替换。
+            link, err := os.Readlink(srcPath)
+            if err != nil {
+                return err
+            }
+            os.Remove(dstPath)
+            if err := os.Symlink(link, dstPath); err != nil {
+                return err
+            }
+        case fi.IsDir():
             if err := copyDir(srcPath, dstPath); err != nil {
                 return err
             }
-        } else {
+        default:
             srcFile, err := os.Open(srcPath)
             if err != nil {
                 return err

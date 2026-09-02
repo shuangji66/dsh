@@ -8,6 +8,8 @@ const props = defineProps<{
   confirmText?: string
   cancelText?: string
   danger?: boolean
+  // 确认按钮文字（加载中显示用），非空时进入等待状态
+  confirmLoading?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -52,12 +54,16 @@ function onConfirm() {
           class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6"
         >
           <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ title }}</h3>
-          <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ message }}</p>
-          <div class="flex justify-end gap-3">
-            <button class="g-btn-secondary" @click="close">{{ cancelText }}</button>
+          <!-- 自定义内容（默认插槽）优先；否则回退到 message 文本 -->
+          <slot>
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ message }}</p>
+          </slot>
+          <div class="flex justify-end gap-3 mt-6">
+            <button class="g-btn-secondary" :disabled="props.confirmLoading" @click="close">{{ cancelText }}</button>
             <button
               class="g-btn-primary"
               :class="danger ? '!bg-danger hover:!bg-danger/90' : ''"
+              :disabled="props.confirmLoading"
               @click="onConfirm"
             >{{ confirmText }}</button>
           </div>

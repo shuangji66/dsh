@@ -106,24 +106,14 @@ onMounted(() => store.load())
             :disabled="locked"
             class="g-input disabled:cursor-not-allowed"
           />
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_dsh_port_hint') }}</p>
         </div>
 
-        <!-- dsh 内存限制（MB） -->
+        <!-- node栈内存限制（MB） -->
         <div class="py-4">
-          <div class="flex items-center justify-between gap-3 mb-1.5">
-            <label class="block text-sm text-ink-soft dark:text-[#A6A6AD]">
-              {{ t('settings_dsh_mem_limit') }} <span class="text-ink-faint">{{ t('settings_dsh_mem_mb') }}</span>
-            </label>
-            <!-- 自动设置开关：打开时不传 NODE_OPTIONS，由系统 node 自动分配内存 -->
-            <label class="flex items-center gap-2 cursor-pointer select-none">
-              <span class="text-sm text-ink dark:text-[#EDEDF0]">{{ t('settings_dsh_mem_auto') }}</span>
-              <div class="relative inline-flex items-center">
-                <input type="checkbox" v-model="config.dshMemAuto" class="sr-only peer">
-                <div class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></div>
-                <div class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
-              </div>
-            </label>
-          </div>
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
+            {{ t('settings_dsh_mem_limit') }} <span class="text-ink-faint">{{ t('settings_dsh_mem_mb') }}</span>
+          </label>
           <div class="flex items-center gap-2">
             <input
               v-model.number="config.dshMemLimit"
@@ -134,6 +124,15 @@ onMounted(() => store.load())
               class="g-input max-w-40 disabled:cursor-not-allowed"
             />
             <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">MB</span>
+          </div>
+          <!-- 自动设置开关：关闭时传 NODE_OPTIONS，由系统 node 自动分配内存 -->
+          <div class="flex items-center justify-between gap-3 mt-3">
+            <span class="text-sm text-ink dark:text-[#EDEDF0]">{{ t('settings_dsh_mem_auto') }}</span>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" v-model="config.dshMemAuto" class="sr-only peer">
+              <div class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></div>
+              <div class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+            </label>
           </div>
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
             {{ config.dshMemAuto ? t('settings_dsh_mem_auto_hint') : t('settings_dsh_mem_hint') }}
@@ -223,6 +222,7 @@ onMounted(() => store.load())
             <option value="last">{{ t('default_last') }}</option>
             <option value="settings">{{ t('default_settings') }}</option>
             <option value="directory">{{ t('default_directory') }}</option>
+            <option value="plugins">{{ t('default_plugins') }}</option>
             <option value="terminal">{{ t('default_terminal') }}</option>
             <option value="logs">{{ t('default_logs') }}</option>
           </select>

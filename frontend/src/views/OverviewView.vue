@@ -59,6 +59,21 @@ function fmtMem(v?: number): string {
   return v + ' MB'
 }
 
+// CPU 占用阈值颜色：0-20% 绿 / 20-50% 橙 / 50% 以上红；未知用黑色（—）
+function cpuColor(v?: number): string {
+  if (v === undefined || v === null || isNaN(v)) return 'text-ink dark:text-[#EDEDF0]'
+  if (v < 20) return 'text-success dark:text-[#10B981]'
+  if (v < 50) return 'text-warning dark:text-[#F59E0B]'
+  return 'text-danger dark:text-[#EF4444]'
+}
+// 内存阈值颜色：<500MB 绿 / 500-1000MB 橙 / 1000MB 以上红；未知用黑色（—）
+function memColor(v?: number): string {
+  if (v === undefined || v === null || isNaN(v)) return 'text-ink dark:text-[#EDEDF0]'
+  if (v < 500) return 'text-success dark:text-[#10B981]'
+  if (v < 1000) return 'text-warning dark:text-[#F59E0B]'
+  return 'text-danger dark:text-[#EF4444]'
+}
+
 // 仅初次加载时显示“加载中…”，之后由 SSE 推送增量更新，避免文字闪烁
 async function initialLoad() {
   visitorsLoading.value = true
@@ -156,19 +171,19 @@ onBeforeUnmount(() => {
       </div>
       <div class="flex items-center justify-between gap-3 flex-wrap mt-4">
         <div class="flex gap-3">
-          <button v-if="!status?.running" class="g-btn-primary bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
+          <button v-if="status?.running === false" class="g-btn-primary bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
           <button v-else class="g-btn-danger" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
-          <button class="g-btn-secondary" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
+          <button class="g-btn-warning" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
         </div>
         <!-- dsh 进程资源使用情况（CPU / 内存），与操作按钮同行 -->
         <div class="flex items-center gap-5">
           <div class="text-right">
             <div class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('cpu_usage') }}</div>
-            <div class="text-sm font-semibold text-ink dark:text-[#EDEDF0] font-mono">{{ fmtCpu(status?.cpuPercent) }}</div>
+            <div class="text-sm font-semibold font-mono" :class="cpuColor(status?.cpuPercent)">{{ fmtCpu(status?.cpuPercent) }}</div>
           </div>
           <div class="text-right">
             <div class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('mem_usage') }}</div>
-            <div class="text-sm font-semibold text-ink dark:text-[#EDEDF0] font-mono">{{ fmtMem(status?.memoryMB) }}</div>
+            <div class="text-sm font-semibold font-mono" :class="memColor(status?.memoryMB)">{{ fmtMem(status?.memoryMB) }}</div>
           </div>
         </div>
       </div>
@@ -200,7 +215,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <button
-              class="g-btn-secondary !h-8 !px-3 !text-xs flex-shrink-0"
+              class="g-btn-danger !h-8 !px-3 !text-xs flex-shrink-0"
               :disabled="deleting === v.id"
               @click="removeVisitor(v.id)"
             >

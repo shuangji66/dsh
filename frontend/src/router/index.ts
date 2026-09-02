@@ -12,6 +12,7 @@ const router = createRouter({
       component: () => import('@/views/ViewSwitcher.vue'),
     },
     { path: '/directory', redirect: { path: '/', query: { view: 'directory' } } },
+    { path: '/plugins', redirect: { path: '/', query: { view: 'plugins' } } },
     { path: '/terminal', redirect: { path: '/', query: { view: 'terminal' } } },
     { path: '/logs', redirect: { path: '/', query: { view: 'logs' } } },
   ],

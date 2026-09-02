@@ -322,6 +322,22 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.forward(w, r, checker)
 }
 
+// isPrivilegedControlRoute reports whether the proxied path is a dsh
+// process-control endpoint that enforces a strict same-origin loopback guard
+// (trustedRestartRequest in dshmarket/src/restart.ts): it only accepts requests
+// that look like they came directly from a browser on loopback and REJECTS any
+// forwarding trace (Forwarded / x-forwarded-* / x-real-ip). When the proxy
+// forwards such a request it must therefore NOT append proxy headers (which the
+// normal forward path does) and must rewrite Host/Origin to the dsh upstream so
+// the same-origin check passes.
+func isPrivilegedControlRoute(path string) bool {
+	switch path {
+	case "/dsh-market/restart":
+		return true
+	}
+	return false
+}
+
 // isLoopback reports whether the request originates from the local host
 // (127.0.0.1 / ::1). Such internal requests are trusted and bypass auth, so the
 // panel backend can reach dsh's own API (e.g. /dsh-market/install) via the proxy.
@@ -462,12 +478,30 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 		outReq.Header.Set("sec-fetch-site", "same-origin")
 	}
 	outReq.Host = checker.hostPort()
+	// 特权控制类请求（如 /dsh-market/restart）在 dsh 侧有严格安全栅栏
+	// （trustedRestartRequest）：要求请求看起来像“来自同源回环浏览器的直接请求”，
+	// 且不允许携带任何转发标记头（Forwarded / x-forwarded-* / x-real-ip），
+	// 否则以 403 拒绝。因此反代转发这类请求时不能附加转发头，并把 Host/Origin
+	// 统一改写为 dsh 上游同源，从而放行反代后的一键重启。
+	if isPrivilegedControlRoute(r.URL.Path) {
+		outReq.Header.Del("Forwarded")
+		outReq.Header.Del("X-Forwarded-For")
+		outReq.Header.Del("X-Forwarded-Host")
+		outReq.Header.Del("X-Forwarded-Proto")
+		outReq.Header.Del("X-Real-Ip")
+		upstreamOrigin := "http://" + checker.hostPort()
+		outReq.Header.Set("Origin", upstreamOrigin)
+		outReq.Header.Set("Referer", upstreamOrigin+"/")
+		outReq.Header.Set("Sec-Fetch-Site", "same-origin")
+		outReq.Header.Set("Sec-Fetch-Mode", "same-origin")
+	} else {
+		outReq.Header.Set("x-forwarded-for", ip(r))
+		outReq.Header.Set("x-forwarded-host", r.Host)
+		outReq.Header.Set("x-forwarded-proto", "http")
+	}
 	if outReq.Header.Get("origin") != "" {
 		outReq.Header.Set("origin", "http://"+checker.hostPort())
 	}
-	outReq.Header.Set("x-forwarded-for", ip(r))
-	outReq.Header.Set("x-forwarded-host", r.Host)
-	outReq.Header.Set("x-forwarded-proto", "http")
 	outReq.Header.Set("accept-encoding", "identity")
 
 	tr := &http.Transport{DisableCompression: true}

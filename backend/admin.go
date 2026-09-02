@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -173,6 +175,10 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"adminBaseURL":  m.renv.AdminBaseURL,
 			"appName":       m.renv.TRIMAppName,
 			"proxyPort":     m.renv.ProxyPort,
+			// 默认主目录语义路径及其实际系统路径，与当前主目录（dsh 的 HOME）。
+			"defaultHomeSemantic": m.defaultHomeSemantic(),
+			"defaultHomeDir":      m.renv.Home,
+			"homeDir":             m.dsh.effectiveHome(),
 		},
 		"status": m.dsh.Status(),
 	})
@@ -386,7 +392,11 @@ func (m *AdminMux) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 // 避免请求线程被拖垮而触发前端网关的 502 Bad Gateway。
 func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 	// 删除 $HOME/.dsh/profiles 目录
-	home := m.renv.Home
+	// 使用当前生效的主目录（若已在资源页切换过，则以切换后的为准）。
+	home := m.dsh.effectiveHome()
+	if home == "" {
+		home = m.renv.Home
+	}
 	if home == "" {
 		home = os.Getenv("HOME")
 	}
@@ -447,6 +457,212 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 // 供插件重置后独立调用；后端的冷启动路径仍由 run 中的 ensureNodePty 承担，顺序不变。
 func (m *AdminMux) patchNodePty() error {
 	return ensureNodePty(m.renv)
+}
+
+// defaultHomeSemantic 返回默认主目录的“相对/语义”路径。它是本应用的 shares 目录，
+// 即 /var/apps/<AppName>/shares/<AppName>，其实际系统路径为启动时的 HOME
+// （如 /vol1/@appshare/Harness）。资源页用它作为固定不可移除的第一张卡片。
+func (m *AdminMux) defaultHomeSemantic() string {
+	name := m.renv.TRIMAppName
+	if name == "" {
+		name = "Harness"
+	}
+	return "/var/apps/" + name + "/shares/" + name
+}
+
+// setHomeReq 是“设置为主目录”请求体。
+type setHomeReq struct {
+	Path    string `json:"path"`    // 目标目录的实际系统路径
+	Migrate bool   `json:"migrate"` // 是否把当前 HOME 的 ~/.dsh 复制到目标目录
+}
+
+// handleSetHome 把某个已授权目录设为 dsh 的 HOME，并在确认后把当前 ~/.dsh 配置
+// 复制到目标目录（可选），随后重启 dsh 使新的 HOME 生效。
+func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
+	var req setHomeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	dest := filepath.Clean(req.Path)
+	if dest == "" || dest == "." || !filepath.IsAbs(dest) {
+		writeErr(w, "无效的目标目录路径", http.StatusBadRequest)
+		return
+	}
+	// 目标目录必须已存在且为目录。
+	if fi, err := os.Stat(dest); err != nil || !fi.IsDir() {
+		writeErr(w, "目标目录不存在或不是目录", http.StatusBadRequest)
+		return
+	}
+
+	current := m.dsh.effectiveHome()
+	if current != "" {
+		// 规范化比较，避免符号链接/末尾斜杠造成的误判。
+		ci, e1 := os.Stat(current)
+		di, e2 := os.Stat(dest)
+		if e1 == nil && e2 == nil && os.SameFile(ci, di) {
+			writeJSON(w, map[string]interface{}{"ok": true, "unchanged": true, "homeDir": current})
+			return
+		}
+	}
+
+	// 可选：迁移当前主目录的 ~/.dsh 配置至目标目录。
+	if req.Migrate && current != "" {
+		srcDsh := filepath.Join(current, ".dsh")
+		if fi, err := os.Stat(srcDsh); err == nil && fi.IsDir() {
+			// 迁移即覆盖：若目标目录已存在 .dsh，先整体删除再拷贝，
+			// 避免残留旧配置或新旧文件混叠。
+			dstDsh := filepath.Join(dest, ".dsh")
+			if _, err := os.Lstat(dstDsh); err == nil {
+				if err := os.RemoveAll(dstDsh); err != nil {
+					writeErr(w, "迁移配置失败: 无法移除目标 ~/.dsh: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				logger().Printf("set-home: removed existing ~/.dsh at %s (overwritten by migration)", dstDsh)
+			}
+			if err := copyDir(srcDsh, dstDsh); err != nil {
+				writeErr(w, "迁移配置失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			logger().Printf("set-home: migrated ~/.dsh from %s to %s", srcDsh, dstDsh)
+		} else {
+			logger().Printf("set-home: source ~/.dsh not found at %s, skip migration", srcDsh)
+		}
+	}
+
+	// 保存新的 HOME 配置。
+	next := GetConfig()
+	next.HomeDir = dest
+	if err := SaveConfig(m.renv, &next, false); err != nil {
+		writeErr(w, "保存配置失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	logger().Printf("set-home: homeDir switched to %s", dest)
+
+	// 后台重启 dsh，使新的 HOME 环境变量生效（避免阻塞请求线程）。
+	go func() {
+		if err := m.restartDsh(); err != nil {
+			logger().Printf("set-home: restart dsh failed: %v", err)
+			return
+		}
+		logger().Printf("set-home: dsh restarted with new HOME=%s", dest)
+	}()
+
+	writeJSON(w, map[string]interface{}{
+		"ok":      true,
+		"changed": true,
+		"homeDir": dest,
+		"status":  m.dsh.Status(),
+	})
+}
+
+// handleDshBackup 把当前 HOME 的 ~/.dsh 目录整体压缩打包为
+// dsh-backup-<YYYYMMDDHHmm>.zip，保存在 HOME 目录下。时间戳精确到分钟，
+// 例如 dsh-backup-202605050933.zip。
+func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
+	home := m.dsh.effectiveHome()
+	if home == "" {
+		writeErr(w, "无法获取当前主目录", http.StatusBadRequest)
+		return
+	}
+	src := filepath.Join(home, ".dsh")
+	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
+		writeErr(w, ".dsh 目录不存在", http.StatusNotFound)
+		return
+	}
+	name := fmt.Sprintf("dsh-backup-%s.zip", time.Now().Format("200601021504"))
+	dest := filepath.Join(home, name)
+	if err := zipDir(src, dest); err != nil {
+		writeErr(w, "备份失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var size int64
+	if fi, err := os.Stat(dest); err == nil {
+		size = fi.Size()
+	}
+	logger().Printf("backup: %s (%d bytes)", dest, size)
+	writeJSON(w, map[string]interface{}{
+		"ok":   true,
+		"name": name,
+		"path": dest,
+		"size": size,
+	})
+}
+
+// zipDir 将 srcDir 目录树递归压缩写入 destZip（zip 文件），保留相对路径。
+func zipDir(srcDir, destZip string) error {
+	out, err := os.Create(destZip)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	zw := zip.NewWriter(out)
+
+	base := filepath.Clean(srcDir)
+	err = filepath.Walk(base, func(p string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == base {
+			return nil // 跳过根目录条目本身
+		}
+		// 不包含备份产物自身，避免递归膨胀。
+		if strings.HasSuffix(p, ".zip") {
+			return nil
+		}
+		rel, err := filepath.Rel(base, p)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if _, err := zw.Create(rel + "/"); err != nil {
+				return err
+			}
+			return nil
+		}
+		// 符号链接：以链接形式记录（内容存目标路径文本）。
+		if info.Mode()&os.ModeSymlink != 0 {
+			hdr, err := zip.FileInfoHeader(info)
+			if err != nil {
+				return err
+			}
+			hdr.Name = rel
+			hdr.Method = zip.Store
+			w, err := zw.CreateHeader(hdr)
+			if err != nil {
+				return err
+			}
+			link, lerr := os.Readlink(p)
+			if lerr != nil {
+				return lerr
+			}
+			_, werr := io.WriteString(w, link)
+			return werr
+		}
+		fh, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		fh.Name = rel
+		fh.Method = zip.Deflate
+		w, err := zw.CreateHeader(fh)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		_, cErr := io.Copy(w, f)
+		f.Close()
+		return cErr
+	})
+	if err != nil {
+		zw.Close()
+		os.Remove(destZip)
+		return err
+	}
+	return zw.Close()
 }
 
 // --- Visitor API (overview page) ---
@@ -571,6 +787,10 @@ func (m *AdminMux) buildHandler() http.Handler {
 		// 在 buildHandler 的 switch 中添加
         case p == "/api/dsh/restart" && r.Method == http.MethodPost:
             m.handleDshRestart(w, r)
+		case p == "/api/dsh/set-home" && r.Method == http.MethodPost:
+			m.handleSetHome(w, r)
+		case p == "/api/dsh/backup" && r.Method == http.MethodPost:
+			m.handleDshBackup(w, r)
 		case p == "/api/fnos/convert-path" && r.Method == http.MethodPost:
             m.handleConvertPath(w, r)
 		case p == "/api/logs" && r.Method == http.MethodGet:

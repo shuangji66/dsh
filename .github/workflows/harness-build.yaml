@@ -15,6 +15,8 @@ jobs:
     strategy:
       matrix:
         arch: [amd64, arm64]
+    env:
+      VERSION: ${{ github.event.inputs.version }}   # 全局版本号，供所有 steps 使用
     steps:
       - name: 检出 shuangji66/dsh 仓库
         uses: actions/checkout@v7
@@ -47,12 +49,11 @@ jobs:
         working-directory: ./dsh-src/backend
         run: |
           GOOS=linux GOARCH=${{ matrix.arch }} CGO_ENABLED=0 \
-            go build -trimpath -ldflags="-s -w" -o harness .
+            go build -trimpath -ldflags="-s -w -X main.harnessVersion=$VERSION" -o harness .
 
       - name: 压缩二进制为 tar.gz
         working-directory: ./dsh-src/backend
         run: |
-          VERSION="${{ github.event.inputs.version }}"
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             PLATFORM="x86"
           else
@@ -81,8 +82,8 @@ jobs:
       - name: 发布到 Release（使用 secrets.DSH）
         env:
           GH_TOKEN: ${{ secrets.DSH }}
+          VERSION: ${{ github.event.inputs.version }}   # 版本号用于 tag 和文件名
         run: |
-          VERSION="${{ github.event.inputs.version }}"
           REPO="${{ github.repository }}"
           TAG="harness-$VERSION"
           TITLE="Harness Binary $VERSION"

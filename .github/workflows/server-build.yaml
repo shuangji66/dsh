@@ -1,0 +1,200 @@
+name: Auto Build dsh Server
+
+on:
+  schedule:
+    # 每 12 小时运行一次：UTC 0:00 和 12:00（北京时间 8:00 和 20:00）
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:   # 支持手动触发调试
+
+jobs:
+  # ========== 第一步：获取所有版本中的最高版本号 ==========
+  fetch-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      dsh_version: ${{ steps.get_highest.outputs.version }}
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: 获取所有版本并按 SemVer 排序取最高
+        id: get_highest
+        run: |
+          # 获取所有版本的 JSON 数组，转为逐行，按版本排序，取最后一行（最高）
+          HIGHEST=$(npm view @deepseek-ai/dsh versions --json | jq -r '.[]' | sort -V | tail -n 1)
+          echo "version=$HIGHEST" >> $GITHUB_OUTPUT
+          echo "检测到最高版本: $HIGHEST"
+
+      - name: 检查该版本是否已有 Release（避免重复构建）
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.get_highest.outputs.version }}"
+          if gh release view "dsh-$VERSION" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "版本 $VERSION 已构建并发布，跳过本次构建"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "版本 $VERSION 尚未构建，继续"
+          fi
+
+  # ========== 第二步：在 Debian 容器中构建 server.tar.gz（原第二步） ==========
+  build-server:
+    needs: fetch-version
+    if: needs.fetch-version.outputs.skip != 'true'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: x86
+          - os: ubuntu-24.04-arm
+            platform: arm
+    runs-on: ${{ matrix.os }}
+    container: debian:12
+    outputs:
+      version: ${{ needs.fetch-version.outputs.dsh_version }}   # 透传版本号
+    steps:
+      - name: 安装系统依赖 + Node.js 24
+        run: |
+          apt-get update
+          apt-get install -y curl tar jq xz-utils
+          curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+          apt-get install -y nodejs
+          node -v
+          npm -v
+
+      - name: 打包 @deepseek-ai/dsh（使用检测到的最高版本）
+        id: pack
+        run: |
+          VERSION="${{ needs.fetch-version.outputs.dsh_version }}"
+          PACKED=$(npm pack "@deepseek-ai/dsh@$VERSION")
+          echo "PACKED=$PACKED" >> $GITHUB_ENV
+          tar xzf "$PACKED"
+
+      - name: 添加 dshmarket 依赖到 package.json
+        run: |
+          cd package
+          jq '.dependencies = (.dependencies // {} | . + {"dshmarket": "latest"})' package.json > tmp.json
+          mv tmp.json package.json
+          # 重新打包
+          tar czf "${{ env.PACKED }}" package
+
+      - name: 安装修改后的包到 /var/apps/Harness/target/server
+        run: |
+          mkdir -p /var/apps/Harness/target/server
+          cd /var/apps/Harness/target/server
+          npm init -y
+          npm install "$GITHUB_WORKSPACE/$PACKED" --prefix /var/apps/Harness/target/server
+
+      # ---------- 关键修改：给 dsh-app-boot 的 web.bundles 加入 dshmarket ----------
+      - name: 修改 PROFILE_TEMPLATES.web.bundles
+        run: |
+          FILE="/var/apps/Harness/target/server/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js"
+          if [ ! -f "$FILE" ]; then
+            echo "警告：$FILE 不存在，跳过修改"
+            exit 0
+          fi
+
+          node -e "
+            const fs = require('fs');
+            const file = process.argv[1];
+            let content = fs.readFileSync(file, 'utf8');
+
+            const varName = 'PROFILE_TEMPLATES';
+            const assignIndex = content.indexOf(varName + ' = {');
+            if (assignIndex === -1) {
+              console.error('未找到 PROFILE_TEMPLATES 定义');
+              process.exit(1);
+            }
+
+            let braceCount = 0;
+            let start = assignIndex + content.substring(assignIndex).indexOf('{');
+            let end = start;
+            for (let i = start; i < content.length; i++) {
+              if (content[i] === '{') braceCount++;
+              else if (content[i] === '}') {
+                braceCount--;
+                if (braceCount === 0) { end = i; break; }
+              }
+            }
+            if (braceCount !== 0) { console.error('大括号不匹配'); process.exit(1); }
+            const fullMatch = content.substring(start, end + 1);
+
+            const webStart = fullMatch.indexOf('web:');
+            if (webStart === -1) { console.error('未找到 web 属性'); process.exit(1); }
+            let webObjStart = fullMatch.indexOf('{', webStart);
+            let webBraceCount = 0;
+            let webObjEnd = webObjStart;
+            for (let i = webObjStart; i < fullMatch.length; i++) {
+              if (fullMatch[i] === '{') webBraceCount++;
+              else if (fullMatch[i] === '}') {
+                webBraceCount--;
+                if (webBraceCount === 0) { webObjEnd = i; break; }
+              }
+            }
+            const webObjStr = fullMatch.substring(webObjStart, webObjEnd + 1);
+            const bundlesRegex = /bundles\\s*:\\s*\\[([^\\]]*)\\]/;
+            const bundlesMatch = webObjStr.match(bundlesRegex);
+            if (!bundlesMatch) { console.error('未找到 bundles 数组'); process.exit(1); }
+
+            let items = bundlesMatch[1].split(',').map(s => s.trim()).filter(s => s.length > 0);
+            if (!items.includes('\"dshmarket\"')) {
+              items.push('\"dshmarket\"');
+              const newArrayStr = '[' + items.join(', ') + ']';
+              const newWebObjStr = webObjStr.replace(bundlesRegex, 'bundles: ' + newArrayStr);
+              const newFullMatch = fullMatch.substring(0, webObjStart) + newWebObjStr + fullMatch.substring(webObjEnd + 1);
+              content = content.substring(0, start) + newFullMatch + content.substring(end + 1);
+              fs.writeFileSync(file, content);
+              console.log('已成功将 dshmarket 添加到 PROFILE_TEMPLATES.web.bundles');
+            } else {
+              console.log('dshmarket 已存在，无需修改');
+            }
+          " "$FILE"
+
+      - name: 压缩 server 目录，以版本号+平台命名
+        run: |
+          VERSION="${{ needs.fetch-version.outputs.dsh_version }}"
+          PLATFORM="${{ matrix.platform }}"
+          ARCHIVE_NAME="server-${PLATFORM}-${VERSION}.tar.gz"
+          tar czf "$GITHUB_WORKSPACE/$ARCHIVE_NAME" -C /var/apps/Harness/target server
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+
+      - name: 上传 server.tar.gz 作为 Artifact（供发布用）
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-${{ matrix.platform }}
+          path: ${{ env.ARCHIVE_NAME }}
+          if-no-files-found: error
+
+  # ========== 第三步：发布到当前仓库的 Release ==========
+  publish:
+    needs: [fetch-version, build-server]
+    if: needs.fetch-version.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 下载所有平台的 server.tar.gz
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 创建/更新 Release 并上传资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.fetch-version.outputs.dsh_version }}"
+          REPO="${{ github.repository }}"
+          TAG="dsh-$VERSION"
+          TITLE="dsh Server $VERSION"
+          NOTES="自动构建 dsh $VERSION 的 server 包（包含 dshmarket 依赖）"
+
+          # 如果 Release 已存在，只追加资产；否则新建
+          if gh release view "$TAG" --repo "$REPO" &>/dev/null; then
+            echo "Release $TAG 已存在，将添加新资产"
+          else
+            gh release create "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES"
+          fi
+
+          # 上传所有 .tar.gz 文件（x86 和 arm）
+          for file in artifacts/*.tar.gz; do
+            echo "上传 $file"
+            gh release upload "$TAG" "$file" --repo "$REPO" --clobber
+          done

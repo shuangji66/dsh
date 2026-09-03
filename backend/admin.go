@@ -562,7 +562,7 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDshBackup 把当前 HOME 的 ~/.dsh 目录整体压缩打包为
-// dsh-data-backup-<YYYYMMDDHHMMSS>.tar.gz，保存在统一备份目录下。
+// dsh-data-<版本>-<YYYYMMDDHHMMSS>.tar.gz，保存在统一备份目录下。
 func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 	home := m.dsh.effectiveHome()
 	if home == "" {
@@ -577,7 +577,12 @@ func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 	// 确保备份目录存在
 	bkpDir := m.update.backupDir()
 	os.MkdirAll(bkpDir, 0755)
-	name := fmt.Sprintf("dsh-data-backup-%s.tar.gz", time.Now().Format("20060102150405"))
+	// 文件名带上当前 dsh 版本号
+	dshVer := m.update.localDshVersion()
+	if dshVer == "" {
+		dshVer = "unknown"
+	}
+	name := fmt.Sprintf("dsh-data-%s-%s.tar.gz", dshVer, time.Now().Format("20060102150405"))
 	dest := filepath.Join(bkpDir, name)
 	// 仅备份 HOME 下的 .dsh 目录；tar 顶层保留 ".dsh/" 前缀，
 	// 解压到 HOME 时能还原完整的 ~/.dsh 路径（不包含 HOME 其它内容）。
@@ -1019,7 +1024,7 @@ func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 
 // --- Server 备份与回滚 API ---
 
-// handleListBackups 返回 dsh server 备份列表（server-backup-*.tar.gz）。
+// handleListBackups 返回 dsh server 备份列表（server-<版本>-<时间戳>.tar.gz）。
 func (m *AdminMux) handleListBackups(w http.ResponseWriter, r *http.Request) {
 	backups, err := m.update.ListServerBackups()
 	if err != nil {
@@ -1074,7 +1079,7 @@ func (m *AdminMux) handleRollbackStatus(w http.ResponseWriter, r *http.Request) 
 }
 // --- dsh 数据备份与恢复 API ---
 
-// handleListDshDataBackups 返回 dsh 数据备份列表（dsh-data-backup-*.tar.gz）。
+// handleListDshDataBackups 返回 dsh 数据备份列表（dsh-data-<版本>-<时间戳>.tar.gz）。
 func (m *AdminMux) handleListDshDataBackups(w http.ResponseWriter, r *http.Request) {
 	backups, err := m.update.ListDshDataBackups()
 	if err != nil {

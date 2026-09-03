@@ -399,6 +399,13 @@ watch(
 
             <div v-if="updatingDone" class="py-6 text-center">
               <div class="text-sm font-medium text-success dark:text-[#10B981] mb-1">{{ t('update_done') }}</div>
+              <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+            </div>
+
+            <!-- harness 更新中：提示需手动刷新兜底 -->
+            <div v-else-if="updating && dialogKind === 'harness'" class="text-center py-4">
+              <div class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-1">{{ t('update_updating') }}</div>
+              <div class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_manual_refresh') }}</div>
             </div>
 
             <template v-else>

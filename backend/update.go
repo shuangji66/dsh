@@ -932,7 +932,7 @@ func (m *UpdateManager) applyHarness(extractDir string) error {
 	dest := filepath.Join(binDir, "harness")
 
 	// 先做备份（压缩当前二进制）。用独立 staging 目录避免打包整棵临时树。
-	backupName := fmt.Sprintf("harness-backup-%s.tar.gz", time.Now().Format("20060102150405"))
+	backupName := fmt.Sprintf("harness-%s-%s.tar.gz", harnessVersion, time.Now().Format("20060102150405"))
 	backupPath := filepath.Join(m.backupDir(), backupName)
 	stage := filepath.Join(filepath.Dir(extractDir), "backup-stage")
 	if err := os.MkdirAll(stage, 0755); err != nil {
@@ -947,9 +947,10 @@ func (m *UpdateManager) applyHarness(extractDir string) error {
 	}
 	logger().Printf("[update] harness 已备份到 %s", backupPath)
 
-	// 替换二进制：先写入临时文件，再 atomic rename 替换。
-	// 不能用 copyFile 直接覆盖（os.Create 截断正在运行的可执行文件会报 "text file busy"）。
-	tmpNew := filepath.Join(filepath.Dir(extractDir), "harness.new")
+	// 替换二进制：在目标同目录下先写入临时文件，再 atomic rename 替换。
+	// 不能用 copyFile 直接覆盖（os.Create 截断正在运行的可执行文件会报 "text file busy"）；
+	// 临时文件必须与 dest 同目录（否则跨文件系统的 rename 会报 "invalid cross-device link"）。
+	tmpNew := filepath.Join(binDir, ".harness.new")
 	if err := copyFile(newBin, tmpNew); err != nil {
 		os.Remove(tmpNew)
 		return fmt.Errorf("复制新二进制失败: %w", err)
@@ -963,7 +964,12 @@ func (m *UpdateManager) applyHarness(extractDir string) error {
 	}
 
 	logger().Printf("[update] harness 二进制已更新，准备重启控制台")
-	// 重启：以新二进制 exec 覆盖当前进程镜像（保持同一 PID，fnOS 监管不失效）。
+	// 先停止 dsh 服务，再由新二进制 exec 覆盖当前进程镜像（保持同一 PID，fnOS 监管不失效）。
+	// 新 harness 进程启动时会自动拉起 dsh，先停止可避免端口冲突或残留进程。
+	logger().Printf("[update] 停止 dsh 服务")
+	if err := m.dsh.Stop(); err != nil {
+		logger().Printf("[update] 停止 dsh 失败: %v", err)
+	}
 	m.restartHarness(dest)
 	return nil
 }
@@ -1022,8 +1028,12 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 		// 即便停止失败也继续尝试备份替换
 	}
 
-	// 备份当前 server 目录
-	backupName := fmt.Sprintf("server-backup-%s.tar.gz", time.Now().Format("20060102150405"))
+	// 备份当前 server 目录（文件名带上当前 dsh 版本号）
+	dshVer := m.localDshVersion()
+	if dshVer == "" {
+		dshVer = "unknown"
+	}
+	backupName := fmt.Sprintf("server-%s-%s.tar.gz", dshVer, time.Now().Format("20060102150405"))
 	backupPath := filepath.Join(m.backupDir(), backupName)
 	if err := tgzDir(serverDir, backupPath); err != nil {
 		m.dsh.Start() // 更新失败，尽量恢复 dsh
@@ -1081,13 +1091,22 @@ func copyFile(src, dst string) error {
 
 // ServerBackup 描述一个 dsh server 的备份条目。
 type ServerBackup struct {
-	Name     string `json:"name"`     // 文件名，如 server-backup-20260903154421.tar.gz
+	Name     string `json:"name"`     // 文件名，如 server-0.1.2-alpha.5-20260903154421.tar.gz
 	Size     int64  `json:"size"`     // 文件大小（字节）
 	Modified string `json:"modified"` // 修改时间（RFC3339）
 	Path     string `json:"path"`     // 完整路径
 }
 
-// ListServerBackups 列出 backupDir 中所有 server-backup-*.tar.gz 文件，按修改时间倒序。
+// backupTimestampRe 匹配新格式备份文件名尾部的 -<YYYYMMDDHHMMSS>.tar.gz 时间戳后缀。
+// 新格式：<类型>-<版本号>-<时间戳>.tar.gz，如 harness-1.0.0-20260903154421.tar.gz。
+var backupTimestampRe = regexp.MustCompile(`-\d{14}\.tar\.gz$`)
+
+// isBackupFile 判断文件名是否为指定类型的备份文件（以 prefix 开头，且以 -<14位时间戳>.tar.gz 结尾）。
+func isBackupFile(name, prefix string) bool {
+	return strings.HasPrefix(name, prefix) && backupTimestampRe.MatchString(name)
+}
+
+// ListServerBackups 列出 backupDir 中所有 server-<版本>-<时间戳>.tar.gz 文件，按修改时间倒序。
 func (m *UpdateManager) ListServerBackups() ([]ServerBackup, error) {
 	dir := m.backupDir()
 	entries, err := os.ReadDir(dir)
@@ -1097,7 +1116,7 @@ func (m *UpdateManager) ListServerBackups() ([]ServerBackup, error) {
 	var backups []ServerBackup
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasPrefix(name, "server-backup-") || !strings.HasSuffix(name, ".tar.gz") {
+		if !isBackupFile(name, "server-") {
 			continue
 		}
 		info, err := e.Info()
@@ -1119,12 +1138,12 @@ func (m *UpdateManager) ListServerBackups() ([]ServerBackup, error) {
 	return backups, nil
 }
 
-// DeleteServerBackup 删除一个 server 备份文件（仅限 backupDir 下的 server-backup-*.tar.gz）。
+// DeleteServerBackup 删除一个 server 备份文件（仅限 backupDir 下的 server-<版本>-<时间戳>.tar.gz）。
 func (m *UpdateManager) DeleteServerBackup(name string) error {
 	dir := m.backupDir()
 	target := filepath.Join(dir, name)
 	// 安全校验：文件必须在 backupDir 下且符合命名规范
-	if filepath.Dir(target) != dir || !strings.HasPrefix(name, "server-backup-") || !strings.HasSuffix(name, ".tar.gz") {
+	if filepath.Dir(target) != dir || !isBackupFile(name, "server-") {
 		return fmt.Errorf("非法的备份文件名: %s", name)
 	}
 	return os.Remove(target)
@@ -1159,7 +1178,7 @@ func (m *UpdateManager) RollbackServer(backupPath string) error {
 		return fmt.Errorf("非法的备份路径: %s", backupPath)
 	}
 	name := filepath.Base(backupPath)
-	if !strings.HasPrefix(name, "server-backup-") || !strings.HasSuffix(name, ".tar.gz") {
+	if !isBackupFile(name, "server-") {
 		return fmt.Errorf("非法的备份文件名: %s", name)
 	}
 	// 检查文件存在
@@ -1243,7 +1262,7 @@ type DshDataBackup struct {
 	Path     string `json:"path"`
 }
 
-// ListDshDataBackups 列出 backupDir 中所有 dsh-data-backup-*.tar.gz 文件，按修改时间倒序。
+// ListDshDataBackups 列出 backupDir 中所有 dsh-data-<版本>-<时间戳>.tar.gz 文件，按修改时间倒序。
 func (m *UpdateManager) ListDshDataBackups() ([]DshDataBackup, error) {
 	dir := m.backupDir()
 	entries, err := os.ReadDir(dir)
@@ -1253,7 +1272,7 @@ func (m *UpdateManager) ListDshDataBackups() ([]DshDataBackup, error) {
 	var backups []DshDataBackup
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasPrefix(name, "dsh-data-backup-") || !strings.HasSuffix(name, ".tar.gz") {
+		if !isBackupFile(name, "dsh-data-") {
 			continue
 		}
 		info, err := e.Info()
@@ -1274,11 +1293,11 @@ func (m *UpdateManager) ListDshDataBackups() ([]DshDataBackup, error) {
 	return backups, nil
 }
 
-// DeleteDshDataBackup 删除一个 dsh 数据备份文件（仅限 backupDir 下的 dsh-data-backup-*.tar.gz）。
+// DeleteDshDataBackup 删除一个 dsh 数据备份文件（仅限 backupDir 下的 dsh-data-<版本>-<时间戳>.tar.gz）。
 func (m *UpdateManager) DeleteDshDataBackup(name string) error {
 	dir := m.backupDir()
 	target := filepath.Join(dir, name)
-	if filepath.Dir(target) != dir || !strings.HasPrefix(name, "dsh-data-backup-") || !strings.HasSuffix(name, ".tar.gz") {
+	if filepath.Dir(target) != dir || !isBackupFile(name, "dsh-data-") {
 		return fmt.Errorf("非法的备份文件名: %s", name)
 	}
 	return os.Remove(target)
@@ -1328,7 +1347,7 @@ func (m *UpdateManager) RestoreDshData(backupPath string) error {
 		return fmt.Errorf("非法的备份路径: %s", backupPath)
 	}
 	name := filepath.Base(backupPath)
-	if !strings.HasPrefix(name, "dsh-data-backup-") || !strings.HasSuffix(name, ".tar.gz") {
+	if !isBackupFile(name, "dsh-data-") {
 		return fmt.Errorf("非法的备份文件名: %s", name)
 	}
 	if _, err := os.Stat(backupPath); err != nil {
@@ -1394,8 +1413,8 @@ func (m *UpdateManager) BackupDir() string {
 }
 
 // startDailyCleanup 启动每天一次的备份清理任务。
-// 扫描 backupDir 中的 harness-backup-*.tar.gz 与 server-backup-*.tar.gz，
-// 超过 30 天的自动删除；dsh-data-backup-*.tar.gz 不在自动清理范围内。
+// 扫描 backupDir 中的 harness-<版本>-<时间戳>.tar.gz 与 server-<版本>-<时间戳>.tar.gz，
+// 超过 30 天的自动删除；dsh-data-<版本>-<时间戳>.tar.gz 不在自动清理范围内。
 func (m *UpdateManager) startDailyCleanup() {
 	go func() {
 		// 启动后延迟 30 秒执行首次清理
@@ -1420,8 +1439,8 @@ func (m *UpdateManager) runBackupCleanup() {
 	removed := 0
 	for _, e := range entries {
 		name := e.Name()
-		// 仅自动清理 harness 与 server 备份；dsh-data-backup-*.tar.gz 不在自动清理范围内
-		if !strings.HasPrefix(name, "harness-backup-") && !strings.HasPrefix(name, "server-backup-") {
+		// 仅自动清理 harness 与 server 备份；dsh-data-* 不在自动清理范围内
+		if !isBackupFile(name, "harness-") && !isBackupFile(name, "server-") {
 			continue
 		}
 		if !strings.HasSuffix(name, ".tar.gz") {

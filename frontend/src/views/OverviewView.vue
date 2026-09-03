@@ -6,6 +6,7 @@ import { useToastStore } from '@/stores/toast'
 import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import UpdateSection from '@/components/UpdateSection.vue'
 
 defineOptions({ name: 'OverviewView' })
 
@@ -19,6 +20,18 @@ const visitorsLoading = ref(false)
 const deleting = ref<string | null>(null)
 let visitorES: EventSource | null = null
 let statusES: EventSource | null = null
+
+// “关于”弹窗
+const aboutVisible = ref(false)
+
+function openAbout() {
+  aboutVisible.value = true
+}
+
+// 打开 GitHub 仓库（新标签页）
+function openGithub() {
+  window.open('https://github.com/shuangji66/dsh', '_blank', 'noopener')
+}
 
 // 停止/重启的二次确认弹窗：无论是否忙碌，每次点击都先弹窗确认
 const lifecycleAction = ref<'stop' | 'restart' | null>(null)
@@ -141,7 +154,6 @@ async function removeVisitor(id: string) {
 
 onMounted(() => {
   store.load()
-  store.loadDshVersion() // 命中缓存则直接使用，避免切换子页面重复命令拉取
   initialLoad()
   connectVisitorStream()
   connectStatusStream()
@@ -158,16 +170,16 @@ onBeforeUnmount(() => {
 <template>
   <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-3xl mx-auto">
     <!-- 页头 -->
-    <header class="mb-8">
+    <header class="flex items-center justify-between mb-8">
       <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('overview_title') }}</p>
+      <!-- 关于按钮（右上角） -->
+      <button class="g-btn-secondary !h-9 !px-4 !text-sm flex-shrink-0" @click="openAbout()">{{ t('about') }}</button>
     </header>
 
     <!-- dsh 生命周期 -->
     <section class="g-card g-card-hover p-6 mb-6">
       <div class="flex items-center justify-between gap-3 mb-2">
         <h2 class="font-display text-lg font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-        <!-- dsh 版本号（右对齐） -->
-        <span v-if="store.dshVersion" class="font-mono text-xs text-ink-soft dark:text-[#A6A6AD] whitespace-nowrap">{{ store.dshVersion }}</span>
       </div>
       <div class="flex items-center justify-between gap-3 flex-wrap mt-4">
         <div class="flex gap-3">
@@ -187,6 +199,9 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
+
+      <!-- 自我更新：harness 控制台版本 + dsh 服务版本 -->
+      <UpdateSection :access-urls="store.config.accessUrls || []" />
     </section>
 
     <!-- 登录列表 -->
@@ -236,5 +251,52 @@ onBeforeUnmount(() => {
       danger
       @confirm="onLifecycleConfirm"
     />
+
+    <!-- 关于弹窗 -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div v-if="aboutVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div class="absolute inset-0 bg-black/50" @click="aboutVisible = false"></div>
+          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-4">DeepSeek Harness</h3>
+
+            <!-- Github 仓库按钮 -->
+            <button
+              class="w-full flex items-center justify-center gap-2 g-btn-secondary mb-5"
+              @click="openGithub"
+            >
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-1.7c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17.2 4.7 18.2 5 18.2 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.2c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/>
+              </svg>
+              {{ t('about_github') }}
+            </button>
+
+            <!-- 特性描述（预留，内容暂无） -->
+            <div class="mb-4">
+              <div class="text-sm font-medium text-ink dark:text-white mb-1">{{ t('about_features') }}</div>
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('about_empty') }}</div>
+            </div>
+
+            <!-- 鸣谢（预留，内容暂无） -->
+            <div>
+              <div class="text-sm font-medium text-ink dark:text-white mb-1">{{ t('about_credits') }}</div>
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('about_empty') }}</div>
+            </div>
+
+            <!-- 底部关闭按钮 -->
+            <div class="flex justify-end mt-6">
+              <button class="g-btn-primary" @click="aboutVisible = false">{{ t('about_close') }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>

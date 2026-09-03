@@ -24,6 +24,8 @@ type AppConfig struct {
 	// 默认主目录（= /var/apps/Harness/shares/Harness 的实际路径 /vol1/@appshare/Harness）。
 	// 资源页可把某个已授权目录设为新的主目录，保存后重启 dsh 生效。
 	HomeDir string `json:"homeDir"`
+	// AccessURLs 是用户配置的 dsh 访问地址列表，显示在概览页供快速访问。
+	AccessURLs []string `json:"accessUrls,omitempty"`
 }
 
 // RuntimeEnv 添加 ProxyPort

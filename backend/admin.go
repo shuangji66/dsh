@@ -18,20 +18,22 @@ import (
 // AdminMux serves the admin SPA, settings API, fnOS proxy, and terminal on the
 // unix admin socket, under the configured baseurl.
 type AdminMux struct {
-	renv *RuntimeEnv
-	dsh  *DshManager
-	fnos *FnosClient
-	auth *Auth
-	spa  http.Handler
+	renv   *RuntimeEnv
+	dsh    *DshManager
+	fnos   *FnosClient
+	auth   *Auth
+	update *UpdateManager
+	spa    http.Handler
 }
 
 // newAdminMux wires the admin SPA mux onto the unix socket.
-func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth) *AdminMux {
+func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManager) *AdminMux {
 	return &AdminMux{
-		renv: renv,
-		dsh:  dsh,
-		auth: auth,
-		fnos: NewFnosClient(renv),
+		renv:   renv,
+		dsh:    dsh,
+		auth:   auth,
+		fnos:   NewFnosClient(renv),
+		update: upd,
 	}
 }
 
@@ -341,16 +343,7 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, m.dsh.Status())
 }
 
-// handleDshVersion 执行 `dsh -V` 获取 dsh 版本号，供概览页在标题右侧展示。
-func (m *AdminMux) handleDshVersion(w http.ResponseWriter, r *http.Request) {
-	out, err := m.dsh.runDshCmd("-V")
-	if err != nil {
-		// 命令失败（如 dsh 未安装/未就绪）时不阻塞页面，返回空版本
-		writeJSON(w, map[string]interface{}{"ok": true, "version": strings.TrimSpace(out)})
-		return
-	}
-	writeJSON(w, map[string]interface{}{"ok": true, "version": strings.TrimSpace(out)})
-}
+
 
 // --- Plugin management (work 区插件卡片) ---
 
@@ -569,8 +562,7 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDshBackup 把当前 HOME 的 ~/.dsh 目录整体压缩打包为
-// dsh-backup-<YYYYMMDDHHmm>.zip，保存在 HOME 目录下。时间戳精确到分钟，
-// 例如 dsh-backup-202605050933.zip。
+// dsh-data-backup-<YYYYMMDDHHMMSS>.tar.gz，保存在统一备份目录下。
 func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 	home := m.dsh.effectiveHome()
 	if home == "" {
@@ -582,9 +574,14 @@ func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, ".dsh 目录不存在", http.StatusNotFound)
 		return
 	}
-	name := fmt.Sprintf("dsh-backup-%s.zip", time.Now().Format("200601021504"))
-	dest := filepath.Join(home, name)
-	if err := zipDir(src, dest); err != nil {
+	// 确保备份目录存在
+	bkpDir := m.update.backupDir()
+	os.MkdirAll(bkpDir, 0755)
+	name := fmt.Sprintf("dsh-data-backup-%s.tar.gz", time.Now().Format("20060102150405"))
+	dest := filepath.Join(bkpDir, name)
+	// 仅备份 HOME 下的 .dsh 目录；tar 顶层保留 ".dsh/" 前缀，
+	// 解压到 HOME 时能还原完整的 ~/.dsh 路径（不包含 HOME 其它内容）。
+	if err := tgzDirAs(src, dest, ".dsh"); err != nil {
 		writeErr(w, "备份失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -592,7 +589,7 @@ func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 	if fi, err := os.Stat(dest); err == nil {
 		size = fi.Size()
 	}
-	logger().Printf("backup: %s (%d bytes)", dest, size)
+	logger().Printf("dsh backup: %s (%d bytes)", dest, size)
 	writeJSON(w, map[string]interface{}{
 		"ok":   true,
 		"name": name,
@@ -794,8 +791,6 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleDshStop(w, r)
 		case p == "/api/dsh/status" && r.Method == http.MethodGet:
 			writeJSON(w, m.dsh.Status())
-		case p == "/api/dsh/version" && r.Method == http.MethodGet:
-			m.handleDshVersion(w, r)
 		// 在 buildHandler 的 switch 中添加
         case p == "/api/dsh/restart" && r.Method == http.MethodPost:
             m.handleDshRestart(w, r)
@@ -803,6 +798,16 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleSetHome(w, r)
 		case p == "/api/dsh/backup" && r.Method == http.MethodPost:
 			m.handleDshBackup(w, r)
+		case p == "/api/dsh/data-backups" && r.Method == http.MethodGet:
+			m.handleListDshDataBackups(w, r)
+		case p == "/api/dsh/data-backups" && r.Method == http.MethodDelete:
+			m.handleDeleteDshDataBackup(w, r)
+		case p == "/api/dsh/data-restore" && r.Method == http.MethodPost:
+			m.handleDshDataRestore(w, r)
+		case p == "/api/dsh/data-restore/status" && r.Method == http.MethodGet:
+			m.handleDshDataRestoreStatus(w, r)
+		case p == "/api/dsh/backup-dir" && r.Method == http.MethodGet:
+			m.handleBackupDir(w, r)
 		case p == "/api/fnos/convert-path" && r.Method == http.MethodPost:
             m.handleConvertPath(w, r)
 		case p == "/api/logs" && r.Method == http.MethodGet:
@@ -825,6 +830,22 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleRemovePlugin(w, r)
 		case p == "/api/plugins/reset" && r.Method == http.MethodPost:
 			m.handleResetPlugins(w, r)
+		case p == "/api/update/status" && r.Method == http.MethodGet:
+			m.handleUpdateStatus(w, r)
+		case p == "/api/update/check" && r.Method == http.MethodPost:
+			m.handleUpdateCheck(w, r)
+		case p == "/api/update/apply" && r.Method == http.MethodPost:
+			m.handleUpdateApply(w, r)
+		case p == "/api/update/stream" && r.Method == http.MethodGet:
+			m.handleUpdateStream(w, r)
+		case p == "/api/dsh/backups" && r.Method == http.MethodGet:
+			m.handleListBackups(w, r)
+		case p == "/api/dsh/backups" && r.Method == http.MethodDelete:
+			m.handleDeleteBackup(w, r)
+		case p == "/api/dsh/rollback" && r.Method == http.MethodPost:
+			m.handleRollback(w, r)
+		case p == "/api/dsh/rollback/status" && r.Method == http.MethodGet:
+			m.handleRollbackStatus(w, r)
 		case strings.HasPrefix(p, "/api/fnos/"):
 			m.handleFnos(w, r)
 		default:
@@ -898,4 +919,216 @@ func (m *AdminMux) handleConvertPath(w http.ResponseWriter, r *http.Request) {
         return
     }
     writeJSON(w, map[string]interface{}{"ok": true, "result": result})
+}
+
+// --- 自我更新 API ---
+
+// handleUpdateStatus 返回当前 harness 与 dsh 的版本检测结果。
+func (m *AdminMux) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	snap := m.update.snapshot()
+	writeJSON(w, map[string]interface{}{
+		"ok":      true,
+		"harness": snap[updateKindHarness],
+		"dsh":     snap[updateKindDsh],
+	})
+}
+
+// handleUpdateCheck 执行一次手动检查更新（“检查更新”按钮）并返回最新结果。
+// 同步执行：前端在拿到响应后即可依据结果提示“暂无更新”或显示红点。
+func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	m.update.checkOnce()
+	snap := m.update.snapshot()
+	writeJSON(w, map[string]interface{}{
+		"ok":      true,
+		"harness": snap[updateKindHarness],
+		"dsh":     snap[updateKindDsh],
+	})
+}
+
+// handleUpdateApply 执行自我更新。body 中 kind 为 harness 或 dsh。
+func (m *AdminMux) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	kind := updateKind(body.Kind)
+	if kind != updateKindHarness && kind != updateKindDsh {
+		writeErr(w, "kind 必须为 harness 或 dsh", http.StatusBadRequest)
+		return
+	}
+	// 后台执行，避免占用请求线程；更新完成后通过 SSE 推送。
+	go func() {
+		if err := m.update.applyUpdate(kind); err != nil {
+			logger().Printf("[update] 更新 %s 失败: %v", kind, err)
+			// 失败也推送一次，前端可据此刷新状态
+			m.update.setStatus(kind, &UpdateStatus{
+				Kind: kind, CheckedAt: time.Now(), Error: err.Error(),
+			})
+		} else {
+			logger().Printf("[update] 更新 %s 成功", kind)
+			// 成功后推送最新状态（本地版本已更新、不再有更新），
+			// 前端据此关闭弹窗并刷新页面。
+			upd := m.update
+			st := upd.getStatus(kind)
+			st.CheckedAt = time.Now()
+			st.Error = ""
+			st.HasUpdate = false
+			if kind == updateKindHarness {
+				st.LocalVersion = harnessVersion
+				st.LatestVersion = harnessVersion
+			} else {
+				v := upd.localDshVersion()
+				st.LocalVersion = v
+				st.LatestVersion = v
+			}
+			upd.setStatus(kind, &st)
+		}
+	}()
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始更新"})
+}
+
+// handleUpdateStream 通过 SSE 推送更新检测结果变更。
+func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
+	setSSEHeaders(w)
+	ctx := r.Context()
+	send := func() {
+		sseSend(w, "update", sseJSON(map[string]interface{}{
+			"harness": m.update.getStatus(updateKindHarness),
+			"dsh":     m.update.getStatus(updateKindDsh),
+		}))
+	}
+	send() // 初始快照
+	ch, unsub := m.update.subscribe()
+	defer unsub()
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			send()
+		case <-keepalive.C:
+			// 心跳：保证连接存活（无需重复推送快照）
+		}
+	}
+}
+
+// --- Server 备份与回滚 API ---
+
+// handleListBackups 返回 dsh server 备份列表（server-backup-*.tar.gz）。
+func (m *AdminMux) handleListBackups(w http.ResponseWriter, r *http.Request) {
+	backups, err := m.update.ListServerBackups()
+	if err != nil {
+		writeErr(w, "读取备份列表失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "backups": backups})
+}
+
+type deleteBackupReq struct {
+	Name string `json:"name"`
+}
+
+// handleDeleteBackup 删除一个 server 备份文件。
+func (m *AdminMux) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	var body deleteBackupReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	if err := m.update.DeleteServerBackup(body.Name); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "deleted": body.Name})
+}
+
+type rollbackReq struct {
+	Name string `json:"name"`
+}
+
+// handleRollback 触发 dsh server 回滚（异步执行，前端通过 /api/dsh/rollback/status 轮询结果）。
+func (m *AdminMux) handleRollback(w http.ResponseWriter, r *http.Request) {
+	var body rollbackReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	dir := m.update.backupDir()
+	fullPath := filepath.Join(dir, body.Name)
+	if err := m.update.RollbackServer(fullPath); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true})
+}
+
+// handleRollbackStatus 返回当前 dsh server 回滚状态。
+func (m *AdminMux) handleRollbackStatus(w http.ResponseWriter, r *http.Request) {
+	status := m.update.GetRollbackStatus()
+	writeJSON(w, map[string]interface{}{"ok": true, "status": status})
+}
+// --- dsh 数据备份与恢复 API ---
+
+// handleListDshDataBackups 返回 dsh 数据备份列表（dsh-data-backup-*.tar.gz）。
+func (m *AdminMux) handleListDshDataBackups(w http.ResponseWriter, r *http.Request) {
+	backups, err := m.update.ListDshDataBackups()
+	if err != nil {
+		writeErr(w, "读取备份列表失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "backups": backups})
+}
+
+type delDshDataReq struct {
+	Name string `json:"name"`
+}
+
+// handleDeleteDshDataBackup 删除一个 dsh 数据备份文件。
+func (m *AdminMux) handleDeleteDshDataBackup(w http.ResponseWriter, r *http.Request) {
+	var body delDshDataReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	if err := m.update.DeleteDshDataBackup(body.Name); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "deleted": body.Name})
+}
+
+type dshDataRestoreReq struct {
+	Name string `json:"name"`
+}
+
+// handleDshDataRestore 触发 dsh 数据恢复（异步执行，前端通过 /api/dsh/data-restore/status 轮询）。
+func (m *AdminMux) handleDshDataRestore(w http.ResponseWriter, r *http.Request) {
+	var body dshDataRestoreReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, "缺少 name", http.StatusBadRequest)
+		return
+	}
+	dir := m.update.backupDir()
+	fullPath := filepath.Join(dir, body.Name)
+	if err := m.update.RestoreDshData(fullPath); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true})
+}
+
+// handleDshDataRestoreStatus 返回当前 dsh 数据恢复状态。
+func (m *AdminMux) handleDshDataRestoreStatus(w http.ResponseWriter, r *http.Request) {
+	status := m.update.GetDshRestoreStatus()
+	writeJSON(w, map[string]interface{}{"ok": true, "status": status})
+}
+
+// handleBackupDir 返回统一备份目录的实际路径（供前端转换语义路径）。
+func (m *AdminMux) handleBackupDir(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]interface{}{"ok": true, "path": m.update.BackupDir()})
 }

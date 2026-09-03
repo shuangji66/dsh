@@ -16,6 +16,7 @@ EMBED_DIR="${BACKEND_DIR}/embed"
 
 export GOCACHE="${GOCACHE:-${ROOT}/.gocache}"
 export GOPATH="${GOPATH:-${ROOT}/.gopath}"
+export PATH=/var/apps/nodejs_v24/target/bin:$PATH
 mkdir -p "$GOCACHE" "$GOPATH"
 
 echo "==> Building frontend..."
@@ -27,14 +28,14 @@ echo "==> Copying frontend dist into embed dir..."
 rm -rf "$EMBED_DIR"
 mkdir -p "$EMBED_DIR"
 cp -r "$FRONTEND_DIR"/dist/* "$EMBED_DIR"/
-# Keep the directory non-empty for go:embed even if dist is empty.
-touch "$EMBED_DIR/.gitkeep"
 
 echo "==> Building Go binary..."
-LDFLAGS="-s -w"
+# 控制台版本号：默认 1.0.0，可经第二个参数覆盖（如 ./build.sh release 1.0.1）。
+HARNESS_VERSION="${2:-1.0.0}"
+LDFLAGS="-s -w -X main.harnessVersion=${HARNESS_VERSION}"
 OUT="${ROOT}/app/backend/harness"
 if [ "${1:-}" = "release" ]; then
-  LDFLAGS="-s -w -linkmode=external"
+  LDFLAGS="-s -w -linkmode=external -X main.harnessVersion=${HARNESS_VERSION}"
 fi
 # Clean the Go build cache so code and embedded-asset changes always compile in.
 go clean -cache

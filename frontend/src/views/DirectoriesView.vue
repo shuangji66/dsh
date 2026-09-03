@@ -6,7 +6,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { TrimApp } from '@trimjs/web-app'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
-import { api } from '@/serverapi'
+import { api, type DshDataBackup } from '@/serverapi'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
 const store = useDirectoriesStore()
@@ -42,6 +42,20 @@ const migrateConfig = ref(false)
 // 备份当前主目录 ~/.dsh 的确认弹窗状态
 const backupDialogVisible = ref(false)
 const backupBusy = ref(false)
+
+// dsh 数据备份恢复状态
+const restoreVisible = ref(false) // 恢复备份选择弹窗
+const restoreBusy = ref(false) // 恢复进行中
+const restoreError = ref('')
+const dshBackups = ref<DshDataBackup[]>([]) // 可用备份列表
+const selectedRestore = ref<string | null>(null) // 选中的备份名
+const confirmRestoreVisible = ref(false) // 恢复二次确认
+const restoreDeleteName = ref<string | null>(null) // 待删除备份
+let restorePollTimer: ReturnType<typeof setInterval> | null = null
+
+// 备份目录（统一备份路径 + sdk 转换后的语义路径）
+const backupDirPath = ref('')
+const backupDirConverted = ref('')
 
 // 移除授权目录的确认弹窗状态
 const removeDirDialogVisible = ref(false)
@@ -133,9 +147,121 @@ function onRemoveDirClick(path: string) {
   removeDirDialogVisible.value = true
 }
 
+// --- dsh 数据备份恢复 ---
+
+// 拉取 dsh 数据备份列表
+async function fetchDshBackups() {
+  try {
+    const res = await api.listDshDataBackups()
+    dshBackups.value = res.backups || []
+  } catch { /* ignore */ }
+}
+
+// 打开恢复备份弹窗
+function onRestoreClick() {
+  restoreError.value = ''
+  restoreBusy.value = false
+  selectedRestore.value = null
+  fetchDshBackups()
+  restoreVisible.value = true
+}
+
+// 选择一个备份
+function selectRestore(name: string) {
+  selectedRestore.value = name
+}
+
+// 二次确认恢复
+function openConfirmRestore() {
+  if (!selectedRestore.value) return
+  confirmRestoreVisible.value = true
+}
+
+// 执行恢复
+async function doRestore() {
+  const name = selectedRestore.value
+  if (!name) return
+  confirmRestoreVisible.value = false
+  restoreBusy.value = true
+  restoreError.value = ''
+  try {
+    await api.dshDataRestore(name)
+    // 轮询恢复状态直到完成
+    if (restorePollTimer) clearInterval(restorePollTimer)
+    restorePollTimer = setInterval(async () => {
+      try {
+        const res = await api.dshDataRestoreStatus()
+        const st = res.status
+        if (st.done) {
+          clearInterval(restorePollTimer!)
+          restorePollTimer = null
+          restoreBusy.value = false
+          if (st.ok) {
+            toast.show(t('restore_success'), 'success')
+            restoreVisible.value = false
+            // 恢复数据后刷新页面（dsh 已重启，加载新配置）
+            setTimeout(() => window.location.reload(), 1000)
+          } else {
+            restoreError.value = st.error || t('restore_failed')
+          }
+        }
+      } catch { /* 继续轮询 */ }
+    }, 2000)
+  } catch (e) {
+    restoreError.value = (e as Error).message || t('restore_failed')
+    restoreBusy.value = false
+  }
+}
+
+// 删除备份
+function openRestoreDelete(name: string) {
+  restoreDeleteName.value = name
+}
+async function doRestoreDelete() {
+  const name = restoreDeleteName.value
+  if (!name) return
+  try {
+    await api.deleteDshDataBackup(name)
+    toast.show(t('restore_deleted'), 'success')
+    restoreDeleteName.value = null
+    fetchDshBackups()
+  } catch (e) {
+    toast.show((e as Error).message, 'error')
+  }
+}
+
+// 格式化备份时间
+function fmtRestoreDate(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return '—'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+// 格式化文件大小
+function fmtRestoreSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+// 拉取备份目录实际路径并转换语义路径
+async function loadBackupDir() {
+  try {
+    const res = await api.backupDir()
+    backupDirPath.value = res.path || ''
+    const language = navigator.language || 'zh-CN'
+    const converted = await api.convertPath([backupDirPath.value], language)
+    backupDirConverted.value = converted?.result?.[0]?.semanticPath || ''
+  } catch {
+    backupDirPath.value = ''
+    backupDirConverted.value = ''
+  }
+}
+
 onMounted(() => {
   store.load()
   loadHomeInfo()
+  loadBackupDir()
   window.addEventListener('message', handleAuthCallback)
 })
 
@@ -214,6 +340,7 @@ async function openFileManager(path: string) {
 
 onBeforeUnmount(() => {
   window.removeEventListener('message', handleAuthCallback)
+  if (restorePollTimer) clearInterval(restorePollTimer)
 })
 </script>
 
@@ -224,6 +351,8 @@ onBeforeUnmount(() => {
         <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('nav_directory') }}</p>
       </div>
       <div class="flex items-center gap-2">
+        <!-- 恢复备份（红色边框红色文字，位于备份按钮左侧） -->
+        <button class="g-btn-danger h-9 px-3 text-xs flex-shrink-0" @click="onRestoreClick()">{{ t('directory_restore') }}</button>
         <button class="g-btn-secondary flex-shrink-0" :disabled="backupBusy" @click="onBackupClick()">{{ t('directory_backup') }}</button>
         <button class="g-btn-primary flex-shrink-0" @click="openPicker()">{{ t('directory_add') }}</button>
       </div>
@@ -254,6 +383,17 @@ onBeforeUnmount(() => {
             @click="onSetHomeClick(defaultHomeDir)"
           >{{ t('directory_set_home') }}</button>
           <button class="g-btn-secondary h-8 px-3 text-xs" @click="openFileManager(defaultHomeDir)">{{ t('directory_open') }}</button>
+        </div>
+        <!-- 备份目录（打开按钮下方，仅支持打开） -->
+        <div v-if="backupDirPath" class="mt-3 pt-3 border-t border-line dark:border-[#2A2A32]">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex flex-col gap-0.5 min-w-0">
+              <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('directory_backup_dir') }}</span>
+              <span class="font-mono text-xs text-ink dark:text-white break-all">{{ backupDirPath }}</span>
+              <span v-if="backupDirConverted" class="text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ backupDirConverted }}</span>
+            </div>
+            <button class="g-btn-secondary h-8 px-3 text-xs flex-shrink-0" @click="openFileManager(backupDirPath)">{{ t('directory_backup_dir_open') }}</button>
+          </div>
         </div>
       </div>
 
@@ -361,5 +501,125 @@ onBeforeUnmount(() => {
       :confirm-loading="backupBusy"
       @confirm="confirmBackup()"
     />
+
+    <!-- 恢复备份选择弹窗 -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div v-if="restoreVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div class="absolute inset-0 bg-black/50" @click="restoreBusy ? null : (restoreVisible = false)"></div>
+          <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">{{ t('confirm_restore_title') }}</h3>
+
+            <div v-if="restoreBusy" class="py-8 text-center">
+              <div class="inline-block animate-spin h-6 w-6 border-2 border-danger border-t-transparent rounded-full mb-2"></div>
+              <div class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('restore_running') }}</div>
+            </div>
+
+            <template v-else>
+              <div v-if="restoreError" class="mb-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-[#EF4444] break-words">{{ restoreError }}</div>
+
+              <div v-if="dshBackups.length === 0" class="py-6 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
+                {{ t('restore_empty') }}
+              </div>
+
+              <div v-else class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32] max-h-64 overflow-auto">
+                <label
+                  v-for="b in dshBackups"
+                  :key="b.name"
+                  class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                >
+                  <input
+                    type="radio"
+                    name="dshrestore"
+                    :value="b.name"
+                    :checked="selectedRestore === b.name"
+                    class="accent-danger flex-shrink-0"
+                    @change="selectRestore(b.name)"
+                  />
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-mono text-ink dark:text-[#EDEDF0] truncate">{{ b.name }}</div>
+                    <div class="text-xs text-ink-faint dark:text-[#8A8A92]">
+                      {{ t('restore_date') }}: {{ fmtRestoreDate(b.modified) }} · {{ t('restore_size') }}: {{ fmtRestoreSize(b.size) }}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger dark:hover:text-[#EF4444] transition-colors"
+                    :title="t('restore_delete')"
+                    @click.prevent="openRestoreDelete(b.name)"
+                  >
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  </button>
+                </label>
+              </div>
+            </template>
+
+            <div class="flex justify-end gap-3 mt-6">
+              <button class="g-btn-secondary" :disabled="restoreBusy" @click="restoreVisible = false">{{ t('confirm_cancel') }}</button>
+              <button
+                v-if="selectedRestore && !restoreBusy"
+                class="g-btn-danger"
+                @click="openConfirmRestore"
+              >{{ t('restore_to') }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 恢复备份二次确认弹窗 -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div v-if="confirmRestoreVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div class="absolute inset-0 bg-black/50" @click="confirmRestoreVisible = false"></div>
+          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('confirm_restore_title') }}</h3>
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('confirm_restore_msg', { name: selectedRestore || '' }) }}</p>
+            <div class="flex justify-end gap-3 mt-6">
+              <button class="g-btn-secondary" @click="confirmRestoreVisible = false">{{ t('confirm_cancel') }}</button>
+              <button class="g-btn-danger" @click="doRestore">{{ t('confirm_ok') }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 删除备份确认弹窗 -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div v-if="restoreDeleteName" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div class="absolute inset-0 bg-black/50" @click="restoreDeleteName = null"></div>
+          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('restore_delete_confirm_title') }}</h3>
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('restore_delete_confirm_msg', { name: restoreDeleteName || '' }) }}</p>
+            <div class="flex justify-end gap-3 mt-6">
+              <button class="g-btn-secondary" @click="restoreDeleteName = null">{{ t('confirm_cancel') }}</button>
+              <button class="g-btn-danger" @click="doRestoreDelete">{{ t('restore_delete') }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>

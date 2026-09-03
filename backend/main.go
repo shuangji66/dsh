@@ -128,7 +128,10 @@ func main() {
     }
 
     dsh := NewDshManager(&renv)
-    admin := newAdminMux(&renv, dsh, auth)
+    upd := newUpdateManager(&renv, dsh)
+    upd.startAutoCheck()
+    upd.startDailyCleanup()
+    admin := newAdminMux(&renv, dsh, auth, upd)
     admin.SetSPA(embeddedFrontend())
 
     // 启动 admin socket（非阻塞）

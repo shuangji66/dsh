@@ -52,6 +52,7 @@ export interface AppConfig {
   dshMemLimit: number
   dshMemAuto: boolean
   homeDir?: string // 当前设置的主目录实际路径（用于保存配置时保留）
+  accessUrls?: string[] // 用户配置的 dsh 访问地址列表
 }
 
 export interface DshStatus {
@@ -83,6 +84,56 @@ export interface SettingsPayload {
   locked: boolean
   runtime: RuntimeInfo
   status: DshStatus
+}
+
+// 更新检测结果（harness 控制台 / dsh 服务各一份）
+export interface UpdateStatus {
+  kind: 'harness' | 'dsh'
+  localVersion: string
+  latestVersion: string
+  hasUpdate: boolean
+  checkedAt: string
+  error?: string
+}
+
+export type UpdateKind = 'harness' | 'dsh'
+
+// 自我更新 SSE 推送与 REST 接口的载荷
+export interface UpdatePayload {
+  harness: UpdateStatus
+  dsh: UpdateStatus
+}
+
+// dsh server 备份条目
+export interface ServerBackup {
+  name: string
+  size: number
+  modified: string
+  path: string
+}
+
+// dsh server 回滚状态
+export interface RollbackStatus {
+  running: boolean
+  done: boolean
+  ok: boolean
+  error?: string
+}
+
+// dsh 数据备份条目（~/.dsh 备份）
+export interface DshDataBackup {
+  name: string
+  size: number
+  modified: string
+  path: string
+}
+
+// dsh 数据恢复状态
+export interface DshRestoreStatus {
+  running: boolean
+  done: boolean
+  ok: boolean
+  error?: string
 }
 
 // 新增一个带自定义 headers 的 request 函数
@@ -122,15 +173,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path, migrate })
     }),
-  // 目录页：备份当前 HOME 的 ~/.dsh 到 <home>/dsh-backup-<分钟时间戳>.zip
+  // 目录页：备份当前 HOME 的 ~/.dsh 到统一备份目录 dsh-data-backup-<时间戳>.tar.gz
   dshBackup: () =>
     request<{ ok: boolean; name?: string; path?: string; size?: number; error?: string }>(
       '/api/dsh/backup',
       { method: 'POST' }
     ),
+  // dsh 数据备份：列表 / 删除 / 恢复 / 恢复状态（对应目录页“恢复备份”）
+  listDshDataBackups: () =>
+    request<{ ok: boolean; backups: DshDataBackup[] }>('/api/dsh/data-backups'),
+  deleteDshDataBackup: (name: string) =>
+    request<{ ok: boolean; deleted: string }>('/api/dsh/data-backups', {
+      method: 'DELETE',
+      body: JSON.stringify({ name })
+    }),
+  dshDataRestore: (name: string) =>
+    request<{ ok: boolean; started: boolean }>('/api/dsh/data-restore', {
+      method: 'POST',
+      body: JSON.stringify({ name })
+    }),
+  dshDataRestoreStatus: () =>
+    request<{ ok: boolean; status: DshRestoreStatus }>('/api/dsh/data-restore/status'),
+  // 统一备份目录实际路径（供转换语义路径）
+  backupDir: () => request<{ ok: boolean; path: string }>('/api/dsh/backup-dir'),
   dshStatus: () => request<DshStatus>('/api/dsh/status'),
-  // 读取 dsh 版本号（`dsh -V`），供概览页标题右侧展示
-  dshVersion: () => request<{ ok: boolean; version: string }>('/api/dsh/version'),
   // 读取日志文件内容
   logs: () => request<{ ok: boolean; path: string; content: string; exists: boolean }>('/api/logs'),
   // 用户授权相关（已存在，确认导出）
@@ -186,5 +252,26 @@ export const api = {
       profilesDir?: string
     }>('/api/plugins/reset', {
       method: 'POST'
-    })
+    }),
+  // 自我更新：版本检测状态 / 手动检查 / 执行更新 / SSE 推送
+  updateStatus: () => request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus }>('/api/update/status'),
+  updateCheck: () => request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus }>('/api/update/check', { method: 'POST' }),
+  updateApply: (kind: UpdateKind) =>
+    request<{ ok: boolean; started: boolean; kind: UpdateKind; msg?: string }>('/api/update/apply', {
+      method: 'POST',
+      body: JSON.stringify({ kind })
+    }),
+  // dsh server 回滚：备份列表 / 删除备份 / 回滚 / 回滚状态
+  listBackups: () => request<{ ok: boolean; backups: ServerBackup[] }>('/api/dsh/backups'),
+  deleteBackup: (name: string) =>
+    request<{ ok: boolean; deleted: string }>('/api/dsh/backups', {
+      method: 'DELETE',
+      body: JSON.stringify({ name })
+    }),
+  rollback: (name: string) =>
+    request<{ ok: boolean; started: boolean }>('/api/dsh/rollback', {
+      method: 'POST',
+      body: JSON.stringify({ name })
+    }),
+  rollbackStatus: () => request<{ ok: boolean; status: RollbackStatus }>('/api/dsh/rollback/status')
 }

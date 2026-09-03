@@ -947,8 +947,15 @@ func (m *UpdateManager) applyHarness(extractDir string) error {
 	}
 	logger().Printf("[update] harness 已备份到 %s", backupPath)
 
-	// 替换二进制
-	if err := copyFile(newBin, dest); err != nil {
+	// 替换二进制：先写入临时文件，再 atomic rename 替换。
+	// 不能用 copyFile 直接覆盖（os.Create 截断正在运行的可执行文件会报 "text file busy"）。
+	tmpNew := filepath.Join(filepath.Dir(extractDir), "harness.new")
+	if err := copyFile(newBin, tmpNew); err != nil {
+		os.Remove(tmpNew)
+		return fmt.Errorf("复制新二进制失败: %w", err)
+	}
+	if err := os.Rename(tmpNew, dest); err != nil {
+		os.Remove(tmpNew)
 		return fmt.Errorf("替换二进制失败: %w", err)
 	}
 	if err := os.Chmod(dest, 0755); err != nil {

@@ -178,7 +178,7 @@ jobs:
 
       - name: 创建/更新 Release 并上传资产
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.DSH }}
         run: |
           VERSION="${{ needs.fetch-version.outputs.dsh_version }}"
           REPO="${{ github.repository }}"

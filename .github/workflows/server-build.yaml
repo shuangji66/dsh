@@ -74,8 +74,9 @@ jobs:
           cd package
           jq '.dependencies = (.dependencies // {} | . + {"dshmarket": "latest"})' package.json > tmp.json
           mv tmp.json package.json
-          # 重新打包
-          tar czf "${{ env.PACKED }}" package
+
+      - name: 重新打包
+        run: tar czf "$PACKED" package
 
       - name: 安装修改后的包到 /var/apps/Harness/target/server
         run: |

@@ -1,0 +1,102 @@
+name: Build Harness Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（例如 1.0.0）'
+        required: true
+        type: string
+
+jobs:
+  # ========== 编译并打包 harness 二进制（amd64 / arm64） ==========
+  build-harness:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: 检出 shuangji66/dsh 仓库
+        uses: actions/checkout@v7
+        with:
+          repository: shuangji66/dsh
+          path: dsh-src
+
+      - name: 安装 Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: 安装 Go 1.26
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+
+      - name: 构建前端
+        working-directory: ./dsh-src/frontend
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: 准备 embed 目录
+        run: |
+          mkdir -p ./dsh-src/backend/embed
+          cp -r ./dsh-src/frontend/dist/* ./dsh-src/backend/embed/
+
+      - name: 构建 Go 二进制（${{ matrix.arch }}）
+        working-directory: ./dsh-src/backend
+        run: |
+          GOOS=linux GOARCH=${{ matrix.arch }} CGO_ENABLED=0 \
+            go build -trimpath -ldflags="-s -w" -o harness .
+
+      - name: 压缩二进制为 tar.gz
+        working-directory: ./dsh-src/backend
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            PLATFORM="x86"
+          else
+            PLATFORM="arm"
+          fi
+          tar czf "harness-${VERSION}-${PLATFORM}.tar.gz" harness
+          echo "PLATFORM=${PLATFORM}" >> $GITHUB_ENV   # 供后续上传使用
+
+      - name: 上传压缩包作为 Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-${{ env.PLATFORM }}
+          path: ./dsh-src/backend/harness-*.tar.gz
+
+  # ========== 创建 Release 并上传 tar.gz 压缩包 ==========
+  publish:
+    needs: build-harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有架构的压缩包
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 发布到 Release（使用 secrets.DSH）
+        env:
+          GH_TOKEN: ${{ secrets.DSH }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          REPO="${{ github.repository }}"
+          TAG="harness-$VERSION"
+          TITLE="Harness Binary $VERSION"
+          NOTES="手动构建 Harness 二进制版本 $VERSION"
+
+          # 如果 Release 已存在，则只追加资产；否则新建
+          if gh release view "$TAG" --repo "$REPO" &>/dev/null; then
+            echo "Release $TAG 已存在，将添加资产"
+          else
+            gh release create "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES"
+          fi
+
+          # 直接上传所有 tar.gz 文件（已按版本和平台命名）
+          for file in artifacts/harness-*.tar.gz; do
+            echo "上传 $file"
+            gh release upload "$TAG" "$file" --repo "$REPO" --clobber
+          done

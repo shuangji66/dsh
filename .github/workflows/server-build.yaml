@@ -2,8 +2,8 @@ name: Auto Build dsh Server
 
 on:
   schedule:
-    # 每 12 小时运行一次：UTC 0:00 和 12:00（北京时间 8:00 和 20:00）
-    - cron: '0 0,12 * * *'
+    # 每 8 小时运行一次：（北京时间 2:00 10:00 18:00）
+    - cron: '0 2,10,18 * * *'
   workflow_dispatch:   # 支持手动触发调试
 
 jobs:

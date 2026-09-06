@@ -42,6 +42,7 @@ type RuntimeEnv struct {
 	PnpmHome     string
 	Lang         string
 	ProxyPort    int // 新增
+	QuickCmdsFile string // 终端快捷指令持久化文件路径（HARNESS_QUICK_CMDS_FILE）
 }
 
 var (
@@ -79,6 +80,7 @@ func loadRuntimeEnv() RuntimeEnv {
 		PnpmHome:     os.Getenv("PNPM_HOME"),
 		Lang:         os.Getenv("TRIM_SYS_LANGUAGE"),
 		ProxyPort:    proxyPort,
+		QuickCmdsFile: envOr("HARNESS_QUICK_CMDS_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "quickcmds.json")),
 	}
 }
 

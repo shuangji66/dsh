@@ -79,6 +79,14 @@ export interface PluginInfo {
   resolved?: string
 }
 
+// 终端页：用户自定义快捷指令（持久化到后端文件）
+export interface QuickCmd {
+  id: string
+  name: string
+  content: string
+  auto: boolean
+}
+
 export interface SettingsPayload {
   config: AppConfig
   locked: boolean
@@ -273,5 +281,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name })
     }),
-  rollbackStatus: () => request<{ ok: boolean; status: RollbackStatus }>('/api/dsh/rollback/status')
+  rollbackStatus: () => request<{ ok: boolean; status: RollbackStatus }>('/api/dsh/rollback/status'),
+  // 终端页：快捷指令列表 / 整体保存
+  listQuickCmds: () => request<{ ok: boolean; path: string; commands: QuickCmd[] }>('/api/quickcmds'),
+  saveQuickCmds: (commands: QuickCmd[]) =>
+    request<{ ok: boolean; path: string; commands: QuickCmd[] }>('/api/quickcmds', {
+      method: 'POST',
+      body: JSON.stringify({ commands })
+    })
 }

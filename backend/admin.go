@@ -852,6 +852,10 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleRollback(w, r)
 		case p == "/api/dsh/rollback/status" && r.Method == http.MethodGet:
 			m.handleRollbackStatus(w, r)
+		case p == "/api/quickcmds" && r.Method == http.MethodGet:
+			m.handleGetQuickCmds(w, r)
+		case p == "/api/quickcmds" && r.Method == http.MethodPost:
+			m.handleSaveQuickCmds(w, r)
 		case strings.HasPrefix(p, "/api/fnos/"):
 			m.handleFnos(w, r)
 		default:

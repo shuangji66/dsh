@@ -4,9 +4,15 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useI18n } from '@/composables/useI18n'
+import { useToastStore } from '@/stores/toast'
+import { api, type QuickCmd } from '@/serverapi'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import QuickCmdsDialog from '@/components/QuickCmdsDialog.vue'
+import QuickCmdEditDialog from '@/components/QuickCmdEditDialog.vue'
 
 defineOptions({ name: 'TerminalView' })
 const { t } = useI18n()
+const toast = useToastStore()
 
 const el = ref<HTMLElement | null>(null)
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -41,6 +47,15 @@ let touchStartX = 0
 let touchStartY = 0
 let touchStartTime = 0
 let pasteHelper: HTMLTextAreaElement | null = null
+
+// 快捷指令弹窗状态
+const quickCmdsVisible = ref(false)
+const editVisible = ref(false)
+const editingCmd = ref<QuickCmd | null>(null)
+const quickCmds = ref<QuickCmd[]>([])
+const deleteTarget = ref<QuickCmd | null>(null)
+const deleteDialogVisible = ref(false)
+const cmdLoading = ref(false)
 
 function wsUrl(): string {
   const u = new URL(wsEndpoint, location.href)
@@ -454,6 +469,103 @@ function clearTerminal() {
   }
 }
 
+// ---------- 快捷指令：列表 / 新增 / 编辑 / 删除 / 执行 ----------
+async function loadQuickCmds() {
+  cmdLoading.value = true
+  try {
+    const res = await api.listQuickCmds()
+    quickCmds.value = res.commands || []
+  } catch (e) {
+    toast.show(t('qc_load_failed'), 'error')
+    console.warn('load quick cmds error:', e)
+  } finally {
+    cmdLoading.value = false
+  }
+}
+
+function openQuickCmds() {
+  quickCmdsVisible.value = true
+  loadQuickCmds()
+}
+
+// 将命令内容写入终端；勾选“自动执行”的命令在输入后自动回车执行，
+// 否则仅输入命令文本，由用户自行回车确认。
+function runQuickCmd(cmd: QuickCmd) {
+  if (!sock || sock.readyState !== WebSocket.OPEN) {
+    toast.show(t('qc_not_connected'), 'error')
+    return
+  }
+  // 多行内容统一转成回车（换行即输入命令的一部分）
+  const payload = cmd.content.replace(/\r?\n/g, '\r') + (cmd.auto ? '\r' : '')
+  sock.send(payload)
+  scrollToBottom()
+  // 点击命令卡片后自动关闭弹窗，并把光标聚焦到终端
+  quickCmdsVisible.value = false
+  term?.focus()
+}
+
+function onQuickCmdAdd() {
+  editingCmd.value = null
+  editVisible.value = true
+}
+
+function onQuickCmdEdit(cmd: QuickCmd) {
+  // 直接持有列表中的引用，保存时据此更新对应卡片
+  editingCmd.value = cmd
+  editVisible.value = true
+}
+
+function onQuickCmdDelete(cmd: QuickCmd) {
+  deleteTarget.value = cmd
+  deleteDialogVisible.value = true
+}
+
+async function confirmDeleteQuickCmd() {
+  const target = deleteTarget.value
+  if (!target) return
+  quickCmds.value = quickCmds.value.filter((c) => c.id !== target.id)
+  deleteTarget.value = null
+  deleteDialogVisible.value = false
+  await persistQuickCmds()
+  toast.show(t('qc_deleted'), 'success')
+}
+
+// 把当前列表整体写回持久化文件；失败时回滚本地列表（深拷贝快照，编辑场景也能正确回滚）
+async function persistQuickCmds() {
+  const snapshot = quickCmds.value.map((c) => ({ ...c }))
+  try {
+    const res = await api.saveQuickCmds(quickCmds.value)
+    quickCmds.value = res.commands || quickCmds.value
+  } catch (e) {
+    quickCmds.value = snapshot
+    toast.show(t('qc_save_failed'), 'error')
+    console.warn('save quick cmds error:', e)
+    throw e
+  }
+}
+
+async function onQuickCmdSave(payload: { name: string; content: string; auto: boolean }) {
+  if (editingCmd.value) {
+    editingCmd.value.name = payload.name
+    editingCmd.value.content = payload.content
+    editingCmd.value.auto = payload.auto
+  } else {
+    quickCmds.value.push({
+      id: crypto.randomUUID(),
+      name: payload.name,
+      content: payload.content,
+      auto: payload.auto
+    })
+  }
+  editVisible.value = false
+  try {
+    await persistQuickCmds()
+    toast.show(t('qc_saved'), 'success')
+  } catch {
+    // persistQuickCmds 已提示失败
+  }
+}
+
 // ---------- 复制：把终端选中内容复制到剪贴板 ----------
 async function copySelection() {
   if (!term) return
@@ -513,6 +625,7 @@ function showToast(msg: string) {
         <span class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('terminal_title') }}</span>
       </div>
       <div class="flex items-center gap-1">
+        <button class="g-btn-ghost" :title="t('term_quick_cmds')" @click="openQuickCmds">{{ t('term_quick_cmds') }}</button>
         <button class="g-btn-ghost hidden sm:inline-flex" :title="t('term_copy')" @click="copySelection">{{ t('term_copy') }}</button>
         <button class="g-btn-ghost" :title="t('term_paste')" @click="pasteClipboard">{{ t('term_paste') }}</button>
         <button class="g-btn-ghost" @click="reconnect">{{ t('term_reconnect') }}</button>
@@ -572,4 +685,33 @@ function showToast(msg: string) {
       </div>
     </div>
   </div>
+
+  <!-- 快捷指令列表弹窗 -->
+  <QuickCmdsDialog
+    v-model:visible="quickCmdsVisible"
+    :commands="quickCmds"
+    :loading="cmdLoading"
+    @add="onQuickCmdAdd"
+    @edit="onQuickCmdEdit"
+    @delete="onQuickCmdDelete"
+    @run="runQuickCmd"
+  />
+
+  <!-- 新增 / 编辑快捷指令弹窗 -->
+  <QuickCmdEditDialog
+    v-model:visible="editVisible"
+    :cmd="editingCmd"
+    @save="onQuickCmdSave"
+  />
+
+  <!-- 删除快捷指令确认 -->
+  <ConfirmDialog
+    v-model:visible="deleteDialogVisible"
+    :title="t('qc_delete_confirm_title')"
+    :message="t('qc_delete_confirm_msg', { name: deleteTarget?.name || '' })"
+    :confirm-text="t('qc_delete')"
+    :cancel-text="t('qc_cancel')"
+    danger
+    @confirm="confirmDeleteQuickCmd"
+  />
 </template>

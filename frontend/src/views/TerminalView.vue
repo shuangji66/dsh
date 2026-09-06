@@ -17,6 +17,10 @@ let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let sock: WebSocket | null = null
 let termOpened = false
+
+// 心跳间隔(ms)：定期发送控制消息，防止连接被代理 / NAT / 负载均衡的空闲超时断开
+const HEARTBEAT_INTERVAL_MS = 20000
+let heartbeatTimer: number | null = null
 let resizeObserver: ResizeObserver | null = null
 let resizeTimeout: number | null = null
 let fitRetryTimer: number | null = null
@@ -67,6 +71,25 @@ function toggleModifier(mod: 'ctrl' | 'alt' | 'shift') {
 function sendResize(cols: number, rows: number) {
   if (!sock || sock.readyState !== WebSocket.OPEN) return
   sock.send(`\x1b]resize;${cols};${rows}\x07`)
+}
+
+// ---------- 心跳保活：与后端约定的 OSC 控制消息，不会写入 PTY ----------
+function sendHeartbeat() {
+  if (!sock || sock.readyState !== WebSocket.OPEN) return
+  sock.send('\x1b]ping\x07')
+}
+
+function startHeartbeat() {
+  stopHeartbeat()
+  sendHeartbeat()
+  heartbeatTimer = window.setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS)
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer !== null) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
 }
 
 function fitAndResize() {
@@ -309,6 +332,7 @@ onMounted(() => {
     // 连接建立后重新 fit 并同步 PTY 尺寸，确保后端 bash 的 cols/rows 与
     // 前端渲染一致，避免换行错位、命令重叠。
     fitAndResize()
+    startHeartbeat()
   }
   sock.onmessage = (ev) => {
     const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)
@@ -316,6 +340,7 @@ onMounted(() => {
     scrollToBottom()
   }
   sock.onclose = () => {
+    stopHeartbeat()
     term?.writeln('\r\n\x1b[31m' + t('term_conn_closed') + '\x1b[0m')
     scrollToBottom()
   }
@@ -367,6 +392,7 @@ onDeactivated(() => {
 })
 
 onBeforeUnmount(() => {
+  stopHeartbeat()
   if (fitRetryTimer) {
     clearTimeout(fitRetryTimer)
     fitRetryTimer = null
@@ -407,8 +433,10 @@ const reconnect = () => {
       term?.writeln('' + t('term_reconnected') + '')
       scrollToBottom()
       fitAndResize()
+      startHeartbeat()
     }
     sock.onclose = () => {
+      stopHeartbeat()
       term?.writeln('\r\n\x1b[31m' + t('term_conn_closed') + '\x1b[0m')
       scrollToBottom()
     }

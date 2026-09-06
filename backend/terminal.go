@@ -138,6 +138,8 @@ func (t *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if strings.HasPrefix(s, "\x1b]ping") && strings.HasSuffix(s, "\x07") {
+				// 心跳包：仅用于保持连接不被代理/NAT 空闲超时断开，不写入 PTY
 			} else {
 				// 普通数据写入 PTY master
 				f.Write(payload)

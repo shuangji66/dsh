@@ -530,16 +530,20 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// patchNodePty 触发一次 node-pty 的自动 patch（重新执行 dsh 的 node-pty 安装/修补）。
+// patchNodePty 触发一次 node-pty 的版本固定与清理（重新执行 ensureNodePty）。
 // 供插件重置后独立调用；后端的冷启动路径仍由 run 中的 ensureNodePty 承担，顺序不变。
+// 重置场景下调用方已在前面重启过 dsh，此处忽略返回的重启标记，不再重复重启。
 func (m *AdminMux) patchNodePty() error {
-	return ensureNodePty(m.renv, m.dsh.effectiveHome())
+	_, err := ensureNodePty(m.renv, m.dsh.effectiveHome())
+	return err
 }
 
-// patchNodePtyHome 触发指定主目录的 node-pty 自动 patch，用于切换主目录后
-// 在新 HOME 下重新执行 node-pty 安装/修补。
+// patchNodePtyHome 触发指定主目录的 node-pty 版本固定与清理，用于切换主目录后
+// 在新 HOME 下重新执行 ensureNodePty。切换场景下调用方已在前面重启过 dsh，
+// 此处忽略返回的重启标记，不再重复重启。
 func (m *AdminMux) patchNodePtyHome(home string) error {
-	return ensureNodePty(m.renv, home)
+	_, err := ensureNodePty(m.renv, home)
+	return err
 }
 
 // defaultHomeSemantic 返回默认主目录的“相对/语义”路径。它是本应用的 shares 目录，

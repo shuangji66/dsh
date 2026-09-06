@@ -148,22 +148,26 @@ func main() {
             logger().Printf("autostart dsh: %v", err)
         } else {
             // dsh 启动成功，等待并捕获其一次性访问 token（新版 dsh 会打印
-            // "dsh web: http://127.0.0.1:<port>/?token=XXX"）。
-            if tok := dsh.WaitToken(15 * time.Second); tok != "" {
-                logger().Printf("dsh access token ready: %s", tok)
-                // 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话
-                // cookie，供反代转发时携带（访问不带 token 的 dsh 地址）。
-                if err := dsh.ExchangeToken(); err != nil {
-                    logger().Printf("dsh token exchange failed: %v", err)
-                } else if dsh.AuthCookie() == "" {
-                    logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
-                }
-            } else {
-                logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)，反代将不带凭据")
-            }
-            // 执行 node-pty 安装（会等待目录生成）
-            if err := ensureNodePty(&renv, renv.Home); err != nil {
+            // "dsh web: http://127.0.0.1:<port>/?token=XXX"），并从 Set-Cookie
+            // 换取 dsh 会话 cookie，供反代转发时携带。
+            captureDshSession(dsh)
+            // 执行 node-pty 固定版本与清理（会等待目录生成）。传入空 home 由函数内部
+            // 优先从 config.json 的 homeDir 解析 dsh 实际使用的 HOME。若返回需要重启，
+            // 则在 pnpm install 完成后重启 dsh 使 node-pty 1.2.0-beta.15 生效。
+            restartNeeded, err := ensureNodePty(&renv, "")
+            if err != nil {
                 logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
+            }
+            if restartNeeded {
+                logger().Printf("node-pty setup changed workspace, restarting dsh")
+                if serr := dsh.Stop(); serr != nil {
+                    logger().Printf("restart dsh (stop) after node-pty setup failed: %v", serr)
+                } else if serr := dsh.Start(); serr != nil {
+                    logger().Printf("restart dsh (start) after node-pty setup failed: %v", serr)
+                } else {
+                    // 重启后 dsh 会生成新的访问 token，需重新捕获会话。
+                    captureDshSession(dsh)
+                }
             }
         }
     } else {
@@ -186,6 +190,24 @@ func main() {
     dsh.Stop()
     os.Remove(renv.AdminSock)
     logger().Printf("backend stopped")
+}
+
+// captureDshSession 等待并捕获 dsh 的一次性访问 token，并用 token 换取 dsh
+// 会话 cookie，供反向代理转发时携带。每次 dsh 启动都会生成新的 token，因此
+// dsh 重启后需重新调用本函数。
+func captureDshSession(dsh *DshManager) {
+    if tok := dsh.WaitToken(15 * time.Second); tok != "" {
+        logger().Printf("dsh access token ready: %s", tok)
+        // 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
+        // 供反代转发时携带（访问不带 token 的 dsh 地址）。
+        if err := dsh.ExchangeToken(); err != nil {
+            logger().Printf("dsh token exchange failed: %v", err)
+        } else if dsh.AuthCookie() == "" {
+            logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
+        }
+    } else {
+        logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)，反代将不带凭据")
+    }
 }
 
 // initConfig applies a config as the process-wide singleton.

@@ -77,6 +77,10 @@ export interface PluginInfo {
   name: string
   version: string
   resolved?: string
+  // 该插件是否被 cordis.patch.yml 用户补丁层停用（前端据此显示启停状态）
+  disabled?: boolean
+  // 该插件被启用后是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）
+  needsRestart?: boolean
 }
 
 // 终端页：用户自定义快捷指令（持久化到后端文件）
@@ -250,6 +254,12 @@ export const api = {
     request<{ ok: boolean; removed: string; msg: string }>('/api/plugins/remove', {
       method: 'POST',
       body: JSON.stringify({ name })
+    }),
+  // 通过编辑 cordis.patch.yml 启停单个插件（机制学自 dsh-market）
+  togglePlugin: (name: string, enabled: boolean) =>
+    request<{ ok: boolean; name: string; enabled: boolean; rows?: string[]; restart?: boolean; refresh?: boolean; error?: string }>('/api/plugins/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ name, enabled })
     }),
   resetPlugins: () =>
     request<{

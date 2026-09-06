@@ -627,9 +627,13 @@ func (m *DshManager) setStarted(t time.Time) { m.startedAt = t }
 
 // PluginInfo 描述一个 dsh 插件依赖条目。
 type PluginInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+	Name     string `json:"name"`
+	Version  string `json:"version"`
 	Resolved string `json:"resolved"`
+	// Disabled 表示该插件是否被 cordis.patch.yml 用户补丁层停用（前端据此显示启停状态）。
+	Disabled bool `json:"disabled"`
+	// NeedsRestart 表示该插件被启用后是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）。
+	NeedsRestart bool `json:"needsRestart"`
 }
 
 // runPluginCmd 以 dsh 的运行环境执行 `dsh plugin --profile web <args...>`，

@@ -186,7 +186,7 @@ const zh: Record<string, string> = {
 
   // 插件管理
   plugin_title: '插件管理',
-  plugin_desc: 'dsh启动失败时可卸载不兼容插件，或重置删除所有插件。',
+  plugin_desc: 'dsh启动失败时可停用/卸载不兼容插件，或重置删除所有插件。',
   plugin_refresh: '刷新',
   plugin_reset: '重置',
   plugin_loading: '加载中…',
@@ -195,6 +195,21 @@ const zh: Record<string, string> = {
   plugin_removing: '卸载中…',
   plugin_removed: '已卸载 {name}',
   plugin_remove_failed: '卸载失败',
+  // 启停开关（cordis.patch.yml 补丁层机制）
+  plugin_enable: '启用',
+  plugin_disable: '停用',
+  plugin_toggling: '切换中…',
+  plugin_toggle_failed: '切换失败',
+  // 切换成功后提示刷新 dsh 页面
+  plugin_toggle_refresh: '已{action}插件 {name}，请刷新 dsh 页面使其生效',
+  // 切换后需重启 dsh 服务才能生效（客户端插件/带原生依赖）
+  plugin_toggle_restart: '插件 {name} 已启用，需重启 dsh 服务才能生效',
+  // 切换后需重启 dsh 服务才能生效（客户端插件/带原生依赖）——内联提示条
+  plugin_restart_prompt: '插件 {name} 已启用，需重启 dsh 服务才能生效',
+  plugin_restart_apply: '重启生效',
+  plugin_restarting: '重启中…',
+  confirm_plugin_restart_title: '重启 dsh 服务',
+  confirm_plugin_restart_msg: '确定要重启 dsh 服务以使插件 {name} 生效吗？',
   plugin_reset_started: '已开始重置，正在重启服务并修补 node-pty…',
   plugin_reset_failed: '重置失败',
   confirm_plugin_uninstall_title: '卸载插件',
@@ -467,7 +482,7 @@ const en: Record<string, string> = {
 
   // 插件管理
   plugin_title: 'Plugins',
-  plugin_desc: 'Uninstall incompatible plugins, or reset to remove all plugins when dsh fails to start.',
+  plugin_desc: 'Disable/uninstall incompatible plugins, or reset to remove all plugins when dsh fails to start.',
   plugin_refresh: 'Refresh',
   plugin_reset: 'Reset',
   plugin_loading: 'Loading…',
@@ -476,6 +491,15 @@ const en: Record<string, string> = {
   plugin_removing: 'Uninstalling…',
   plugin_removed: 'Removed {name}',
   plugin_remove_failed: 'Remove failed',
+  // Enable/disable toggle (cordis.patch.yml patch-layer mechanism)
+  plugin_enable: 'Enable',
+  plugin_disable: 'Disable',
+  plugin_toggling: 'Toggling…',
+  plugin_toggle_failed: 'Toggle failed',
+  // Toast shown after a toggle prompting the user to refresh the dsh page
+  plugin_toggle_refresh: 'Plugin {name} {action}; refresh the dsh page to apply',
+  // Toast shown after enabling a plugin that needs a dsh service restart to take effect
+  plugin_toggle_restart: 'Plugin {name} enabled; restart the dsh service to apply',
   plugin_reset_started: 'Reset started — restarting service and patching node-pty…',
   plugin_reset_failed: 'Reset failed',
   confirm_plugin_uninstall_title: 'Uninstall Plugin',

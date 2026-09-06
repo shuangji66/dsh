@@ -348,14 +348,97 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
 
 // --- Plugin management (work 区插件卡片) ---
 
-// handleListPlugins 返回 dsh 的 web 插件列表（解析 `dsh plugin --profile web list`）。
+// handleListPlugins 返回 dsh 的 web 插件列表（解析 `dsh plugin --profile web list`），
+// 并读取用户补丁层 cordis.patch.yml 与 state.json 的禁用情况，给每个插件标注启停状态。
+// 插件的包名与补丁行 id 可能不一致（如 @linxin666/dsh-client-ui-git-graph 的 id 是
+// ui-git-graph），故按包名读出其行 id 再与补丁层比对。
 func (m *AdminMux) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 	out, err := m.dsh.runPluginCmd("list")
 	if err != nil {
 		writeErr(w, "执行插件列表失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "plugins": parsePluginList(out), "raw": out})
+	plugins := parsePluginList(out)
+	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
+	// 前端冷启动/刷新插件列表时，从这里读取 cordis.patch.yml 的禁用情况，以显示启停状态。
+	disabledIDs := readDisabledPluginIds(pluginPatchPath(m.dsh.effectiveHome()))
+	disabledIDSet := make(map[string]bool, len(disabledIDs))
+	for _, id := range disabledIDs {
+		disabledIDSet[id] = true
+	}
+	// state.json 的 disabled 数组用的是包名，一并读取（供前端兜底/回放）。
+	stateDisabled := readMarketDisabled(profileWebDir)
+	stateDisabledSet := make(map[string]bool, len(stateDisabled))
+	for _, name := range stateDisabled {
+		stateDisabledSet[name] = true
+	}
+	for i := range plugins {
+		name := plugins[i].Name
+		rows := readPackageRowIds(profileWebDir, name)
+		off := false
+		for _, id := range rows {
+			if disabledIDSet[id] {
+				off = true
+				break
+			}
+		}
+		if stateDisabledSet[name] {
+			off = true
+		}
+		plugins[i].Disabled = off
+		// 该插件若被启用，是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）
+		plugins[i].NeedsRestart = needsRestart(profileWebDir, name)
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "plugins": plugins, "raw": out})
+}
+
+type togglePluginReq struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+// handleTogglePlugin 通过编辑 cordis.patch.yml 启停单个插件（机制学自 dsh-market）。
+// 关键改进：
+//   - 用插件在补丁层实际的“行 id”（由包名映射得到，可能不同名，如 ui-git-graph）
+//     写入 cordis.patch.yml，而非直接写包名（@linxin666/dsh-client-ui-git-graph 含 @
+//     与 /，根本不能作为行 id 写入）。
+//   - 同步更新 state.json 的 disabled 数组（该数组用的是包名）。
+//   - 判断该插件启用后是否需要重启 dsh 服务才能生效，返回给前端决定提示文案。
+func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
+	var body togglePluginReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, "缺少插件名", http.StatusBadRequest)
+		return
+	}
+	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
+	patchPath := pluginPatchPath(m.dsh.effectiveHome())
+	rows := readPackageRowIds(profileWebDir, body.Name)
+	if len(rows) == 0 {
+		// 没有可写的行 id（纯客户端插件等）：补丁层无从下手，仅靠 state.json 记录。
+		// 仍返回 ok，前端据 needsRestart 提示刷新/重启。
+		logger().Printf("toggle plugin %s: no patch rows (client-only?) — state.json only", body.Name)
+	}
+	for _, id := range rows {
+		if err := setPluginDisabled(patchPath, id, !body.Enabled); err != nil {
+			logger().Printf("toggle plugin %s id %s -> %v: %v", body.Name, id, body.Enabled, err)
+			writeErr(w, "写入补丁层失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	// 同步 state.json 的 disabled 数组（包名）
+	if err := writeMarketDisabled(profileWebDir, body.Name, !body.Enabled); err != nil {
+		logger().Printf("toggle plugin %s: sync state.json failed: %v", body.Name, err)
+	}
+	restart := body.Enabled && needsRestart(profileWebDir, body.Name)
+	logger().Printf("toggle plugin %s -> enabled=%v rows=%v restart=%v (patch %s)", body.Name, body.Enabled, rows, restart, patchPath)
+	writeJSON(w, map[string]interface{}{
+		"ok":      true,
+		"name":    body.Name,
+		"enabled": body.Enabled,
+		"rows":    rows,
+		"restart": restart,
+		"refresh": true,
+	})
 }
 
 type removePluginReq struct {
@@ -834,6 +917,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleListPlugins(w, r)
 		case p == "/api/plugins/remove" && r.Method == http.MethodPost:
 			m.handleRemovePlugin(w, r)
+		case p == "/api/plugins/toggle" && r.Method == http.MethodPost:
+			m.handleTogglePlugin(w, r)
 		case p == "/api/plugins/reset" && r.Method == http.MethodPost:
 			m.handleResetPlugins(w, r)
 		case p == "/api/update/status" && r.Method == http.MethodGet:

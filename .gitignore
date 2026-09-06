@@ -1,6 +1,7 @@
 dist
 harness
 node_modules
+dsh-market
 .gocache
 .gopath
 .gomod

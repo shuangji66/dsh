@@ -33,5 +33,16 @@ export const usePluginsStore = defineStore('plugins', () => {
     plugins.value = []
   }
 
-  return { plugins, pluginsLoading, loadPlugins, clearPluginsCache }
+  // 通过编辑 cordis.patch.yml 启停单个插件；成功后清缓存并重拉列表。
+  // 返回 { ok, name, enabled, restart } 供视图决定是弹“重启 dsh”还是“刷新页面”的 toast。
+  async function togglePlugin(name: string, enabled: boolean): Promise<{ ok: boolean; name: string; enabled: boolean; restart: boolean; msg?: string }> {
+    const p = await api.togglePlugin(name, enabled)
+    if (p.ok) {
+      clearPluginsCache()
+      await loadPlugins(true)
+    }
+    return { ok: p.ok, name, enabled, restart: !!p.restart, msg: p.error }
+  }
+
+  return { plugins, pluginsLoading, loadPlugins, clearPluginsCache, togglePlugin }
 })

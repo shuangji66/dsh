@@ -323,7 +323,7 @@ watch(
             <span v-if="hasUpdateDot('harness')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <!-- 检查更新：SVG 刷新图标 -->
-          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" title="检查更新" :disabled="checking.harness" @click="doCheck('harness')">
+          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" :title="t('update_check')" :disabled="checking.harness" @click="doCheck('harness')">
             <svg :class="checking.harness ? 'animate-spin' : ''" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
             </svg>
@@ -348,7 +348,7 @@ watch(
             {{ versionText('dsh') }}
             <span v-if="hasUpdateDot('dsh')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
-          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" title="检查更新" :disabled="checking.dsh" @click="doCheck('dsh')">
+          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" :title="t('update_check')" :disabled="checking.dsh" @click="doCheck('dsh')">
             <svg :class="checking.dsh ? 'animate-spin' : ''" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
             </svg>

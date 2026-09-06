@@ -196,8 +196,9 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "配置格式错误", http.StatusBadRequest)
 		return
 	}
-	// 保存前校验密码强度：只要填了密码就必须满足要求（≥8位，含字母、数字、标点）
-	if req.Config.Password != "" {
+	// 保存前校验密码强度：仅当开启登录鉴权时校验（≥8位，含字母、数字、标点）；
+	// 关闭鉴权时不校验，允许保留任意历史密码，避免切换开关被旧密码拦截。
+	if req.Config.AuthEnabled && req.Config.Password != "" {
 		if v := validatePassword(req.Config.Password); v != "" {
 			writeErr(w, "密码不符合要求："+v, http.StatusBadRequest)
 			return

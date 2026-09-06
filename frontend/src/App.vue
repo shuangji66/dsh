@@ -122,7 +122,7 @@ onMounted(() => {
       <button
         @click="toggleCollapse"
         class="w-9 h-9 rounded-lg flex items-center justify-center text-lg transition hover:bg-black/5 dark:hover:bg-white/5 text-ink-soft dark:text-[#A6A6AD] mb-5 mx-auto"
-        :title="collapsed ? '展开' : '折叠'"
+        :title="collapsed ? t('sidebar_expand') : t('sidebar_collapse')"
         v-html="menuIcon"
       />
 

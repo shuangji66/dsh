@@ -21,6 +21,7 @@ let resizeObserver: ResizeObserver | null = null
 let resizeTimeout: number | null = null
 let fitRetryTimer: number | null = null
 let onPasteEvent: ((ev: ClipboardEvent) => void) | null = null
+let toastTimer: number | null = null
 
 // 修饰键
 const ctrlPressed = ref(false)
@@ -462,7 +463,6 @@ async function pasteClipboard() {
   }
 }
 
-let toastTimer: number | null = null
 function showToast(msg: string) {
   const hint = document.querySelector('.term-copy-toast') as HTMLElement | null
   if (!hint) return

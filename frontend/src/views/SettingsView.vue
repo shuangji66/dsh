@@ -35,7 +35,7 @@ const SAFE_PUNCT = new Set('.,-_:/@%^=+~')
 // 前端密码校验：至少 8 位，且必须同时含字母、数字、标点；
 // 危险标点（ASCII 中不属于安全集合的字符）会拒绝，非 ASCII 字符允许。
 function validatePassword(pwd: string): string {
-  if (pwd.length < 8) return '密码长度不足 8 位'
+  if (pwd.length < 8) return t('pwd_too_short')
   let hasLetter = false
   let hasDigit = false
   let hasPunct = false
@@ -43,18 +43,19 @@ function validatePassword(pwd: string): string {
     if (ch >= '0' && ch <= '9') { hasDigit = true; continue }
     if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) { hasLetter = true; continue }
     if (SAFE_PUNCT.has(ch)) { hasPunct = true; continue }
-    if (ch.charCodeAt(0) < 128) return `含危险标点 "${ch}"（仅允许 . , - _ : / @ % ^ = + ~）`
+    if (ch.charCodeAt(0) < 128) return t('pwd_danger_punct', { ch })
   }
-  if (!hasLetter) return '密码缺少字母'
-  if (!hasDigit) return '密码缺少数字'
-  if (!hasPunct) return '密码缺少标点（仅允许 . , - _ : / @ % ^ = + ~）'
+  if (!hasLetter) return t('pwd_missing_letter')
+  if (!hasDigit) return t('pwd_missing_digit')
+  if (!hasPunct) return t('pwd_missing_punct')
   return ''
 }
 
-// 保存前校验：只要填写了密码，就必须满足强度要求（≥8位，含字母、数字、标点）
+// 保存前校验：仅当开启登录鉴权且填写了密码时，才要求满足强度要求（≥8位，含字母、数字、标点）；
+// 关闭鉴权时不校验，与后端 handleSaveSettings 保持一致
 function submit() {
   const pwd = config.value.password
-  if (pwd) {
+  if (config.value.authEnabled && pwd) {
     const err = validatePassword(pwd)
     if (err) {
       toast.show(err, 'error')
@@ -105,9 +106,19 @@ function onMemAutoToggle() {
   toast.show(t('saved_mem_restart'), 'info', 5000)
 }
 
-// 鉴权登录开关：即时保存，仅提示切换成功
-function onAuthToggle() {
-  store.save(false)
+// 鉴权登录开关：即时保存。开启前先做前端密码强度校验（i18n 提示，失败回滚开关）；
+// 关闭鉴权时不校验密码，允许直接关闭。
+async function onAuthToggle() {
+  const pwd = config.value.password
+  if (config.value.authEnabled && pwd) {
+    const err = validatePassword(pwd)
+    if (err) {
+      config.value.authEnabled = false // 回滚开关，避免 UI 与后端状态不一致
+      toast.show(err, 'error')
+      return
+    }
+  }
+  await store.save(false)
   toast.show(t('settings_toggle_saved'), 'success')
 }
 </script>

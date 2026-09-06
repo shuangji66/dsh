@@ -28,6 +28,26 @@ function openAbout() {
   aboutVisible.value = true
 }
 
+// 关于弹窗特性介绍：简短词组，对应 useI18n 中的 about_feature_* 键
+const aboutFeatures = [
+  'about_feature_lifecycle',
+  'about_feature_monitor',
+  'about_feature_update',
+  'about_feature_auth',
+  'about_feature_proxy',
+  'about_feature_dirs',
+  'about_feature_backup',
+  'about_feature_plugins',
+  'about_feature_terminal',
+  'about_feature_logs',
+  'about_feature_console',
+]
+
+// 打开 GitHub 用户主页（新标签页）
+function openGithubUser(user: string) {
+  window.open(`https://github.com/${user}`, '_blank', 'noopener')
+}
+
 // 打开 GitHub 仓库（新标签页）
 function openGithub() {
   window.open('https://github.com/shuangji66/dsh', '_blank', 'noopener')
@@ -278,16 +298,23 @@ onBeforeUnmount(() => {
               {{ t('about_github') }}
             </button>
 
-            <!-- 特性描述（预留，内容暂无） -->
-            <div class="mb-4">
-              <div class="text-sm font-medium text-ink dark:text-white mb-1">{{ t('about_features') }}</div>
-              <div class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('about_empty') }}</div>
+            <!-- 特性介绍（简短词组） -->
+            <div class="mb-5">
+              <div class="text-sm font-medium text-ink dark:text-white mb-2">{{ t('about_features') }}</div>
+              <ul class="space-y-1.5">
+                <li v-for="f in aboutFeatures" :key="f" class="flex items-start gap-2">
+                  <svg class="mt-0.5 w-3.5 h-3.5 text-brand shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  <span class="text-xs text-ink-soft dark:text-[#A6A6AD] leading-relaxed">{{ t(f) }}</span>
+                </li>
+              </ul>
             </div>
 
-            <!-- 鸣谢（预留，内容暂无） -->
+            <!-- 鸣谢 -->
             <div>
-              <div class="text-sm font-medium text-ink dark:text-white mb-1">{{ t('about_credits') }}</div>
-              <div class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('about_empty') }}</div>
+              <div class="text-sm font-medium text-ink dark:text-white mb-2">{{ t('about_credits') }}</div>
+              <p class="text-xs text-ink-soft dark:text-[#A6A6AD] leading-relaxed">
+                {{ t('about_credits_pre') }}<button class="inline text-brand hover:underline" @click="openGithubUser('yuexps')">yuexps</button>{{ t('about_credits_suf') }}
+              </p>
             </div>
 
             <!-- 底部关闭按钮 -->

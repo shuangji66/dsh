@@ -1,3 +1,6 @@
 dist
 harness
 node_modules
+.gocache
+.gopath
+.gomod

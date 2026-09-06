@@ -16,8 +16,10 @@ function validDefaultPage(v: string | null): DefaultPage {
 const defaultPage = ref<DefaultPage>(validDefaultPage(localStorage.getItem(DEFAULT_PAGE_KEY)))
 
 export function setDefaultPage(v: DefaultPage) {
-  defaultPage.value = v
-  localStorage.setItem(DEFAULT_PAGE_KEY, v)
+  // 防呆：非法值回退到默认页，避免把脏数据写进 localStorage
+  const page = validDefaultPage(v)
+  defaultPage.value = page
+  localStorage.setItem(DEFAULT_PAGE_KEY, page)
 }
 
 export function useConsolePrefs() {

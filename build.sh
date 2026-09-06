@@ -10,13 +10,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BACKEND_DIR="${ROOT}/app/backend"
-FRONTEND_DIR="${ROOT}/app/frontend"
+BACKEND_DIR="${ROOT}/dsh/backend"
+FRONTEND_DIR="${ROOT}/dsh/frontend"
 EMBED_DIR="${BACKEND_DIR}/embed"
 
 export GOCACHE="${GOCACHE:-${ROOT}/.gocache}"
 export GOPATH="${GOPATH:-${ROOT}/.gopath}"
 export PATH=/var/apps/nodejs_v24/target/bin:$PATH
+export GOFLAGS="-buildvcs=false"
 mkdir -p "$GOCACHE" "$GOPATH"
 
 echo "==> Building frontend..."
@@ -33,7 +34,7 @@ echo "==> Building Go binary..."
 # 控制台版本号：默认 1.0.0，可经第二个参数覆盖（如 ./build.sh release 1.0.1）。
 HARNESS_VERSION="${2:-1.0.0}"
 LDFLAGS="-s -w -X main.harnessVersion=${HARNESS_VERSION}"
-OUT="${ROOT}/app/backend/harness"
+OUT="${ROOT}/dsh/backend/harness"
 if [ "${1:-}" = "release" ]; then
   LDFLAGS="-s -w -linkmode=external -X main.harnessVersion=${HARNESS_VERSION}"
 fi

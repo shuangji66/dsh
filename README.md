@@ -132,7 +132,7 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `proxy_addr` | 代理地址 | `http://127.0.0.1:7890` |
 | `auth_mode` / `PROXY_AUTH` | 启用鉴权 | `true` |
 | `password` | 登录密码 | 空 |
-| `auth_ttl_hours` | 登录鉴权有效期（小时） | `2` |
+| `auth_ttl_hours` | 登录鉴权有效期（小时） | `4` |
 | `TRIM_API_TOKEN` / `TRIM_APPNAME` | fnOS gateway 凭据 | — |
 
 运行时配置（`config.json`）字段：`dshPort`、`proxyEnabled`、`proxyAddr`、

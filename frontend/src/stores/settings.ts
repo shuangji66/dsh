@@ -11,7 +11,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyAddr: 'http://127.0.0.1:7890',
     authEnabled: true,
     password: '',
-    authTTLHours: 2,
+    authTTLHours: 4,
     dshMemLimit: 2048,
     dshMemAuto: true,
     homeDir: '',

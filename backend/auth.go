@@ -313,10 +313,10 @@ func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request) bool {
 				serveLoginPage(w, "密码错误")
 				return true
 			}
-			// 登录有效期取配置中的 AuthTTLHours（小时）；未配置或非法时回退到 2 小时
+			// 登录有效期取配置中的 AuthTTLHours（小时）；未配置或非法时回退到 4 小时
 			ttlSeconds := c.AuthTTLHours * 3600
 			if ttlSeconds <= 0 {
-				ttlSeconds = 2 * 60 * 60
+				ttlSeconds = 4 * 60 * 60
 			}
 			expire := time.Now().Unix() + int64(ttlSeconds)
 			token := hmacToken(c.Password, expire)

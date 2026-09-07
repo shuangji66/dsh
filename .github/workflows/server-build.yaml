@@ -60,7 +60,7 @@ jobs:
       - name: 安装系统依赖 + Node.js 24
         run: |
           apt-get update
-          apt-get install -y curl tar jq xz-utils
+          apt-get install -y curl tar jq xz-utils build-essential
           curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
           apt-get install -y nodejs
           node -v

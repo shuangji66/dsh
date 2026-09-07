@@ -502,9 +502,12 @@ func (m *UpdateManager) checkOnce() {
 	}
 	m.setStatus(updateKindDsh, &dshNext)
 
-	logger().Printf("[update] 检测完成 harness 本地=%s 最新=%s 有更新=%v | dsh 本地=%s 最新=%s 有更新=%v",
-		harnessVersion, harnessStatus.LatestVersion, harnessStatus.HasUpdate,
-		dshLocal, dshStatus.LatestVersion, dshStatus.HasUpdate)
+	// 仅当 harness 或 dsh 任一个有更新时才打印检测结果，无更新时不刷日志。
+	if harnessStatus.HasUpdate || dshNext.HasUpdate {
+		logger().Printf("[update] 发现更新 harness 本地=%s 最新=%s | dsh 本地=%s 最新=%s",
+			harnessVersion, harnessStatus.LatestVersion,
+			dshLocal, dshNext.LatestVersion)
+	}
 }
 
 // startAutoCheck 启动每小时一次的自动检测后台任务。

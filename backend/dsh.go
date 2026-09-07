@@ -78,7 +78,7 @@ func (s *tokenScanner) Write(p []byte) (int, error) {
 }
 
 // Token returns the latest one-shot access token captured from the dsh startup
-// log, or "" when none has been observed yet (e.g. dsh not started / old dsh).
+// log, or "" when none has been observed yet (e.g. dsh not started).
 func (m *DshManager) Token() string {
 	m.tokenMu.RLock()
 	defer m.tokenMu.RUnlock()
@@ -86,9 +86,8 @@ func (m *DshManager) Token() string {
 }
 
 // WaitToken blocks until a token is captured from the dsh startup log or the
-// timeout elapses. It returns the token (possibly empty on timeout). Old dsh
-// versions that never print a token cause this to wait out the full timeout
-// (or return early once dsh has exited) and return "".
+// timeout elapses. It returns the token (possibly empty on timeout or if dsh
+// has exited).
 func (m *DshManager) WaitToken(timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -105,8 +104,7 @@ func (m *DshManager) WaitToken(timeout time.Duration) string {
 }
 
 // AuthCookie returns the dsh session cookie (e.g. "dsh-auth-xxx=yyy") that the
-// proxy carries when forwarding to dsh. Empty until ExchangeToken succeeds or
-// for old dsh versions that don't use a token/cookie flow.
+// proxy carries when forwarding to dsh. Empty until ExchangeToken succeeds.
 func (m *DshManager) AuthCookie() string {
 	m.authMu.RLock()
 	defer m.authMu.RUnlock()
@@ -122,7 +120,7 @@ func (m *DshManager) setAuthCookie(ck string) {
 // ExchangeToken 用启动日志中捕获的一次性 token 访问一次带 token 的 dsh 地址
 // （http://127.0.0.1:<dshPort>/?token=XXX），从响应头的 Set-Cookie 中提取
 // dsh 会话 cookie（dsh-auth-*）并保存。此后反代访问 dsh 时携带该 cookie、
-// 访问不带 token 的地址即可。旧版 dsh（无 token）时此方法直接返回。
+// 访问不带 token 的地址即可。
 func (m *DshManager) ExchangeToken() error {
 	tok := m.Token()
 	if tok == "" {
@@ -149,7 +147,6 @@ func (m *DshManager) ExchangeToken() error {
 	for _, c := range cookies {
 		if strings.HasPrefix(c.Name, "dsh-auth-") && c.Value != "" {
 			m.setAuthCookie(c.Name + "=" + c.Value)
-			m.logf("dsh auth cookie captured: %s", c.Name)
 			return nil
 		}
 	}
@@ -507,7 +504,6 @@ func (m *DshManager) Start() error {
 			m.tokenMu.Lock()
 			m.token = tok
 			m.tokenMu.Unlock()
-			m.logf("dsh access token captured: %s", tok)
 		},
 	}
 	cmd.Stdout = scanner

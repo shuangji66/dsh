@@ -288,14 +288,10 @@ func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 	// 并用 token 换取 dsh 会话 cookie（反代转发时携带该 cookie）。
 	go func() {
 		if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
-			logger().Printf("dsh access token ready: %s", tok)
+			// 成功捕获 token 并换取 cookie 时不输出日志，仅在交换失败时记录错误。
 			if err := m.dsh.ExchangeToken(); err != nil {
 				logger().Printf("dsh token exchange failed: %v", err)
-			} else if m.dsh.AuthCookie() == "" {
-				logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
 			}
-		} else {
-			logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)")
 		}
 	}()
 	writeJSON(w, m.dsh.Status())
@@ -322,14 +318,10 @@ func (m *AdminMux) restartDsh() error {
 	// 并用 token 换取 dsh 会话 cookie。
 	go func() {
 		if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
-			logger().Printf("dsh access token ready: %s", tok)
+			// 成功捕获 token 并换取 cookie 时不输出日志，仅在交换失败时记录错误。
 			if err := m.dsh.ExchangeToken(); err != nil {
 				logger().Printf("dsh token exchange failed: %v", err)
-			} else if m.dsh.AuthCookie() == "" {
-				logger().Printf("no dsh auth cookie observed (旧版 dsh 或响应无 Set-Cookie)")
 			}
-		} else {
-			logger().Printf("no dsh access token observed (旧版 dsh 或日志未就绪)")
 		}
 	}()
 	return nil

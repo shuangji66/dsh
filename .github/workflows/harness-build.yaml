@@ -4,8 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（例如 1.0.0）'
+        description: '版本号（例如 1.1.0）'
         required: true
+        type: string
+      notes:
+        description: '发布说明（可选，留空则使用默认）'
+        required: false
         type: string
 
 jobs:
@@ -72,6 +76,8 @@ jobs:
   publish:
     needs: build-harness
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.inputs.version }}   # 版本号用于 tag 和文件名
     steps:
       - name: 下载所有架构的压缩包
         uses: actions/download-artifact@v7
@@ -82,12 +88,18 @@ jobs:
       - name: 发布到 Release（使用 secrets.DSH）
         env:
           GH_TOKEN: ${{ secrets.DSH }}
-          VERSION: ${{ github.event.inputs.version }}   # 版本号用于 tag 和文件名
         run: |
           REPO="${{ github.repository }}"
           TAG="harness-$VERSION"
           TITLE="Harness Binary $VERSION"
-          NOTES="手动构建 Harness 二进制版本 $VERSION"
+
+          # 获取用户输入的发布说明，若为空则使用默认
+          USER_NOTES="${{ github.event.inputs.notes }}"
+          if [ -z "$USER_NOTES" ]; then
+            NOTES="手动构建 Harness 二进制版本 $VERSION"
+          else
+            NOTES="$USER_NOTES"
+          fi
 
           # 如果 Release 已存在，则只追加资产；否则新建
           if gh release view "$TAG" --repo "$REPO" &>/dev/null; then

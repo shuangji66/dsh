@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -59,12 +60,13 @@ type tagInfo struct {
 
 // UpdateStatus 是一次更新检测的状态（harness 与 dsh 各自一份）。
 type UpdateStatus struct {
-	Kind        updateKind `json:"kind"`
-	LocalVersion string    `json:"localVersion"`  // 本地版本号
-	LatestVersion string   `json:"latestVersion"` // 仓库最新 tag 版本号（空表示未获取到）
-	HasUpdate   bool       `json:"hasUpdate"`     // 是否有可用更新
-	CheckedAt   time.Time  `json:"checkedAt"`     // 最近检测时间
-	Error       string     `json:"error,omitempty"` // 最近一次检测/拉取失败原因
+	Kind         updateKind `json:"kind"`
+	LocalVersion string     `json:"localVersion"`     // 本地版本号
+	LatestVersion string    `json:"latestVersion"`    // 仓库最新 tag 版本号（空表示未获取到）
+	HasUpdate    bool       `json:"hasUpdate"`        // 是否有可用更新
+	CheckedAt    time.Time  `json:"checkedAt"`        // 最近检测时间
+	Error        string     `json:"error,omitempty"`  // 最近一次检测/拉取失败原因
+	ReleaseNotes string     `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
 }
 
 // UpdateManager 管理控制台与 dsh 的版本检测、SSE 推送与自我更新。
@@ -408,6 +410,121 @@ func fetchTagsViaHTML(client *http.Client) ([]string, error) {
 	return names, nil
 }
 
+// fetchReleaseNotes 获取指定 tag 的 release 正文（不含标题 name）。优先走
+// GitHub Releases API（取 body 字段）；API 受速率限制或不可用时，回退到非 API
+// 的 release 页面 HTML（此页面不受 API 限流），解析其中的 markdown-body 正文。
+// 任何失败都返回空串，不影响更新检测主流程。返回的正文保留原始换行与
+// Markdown 文本，由前端按纯文本换行展示。
+func fetchReleaseNotes(client *http.Client, tag string) string {
+	if body := fetchReleaseNotesViaAPI(client, tag); body != "" {
+		return body
+	}
+	return fetchReleaseNotesViaHTML(client, tag)
+}
+
+// fetchReleaseNotesViaAPI 通过 GitHub Releases API 的 body 字段获取正文。
+func fetchReleaseNotesViaAPI(client *http.Client, tag string) string {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
+		updateRepoOwner, updateRepoName, url.PathEscape(tag))
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "harness-console")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return ""
+	}
+	var rel struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &rel); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(rel.Body)
+}
+
+// fetchReleaseNotesViaHTML 从非 API 的 release 页面 HTML 提取正文。该页面不受
+// GitHub API 速率限制。正文位于 <div ... data-test-selector="body-content"
+// class="markdown-body ...">...</div>，仅含正文（标题单独在页面其它位置）。
+// 提取后用纯文本方式展开，保留换行。
+func fetchReleaseNotesViaHTML(client *http.Client, tag string) string {
+	pageURL := fmt.Sprintf("%s/releases/tag/%s", updateRepoURL, url.PathEscape(tag))
+	req, err := http.NewRequest("GET", pageURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "harness-console")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 6<<20))
+	if err != nil {
+		return ""
+	}
+	body := string(raw)
+	marker := `data-test-selector="body-content"`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return ""
+	}
+	// 回退定位 div 起点，避免把属性本身带进正文
+	start := strings.LastIndex(body[:i], "<div")
+	if start < 0 || start > i {
+		start = i
+	}
+	// 截取到该 div 闭合（找下一个 </div>，正文内部一般不含未配对 div）
+	j := strings.Index(body[i:], "</div>")
+	if j < 0 {
+		return ""
+	}
+	seg := body[start : i+j+len("</div>")]
+	return stripHTMLToText(seg)
+}
+
+// stripHTMLToText 把一段 HTML 转成纯文本：块级/换行标签替换为换行，其余标签删除，
+// 并解码实体、归一化连续空行。用于把 release 正文 HTML 还原成可读的多行文本。
+func stripHTMLToText(seg string) string {
+	// 常见块级标签与 <br> 视为换行
+	for _, tag := range []string{"</p>", "</div>", "</li>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</br>", "<br>", "<br/>", "<br />"} {
+		seg = strings.ReplaceAll(seg, tag, "\n")
+	}
+	seg = strings.ReplaceAll(seg, "<li>", "• ")
+	seg = strings.ReplaceAll(seg, "</li>", "\n")
+	seg = strings.ReplaceAll(seg, "</pre>", "\n")
+	// 其余标签全部剔除（保留文本内容）
+	seg = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(seg, "")
+	// 解码 HTML 实体（如 &amp; &lt;）
+	seg = html.UnescapeString(seg)
+	// 归一化：将空白行折叠为单个空行，去掉多余行首/行尾空白
+	lines := []string{}
+	for _, ln := range strings.Split(seg, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			if len(lines) > 0 && lines[len(lines)-1] != "" {
+				lines = append(lines, "")
+			}
+			continue
+		}
+		lines = append(lines, ln)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 // --- HTTP 客户端（代理回退） ---
 
 // httpClientForUpdate 构造用于更新下载/拉取的 HTTP 客户端。优先使用持久化
@@ -465,6 +582,7 @@ func (m *UpdateManager) checkOnce() {
 			st.HasUpdate = false
 			st.CheckedAt = now
 			st.Error = err.Error()
+			st.ReleaseNotes = ""
 		}
 		m.mu.Unlock()
 		m.notify()
@@ -474,11 +592,23 @@ func (m *UpdateManager) checkOnce() {
 	h := pickLatest(tags, "harness-")
 	d := pickLatest(tags, "dsh-")
 
+	// 更新内容：只取最新 release 的正文（不含标题），失败时保持空串。
+	notesClient := m.httpClientForUpdate()
+	harnessNotes := ""
+	if h != nil {
+		harnessNotes = fetchReleaseNotes(notesClient, h.name)
+	}
+	dshNotes := ""
+	if d != nil {
+		dshNotes = fetchReleaseNotes(notesClient, d.name)
+	}
+
 	harnessStatus := m.getStatus(updateKindHarness)
 	harnessStatus.Kind = updateKindHarness
 	harnessStatus.LocalVersion = harnessVersion
 	harnessStatus.CheckedAt = now
 	harnessStatus.Error = ""
+	harnessStatus.ReleaseNotes = harnessNotes
 	if h != nil {
 		harnessStatus.LatestVersion = h.version
 		harnessStatus.HasUpdate = compareVersion(h.version, harnessVersion) > 0
@@ -493,6 +623,7 @@ func (m *UpdateManager) checkOnce() {
 	dshNext.LocalVersion = dshLocal
 	dshNext.CheckedAt = now
 	dshNext.Error = ""
+	dshNext.ReleaseNotes = dshNotes
 	if d != nil {
 		dshNext.LatestVersion = d.version
 		dshNext.HasUpdate = compareVersion(d.version, dshLocal) > 0

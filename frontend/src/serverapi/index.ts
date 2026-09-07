@@ -106,6 +106,8 @@ export interface UpdateStatus {
   hasUpdate: boolean
   checkedAt: string
   error?: string
+  // 最新 release 的更新内容（正文，不含标题；可能为空串）
+  releaseNotes?: string
 }
 
 export type UpdateKind = 'harness' | 'dsh'

@@ -12,8 +12,8 @@ const { t } = useI18n()
 
 // 后端推送的更新状态（harness / dsh 各一份）。本地版本号由 `/api/update/status`
 // 统一提供（dsh 版本原 `/api/dsh/version` 端点已移除）。
-const harnessStatus = ref<UpdateStatus>({ kind: 'harness', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '' })
-const dshStatus = ref<UpdateStatus>({ kind: 'dsh', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '' })
+const harnessStatus = ref<UpdateStatus>({ kind: 'harness', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
+const dshStatus = ref<UpdateStatus>({ kind: 'dsh', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
 
 // 各目标是否正在“检查更新”
 const checking = ref<Record<UpdateKind, boolean>>({ harness: false, dsh: false })
@@ -425,10 +425,20 @@ watch(
                 {{ dialogStatus.error }}
               </div>
 
-              <!-- 无更新提示 -->
-              <div v-else-if="!dialogStatus.hasUpdate" class="mt-3 text-sm text-ink-soft dark:text-[#A6A6AD]">
-                {{ t('update_no_update') }}
-              </div>
+              <template v-else>
+                <!-- 更新内容（release 正文，不含标题）：保留换行、超长可滚动，不撑破弹窗 -->
+                <div v-if="dialogStatus.hasUpdate && dialogStatus.releaseNotes" class="mt-3">
+                  <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">{{ t('update_release_notes') }}</div>
+                  <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] whitespace-pre-wrap break-words max-h-44 overflow-y-auto leading-relaxed">
+                    {{ dialogStatus.releaseNotes }}
+                  </div>
+                </div>
+
+                <!-- 无更新提示 -->
+                <div v-else-if="!dialogStatus.hasUpdate" class="mt-3 text-sm text-ink-soft dark:text-[#A6A6AD]">
+                  {{ t('update_no_update') }}
+                </div>
+              </template>
             </template>
 
             <div class="flex justify-end gap-3 mt-6">

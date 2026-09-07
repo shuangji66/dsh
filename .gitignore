@@ -5,3 +5,5 @@ dsh-market
 .gocache
 .gopath
 .gomod
+.gocache*
+.gopath*

@@ -20,14 +20,16 @@ import (
 //  2. 检测是否残留 patchedDependencies 里的 `node-pty@1.1.0`；存在则删除该内容。
 //  3. 删除 ~/.dsh/profiles/web/patches 与
 //     ~/.dsh/profiles/web/node_modules/.pnpm_patches/node-pty@1.1.0。
-//  4. 只要上面发生任何改动，就标记“需要重启 dsh”。
-//  5. 进入 ~/.dsh/profiles/web 执行 pnpm install，让 node-pty 1.2.0-beta.15 生效。
+//  4. 只有发现了旧的 patch 依赖条目或旧 patch 目录时，才执行 pnpm install 并
+//     标记“需要重启 dsh”。
 //
-// 返回的 bool 表示是否需要重启 dsh（依据步骤 4 的标记），由调用方在
-// pnpm install 完成后按该标记重启 dsh。
+// 初次安装（既无 overrides 也无旧 patch）只写 pnpm-workspace.yaml，跳过
+// pnpm install：之后用户安装的插件若引用 node-pty，会按 overrides 自动装上
+// 固定版本。
+//
+// 返回的 bool 表示是否需要重启 dsh（仅在执行了 pnpm install 时为真），由调用方
+// 在 pnpm install 完成后按该标记重启 dsh。
 func ensureNodePty(renv *RuntimeEnv, home string) (restartNeeded bool, err error) {
-	logger().Printf("[node-pty] starting setup check")
-
 	// 优先读取 config.json 的 homeDir，这才是 dsh 服务实际使用的 HOME；
 	// 其次回退到启动时默认主目录与环境变量。
 	if home == "" {
@@ -36,11 +38,9 @@ func ensureNodePty(renv *RuntimeEnv, home string) (restartNeeded bool, err error
 	if home == "" {
 		home = "/var/apps/Harness/shares/Harness"
 	}
-	logger().Printf("[node-pty] using HOME=%s", home)
 
 	// 等待 pnpm 可用（冷启动时 harness 可能刚安装完 pnpm）。
 	pnpmPath := pnpmBinPath()
-	logger().Printf("[node-pty] waiting for pnpm at %s", pnpmPath)
 	timeout := time.After(5 * time.Minute)
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -50,7 +50,6 @@ func ensureNodePty(renv *RuntimeEnv, home string) (restartNeeded bool, err error
 			return false, fmt.Errorf("timed out waiting for pnpm at %s", pnpmPath)
 		case <-ticker.C:
 			if _, err := os.Stat(pnpmPath); err == nil {
-				logger().Printf("[node-pty] pnpm found")
 				goto waitWebDir
 			} else if !os.IsNotExist(err) {
 				return false, fmt.Errorf("checking pnpm existence: %w", err)
@@ -60,7 +59,6 @@ func ensureNodePty(renv *RuntimeEnv, home string) (restartNeeded bool, err error
 
 waitWebDir:
 	webDir := filepath.Join(home, ".dsh", "profiles", "web")
-	logger().Printf("[node-pty] waiting for web dir: %s", webDir)
 	webTimeout := time.After(2 * time.Minute)
 	webTicker := time.NewTicker(3 * time.Second)
 	defer webTicker.Stop()
@@ -70,7 +68,6 @@ waitWebDir:
 			return false, fmt.Errorf("timed out waiting for web dir %s", webDir)
 		case <-webTicker.C:
 			if _, err := os.Stat(webDir); err == nil {
-				logger().Printf("[node-pty] web dir found")
 				goto setup
 			} else if !os.IsNotExist(err) {
 				return false, fmt.Errorf("checking web dir existence: %w", err)
@@ -80,7 +77,7 @@ waitWebDir:
 
 setup:
 	// 1) 确保 overrides 固定 node-pty 版本；2) 清理 patchedDependencies。
-	yamlChanged, hadPatched, err := ensureWorkspaceYAML(webDir)
+	_, hadPatched, err := ensureWorkspaceYAML(webDir)
 	if err != nil {
 		return false, fmt.Errorf("update pnpm-workspace.yaml: %w", err)
 	}
@@ -93,7 +90,6 @@ setup:
 		if rerr := os.RemoveAll(patchesDir); rerr != nil {
 			return false, fmt.Errorf("remove %s: %w", patchesDir, rerr)
 		}
-		logger().Printf("[node-pty] removed %s", patchesDir)
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("stat %s: %w", patchesDir, err)
 	}
@@ -103,20 +99,26 @@ setup:
 		if rerr := os.RemoveAll(pnpmPatchesDir); rerr != nil {
 			return false, fmt.Errorf("remove %s: %w", pnpmPatchesDir, rerr)
 		}
-		logger().Printf("[node-pty] removed %s", pnpmPatchesDir)
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("stat %s: %w", pnpmPatchesDir, err)
 	}
 
-	// 4) 只要发生了任何改动就标记需要重启 dsh。
-	restartNeeded = yamlChanged || hadPatchArtifacts
+	// 4) 只有发现旧的 patch 依赖条目或旧 patch 目录时，才需要重建依赖并重启 dsh。
+	//    初次安装（既无 overrides 也无旧 patch）只写 pnpm-workspace.yaml 即可：
+	//    之后用户安装的插件若引用 node-pty，会按 overrides 自动装上固定版本。
+	needRebuild := hadPatched || hadPatchArtifacts
+	restartNeeded = needRebuild
+
+	if !needRebuild {
+		logger().Printf("[node-pty] 已更新 pnpm-workspace.yaml，无需重装依赖")
+		return restartNeeded, nil
+	}
 
 	// 5) 进入 web 目录执行 pnpm install，让 node-pty 1.2.0-beta.15 真正生效。
-	logger().Printf("[node-pty] running pnpm install in %s", webDir)
 	cmd := exec.Command(pnpmPath, "install", "--no-frozen-lockfile")
 	cmd.Dir = webDir
 	cmd.Env = append(os.Environ(), "PNPM_HOME="+renv.PnpmHome)
-	// 若清理了残留的 patchedDependencies 条目，node_modules 目录会被 pnpm 移除
+	// 清理了残留的 patchedDependencies 条目后，node_modules 目录会被 pnpm 移除
 	// 重建；在无 TTY 环境下需显式放行，否则会触发
 	// ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY 而中止安装。已在上一步把顶层
 	// confirmModulesPurge:false 写入 pnpm-workspace.yaml（主手段）；此处再以
@@ -124,12 +126,11 @@ setup:
 	if hadPatched {
 		cmd.Env = setEnv(cmd.Env, "npm_config_confirm_modules_purge", "false")
 		cmd.Env = setEnv(cmd.Env, "CI", "true")
-		logger().Printf("[node-pty] stale patch removed, allowing modules-dir purge for install")
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("pnpm install failed: %w, output:\n%s", err, out)
 	}
-	logger().Printf("[node-pty] pnpm install succeeded, restartNeeded=%v", restartNeeded)
+	logger().Printf("[node-pty] 已重装依赖并固定 node-pty 到 1.2.0-beta.15（需重启）")
 	return restartNeeded, nil
 }
 
@@ -168,7 +169,6 @@ func ensureWorkspaceYAML(webDir string) (changed bool, hadPatched bool, err erro
 		if werr := os.WriteFile(path, []byte(base), 0o644); werr != nil {
 			return false, false, werr
 		}
-		logger().Printf("[node-pty] %s missing, created with overrides + allowBuilds", path)
 		return true, false, nil
 	}
 
@@ -229,7 +229,6 @@ func ensureWorkspaceYAML(webDir string) (changed bool, hadPatched bool, err erro
 	if werr := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); werr != nil {
 		return false, hadPatched, werr
 	}
-	logger().Printf("[node-pty] pnpm-workspace.yaml updated")
 	return true, hadPatched, nil
 }
 
@@ -344,7 +343,6 @@ func removePatchedEntry(lines []string, start, end int) ([]string, bool) {
 	if entryStart < 0 {
 		return lines, false
 	}
-	logger().Printf("[node-pty] removing patchedDependencies entry node-pty@1.1.0")
 	newLines := append([]string{}, lines[:entryStart]...)
 	newLines = append(newLines, lines[entryEnd:]...)
 	return newLines, true

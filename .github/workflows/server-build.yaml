@@ -5,6 +5,11 @@ on:
     # 每 8 小时运行一次：（北京时间 2:00 10:00 18:00）
     - cron: '0 2,10,18 * * *'
   workflow_dispatch:   # 支持手动触发调试
+    inputs:
+      notes:
+        description: '发布说明（可选，留空则使用默认）'
+        required: false
+        type: string
 
 jobs:
   # ========== 第一步：获取所有版本中的最高版本号 ==========
@@ -185,7 +190,14 @@ jobs:
           REPO="${{ github.repository }}"
           TAG="dsh-$VERSION"
           TITLE="dsh Server $VERSION"
-          NOTES="自动构建 dsh $VERSION 的 server 包（包含 dshmarket 依赖）"
+
+          # 获取用户输入的发布说明（若为调度触发则不存在，默认为空）
+          USER_NOTES="${{ github.event.inputs.notes }}"
+          if [ -z "$USER_NOTES" ]; then
+            NOTES="自动构建 dsh $VERSION 的 server 包（包含 dshmarket 依赖）"
+          else
+            NOTES="$USER_NOTES"
+          fi
 
           # 如果 Release 已存在，只追加资产；否则新建
           if gh release view "$TAG" --repo "$REPO" &>/dev/null; then

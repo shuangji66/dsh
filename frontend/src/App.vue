@@ -9,10 +9,10 @@ import Toast from '@/components/Toast.vue'
 import router from './router'
 
 const route = useRoute()
-const { t, locale } = useI18n()
+const { t, locale, setLocale } = useI18n()
 const settings = useSettingsStore()
 const { defaultPage } = useConsolePrefs()
-useTheme() // 初始化/跟随系统主题
+const { themeMode, cycleTheme } = useTheme() // 初始化/跟随系统主题 + 侧边栏主题切换
 
 // 侧边栏折叠状态
 const collapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
@@ -92,10 +92,29 @@ const icons = {
   logs: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16"/><path d="M4 14h16"/><path d="M7 11.5h0M7 16.5h0"/></svg>`,
   // 汉堡折叠图标
   menu: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>`,
-  close: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`
+  close: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+  // 主题切换图标：按当前模式显示 浅色(太阳)/深色(月亮)/跟随系统(显示器)
+  sun: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>`,
+  moon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>`,
+  monitor: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="10" x="5" y="4" rx="2"/><line x1="12" x2="12" y1="20" y2="16"/><line x1="8" x2="16" y1="20" y2="20"/></svg>`,
+  // 语言切换图标：地球
+  globe: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>`
 }
 
 const menuIcon = computed(() => collapsed.value ? icons.menu : icons.close)
+
+// 主题图标与提示文案随当前模式变化：light=太阳 / dark=月亮 / system=显示器
+const themeIcon = computed(() =>
+  themeMode.value === 'dark' ? icons.moon : themeMode.value === 'light' ? icons.sun : icons.monitor
+)
+const themeTitle = computed(() => t('theme_' + themeMode.value))
+
+// 语言切换：点击在 中文 ↔ English 之间循环（与设置页语言选择共享同一 locale）
+function cycleLanguage() {
+  setLocale(locale.value === 'zh' ? 'en' : 'zh')
+}
+// 语言提示文案：显示当前语言名
+const languageTitle = computed(() => t(locale.value === 'zh' ? 'lang_zh' : 'lang_en'))
 
 // 阻止浏览器后退/滑动返回切换子页面
 onMounted(() => {
@@ -139,6 +158,24 @@ onMounted(() => {
           <span v-if="!collapsed" class="whitespace-nowrap">{{ t(item.labelKey) }}</span>
         </button>
       </nav>
+
+      <!-- 底部：主题切换按钮（折叠仅图标；展开图标+“主题”，居中；点击循环 浅色→深色→跟随系统） -->
+      <button
+        class="mt-auto flex items-center justify-center gap-2.5 w-full px-2 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer text-ink-soft dark:text-[#A6A6AD] hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink dark:hover:text-white"
+        :title="themeTitle"
+        @click="cycleTheme">
+        <span class="w-5 h-5 flex-shrink-0 inline-block" v-html="themeIcon"></span>
+        <span v-if="!collapsed" class="whitespace-nowrap">{{ t('theme_label') }}</span>
+      </button>
+
+      <!-- 底部：语言切换按钮（折叠仅图标；展开图标+“语言”，居中；点击循环 中文↔English） -->
+      <button
+        class="mt-1 flex items-center justify-center gap-2.5 w-full px-2 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer text-ink-soft dark:text-[#A6A6AD] hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink dark:hover:text-white"
+        :title="languageTitle"
+        @click="cycleLanguage">
+        <span class="w-5 h-5 flex-shrink-0 inline-block" v-html="icons.globe"></span>
+        <span v-if="!collapsed" class="whitespace-nowrap">{{ t('language_label') }}</span>
+      </button>
     </aside>
 
     <!-- ===== 移动端：底部导航栏 (小于 md) ===== -->

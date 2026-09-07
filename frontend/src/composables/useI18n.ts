@@ -62,6 +62,7 @@ const zh: Record<string, string> = {
   console_default_page: '打开时的默认页面',
   lang_zh: '中文',
   lang_en: 'English',
+  language_label: '语言',
   default_overview: '默认概览',
   default_last: '保持退出时的页面',
   default_settings: '设置页',
@@ -83,6 +84,7 @@ const zh: Record<string, string> = {
   // 概览页
   overview_title: '概览',
   about: '关于',
+  about_title: 'Harness 控制台',
   about_github: 'Github 仓库',
   about_credits: '鸣谢',
   about_features: '特性',
@@ -360,6 +362,7 @@ const en: Record<string, string> = {
   console_default_page: 'Default page on open',
   lang_zh: '中文',
   lang_en: 'English',
+  language_label: 'Language',
   default_overview: 'Overview',
   default_last: 'Last viewed page',
   default_settings: 'Settings',
@@ -380,6 +383,7 @@ const en: Record<string, string> = {
 
   overview_title: 'Overview',
   about: 'About',
+  about_title: 'Harness Console',
   about_github: 'GitHub Repository',
   about_credits: 'Acknowledgements',
   about_features: 'Features',

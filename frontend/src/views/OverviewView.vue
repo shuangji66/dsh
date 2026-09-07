@@ -285,7 +285,7 @@ onBeforeUnmount(() => {
         <div v-if="aboutVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div class="absolute inset-0 bg-black/50" @click="aboutVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-4">DeepSeek Harness</h3>
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-4">{{ t('about_title') }}</h3>
 
             <!-- Github 仓库按钮 -->
             <button

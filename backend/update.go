@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -25,6 +26,9 @@ import (
 // -ldflags "-X main.harnessVersion=..." 覆盖。它代表"harness 控制台"的版本，
 // 与 dsh 服务版本（dsh -V）相互独立。
 var harnessVersion = "1.0.0"
+
+// errUpdateCancelled 表示更新下载被用户主动取消（前端点“取消更新”触发）。
+var errUpdateCancelled = errors.New("用户取消更新")
 
 // --- GitHub 仓库与发布资源常量 ---
 const (
@@ -67,6 +71,27 @@ type UpdateStatus struct {
 	CheckedAt    time.Time  `json:"checkedAt"`        // 最近检测时间
 	Error        string     `json:"error,omitempty"`  // 最近一次检测/拉取失败原因
 	ReleaseNotes string     `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
+
+	// 下载进度（仅更新包下载期间有值；下载完成后清空）。
+	Downloading     bool  `json:"downloading,omitempty"`     // 是否正在下载更新包
+	DownloadPct     int   `json:"downloadPct,omitempty"`     // 下载进度百分比（0-100）
+	DownloadedBytes int64 `json:"downloadedBytes,omitempty"` // 已下载字节数
+	TotalBytes      int64 `json:"totalBytes,omitempty"`      // 总字节数（未知为 0）
+
+	// 流程阶段：""(空闲) / downloading(下载中) / downloaded(已下载待安装) / installing(安装中)。
+	Phase string `json:"phase,omitempty"`
+	// ReadyToInstall 表示更新包已下载就绪，等待用户点击“安装”。
+	ReadyToInstall bool `json:"readyToInstall,omitempty"`
+	// Cancelled 表示最近一次更新被用户主动取消（仅失败推送时置位）。
+	Cancelled bool `json:"cancelled,omitempty"`
+}
+
+// PendingUpdate 记录某个 kind 已下载完成、等待用户确认安装的更新包。
+// 只会保留一个 kind 的一份待安装包；重新下载或安装完成后即被清理。
+type PendingUpdate struct {
+	Kind    updateKind
+	Version string
+	PkgPath string // 已下载更新包的 .tar.gz 完整路径
 }
 
 // UpdateManager 管理控制台与 dsh 的版本检测、SSE 推送与自我更新。
@@ -84,6 +109,15 @@ type UpdateManager struct {
 	rollbackDone bool
 	rollbackOk   bool
 	rollbackErr  string
+
+	// cancelMu 保护 cancelCh：cancelCh 非 nil 表示正在下载更新包，
+	// 关闭它即通知下载协程中断（前端“取消更新”按钮触发）。
+	cancelMu sync.Mutex
+	cancelCh chan struct{}
+
+	// pendingMu 保护 pending：记录某个 kind 已下载完成、等待用户确认安装的更新包。
+	pendingMu sync.Mutex
+	pending   *PendingUpdate
 }
 
 // newUpdateManager 创建更新管理器并依据运行时环境填充本地版本。
@@ -603,41 +637,45 @@ func (m *UpdateManager) checkOnce() {
 		dshNotes = fetchReleaseNotes(notesClient, d.name)
 	}
 
-	harnessStatus := m.getStatus(updateKindHarness)
-	harnessStatus.Kind = updateKindHarness
-	harnessStatus.LocalVersion = harnessVersion
-	harnessStatus.CheckedAt = now
-	harnessStatus.Error = ""
-	harnessStatus.ReleaseNotes = harnessNotes
-	if h != nil {
-		harnessStatus.LatestVersion = h.version
-		harnessStatus.HasUpdate = compareVersion(h.version, harnessVersion) > 0
-	} else {
-		harnessStatus.LatestVersion = ""
-		harnessStatus.HasUpdate = false
-	}
-	m.setStatus(updateKindHarness, &harnessStatus)
+	// 用 updateStatus 就地修改（而非 setStatus 全量替换），保留 Phase / ReadyToInstall
+	// 等“两阶段更新”的进行中状态，避免每小时自动检测把“已下载待安装”状态清掉。
+	m.updateStatus(updateKindHarness, func(st *UpdateStatus) {
+		st.Kind = updateKindHarness
+		st.LocalVersion = harnessVersion
+		st.CheckedAt = now
+		st.Error = ""
+		st.ReleaseNotes = harnessNotes
+		if h != nil {
+			st.LatestVersion = h.version
+			st.HasUpdate = compareVersion(h.version, harnessVersion) > 0
+		} else {
+			st.LatestVersion = ""
+			st.HasUpdate = false
+		}
+	})
 
-	dshNext := m.getStatus(updateKindDsh)
-	dshNext.Kind = updateKindDsh
-	dshNext.LocalVersion = dshLocal
-	dshNext.CheckedAt = now
-	dshNext.Error = ""
-	dshNext.ReleaseNotes = dshNotes
-	if d != nil {
-		dshNext.LatestVersion = d.version
-		dshNext.HasUpdate = compareVersion(d.version, dshLocal) > 0
-	} else {
-		dshNext.LatestVersion = ""
-		dshNext.HasUpdate = false
-	}
-	m.setStatus(updateKindDsh, &dshNext)
+	m.updateStatus(updateKindDsh, func(st *UpdateStatus) {
+		st.Kind = updateKindDsh
+		st.LocalVersion = dshLocal
+		st.CheckedAt = now
+		st.Error = ""
+		st.ReleaseNotes = dshNotes
+		if d != nil {
+			st.LatestVersion = d.version
+			st.HasUpdate = compareVersion(d.version, dshLocal) > 0
+		} else {
+			st.LatestVersion = ""
+			st.HasUpdate = false
+		}
+	})
 
 	// 仅当 harness 或 dsh 任一个有更新时才打印检测结果，无更新时不刷日志。
-	if harnessStatus.HasUpdate || dshNext.HasUpdate {
+	hs := m.getStatus(updateKindHarness)
+	ds := m.getStatus(updateKindDsh)
+	if hs.HasUpdate || ds.HasUpdate {
 		logger().Printf("[update] 发现更新 harness 本地=%s 最新=%s | dsh 本地=%s 最新=%s",
-			harnessVersion, harnessStatus.LatestVersion,
-			dshLocal, dshNext.LatestVersion)
+			harnessVersion, hs.LatestVersion,
+			dshLocal, ds.LatestVersion)
 	}
 }
 
@@ -703,7 +741,10 @@ func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
 
 // downloadToFile 下载 url 到本地文件，返回文件大小。会依次尝试加速源回退，
 // 并沿用既有的代理直连客户端。先尝试加速源（若命中 200 即成功），否则直连。
-func (m *UpdateManager) downloadToFile(rawURL, dest string) (int64, error) {
+// progress 为可选的下载进度回调（downloadled/total 字节，节流上报）；cancel 为
+// 可选的取消信号 —— 关闭后立即中断下载（已下载的临时文件会被删除），并返回
+// errUpdateCancelled。
+func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downloaded, total int64), cancel <-chan struct{}) (int64, error) {
 	// 待尝试的 URL 序列：加速源前缀 + 直连。
 	candidates := []string{rawURL}
 	for _, acc := range updateAccelerators {
@@ -734,19 +775,45 @@ func (m *UpdateManager) downloadToFile(rawURL, dest string) (int64, error) {
 			resp.Body.Close()
 			return 0, err
 		}
-		n, err := io.Copy(out, resp.Body)
+		// 用可取消 reader 包装响应体：支持进度上报与取消中断。
+		var total int64
+		if resp.ContentLength > 0 {
+			total = resp.ContentLength
+		}
+		reader := io.Reader(resp.Body)
+		if cancel != nil {
+			reader = &cancelProgressReader{
+				r:        resp.Body,
+				cancel:   cancel,
+				progress: progress,
+				total:    total,
+			}
+		}
+		n, err := io.Copy(out, reader)
 		out.Close()
 		resp.Body.Close()
 		if err != nil {
 			os.Remove(dest)
+			if errors.Is(err, errUpdateCancelled) {
+				// 用户取消：不再尝试其它镜像源。
+				lastErr = errUpdateCancelled
+				break
+			}
 			lastErr = fmt.Errorf("下载 %s 中断: %w", u, err)
 			continue
+		}
+		// 下载完成时上报一次最终进度
+		if progress != nil {
+			progress(n, total)
 		}
 		logger().Printf("[update] 下载成功 %s (%d bytes)", u, n)
 		return n, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("所有下载源均失败")
+	}
+	if errors.Is(lastErr, errUpdateCancelled) {
+		logger().Printf("[update] 下载已被用户取消")
 	}
 	return 0, lastErr
 }
@@ -995,9 +1062,111 @@ func (m *UpdateManager) backupDir() string {
 	return dir
 }
 
-// applyUpdate 执行自我更新。kind 指定更新 harness 还是 dsh。流程严格遵循：
-// 先下载成功，再备份替换，最后重启。返回错误则说明更新失败及原因。
-func (m *UpdateManager) applyUpdate(k updateKind) error {
+// --- 下载取消与进度 ---
+
+// updateStatus 修改并广播某个 kind 的状态（线程安全）。
+func (m *UpdateManager) updateStatus(k updateKind, f func(*UpdateStatus)) {
+	m.mu.Lock()
+	if st, ok := m.statuses[k]; ok {
+		f(st)
+	}
+	m.mu.Unlock()
+	m.notify()
+}
+
+// setDownloadProgress 更新某个 kind 的下载进度状态并广播给前端（SSE）。
+func (m *UpdateManager) setDownloadProgress(k updateKind, downloading bool, pct int, downloaded, total int64) {
+	m.updateStatus(k, func(st *UpdateStatus) {
+		st.Downloading = downloading
+		st.DownloadPct = pct
+		st.DownloadedBytes = downloaded
+		st.TotalBytes = total
+	})
+}
+
+// CancelUpdate 请求取消当前正在进行的更新下载。若当前没有下载（cancelCh 为
+// nil），调用被安全忽略。取消会中断下载并在 applyUpdate 中表现为“下载失败: 用户取消”，
+// 已下载的临时文件会被清理，不会触碰磁盘上的二进制/server 目录。
+func (m *UpdateManager) CancelUpdate() {
+	m.cancelMu.Lock()
+	defer m.cancelMu.Unlock()
+	if m.cancelCh != nil {
+		close(m.cancelCh)
+		m.cancelCh = nil
+	}
+}
+
+// pendingDir 返回存放“已下载待安装”更新包的目录（在持久备份目录下，跨两步保留）。
+func (m *UpdateManager) pendingDir() string {
+	dir := filepath.Join(m.backupDir(), "pending")
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// getPending 读取当前待安装更新包（可能为 nil）。
+func (m *UpdateManager) getPending() *PendingUpdate {
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+	return m.pending
+}
+
+// setPending 记录新的待安装更新包；若该 kind 已有旧包则清理旧文件。
+func (m *UpdateManager) setPending(p *PendingUpdate) {
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+	// 清理同 kind 旧的待安装包文件。
+	if old := m.pending; old != nil && old.Kind == p.Kind && old.PkgPath != "" && old.PkgPath != p.PkgPath {
+		os.Remove(old.PkgPath)
+	}
+	m.pending = p
+}
+
+// clearPending 清除当前待安装更新包并删除其文件。
+func (m *UpdateManager) clearPending() {
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+	if m.pending != nil && m.pending.PkgPath != "" {
+		os.Remove(m.pending.PkgPath)
+	}
+	m.pending = nil
+}
+
+// cancelProgressReader 包装下载响应体：在每次读取时检查取消信号，并按节流
+// 节奏上报进度（每 500ms 或每 256KB 一次），避免高频回调刷爆 SSE。
+type cancelProgressReader struct {
+	r        io.Reader
+	cancel   <-chan struct{}
+	progress func(downloaded, total int64)
+	total    int64
+	n        int64
+	lastAt   time.Time
+	lastN    int64
+}
+
+func (cr *cancelProgressReader) Read(p []byte) (int, error) {
+	select {
+	case <-cr.cancel:
+		return 0, fmt.Errorf("update cancelled")
+	default:
+	}
+	n, err := cr.r.Read(p)
+	cr.n += int64(n)
+	if cr.progress != nil {
+		now := time.Now()
+		if now.Sub(cr.lastAt) >= 500*time.Millisecond || cr.n-cr.lastN >= 256<<10 {
+			cr.progress(cr.n, cr.total)
+			cr.lastAt = now
+			cr.lastN = cr.n
+		}
+	}
+	return n, err
+}
+
+// downloadUpdate 只下载更新包（第一步），不安装。可在下载过程中取消（CancelUpdate
+// 关闭 cancelCh 中断），下载成功后把 .tar.gz 放到持久的“待安装”目录并记入 pending，
+// 推送 phase=downloaded / readyToInstall=true，等待用户在弹窗里点“安装”。
+// 返回错误表示下载失败或被用户取消。
+func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	m.applying.Lock()
 	defer m.applying.Unlock()
 
@@ -1007,34 +1176,158 @@ func (m *UpdateManager) applyUpdate(k updateKind) error {
 	}
 	version := st.LatestVersion
 	arch := m.updateArch()
-	logger().Printf("[update] 开始更新 %s 到 %s (arch=%s)", k, version, arch)
+	logger().Printf("[update] 开始下载 %s 到 %s (arch=%s)", k, version, arch)
 
-	tmpDir := filepath.Join(os.TempDir(), "harness-update-"+string(k)+"-"+time.Now().Format("20060102150405"))
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+	// 目标包持久保存在“待安装”目录，跨“下载→安装”两步保留。
+	// 文件名带时间戳，避免与同版本上次下载冲突（setPending 会清理同 kind 旧包）。
+	pkgPath := filepath.Join(m.pendingDir(), string(k)+"-"+version+"-"+time.Now().Format("20060102150405")+".tar.gz")
+
+	// 建立取消信号：CancelUpdate 关闭 cancelCh 以中断本次下载。
+	cancelCh := make(chan struct{})
+	m.cancelMu.Lock()
+	m.cancelCh = cancelCh
+	m.cancelMu.Unlock()
+	// 进入“下载中”状态（清空上一次的进度/错误/取消残留）。
+	m.updateStatus(k, func(s *UpdateStatus) {
+		s.Phase = "downloading"
+		s.ReadyToInstall = false
+		s.Cancelled = false
+		s.Error = ""
+		s.Downloading = true
+		s.DownloadPct = 0
+		s.DownloadedBytes = 0
+		s.TotalBytes = 0
+	})
+
+	n, err := m.downloadToFile(m.assetURL(k, version, arch), pkgPath,
+		func(downloaded, total int64) {
+			pct := 0
+			if total > 0 {
+				pct = int(downloaded * 100 / total)
+				if pct > 100 {
+					pct = 100
+				}
+			}
+			m.setDownloadProgress(k, true, pct, downloaded, total)
+		}, cancelCh)
+	m.cancelMu.Lock()
+	m.cancelCh = nil
+	m.cancelMu.Unlock()
+
+	if err != nil {
+		os.Remove(pkgPath)
+		// 取消或失败：退出“下载中”状态（失败原因由 error / cancelled 字段呈现）。
+		m.updateStatus(k, func(s *UpdateStatus) {
+			s.Phase = ""
+			s.Downloading = false
+			s.DownloadPct = 0
+			s.DownloadedBytes = 0
+			s.TotalBytes = 0
+		})
+		return fmt.Errorf("下载失败: %w", err)
+	}
+
+	// 下载成功：记录待安装包，推送“已下载待安装”。
+	m.setPending(&PendingUpdate{Kind: k, Version: version, PkgPath: pkgPath})
+	m.updateStatus(k, func(s *UpdateStatus) {
+		s.Phase = "downloaded"
+		s.ReadyToInstall = true
+		s.Downloading = false
+		s.DownloadPct = 100
+		s.DownloadedBytes = n
+		if s.TotalBytes <= 0 {
+			s.TotalBytes = n
+		}
+		s.Error = ""
+		s.Cancelled = false
+	})
+	logger().Printf("[update] %s 更新包已下载到 %s (%d bytes)，等待安装", k, pkgPath, n)
+	return nil
+}
+
+// installUpdate 安装已下载的更新包（第二步）。读取 pending 中的 .tar.gz，解压后
+// 调用 applyHarness / applyServer 执行“备份→替换→重启”。安装阶段耗时短、不可取消。
+// 安装失败时保留 pending（用户可重试安装）；安装成功后仅 dsh 情形清除 pending
+// （harness 成功时进程会被 exec 换新映像，根本不会执行到这里）。
+func (m *UpdateManager) installUpdate(k updateKind) error {
+	m.applying.Lock()
+	defer m.applying.Unlock()
+
+	p := m.getPending()
+	if p == nil || p.Kind != k {
+		return fmt.Errorf("尚未下载 %s 更新包，请先下载更新", k)
+	}
+	if _, err := os.Stat(p.PkgPath); err != nil {
+		m.clearPending()
+		return fmt.Errorf("待安装更新包已不存在（可能被清理），请重新下载: %w", err)
+	}
+	logger().Printf("[update] 开始安装 %s 到 %s", k, p.Version)
+
+	// 进入“安装中”状态。
+	m.updateStatus(k, func(s *UpdateStatus) {
+		s.Phase = "installing"
+		s.ReadyToInstall = false
+		s.Cancelled = false
+		s.Error = ""
+	})
+
+	// 解压到临时目录。
+	tmpDir, err := os.MkdirTemp("", "harness-install-"+string(k)+"-"+time.Now().Format("20060102150405"))
+	if err != nil {
+		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
 		return fmt.Errorf("创建临时目录失败: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
-
-	tgzPath := filepath.Join(tmpDir, "pkg.tar.gz")
-	if _, err := m.downloadToFile(m.assetURL(k, version, arch), tgzPath); err != nil {
-		return fmt.Errorf("下载失败: %w", err)
-	}
-	// 下载成功后解压到临时解压目录
-	extractDir := filepath.Join(tmpDir, "extract")
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
-		return fmt.Errorf("创建解压目录失败: %w", err)
-	}
-	if err := extractTarGz(tgzPath, extractDir); err != nil {
-		return fmt.Errorf("解压失败: %w", err)
+	if err := extractTarGz(p.PkgPath, tmpDir); err != nil {
+		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
+		return fmt.Errorf("解压更新包失败: %w", err)
 	}
 
+	var installErr error
 	switch k {
 	case updateKindHarness:
-		return m.applyHarness(extractDir)
+		installErr = m.applyHarness(tmpDir)
 	case updateKindDsh:
-		return m.applyServer(extractDir)
+		installErr = m.applyServer(tmpDir)
+	default:
+		installErr = fmt.Errorf("未知的更新类型 %s", k)
 	}
-	return fmt.Errorf("未知的更新类型 %s", k)
+	if installErr != nil {
+		// 安装失败：保留待安装包（可重试安装），退出“安装中”状态。
+		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
+		return installErr
+	}
+	// 安装成功：dsh 情形清除待安装包；harness 情形进程已被 exec 替换（若 exec
+	// 失败返回 nil，则保留包供重试）。
+	if k == updateKindDsh {
+		m.clearPending()
+	}
+	return nil
+}
+
+// DiscardUpdate 删除已下载待安装的更新包（前端“删除更新包”按钮触发），
+// 并把该 kind 重置为初始待更新状态（phase 清空、readyToInstall=false、
+// 取消/错误标记清空），前端按钮回到“下载更新”。无待安装包时忽略。
+func (m *UpdateManager) DiscardUpdate(k updateKind) error {
+	m.applying.Lock()
+	defer m.applying.Unlock()
+
+	if m.getPending() == nil {
+		return nil // 没有待安装更新包，忽略即可
+	}
+	m.clearPending()
+	m.updateStatus(k, func(s *UpdateStatus) {
+		s.Phase = ""
+		s.ReadyToInstall = false
+		s.Downloading = false
+		s.DownloadPct = 0
+		s.DownloadedBytes = 0
+		s.TotalBytes = 0
+		s.Error = ""
+		s.Cancelled = false
+	})
+	logger().Printf("[update] 已删除 %s 的待安装更新包", k)
+	return nil
 }
 
 // findExecutable 在解压目录中递归查找可执行文件 harness。
@@ -1118,6 +1411,19 @@ func (m *UpdateManager) restartHarness(newBin string) {
 	}
 }
 
+// startDshCaptured 启动 dsh 并异步捕获新的一次性访问 token、换取 dsh 会话 cookie。
+// 每次 dsh 启动都会生成新的 token（Start 也会重置旧 token 与会话 cookie），因此
+// 更新 server / 回滚 / 数据恢复等“重启 dsh 后必须刷新会话凭据”的路径都必须经过
+// 本方法，否则反代仍携带旧 cookie（或空 cookie）转发到新启动的 dsh，导致会话失效。
+func (m *UpdateManager) startDshCaptured() error {
+	if err := m.dsh.Start(); err != nil {
+		return err
+	}
+	// 异步等待捕获 token 并换取 cookie，不阻塞更新/回滚主流程（最多等 15 秒）。
+	go captureDshSession(m.dsh)
+	return nil
+}
+
 // applyServer 备份并替换 dsh server 目录。
 // 顺序：找到 server 根 → 先停止 dsh 服务 → 再备份替换 → 最后启动 dsh。
 func (m *UpdateManager) applyServer(extractDir string) error {
@@ -1170,7 +1476,10 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 	backupName := fmt.Sprintf("server-%s-%s.tar.gz", dshVer, time.Now().Format("20060102150405"))
 	backupPath := filepath.Join(m.backupDir(), backupName)
 	if err := tgzDir(serverDir, backupPath); err != nil {
-		m.dsh.Start() // 更新失败，尽量恢复 dsh
+		// 更新失败，尽量恢复 dsh（重启后需重新捕获会话凭据）
+		if serr := m.startDshCaptured(); serr != nil {
+			logger().Printf("[update] 恢复 dsh 启动失败: %v", serr)
+		}
 		return fmt.Errorf("备份 server 目录失败: %w", err)
 	}
 	logger().Printf("[update] server 已备份到 %s", backupPath)
@@ -1178,22 +1487,31 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 	// 替换：把旧的 server 移到临时位置，放入新的，再删除临时旧目录。
 	oldTmp := filepath.Join(parent, ".server-old-"+time.Now().Format("20060102150405"))
 	if err := os.Rename(serverDir, oldTmp); err != nil {
-		m.dsh.Start() // 更新失败，尽量恢复 dsh
+		// 更新失败，尽量恢复 dsh（重启后需重新捕获会话凭据）
+		if serr := m.startDshCaptured(); serr != nil {
+			logger().Printf("[update] 恢复 dsh 启动失败: %v", serr)
+		}
 		return fmt.Errorf("移动旧 server 目录失败: %w", err)
 	}
 	if err := copyDir(srcServer, serverDir); err != nil {
-		// 回滚：把旧目录放回去，并恢复 dsh
+		// 回滚：把旧目录放回去，并恢复 dsh（重启后需重新捕获会话凭据）
 		os.Rename(oldTmp, serverDir)
-		m.dsh.Start()
+		if serr := m.startDshCaptured(); serr != nil {
+			logger().Printf("[update] 恢复 dsh 启动失败: %v", serr)
+		}
 		return fmt.Errorf("复制新 server 失败: %w", err)
 	}
 	os.RemoveAll(oldTmp)
 
 	logger().Printf("[update] server 目录已更新，启动 dsh 服务")
-	// 启动 dsh
-	if err := m.dsh.Start(); err != nil {
-		return fmt.Errorf("更新完成，但启动 dsh 失败: %w", err)
-	}
+	// 启动 dsh（fire-and-forget）：解压+备份替换已完成，安装流程立即返回成功，
+	// 不等待 dsh 完全启动（会话 cookie 由异步 captureDshSession 后台换取）。
+	// 若 dsh 启动失败，只记录日志，不阻塞“安装成功”的返回。
+	go func() {
+		if err := m.startDshCaptured(); err != nil {
+			logger().Printf("[update] 启动 dsh 失败（异步，安装已完成）: %v", err)
+		}
+	}()
 	return nil
 }
 
@@ -1369,21 +1687,33 @@ func (m *UpdateManager) doRollbackServer(backupPath string) error {
 		return fmt.Errorf("解压备份失败: %w", err)
 	}
 
-	// 4. 删除备份压缩包
-	logger().Printf("[rollback] 删除备份文件: %s", backupPath)
-	if err := os.Remove(backupPath); err != nil {
-		logger().Printf("[rollback] 删除备份文件失败（非致命）: %v", err)
-		// 不作为回滚失败
-	}
+	// 4. 保留备份压缩包（不做删除）：回退后用户仍可再次回滚到其它版本，
+	//   备份文件仅由用户手动删除或每日清理任务按 30 天过期清理。
 
-	// 5. 启动 dsh 服务
+	// 5. 启动 dsh 服务（并异步捕获新 token 换取会话 cookie，供反代转发）。
+	//   注：不在此处等待 dsh 完全启动成功——启动动作发出即可，会话 cookie
+	//   由异步 captureDshSession 在后台换取，前端无需等待。
 	logger().Printf("[rollback] 启动 dsh 服务")
-	if err := m.dsh.Start(); err != nil {
+	if err := m.startDshCaptured(); err != nil {
 		return fmt.Errorf("启动 dsh 失败: %w", err)
 	}
 
+	// 6. 回滚完成后刷新 dsh 版本号状态，前端 reload 后版本行立即显示新版本。
+	m.refreshDshVersion()
+
 	logger().Printf("[rollback] server 回滚完成")
 	return nil
+}
+
+// refreshDshVersion 重新执行 `dsh -V` 并就地更新 dsh 的 LocalVersion 状态
+// （仅当取到非空版本号时更新，避免把版本号刷成空串）。用于回滚/安装完成后
+// 让前端刷新页面时立即显示新版本，而不是等到下一次自动检测。
+func (m *UpdateManager) refreshDshVersion() {
+	if v := m.localDshVersion(); v != "" {
+		m.updateStatus(updateKindDsh, func(st *UpdateStatus) {
+			st.LocalVersion = v
+		})
+	}
 }
 
 // --- DSH 数据备份列表与恢复 ---
@@ -1531,9 +1861,9 @@ func (m *UpdateManager) doRestoreDshData(backupPath string) error {
 		return fmt.Errorf("解压备份失败: %w", err)
 	}
 
-	// 4. 启动 dsh 服务
+	// 4. 启动 dsh 服务（并异步捕获新 token 换取会话 cookie，供反代转发）
 	logger().Printf("[restore] 启动 dsh 服务")
-	if err := m.dsh.Start(); err != nil {
+	if err := m.startDshCaptured(); err != nil {
 		return fmt.Errorf("启动 dsh 失败: %w", err)
 	}
 

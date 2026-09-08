@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -922,7 +923,16 @@ func (m *AdminMux) buildHandler() http.Handler {
 		case p == "/api/update/check" && r.Method == http.MethodPost:
 			m.handleUpdateCheck(w, r)
 		case p == "/api/update/apply" && r.Method == http.MethodPost:
-			m.handleUpdateApply(w, r)
+			// 兼容旧版一键更新：更新已拆分为“下载”与“安装”两步。
+			writeErr(w, "更新已拆分为“下载”与“安装”两步，请使用 /api/update/download 与 /api/update/install", http.StatusGone)
+		case p == "/api/update/download" && r.Method == http.MethodPost:
+			m.handleUpdateDownload(w, r)
+		case p == "/api/update/install" && r.Method == http.MethodPost:
+			m.handleUpdateInstall(w, r)
+		case p == "/api/update/discard" && r.Method == http.MethodPost:
+			m.handleDiscardUpdate(w, r)
+		case p == "/api/update/cancel" && r.Method == http.MethodPost:
+			m.handleCancelUpdate(w, r)
 		case p == "/api/update/stream" && r.Method == http.MethodGet:
 			m.handleUpdateStream(w, r)
 		case p == "/api/dsh/backups" && r.Method == http.MethodGet:
@@ -1036,8 +1046,9 @@ func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUpdateApply 执行自我更新。body 中 kind 为 harness 或 dsh。
-func (m *AdminMux) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+// handleUpdateDownload 执行“下载更新包”（第一步，可取消）。body 中 kind 为 harness 或 dsh。
+// 下载进度经 SSE 推送；下载成功后推送 phase=downloaded，弹窗按钮变为“安装”。
+func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Kind string `json:"kind"`
 	}
@@ -1050,35 +1061,121 @@ func (m *AdminMux) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "kind 必须为 harness 或 dsh", http.StatusBadRequest)
 		return
 	}
-	// 后台执行，避免占用请求线程；更新完成后通过 SSE 推送。
+	// 同步置“下载中”状态：在返回 HTTP 响应前后端状态即已就绪（downloadUpdate
+	// goroutine 内还会再置一次，幂等）。这样即使 SSE 首帧丢失或断线重连，
+	// 前端拿到的快照也必然是 downloading，不会退回空闲页。
+	m.update.updateStatus(kind, func(st *UpdateStatus) {
+		st.Phase = "downloading"
+		st.ReadyToInstall = false
+		st.Cancelled = false
+		st.Error = ""
+		st.Downloading = true
+		st.DownloadPct = 0
+		st.DownloadedBytes = 0
+		st.TotalBytes = 0
+	})
+	// 后台执行，避免占用请求线程；进度/完成/取消均经 SSE 推送。
 	go func() {
-		if err := m.update.applyUpdate(kind); err != nil {
-			logger().Printf("[update] 更新 %s 失败: %v", kind, err)
-			// 失败也推送一次，前端可据此刷新状态
-			m.update.setStatus(kind, &UpdateStatus{
-				Kind: kind, CheckedAt: time.Now(), Error: err.Error(),
-			})
-		} else {
-			logger().Printf("[update] 更新 %s 成功", kind)
-			// 成功后推送最新状态（本地版本已更新、不再有更新），
-			// 前端据此关闭弹窗并刷新页面。
+		if err := m.update.downloadUpdate(kind); err != nil {
+			logger().Printf("[update] 下载 %s 失败: %v", kind, err)
+			// 在原有状态副本上追加失败/取消信息推送，避免版本号、hasUpdate 等
+			// 字段被冲掉（取消后前端仍可再次发起下载）。
 			upd := m.update
 			st := upd.getStatus(kind)
 			st.CheckedAt = time.Now()
+			st.Error = err.Error()
+			st.Cancelled = errors.Is(err, errUpdateCancelled)
+			st.Downloading = false
+			st.DownloadPct = 0
+			st.Phase = ""
+			upd.setStatus(kind, &st)
+		}
+		// 下载成功：downloadUpdate 已推送 phase=downloaded / readyToInstall=true。
+	}()
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始下载更新"})
+}
+
+// handleUpdateInstall 执行“安装更新包”（第二步，不可取消）。读取待安装包并执行
+// 备份替换+重启。对 dsh：成功后推送最新状态，前端刷新；对 harness：成功即 exec
+// 换新进程，由新进程重启 dsh，前端靠页面刷新兜底。
+func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	kind := updateKind(body.Kind)
+	if kind != updateKindHarness && kind != updateKindDsh {
+		writeErr(w, "kind 必须为 harness 或 dsh", http.StatusBadRequest)
+		return
+	}
+	go func() {
+		if err := m.update.installUpdate(kind); err != nil {
+			logger().Printf("[update] 安装 %s 失败: %v", kind, err)
+			upd := m.update
+			st := upd.getStatus(kind)
+			st.CheckedAt = time.Now()
+			st.Error = err.Error()
+			st.Cancelled = false
+			st.Phase = ""
+			upd.setStatus(kind, &st)
+			return
+		}
+		logger().Printf("[update] 安装 %s 成功", kind)
+		// 成功后立即推送成功状态：完成更新解压/备份替换动作即可结束弹窗，
+		// 不等待 dsh 启动成功（会话 cookie 由异步 captureDshSession 换取）。
+		// 用 updateStatus 就地修改（而非 getStatus+setStatus 副本替换），
+		// 避免与 refreshDshVersion 的更新互相覆盖。
+		// 注意：phase 必须置为非空的 "done"——Phase 字段带 json omitempty，
+		// 空字符串会被省略导致前端收不到（前端以 phase==="done" 为成功信号关弹窗）。
+		upd := m.update
+		upd.updateStatus(kind, func(st *UpdateStatus) {
+			st.CheckedAt = time.Now()
 			st.Error = ""
 			st.HasUpdate = false
+			st.Phase = "done"
+			st.ReadyToInstall = false
 			if kind == updateKindHarness {
 				st.LocalVersion = harnessVersion
 				st.LatestVersion = harnessVersion
-			} else {
-				v := upd.localDshVersion()
-				st.LocalVersion = v
-				st.LatestVersion = v
 			}
-			upd.setStatus(kind, &st)
+		})
+		// dsh 版本号异步刷新：`dsh -V` 可能较慢（需加载 node 环境），不阻塞
+		// 上面这次“成功”推送；前端此时已可收起弹窗，刷新页面后拿到新版本。
+		if kind != updateKindHarness {
+			go upd.refreshDshVersion()
 		}
 	}()
-	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始更新"})
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始安装更新"})
+}
+
+// handleCancelUpdate 取消正在进行的更新下载（下载完成后取消无效，忽略即可）。
+func (m *AdminMux) handleCancelUpdate(w http.ResponseWriter, r *http.Request) {
+	m.update.CancelUpdate()
+	writeJSON(w, map[string]interface{}{"ok": true, "cancelled": true})
+}
+
+// handleDiscardUpdate 删除已下载待安装的更新包，重置为待更新状态（前端“删除更新包”按钮）。
+func (m *AdminMux) handleDiscardUpdate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	kind := updateKind(body.Kind)
+	if kind != updateKindHarness && kind != updateKindDsh {
+		writeErr(w, "kind 必须为 harness 或 dsh", http.StatusBadRequest)
+		return
+	}
+	if err := m.update.DiscardUpdate(kind); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "discarded": true})
 }
 
 // handleUpdateStream 通过 SSE 推送更新检测结果变更。

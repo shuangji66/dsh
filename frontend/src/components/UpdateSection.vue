@@ -21,9 +21,23 @@ const checking = ref<Record<UpdateKind, boolean>>({ harness: false, dsh: false }
 // 弹窗状态
 const dialogVisible = ref(false)
 const dialogKind = ref<UpdateKind>('harness')
-const updating = ref(false) // 是否正在执行更新
 const updatingDone = ref(false) // 更新成功后短暂显示“更新成功”
-const targetVersion = ref('') // 用户点击更新时正在安装的目标版本号
+const targetVersion = ref('') // 本次要安装的目标版本号（用于判定安装完成）
+const installing = ref(false) // 是否正在安装（点击“安装更新”后）
+// 是否处于进行中（下载中 / 安装中）：禁用关闭与重复操作
+const busy = computed(() => {
+  const ph = dialogStatus.value.phase
+  return ph === 'downloading' || ph === 'installing' || installing.value
+})
+// 下载中（可取消）
+const downloading = computed(() => dialogStatus.value.phase === 'downloading')
+// 已下载待安装（显示“安装更新”按钮）
+const downloaded = computed(() => dialogStatus.value.phase === 'downloaded' && dialogStatus.value.readyToInstall)
+// 取消更新
+const cancelConfirmVisible = ref(false) // 取消二次确认弹窗
+const cancelling = ref(false) // 取消请求是否已发出、等待后端中断
+// 安装二次确认
+const installConfirmVisible = ref(false)
 
 // dsh server 回滚状态
 const serverBackups = ref<ServerBackup[]>([]) // 可用备份列表
@@ -116,46 +130,202 @@ function openDialog(kind: UpdateKind) {
   dialogVisible.value = true
 }
 
-// 执行自我更新
-async function doApply() {
+// 第一步：下载更新包（可取消）。后端下载完成后经 SSE 推送 phase=downloaded，
+// 弹窗按钮随之变为“安装更新”。
+async function doDownload() {
   const kind = dialogKind.value
-  if (updating.value) return
-  // 记录本次要安装的目标版本，用于判定更新是否完成。
+  if (busy.value) return
   targetVersion.value = dialogStatus.value.latestVersion
-  updating.value = true
   updatingDone.value = false
+  installing.value = false
+  // 乐观更新：点击后本地立即切到“下载中”视图（进度条 + 取消按钮），
+  // 不再依赖 SSE 首帧推送——SSE 断开/丢帧时也能立刻看到进度页，
+  // 下载实际已在后台执行；后续收到进度帧再实时刷新数字。
+  applyLocalDownloading()
   try {
-    await api.updateApply(kind)
-    // 后端异步执行下载/备份/替换/重启；由 SSE 推送完成状态。
-    // 兜底超时：若长时间未收到完成状态则主动刷新页面（尽力而为）。
+    await api.updateDownload(kind)
+    // 后端异步下载；进度/完成经 SSE 推送。
+    // 兜底超时：若长时间未收到任何推送（下载卡死/进程异常）则刷新页面。
     reloadTimer = setTimeout(() => {
       window.location.reload()
     }, 45000)
   } catch (e) {
-    // 请求阶段即失败（参数错误等）
+    // 请求阶段即失败（参数错误等）：回滚到待更新状态。
     toast.show((e as Error).message || t('update_failed'), 'error')
-    updating.value = false
+    applyLocalReset()
   }
 }
 
-// 侦测后端推送的完成/失败状态
+// 本地立即进入“下载中”状态（供 doDownload 乐观更新，不等 SSE 首帧）。
+function applyLocalDownloading() {
+  const patch = {
+    phase: 'downloading' as string,
+    readyToInstall: false,
+    downloading: true,
+    downloadPct: 0,
+    downloadedBytes: 0,
+    totalBytes: 0,
+    error: '',
+    cancelled: false
+  }
+  if (dialogKind.value === 'harness') {
+    harnessStatus.value = { ...harnessStatus.value, ...patch }
+  } else {
+    dshStatus.value = { ...dshStatus.value, ...patch }
+  }
+}
+
+// 本地把当前弹窗目标重置为“待更新、未下载”状态（下载请求失败时回滚）。
+function applyLocalReset() {
+  const patch = {
+    phase: '' as string,
+    readyToInstall: false,
+    downloading: false,
+    downloadPct: 0,
+    downloadedBytes: 0,
+    totalBytes: 0
+  }
+  if (dialogKind.value === 'harness') {
+    harnessStatus.value = { ...harnessStatus.value, ...patch }
+  } else {
+    dshStatus.value = { ...dshStatus.value, ...patch }
+  }
+}
+
+// 第二步：安装更新包（不可取消）。先弹二次确认，再调 /api/update/install。
+function openInstallConfirm() {
+  if (busy.value || !downloaded.value) return
+  installConfirmVisible.value = true
+}
+
+async function doInstall() {
+  const kind = dialogKind.value
+  if (busy.value || !downloaded.value) return
+  installConfirmVisible.value = false
+  installing.value = true
+  try {
+    await api.updateInstall(kind)
+    // 后端异步安装（备份→替换→重启）；完成经 SSE 推送。
+    // 兜底超时：安装耗时短，60 秒未收到完成状态则刷新页面。
+    reloadTimer = setTimeout(() => {
+      window.location.reload()
+    }, 60000)
+  } catch (e) {
+    installing.value = false
+    toast.show((e as Error).message || t('update_failed'), 'error')
+  }
+}
+
+// --- 更新下载进度与取消 ---
+
+// 下载进度百分比（0-100，未知总量时为 0）
+const downloadPct = computed(() => {
+  return Math.max(0, Math.min(100, dialogStatus.value.downloadPct ?? 0))
+})
+// 是否已知更新包总大小（Content-Length）
+const downloadTotalKnown = computed(() => (dialogStatus.value.totalBytes ?? 0) > 0)
+// 进度条宽度：已知总量按百分比；未知总量用半宽脉冲动画表示“进行中”。
+const progressBarStyle = computed(() =>
+  downloadTotalKnown.value ? { width: downloadPct.value + '%' } : { width: '50%' }
+)
+const progressBarClass = computed(() => (downloadTotalKnown.value ? '' : 'animate-pulse'))
+// 已下载 / 总量文字
+const downloadSizeText = computed(() => {
+  const d = dialogStatus.value
+  const dl = fmtSize(d.downloadedBytes ?? 0)
+  if (downloadTotalKnown.value) {
+    return t('update_download_size', { downloaded: dl, total: fmtSize(d.totalBytes ?? 0) })
+  }
+  return t('update_download_unknown_size', { downloaded: dl })
+})
+
+// 点击“取消更新” → 弹出二次确认（仅下载中有效）
+function openCancelConfirm() {
+  if (!downloading.value || cancelling.value) return
+  cancelConfirmVisible.value = true
+}
+
+// 确认取消：通知后端中断下载；中断完成后后端经 SSE 推送 cancelled/error 状态，
+// 由 watchForCompletion 复位 UI。
+async function doCancelUpdate() {
+  if (cancelling.value) return
+  cancelling.value = true
+  try {
+    await api.updateCancel()
+    // 保持“下载中”状态等待 SSE 推送；不额外兜底计时器，避免与完成推送竞争。
+    // 若取消请求到达时下载恰好已完成（后端无取消目标），则 phase 会变为
+    // downloaded（已就绪），用户可自行选择安装。
+  } catch (e) {
+    cancelling.value = false
+    cancelConfirmVisible.value = false
+    toast.show((e as Error).message || t('update_failed'), 'error')
+  }
+}
+
+// --- 删除已下载的更新包 ---
+const discardConfirmVisible = ref(false) // 删除更新包二次确认
+
+function openDiscardConfirm() {
+  if (!downloaded.value || busy.value) return
+  discardConfirmVisible.value = true
+}
+
+// 确认删除：清除后端待安装更新包并重置为待更新状态（SSE 推送 phase 清空）。
+async function doDiscard() {
+  const kind = dialogKind.value
+  if (!downloaded.value) return
+  discardConfirmVisible.value = false
+  try {
+    await api.updateDiscard(kind)
+    toast.show(t('update_discarded'), 'success')
+    // 后端已推送 phase="" / readyToInstall=false；若 SSE 暂未送达，
+    // 本地也主动复位，保证按钮立刻回到“下载更新”。
+    if (dialogKind.value === 'harness') {
+      harnessStatus.value = { ...harnessStatus.value, phase: '', readyToInstall: false, downloading: false }
+    } else {
+      dshStatus.value = { ...dshStatus.value, phase: '', readyToInstall: false, downloading: false }
+    }
+  } catch (e) {
+    toast.show((e as Error).message || t('update_failed'), 'error')
+  }
+}
+
+// 侦测后端推送的各阶段完成/失败状态。
+// 触发时机：phase 变化 / 进度字段变化 / 安装完成后的状态推送。
 function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
-  if (kind !== dialogKind.value || !updating.value) return
-  // 失败：后端推送了 error
+  if (kind !== dialogKind.value) return
+  // 下载完成 → 进入 downloaded（readyToInstall=true）：清除兜底计时器，
+  // 按钮自动变为“安装更新”。
+  if (st.phase === 'downloaded') {
+    clearTimeout(reloadTimer ?? undefined)
+    return
+  }
+  // 用户取消下载：退出进行中状态，可重新下载。
+  if (st.cancelled || (st.error && st.error.includes('用户取消'))) {
+    clearTimeout(reloadTimer ?? undefined)
+    installing.value = false
+    cancelling.value = false
+    cancelConfirmVisible.value = false
+    toast.show(t('update_cancelled'), 'info')
+    return
+  }
+  // 失败（下载失败 / 安装失败）：退出进行中状态。
   if (st.error) {
     clearTimeout(reloadTimer ?? undefined)
-    updating.value = false
-    updatingDone.value = false
+    installing.value = false
+    cancelling.value = false
+    cancelConfirmVisible.value = false
+    installConfirmVisible.value = false
     toast.show(st.error || t('update_failed'), 'error')
     return
   }
-  // 成功：不再有更新，且本地版本已到达本次要安装的目标版本
-  // （更新后本地版本号会等于目标版本，如 harness-1.0.1 或 dsh-0.1.3）
-  if (!st.hasUpdate && targetVersion.value && st.localVersion === targetVersion.value) {
+  // 安装成功：后端完成解压并推送明确成功信号 phase==="done"（非空，JSON
+  // omitempty 不会把它省略），前端即可结束弹窗——无需等待 dsh 完全启动成功。
+  if (installing.value && st.phase === 'done') {
     clearTimeout(reloadTimer ?? undefined)
-    updating.value = false
+    installing.value = false
     updatingDone.value = true
-    // 短暂显示“更新成功”，随后关闭弹窗并刷新页面
+    // 短暂显示“安装成功”，随后关闭弹窗并刷新页面。
     setTimeout(() => {
       dialogVisible.value = false
       window.location.reload()
@@ -164,7 +334,7 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
 }
 
 function closeDialog() {
-  if (updating.value) return
+  if (busy.value) return
   dialogVisible.value = false
 }
 
@@ -299,11 +469,11 @@ onBeforeUnmount(() => {
   if (rollbackPollTimer) clearInterval(rollbackPollTimer)
 })
 
-// 侦测后端推送的完成/失败状态：当对应状态变化且正在更新时判定结果。
+// 侦测后端推送的各阶段状态变化：下载进度、下载完成、安装完成/失败、取消。
 watch(
   () => dialogKind.value === 'harness' ? harnessStatus.value : dshStatus.value,
   (st) => {
-    if (dialogVisible.value && updating.value) watchForCompletion(dialogKind.value, st)
+    if (dialogVisible.value) watchForCompletion(dialogKind.value, st)
   },
   { deep: true }
 )
@@ -398,14 +568,54 @@ watch(
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-1">{{ dialogTitle }}</h3>
 
             <div v-if="updatingDone" class="py-6 text-center">
-              <div class="text-sm font-medium text-success dark:text-[#10B981] mb-1">{{ t('update_done') }}</div>
+              <div class="text-sm font-medium text-success dark:text-[#10B981] mb-1">{{ t('update_installed_done') }}</div>
               <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
             </div>
 
-            <!-- harness 更新中：提示需手动刷新兜底 -->
-            <div v-else-if="updating && dialogKind === 'harness'" class="text-center py-4">
-              <div class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-1">{{ t('update_updating') }}</div>
-              <div class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_manual_refresh') }}</div>
+            <!-- 下载中：进度条 + 取消（可取消） -->
+            <div v-else-if="downloading" class="py-4">
+              <div class="flex items-center justify-between text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">
+                <span>{{ t('update_downloading') }}</span>
+                <span v-if="downloadTotalKnown">{{ downloadPct }}%</span>
+              </div>
+              <div class="h-2 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+                <div
+                  class="h-full rounded-full bg-brand transition-all duration-300"
+                  :class="progressBarClass"
+                  :style="progressBarStyle"
+                ></div>
+              </div>
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ downloadSizeText }}</div>
+
+              <!-- 取消下载 -->
+              <div class="text-center mt-4">
+                <button
+                  class="g-btn-secondary text-danger hover:!bg-danger/10 !border-danger/40"
+                  :disabled="cancelling"
+                  @click="openCancelConfirm"
+                >{{ t('update_cancel') }}</button>
+              </div>
+            </div>
+
+            <!-- 已下载待安装：提示 + “删除更新包”按钮，底部为“安装更新”按钮 -->
+            <div v-else-if="downloaded" class="py-4 text-center">
+              <div class="text-sm text-ink dark:text-white mb-1">{{ t('update_wait_install') }}</div>
+              <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+
+              <!-- 删除更新包（清除下载，重置为待更新） -->
+              <div class="text-center mt-4">
+                <button
+                  class="g-btn-secondary text-danger hover:!bg-danger/10 !border-danger/40"
+                  @click="openDiscardConfirm"
+                >{{ t('update_discard_btn') }}</button>
+              </div>
+            </div>
+
+            <!-- 安装中：不可取消 -->
+            <div v-else-if="installing" class="py-6 text-center">
+              <div class="inline-block animate-spin h-6 w-6 border-2 border-brand border-t-transparent rounded-full mb-2"></div>
+              <div class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_installing') }}</div>
+              <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
             </div>
 
             <template v-else>
@@ -420,9 +630,15 @@ watch(
                 </div>
               </div>
 
-              <!-- 失败提示 -->
-              <div v-if="dialogStatus.error" class="mt-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-[#EF4444] break-words">
-                {{ dialogStatus.error }}
+              <!-- 取消 / 失败提示（取消显示中性提示，不再当作错误） -->
+              <div
+                v-if="dialogStatus.error || dialogStatus.cancelled"
+                class="mt-3 rounded-lg px-3 py-2 text-xs break-words"
+                :class="dialogStatus.cancelled
+                  ? 'bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] text-ink-soft dark:text-[#A6A6AD]'
+                  : 'bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]'"
+              >
+                {{ dialogStatus.cancelled ? t('update_cancelled') : dialogStatus.error }}
               </div>
 
               <template v-else>
@@ -442,13 +658,91 @@ watch(
             </template>
 
             <div class="flex justify-end gap-3 mt-6">
-              <button class="g-btn-secondary" :disabled="updating" @click="closeDialog">{{ t('update_close') }}</button>
+              <button class="g-btn-secondary" :disabled="busy" @click="closeDialog">{{ t('update_close') }}</button>
+              <!-- 已下载待安装 → 安装更新 -->
               <button
-                v-if="dialogStatus.hasUpdate && !updatingDone"
+                v-if="downloaded"
                 class="g-btn-primary"
-                :disabled="updating"
-                @click="doApply"
-              >{{ updating ? t('update_updating') : t('update_button') }}</button>
+                @click="openInstallConfirm"
+              >{{ t('update_install_btn') }}</button>
+              <!-- 空闲且有待更新 → 下载更新（取消后可重新下载） -->
+              <button
+                v-else-if="dialogStatus.hasUpdate && !busy && !updatingDone"
+                class="g-btn-primary"
+                @click="doDownload"
+              >{{ dialogStatus.cancelled ? t('update_redownload') : t('update_download_btn') }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 取消更新二次确认弹窗 -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div v-if="cancelConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div class="absolute inset-0 bg-black/50" @click="cancelConfirmVisible = false"></div>
+          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_cancel_confirm_title') }}</h3>
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_cancel_confirm_msg') }}</p>
+            <div class="flex justify-end gap-3 mt-6">
+              <button class="g-btn-secondary" :disabled="cancelling" @click="cancelConfirmVisible = false">{{ t('confirm_cancel') }}</button>
+              <button class="g-btn-primary !bg-danger hover:!bg-danger/90" :disabled="cancelling" @click="doCancelUpdate">{{ t('update_cancel_confirm_ok') }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 安装更新二次确认弹窗 -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div v-if="installConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div class="absolute inset-0 bg-black/50" @click="installConfirmVisible = false"></div>
+          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_install_confirm_title') }}</h3>
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_install_confirm_msg') }}</p>
+            <div class="flex justify-end gap-3 mt-6">
+              <button class="g-btn-secondary" @click="installConfirmVisible = false">{{ t('confirm_cancel') }}</button>
+              <button class="g-btn-primary" @click="doInstall">{{ t('update_install_confirm_ok') }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- 删除更新包二次确认弹窗 -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div v-if="discardConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div class="absolute inset-0 bg-black/50" @click="discardConfirmVisible = false"></div>
+          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_discard_confirm_title') }}</h3>
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_discard_confirm_msg') }}</p>
+            <div class="flex justify-end gap-3 mt-6">
+              <button class="g-btn-secondary" @click="discardConfirmVisible = false">{{ t('confirm_cancel') }}</button>
+              <button class="g-btn-primary !bg-danger hover:!bg-danger/90" @click="doDiscard">{{ t('update_discard_confirm_ok') }}</button>
             </div>
           </div>
         </div>

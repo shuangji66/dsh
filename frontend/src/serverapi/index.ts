@@ -108,6 +108,17 @@ export interface UpdateStatus {
   error?: string
   // 最新 release 的更新内容（正文，不含标题；可能为空串）
   releaseNotes?: string
+  // 下载进度（更新包下载期间由后端 SSE 推送）
+  downloading?: boolean // 是否正在下载更新包
+  downloadPct?: number // 下载进度百分比（0-100；total 未知时为估算值）
+  downloadedBytes?: number // 已下载字节数
+  totalBytes?: number // 总字节数（未知为 0）
+  // 两阶段更新流程阶段：''(空闲) / downloading(下载中) / downloaded(已下载待安装) / installing(安装中)
+  phase?: string
+  // 更新包已下载就绪，等待用户点击“安装”
+  readyToInstall?: boolean
+  // 最近一次更新是否被用户主动取消
+  cancelled?: boolean
 }
 
 export type UpdateKind = 'harness' | 'dsh'
@@ -273,11 +284,27 @@ export const api = {
     }>('/api/plugins/reset', {
       method: 'POST'
     }),
-  // 自我更新：版本检测状态 / 手动检查 / 执行更新 / SSE 推送
+  // 自我更新：版本检测状态 / 手动检查 / 下载更新（可取消） / 安装更新 / 取消下载 / SSE 推送
   updateStatus: () => request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus }>('/api/update/status'),
   updateCheck: () => request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus }>('/api/update/check', { method: 'POST' }),
-  updateApply: (kind: UpdateKind) =>
-    request<{ ok: boolean; started: boolean; kind: UpdateKind; msg?: string }>('/api/update/apply', {
+  updateDownload: (kind: UpdateKind) =>
+    request<{ ok: boolean; started: boolean; kind: UpdateKind; msg?: string }>('/api/update/download', {
+      method: 'POST',
+      body: JSON.stringify({ kind })
+    }),
+  updateInstall: (kind: UpdateKind) =>
+    request<{ ok: boolean; started: boolean; kind: UpdateKind; msg?: string }>('/api/update/install', {
+      method: 'POST',
+      body: JSON.stringify({ kind })
+    }),
+  // 取消正在进行的更新下载（下载完成后的取消请求被忽略）
+  updateCancel: () =>
+    request<{ ok: boolean; cancelled: boolean }>('/api/update/cancel', {
+      method: 'POST'
+    }),
+  // 删除已下载待安装的更新包，重置为待更新状态
+  updateDiscard: (kind: UpdateKind) =>
+    request<{ ok: boolean; discarded: boolean }>('/api/update/discard', {
       method: 'POST',
       body: JSON.stringify({ kind })
     }),

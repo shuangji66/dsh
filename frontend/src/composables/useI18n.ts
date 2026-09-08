@@ -291,6 +291,31 @@ const zh: Record<string, string> = {
   update_failed: '更新失败',
   update_close: '关闭',
   update_error_unknown: '未知错误',
+  // 两阶段更新（下载 → 安装）
+  update_download_btn: '下载更新',
+  update_installing: '安装中…',
+  update_install_btn: '安装更新',
+  update_installed_done: '安装成功，正在刷新…',
+  update_install_confirm_title: '确认安装',
+  update_install_confirm_msg: '确定要安装已下载的更新包吗？安装将备份当前版本并重启服务，期间服务会短暂中断。',
+  update_install_confirm_ok: '确认安装',
+  update_redownload: '重新下载',
+  update_wait_install: '更新包已就绪，点击“安装更新”完成安装',
+  // 删除已下载的更新包
+  update_discard_btn: '删除更新包',
+  update_discard_confirm_title: '删除更新包',
+  update_discard_confirm_msg: '确定要删除已下载的更新包吗？删除后需重新下载才能安装。',
+  update_discard_confirm_ok: '删除更新包',
+  update_discarded: '已删除更新包',
+  // 更新下载进度与取消
+  update_downloading: '正在下载更新包…',
+  update_download_size: '{downloaded} / {total}',
+  update_download_unknown_size: '已下载 {downloaded}',
+  update_cancel: '取消更新',
+  update_cancelled: '已取消更新，可重新下载',
+  update_cancel_confirm_title: '取消更新',
+  update_cancel_confirm_msg: '确定要取消当前更新吗？已下载的临时文件将被清理，不会影响现有版本。',
+  update_cancel_confirm_ok: '取消更新',
 
   // 回滚
   rollback_title: '版本回滚',
@@ -582,6 +607,31 @@ const en: Record<string, string> = {
   update_failed: 'Update failed',
   update_close: 'Close',
   update_error_unknown: 'Unknown error',
+  // Two-phase update (download → install)
+  update_download_btn: 'Download Update',
+  update_installing: 'Installing…',
+  update_install_btn: 'Install Update',
+  update_installed_done: 'Installed, refreshing…',
+  update_install_confirm_title: 'Confirm Install',
+  update_install_confirm_msg: 'Install the downloaded update package? This will back up the current version and restart the service; the service will be briefly interrupted.',
+  update_install_confirm_ok: 'Confirm Install',
+  update_redownload: 'Download Again',
+  update_wait_install: 'Update package ready. Click "Install Update" to finish.',
+  // Delete the downloaded update package
+  update_discard_btn: 'Delete Package',
+  update_discard_confirm_title: 'Delete Update Package',
+  update_discard_confirm_msg: 'Delete the downloaded update package? You will need to download it again before installing.',
+  update_discard_confirm_ok: 'Delete Package',
+  update_discarded: 'Update package deleted',
+  // Update download progress & cancel
+  update_downloading: 'Downloading update package…',
+  update_download_size: '{downloaded} / {total}',
+  update_download_unknown_size: 'Downloaded {downloaded}',
+  update_cancel: 'Cancel update',
+  update_cancelled: 'Update cancelled, you can download again',
+  update_cancel_confirm_title: 'Cancel Update',
+  update_cancel_confirm_msg: 'Cancel the current update? Downloaded temp files will be cleaned up; the current version is not affected.',
+  update_cancel_confirm_ok: 'Cancel update',
 
   // Rollback
   rollback_title: 'Version Rollback',

@@ -182,6 +182,26 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # ---------- 新增：从上游 deepseek-harness 获取对应版本的 Release Notes ----------
+      - name: 获取上游 Release Notes
+        id: fetch_notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.fetch-version.outputs.dsh_version }}"
+          UPSTREAM_REPO="deepseek-ai/deepseek-harness"
+          TAG="dsh-v${VERSION}"
+
+          # 尝试获取上游 Release 的 body
+          if NOTES=$(gh release view "$TAG" --repo "$UPSTREAM_REPO" --json body -q .body 2>/dev/null); then
+            echo "notes=$NOTES" >> $GITHUB_OUTPUT
+            echo "成功从上游获取 Release Notes"
+          else
+            # 如果获取失败（Release 不存在或网络问题），使用默认说明
+            echo "notes=自动构建 dsh $VERSION 的 server 包（包含 dshmarket 依赖）" >> $GITHUB_OUTPUT
+            echo "警告：无法从上游获取 Release Notes，使用默认说明"
+          fi
+
       - name: 创建/更新 Release 并上传资产
         env:
           GH_TOKEN: ${{ secrets.DSH }}
@@ -191,12 +211,12 @@ jobs:
           TAG="dsh-$VERSION"
           TITLE="dsh Server $VERSION"
 
-          # 获取用户输入的发布说明（若为调度触发则不存在，默认为空）
+          # 优先使用用户手动输入的 notes，否则使用从上游获取的 notes
           USER_NOTES="${{ github.event.inputs.notes }}"
-          if [ -z "$USER_NOTES" ]; then
-            NOTES="自动构建 dsh $VERSION 的 server 包（包含 dshmarket 依赖）"
-          else
+          if [ -n "$USER_NOTES" ]; then
             NOTES="$USER_NOTES"
+          else
+            NOTES="${{ steps.fetch_notes.outputs.notes }}"
           fi
 
           # 如果 Release 已存在，只追加资产；否则新建

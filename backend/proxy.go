@@ -15,7 +15,10 @@ import (
 //   - randomUUID polyfill (non-secure HTTP contexts),
 //   - client privileged-state injection: __DSH_TRANSPORT__ ownsHost,
 //   - module-loader hook that forces connection.isLoopback = true,
-//   - settings-scope enqueue fix (keeps plugin-config / model-settings writable).
+//   - settings-scope enqueue fix (keeps plugin-config / model-settings writable),
+//   - open-in-app block: 服务器部署没有本地 GUI 应用，"在本地编辑器打开工作区"
+//     （/open-in-app/apps、/open-in-app/icon/<app>、/open-in-app/open）无效，
+//     注入脚本拦截整个 /open-in-app/ 前缀，apps 探测失败即隐藏头部按钮。
 const bootstrapScript = `(function () {
   // 1. randomUUID polyfill for non-secure (HTTP IP) contexts
   var c = window.crypto;
@@ -110,6 +113,101 @@ const bootstrapScript = `(function () {
       });
     } catch (_e) {}
   }
+
+  // 4. 屏蔽 dsh 的"用本地编辑器打开工作区"功能（open-in-app）
+  //    dsh 新版本在会话头部提供 open-in-app 拆分按钮，宿主注册了三个路由：
+  //    GET /open-in-app/apps、GET /open-in-app/icon/<app>、POST /open-in-app/open。
+  //    服务器部署没有本地 GUI 应用可打开，这些请求在服务器上无效（点击还会
+  //    在宿主机派生进程）。客户端设计：/open-in-app/apps 探测失败即发布空
+  //    列表、不渲染按钮（open-in-app 的 controller.run() 与 OpenInAppAction
+  //    均按“无可用应用”处理），因此拦截整个 /open-in-app/ 前缀即可让该功能
+  //    整体消失，也不会再产生 /open-in-app/icon/zed 之类的图标请求。
+  var isOpenInAppUrl = function (input) {
+    var raw;
+    if (typeof input === "string") raw = input;
+    else if (typeof URL === "function" && input instanceof URL) raw = String(input);
+    else if (input && typeof input === "object" && typeof input.url === "string") raw = input.url; // Request
+    else return false;
+    try {
+      var u = new URL(raw, location.href);
+      var p = u.pathname;
+      return p === "/open-in-app" || p.indexOf("/open-in-app/") === 0;
+    } catch (_e) { return false; }
+  };
+
+  // 4a. fetch 拦截：对 /open-in-app/* 返回 404（非 ok、不触网），
+  //     客户端按“无可用应用”降级，按钮不渲染。
+  var rawFetch = window.fetch;
+  if (typeof rawFetch === "function") {
+    window.fetch = function (input, init) {
+      if (isOpenInAppUrl(input)) {
+        try {
+          return Promise.resolve(new Response(null, { status: 404, statusText: "Not Found" }));
+        } catch (_e) {
+          // 无 Response 构造器的极端环境：返回最小失败对象（ok=false 即失败）
+          return Promise.resolve({ ok: false, status: 404, statusText: "Not Found", url: String(input) });
+        }
+      }
+      return rawFetch.apply(this, arguments);
+    };
+  }
+
+  // 4b. XMLHttpRequest 拦截（防御未来改用 XHR 的客户端）：不发请求，
+  //     直接模拟失败（readyState=DONE、status=0、触发 error 事件）。
+  try {
+    if (typeof XMLHttpRequest !== "undefined") {
+      var xhrOpen = XMLHttpRequest.prototype.open;
+      var xhrSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        this.__dshOpenInAppBlocked = isOpenInAppUrl(url);
+        return xhrOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function (body) {
+        if (this.__dshOpenInAppBlocked) {
+          this.__dshOpenInAppBlocked = false;
+          var self = this;
+          var failXhr = function () {
+            try {
+              Object.defineProperty(self, "readyState", { value: 4, configurable: true, writable: true });
+              Object.defineProperty(self, "status", { value: 0, configurable: true, writable: true });
+            } catch (_e) {}
+            if (typeof self.onreadystatechange === "function") { try { self.onreadystatechange(); } catch (_e) {} }
+            try {
+              var ev = new Event("error");
+              self.dispatchEvent(ev);
+              if (typeof self.onerror === "function") { try { self.onerror(ev); } catch (_e) {} }
+            } catch (_e) {}
+          };
+          if (typeof Promise !== "undefined" && typeof Promise.resolve === "function") Promise.resolve().then(failXhr);
+          else setTimeout(failXhr, 0);
+          return;
+        }
+        return xhrSend.apply(this, arguments);
+      };
+    }
+  } catch (_e) {}
+
+  // 4c. <img src="/open-in-app/icon/<app>"> 图标请求拦截：不赋值 src，
+  //     即不发起网络请求（兜底；apps 已被 4a 拦截时按钮不会渲染图标）。
+  try {
+    if (typeof HTMLImageElement !== "undefined") {
+      var imgSrcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+      if (imgSrcDesc && typeof imgSrcDesc.set === "function") {
+        var imgSrcGet = imgSrcDesc.get;
+        var imgSrcSet = imgSrcDesc.set;
+        Object.defineProperty(HTMLImageElement.prototype, "src", {
+          configurable: true,
+          get: function () { return imgSrcGet ? imgSrcGet.call(this) : undefined; },
+          set: function (v) {
+            if (!isOpenInAppUrl(v)) imgSrcSet.call(this, v);
+          },
+        });
+      }
+    }
+  } catch (_e) {}
+
+  // 调试标记：页面加载后可用 window.__DSH_OPEN_IN_APP_BLOCKED__ 确认屏蔽生效。
+  try { window.__DSH_OPEN_IN_APP_BLOCKED__ = true; } catch (_e) {}
 })();`
 
 func injectIntoHTML(body []byte) []byte {

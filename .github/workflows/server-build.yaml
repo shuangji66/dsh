@@ -182,7 +182,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # ---------- 新增：从上游 deepseek-harness 获取对应版本的 Release Notes ----------
+      # ---------- 获取上游 Release Notes（支持多行） ----------
       - name: 获取上游 Release Notes
         id: fetch_notes
         env:
@@ -192,14 +192,18 @@ jobs:
           UPSTREAM_REPO="deepseek-ai/deepseek-harness"
           TAG="dsh-v${VERSION}"
 
-          # 尝试获取上游 Release 的 body
           if NOTES=$(gh release view "$TAG" --repo "$UPSTREAM_REPO" --json body -q .body 2>/dev/null); then
-            echo "notes=$NOTES" >> $GITHUB_OUTPUT
-            echo "成功从上游获取 Release Notes"
+            # 使用多行输出格式，避免特殊字符（换行、引号等）导致的问题
+            echo "notes<<EOF" >> $GITHUB_OUTPUT
+            echo "$NOTES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "✅ 成功从上游获取 Release Notes"
           else
-            # 如果获取失败（Release 不存在或网络问题），使用默认说明
-            echo "notes=自动构建 dsh $VERSION 的 server 包（包含 dshmarket 依赖）" >> $GITHUB_OUTPUT
-            echo "警告：无法从上游获取 Release Notes，使用默认说明"
+            DEFAULT_NOTES="自动构建 dsh $VERSION 的 server 包（包含 dshmarket 依赖）"
+            echo "notes<<EOF" >> $GITHUB_OUTPUT
+            echo "$DEFAULT_NOTES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "⚠️ 无法从上游获取 Release Notes，使用默认说明"
           fi
 
       - name: 创建/更新 Release 并上传资产
@@ -211,7 +215,7 @@ jobs:
           TAG="dsh-$VERSION"
           TITLE="dsh Server $VERSION"
 
-          # 优先使用用户手动输入的 notes，否则使用从上游获取的 notes
+          # 优先用户手动输入，否则使用上游 notes
           USER_NOTES="${{ github.event.inputs.notes }}"
           if [ -n "$USER_NOTES" ]; then
             NOTES="$USER_NOTES"
@@ -219,15 +223,22 @@ jobs:
             NOTES="${{ steps.fetch_notes.outputs.notes }}"
           fi
 
-          # 如果 Release 已存在，只追加资产；否则新建
+          # 将内容写入临时文件，支持多行和特殊字符
+          echo "$NOTES" > /tmp/release_notes.txt
+
           if gh release view "$TAG" --repo "$REPO" &>/dev/null; then
             echo "Release $TAG 已存在，将添加新资产"
           else
-            gh release create "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES"
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --title "$TITLE" \
+              --notes-file /tmp/release_notes.txt
           fi
 
-          # 上传所有 .tar.gz 文件（x86 和 arm）
           for file in artifacts/*.tar.gz; do
+            echo "上传 $file"
+            gh release upload "$TAG" "$file" --repo "$REPO" --clobber
+          done
             echo "上传 $file"
             gh release upload "$TAG" "$file" --repo "$REPO" --clobber
           done

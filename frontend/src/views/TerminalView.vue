@@ -2,6 +2,7 @@
   import { onMounted, onBeforeUnmount, onActivated, onDeactivated, ref, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { useI18n } from '@/composables/useI18n'
 import { useToastStore } from '@/stores/toast'
@@ -280,11 +281,21 @@ onMounted(() => {
   term = new Terminal({
     cursorBlink: true,
     fontSize: 13,
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    // 字体需带 CJK 回退，否则中文按 fallsback 字体的度量渲染，导致列宽错位
+    fontFamily:
+      'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", "Noto Sans Mono CJK SC", "PingFang SC", "Microsoft YaHei", "WenQuanYi Micro Hei", monospace',
     theme,
     scrollback: 1000,
     letterSpacing: 0,
+    // xterm 5.x 中 term.unicode API 属 proposed API，访问前必须显式开启，
+    // 否则 term.unicode.activeVersion = '11' 会直接抛错导致终端页初始化中断。
+    allowProposedApi: true,
   })
+  // Unicode 11 宽度表：xterm 默认的 Unicode 6 规则对大量 CJK 字符宽度计算错误，
+  // 会造成中文输入时光标/渲染错位。addon 需在构造后加载并切换 activeVersion
+  // （构造参数里直接写 unicodeVersion: '11' 会因 provider 尚未注册而抛错）。
+  term.loadAddon(new Unicode11Addon())
+  term.unicode.activeVersion = '11'
   fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 

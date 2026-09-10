@@ -447,8 +447,9 @@ func fetchTagsViaHTML(client *http.Client) ([]string, error) {
 // fetchReleaseNotes 获取指定 tag 的 release 正文（不含标题 name）。优先走
 // GitHub Releases API（取 body 字段）；API 受速率限制或不可用时，回退到非 API
 // 的 release 页面 HTML（此页面不受 API 限流），解析其中的 markdown-body 正文。
-// 任何失败都返回空串，不影响更新检测主流程。返回的正文保留原始换行与
-// Markdown 文本，由前端按纯文本换行展示。
+// 任何失败都返回空串，不影响更新检测主流程。返回的正文保留原始 Markdown
+// 文本（API 路径）或经 stripHTMLToText 还原的可读文本（HTML 回退路径），
+// 由前端做轻量 Markdown 渲染展示。
 func fetchReleaseNotes(client *http.Client, tag string) string {
 	if body := fetchReleaseNotesViaAPI(client, tag); body != "" {
 		return body

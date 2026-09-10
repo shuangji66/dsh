@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-//go:embed embed
+//go:embed all:embed
 var embeddedFS embed.FS
 
 // embeddedFrontend returns the embedded SPA assets.

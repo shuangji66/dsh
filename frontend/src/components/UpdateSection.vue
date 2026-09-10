@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, sseUrl, type UpdateKind, type UpdateStatus, type ServerBackup } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
+import MarkdownText from '@/components/MarkdownText.vue'
 
 // 概览页传入：dsh 访问地址列表（显示在版本号下方）
 const props = defineProps<{ accessUrls?: string[] }>()
@@ -642,11 +643,11 @@ watch(
               </div>
 
               <template v-else>
-                <!-- 更新内容（release 正文，不含标题）：保留换行、超长可滚动，不撑破弹窗 -->
+                <!-- 更新内容（release 正文，不含标题）：Markdown 渲染，超长可滚动，不撑破弹窗 -->
                 <div v-if="dialogStatus.hasUpdate && dialogStatus.releaseNotes" class="mt-3">
                   <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">{{ t('update_release_notes') }}</div>
-                  <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] whitespace-pre-wrap break-words max-h-44 overflow-y-auto leading-relaxed">
-                    {{ dialogStatus.releaseNotes }}
+                  <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] max-h-44 overflow-y-auto leading-relaxed">
+                    <MarkdownText :source="dialogStatus.releaseNotes" />
                   </div>
                 </div>
 

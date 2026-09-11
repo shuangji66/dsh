@@ -34,14 +34,20 @@ type RuntimeEnv struct {
 	AdminSock    string
 	AdminBaseURL string
 	LogFile      string // 日志文件输出路径（HARNESS_LOG_FILE），为空则不落盘
-	TRIMApiToken string
-	TRIMAppDest  string
-	TRIMAppName  string
-	Path         string
-	Home         string
-	PnpmHome     string
-	Lang         string
-	ProxyPort    int // 新增
+	// PidFile 是 harness 控制台自身的 PID 文件路径（HARNESS_PID_FILE，为空则不
+	// 维护）；DshPidFile 是 dsh 服务进程的 PID 文件路径（HARNESS_DSH_PID_FILE，
+	// 为空则不维护）。二者用途不同：前者标识控制台进程，dsh 装插件自重启等场景
+	// 下保持不变；后者跟随 dsh 实时 PID，dsh 停止时移除。
+	PidFile       string
+	DshPidFile    string
+	TRIMApiToken  string
+	TRIMAppDest   string
+	TRIMAppName   string
+	Path          string
+	Home          string
+	PnpmHome      string
+	Lang          string
+	ProxyPort     int // 新增
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（HARNESS_QUICK_CMDS_FILE）
 }
 
@@ -72,6 +78,8 @@ func loadRuntimeEnv() RuntimeEnv {
 		AdminSock:    envOr("HARNESS_ADMIN_SOCK", filepath.Join(appDest, "app.sock")),
 		AdminBaseURL: envOr("HARNESS_ADMIN_BASEURL", appDest),
 		LogFile:      os.Getenv("HARNESS_LOG_FILE"),
+		PidFile:      os.Getenv("HARNESS_PID_FILE"),
+		DshPidFile:   os.Getenv("HARNESS_DSH_PID_FILE"),
 		TRIMApiToken: os.Getenv("TRIM_API_TOKEN"),
 		TRIMAppDest:  appDest,
 		TRIMAppName:  appName,

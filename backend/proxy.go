@@ -610,6 +610,15 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 	}
 	defer resp.Body.Close()
 
+	// dsh 市场（dsh-market）一键自重启检测：前端点击“立即重启”会对
+	// POST /dsh-market/restart 发起请求，dsh-market 排定自重启后返回 200
+	//（实际约 0.5s 后对自己 SIGTERM，由 detached helper 拉起新进程）。此时
+	// 通知 DshManager 作废缓存并后台重新发现新 dsh PID，刷新 PID 文件与
+	// 概览 CPU/内存监控（否则旧 PID 的僵尸态会让监控读到 0）。
+	if isPrivilegedControlRoute(r.URL.Path) && r.Method == http.MethodPost && resp.StatusCode == http.StatusOK {
+		p.dsh.notifySelfRestart()
+	}
+
 	for k, vv := range resp.Header {
 		for _, v := range vv {
 			w.Header().Add(k, v)

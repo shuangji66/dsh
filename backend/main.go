@@ -94,7 +94,10 @@ func main() {
     cleanupLog := setupLogFile()
     defer cleanupLog()
 
-    pidFile := os.Getenv("HARNESS_PID_FILE")
+    // HARNESS_PID_FILE 记录的是 harness 控制台自身 PID（用于平台识别控制台
+    // 进程），dsh 服务 PID 单独由 HARNESS_DSH_PID_FILE 记录（见 DshManager，
+    // 随 dsh 启动/自重启/停止实时刷新），二者不要混用。
+    pidFile := renv.PidFile
     if pidFile != "" {
         if err := writePidFile(pidFile, os.Getpid()); err != nil {
             logger().Printf("failed to write pid file %s: %v", pidFile, err)
@@ -103,6 +106,9 @@ func main() {
         }
         defer removePidFile(pidFile)
     }
+    // 退出时顺带清理 dsh 服务 PID 文件（正常退出前 dsh.Stop() 已移除，
+    // 这里兜底处理异常退出路径）。
+    defer removePidFile(renv.DshPidFile)
 
     if _, err := net.Dial("unix", renv.AdminSock); err == nil {
         logger().Printf("Admin socket %s is already in use, another instance is running. Exiting.", renv.AdminSock)

@@ -123,7 +123,8 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_ADMIN_SOCK` | Admin Unix socket 路径 | `$TRIM_APPDEST/app.sock` |
 | `HARNESS_ADMIN_BASEURL` | 前端资源 baseurl 前缀 | `$TRIM_APPDEST` |
 | `HARNESS_LOG_FILE` | 日志落盘路径（空则不落盘） | 空 |
-| `HARNESS_PID_FILE` | PID 文件路径 | 空 |
+| `HARNESS_PID_FILE` | PID 文件路径（harness 控制台自身 PID，恒不变） | 空 |
+| `HARNESS_DSH_PID_FILE` | dsh 服务 PID 文件路径（随 dsh 启动/自重启刷新为实时 PID，dsh 停止时移除） | 空 |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
 | `HARNESS_QUICK_CMDS_FILE` | 终端快捷指令持久化文件 | `$TRIM_PKGVAR/quickcmds.json` |
 | `PROXY_PORT` | 反向代理监听端口 | `13079` |

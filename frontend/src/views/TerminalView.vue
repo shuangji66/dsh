@@ -1,10 +1,12 @@
 <script setup lang="ts">
-  import { onMounted, onBeforeUnmount, onActivated, onDeactivated, ref, nextTick } from 'vue'
+  import { onMounted, onBeforeUnmount, onActivated, onDeactivated, ref, watch, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { ClipboardAddon } from '@xterm/addon-clipboard'
 import '@xterm/xterm/css/xterm.css'
 import { useI18n } from '@/composables/useI18n'
+import { useTheme } from '@/composables/useTheme'
 import { useToastStore } from '@/stores/toast'
 import { api, type QuickCmd } from '@/serverapi'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -14,6 +16,57 @@ import QuickCmdEditDialog from '@/components/QuickCmdEditDialog.vue'
 defineOptions({ name: 'TerminalView' })
 const { t } = useI18n()
 const toast = useToastStore()
+const { isDark } = useTheme() // 终端配色跟随控制台浅色/深色切换
+
+// ---------- xterm 主题配色（随控制台主题切换） ----------
+// 深色模式：黑底 #1A1A1A 背景、#4EC9B0 绿字（经典绿色终端风）
+const DARK_PALETTE = {
+  background: '#1A1A1A',
+  foreground: '#4EC9B0',
+  cursor: '#4EC9B0',
+  cursorAccent: '#1A1A1A',
+  selectionBackground: 'rgba(78, 201, 176, 0.35)',
+  black: '#4d4d4d',
+  red: '#ff5555',
+  green: '#4EC9B0',
+  yellow: '#ffdd33',
+  blue: '#5555ff',
+  magenta: '#ff55ff',
+  cyan: '#55ffff',
+  white: '#bbbbbb',
+  brightBlack: '#878787',
+  brightRed: '#ff7777',
+  brightGreen: '#66ff88',
+  brightYellow: '#ffee66',
+  brightBlue: '#7777ff',
+  brightMagenta: '#ff88ff',
+  brightCyan: '#88ffff',
+  brightWhite: '#ffffff'
+}
+// 浅色模式：温和的米白背景 + 黑字
+const LIGHT_PALETTE = {
+  background: '#faf5e9',
+  foreground: '#1a1814',
+  cursor: '#1a1814',
+  cursorAccent: '#faf5e9',
+  selectionBackground: 'rgba(181, 141, 63, 0.35)',
+  black: '#37352f',
+  red: '#c14a3a',
+  green: '#4d7f38',
+  yellow: '#a5711f',
+  blue: '#3b6ea5',
+  magenta: '#8f4f9e',
+  cyan: '#2e7d78',
+  white: '#665f52',
+  brightBlack: '#8a8377',
+  brightRed: '#d96a55',
+  brightGreen: '#5c9444',
+  brightYellow: '#c08a2e',
+  brightBlue: '#4f82bd',
+  brightMagenta: '#a862b5',
+  brightCyan: '#3d918b',
+  brightWhite: '#948c7d'
+}
 
 const el = ref<HTMLElement | null>(null)
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -24,6 +77,10 @@ let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let sock: WebSocket | null = null
 let termOpened = false
+
+// 桌面端鼠标选中自动复制的去重/节流状态
+let lastAutoCopied = ''
+let lastAutoCopyToastAt = 0
 
 // 心跳间隔(ms)：定期发送控制消息，防止连接被代理 / NAT / 负载均衡的空闲超时断开
 const HEARTBEAT_INTERVAL_MS = 20000
@@ -254,37 +311,14 @@ function onTouchEnd() {
 onMounted(() => {
   if (!el.value) return
 
-  const theme = {
-    background: '#1e1e2e',
-    foreground: '#cdd6f4',
-    cursor: '#f5e0dc',
-    cursorAccent: '#1e1e2e',
-    selection: '#585b70',
-    black: '#45475a',
-    red: '#f38ba8',
-    green: '#a6e3a1',
-    yellow: '#f9e2af',
-    blue: '#89b4fa',
-    magenta: '#cba6f7',
-    cyan: '#94e2d5',
-    white: '#bac2de',
-    brightBlack: '#585b70',
-    brightRed: '#f38ba8',
-    brightGreen: '#a6e3a1',
-    brightYellow: '#f9e2af',
-    brightBlue: '#89b4fa',
-    brightMagenta: '#cba6f7',
-    brightCyan: '#94e2d5',
-    brightWhite: '#a6adc8',
-  }
-
   term = new Terminal({
     cursorBlink: true,
     fontSize: 13,
     // 字体需带 CJK 回退，否则中文按 fallsback 字体的度量渲染，导致列宽错位
     fontFamily:
       'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", "Noto Sans Mono CJK SC", "PingFang SC", "Microsoft YaHei", "WenQuanYi Micro Hei", monospace',
-    theme,
+    // 终端的底色/字体色跟随控制台浅色/深色主题切换
+    theme: isDark.value ? DARK_PALETTE : LIGHT_PALETTE,
     scrollback: 1000,
     letterSpacing: 0,
     // xterm 5.x 中 term.unicode API 属 proposed API，访问前必须显式开启，
@@ -298,6 +332,12 @@ onMounted(() => {
   term.unicode.activeVersion = '11'
   fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
+  // 剪贴板 addon：注册 OSC 52 剪贴板读写（桌面端鼠标选中自动复制）
+  try {
+    term.loadAddon(new ClipboardAddon())
+  } catch (e) {
+    console.warn('clipboard addon:', e)
+  }
 
   // 等待等宽字体加载完成后再 open + fit，确保 xterm 首次测量到的字符
   // 单元格宽度是准确的。若过早 open，xterm 会用一个尚未加载完成的回退
@@ -391,7 +431,29 @@ onMounted(() => {
     }
     sock.send(data)
   })
+
+  // 桌面端：鼠标框选（或双击选词）后自动把选中文本复制进剪贴板，并 toast 提示。
+  // 连续选择变化时按文本去重 + 1.2s 节流，避免刷屏。
+  term.onSelectionChange(() => {
+    const sel = term?.getSelection()
+    if (!sel || !sel.trim() || sel === lastAutoCopied) return
+    lastAutoCopied = sel
+    copyText(sel)
+    const now = Date.now()
+    if (now - lastAutoCopyToastAt > 1200) {
+      lastAutoCopyToastAt = now
+      showToast('' + t('term_copied') + '')
+    }
+  })
 })
+
+// 控制台主题（浅色/深色/跟随系统）切换时，实时更新终端底色与字体色
+watch(
+  () => isDark.value,
+  (d) => {
+    if (term) term.options.theme = d ? DARK_PALETTE : LIGHT_PALETTE
+  }
+)
 
 // 页面切换回来时（KeepAlive 激活）：重新适配尺寸、滚动到底部
 onActivated(() => {
@@ -577,22 +639,42 @@ async function onQuickCmdSave(payload: { name: string; content: string; auto: bo
   }
 }
 
-// ---------- 复制：把终端选中内容复制到剪贴板 ----------
-async function copySelection() {
-  if (!term) return
-  const sel = term.getSelection()
-  if (!sel) {
-    showToast('' + t('term_no_selection') + '')
-    return
-  }
+// 快捷指令上移/下移：QuickCmdsDialog 已算出新顺序，这里整体写回持久化文件
+async function onQuickCmdReorder(ordered: QuickCmd[]) {
+  quickCmds.value = ordered
   try {
-    await navigator.clipboard.writeText(sel)
-    showToast('' + t('term_copied') + '')
+    await persistQuickCmds()
   } catch {
-    // 剪贴板 API 不可用（如非安全上下文）时退回选中态
-    showToast('' + t('term_select_hint') + '')
+    // persistQuickCmds 已提示失败并回滚
   }
-  term.focus()
+}
+
+// ---------- 复制：桌面端鼠标选中已自动复制，不再提供复制按钮入口 ----------
+// 剪贴板写入：优先异步 Clipboard API；非安全上下文（http 反代）时用 execCommand 兜底
+function legacyCopy(text: string) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  ta.style.top = '-9999px'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  try {
+    document.execCommand('copy')
+  } catch {
+    /* 忽略 */
+  }
+  document.body.removeChild(ta)
+}
+
+function copyText(text: string) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).catch(() => legacyCopy(text))
+  } else {
+    legacyCopy(text)
+  }
 }
 
 // ---------- 粘贴：读取剪贴板并发送到终端 ----------
@@ -637,15 +719,16 @@ function showToast(msg: string) {
       </div>
       <div class="flex items-center gap-1">
         <button class="g-btn-ghost" :title="t('term_quick_cmds')" @click="openQuickCmds">{{ t('term_quick_cmds') }}</button>
-        <button class="g-btn-ghost hidden sm:inline-flex" :title="t('term_copy')" @click="copySelection">{{ t('term_copy') }}</button>
         <button class="g-btn-ghost" :title="t('term_paste')" @click="pasteClipboard">{{ t('term_paste') }}</button>
         <button class="g-btn-ghost" @click="reconnect">{{ t('term_reconnect') }}</button>
         <button class="g-btn-ghost" @click="clearTerminal">{{ t('term_clear') }}</button>
       </div>
     </div>
 
-    <!-- 终端容器，绑定触摸事件（相对定位，承载复制提示气泡） -->
-    <div ref="el" class="flex-1 term-container overflow-hidden relative" @touchstart="onTouchStart"
+    <!-- 终端容器，绑定触摸事件（相对定位，承载复制提示气泡）
+         深色模式：#1A1A1A 底 / #4EC9B0 字；浅色模式：#faf5e9 底 / #1a1814 字（跟随控制台主题） -->
+    <div ref="el" class="flex-1 term-container overflow-hidden relative border-l-[10px] border-b-[10px]
+      bg-[#faf5e9] border-[#faf5e9] dark:bg-[#1A1A1A] dark:border-[#1A1A1A]" @touchstart="onTouchStart"
       @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd">
       <!-- 复制/粘贴反馈提示 -->
       <div
@@ -706,6 +789,7 @@ function showToast(msg: string) {
     @edit="onQuickCmdEdit"
     @delete="onQuickCmdDelete"
     @run="runQuickCmd"
+    @reorder="onQuickCmdReorder"
   />
 
   <!-- 新增 / 编辑快捷指令弹窗 -->

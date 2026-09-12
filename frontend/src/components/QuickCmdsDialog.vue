@@ -15,11 +15,13 @@ const emit = defineEmits<{
   (e: 'edit', cmd: QuickCmd): void
   (e: 'delete', cmd: QuickCmd): void
   (e: 'run', cmd: QuickCmd): void
+  (e: 'reorder', ordered: QuickCmd[]): void
 }>()
 
 const { t } = useI18n()
 
 const open = ref(props.visible)
+const reordering = ref(false)
 watch(
   () => props.visible,
   (v) => (open.value = v)
@@ -28,6 +30,25 @@ watch(
 function close() {
   open.value = false
   emit('update:visible', false)
+}
+
+// 上移/下移：交换相邻项后整体提交新顺序，由父组件持久化
+function moveUp(idx: number) {
+  if (idx <= 0 || reordering.value) return
+  const arr = props.commands.slice()
+  ;[arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]]
+  reordering.value = true
+  emit('reorder', arr)
+  reordering.value = false
+}
+
+function moveDown(idx: number) {
+  if (idx >= props.commands.length - 1 || reordering.value) return
+  const arr = props.commands.slice()
+  ;[arr[idx], arr[idx + 1]] = [arr[idx + 1], arr[idx]]
+  reordering.value = true
+  emit('reorder', arr)
+  reordering.value = false
 }
 </script>
 
@@ -48,7 +69,10 @@ function close() {
         >
           <div class="flex items-center justify-between px-5 py-4 border-b border-line dark:border-[#2A2A32]">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white">{{ t('qc_title') }}</h3>
-            <button class="g-btn-ghost !h-8 !px-2 text-lg leading-none" title="close" @click="close">×</button>
+            <div class="flex items-center gap-2">
+              <button class="g-btn-primary !h-8 px-4 text-sm" @click="emit('add')">{{ t('qc_add') }}</button>
+              <button class="g-btn-ghost !h-8 !px-2 text-lg leading-none" title="close" @click="close">×</button>
+            </div>
           </div>
 
           <!-- 命令卡片列表 -->
@@ -60,7 +84,7 @@ function close() {
               {{ t('qc_empty') }}
             </div>
             <div
-              v-for="c in props.commands"
+              v-for="(c, idx) in props.commands"
               :key="c.id"
               class="group rounded-lg border border-[#E8E8EC] dark:border-[#2A2A32] hover:border-brand/50 dark:hover:border-brand/50 cursor-pointer transition-colors"
               :title="c.content"
@@ -77,8 +101,9 @@ function close() {
                 <!-- 命令内容：单行省略，绝不溢出卡片 -->
                 <p class="mt-1 text-xs font-mono text-ink-soft dark:text-[#A6A6AD] truncate">{{ c.content }}</p>
               </div>
+              <!-- 第二行：左侧 编辑/删除，右侧 上移/下移（SVG 图标） -->
               <div class="flex items-center gap-2 px-3.5 py-2 border-t border-line dark:border-[#2A2A32]">
-                <button class="g-btn-ghost !h-7 !px-2.5 text-xs" title="编辑" @click.stop="emit('edit', c)">
+                <button class="g-btn-ghost !h-7 !px-2.5 text-xs" :title="t('qc_edit')" @click.stop="emit('edit', c)">
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5">
                     <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -86,7 +111,7 @@ function close() {
                   </svg>
                   {{ t('qc_edit') }}
                 </button>
-                <button class="g-btn-ghost !h-7 !px-2.5 text-xs !text-[#EF4444] hover:!bg-[#EF4444]/10" title="删除" @click.stop="emit('delete', c)">
+                <button class="g-btn-ghost !h-7 !px-2.5 text-xs !text-[#EF4444] hover:!bg-[#EF4444]/10" :title="t('qc_delete')" @click.stop="emit('delete', c)">
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5">
                     <path d="M3 6h18" />
@@ -94,13 +119,33 @@ function close() {
                   </svg>
                   {{ t('qc_delete') }}
                 </button>
+                <div class="flex-1"></div>
+                <!-- 上移（第一项不可上移） -->
+                <button
+                  v-if="idx > 0"
+                  class="g-btn-ghost !h-7 !px-2"
+                  :title="t('qc_move_up')"
+                  :disabled="reordering"
+                  @click.stop="moveUp(idx)"
+                >
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 15l-6-6-6 6" />
+                  </svg>
+                </button>
+                <!-- 下移（最后一项不可下移） -->
+                <button
+                  v-if="idx < props.commands.length - 1"
+                  class="g-btn-ghost !h-7 !px-2"
+                  :title="t('qc_move_down')"
+                  :disabled="reordering"
+                  @click.stop="moveDown(idx)"
+                >
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                </button>
               </div>
             </div>
-          </div>
-
-          <!-- 底部：新增按钮 -->
-          <div class="px-5 py-3 border-t border-line dark:border-[#2A2A32]">
-            <button class="g-btn-primary w-full" @click="emit('add')">{{ t('qc_add') }}</button>
           </div>
         </div>
       </div>

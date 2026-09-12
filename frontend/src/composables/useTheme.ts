@@ -1,11 +1,16 @@
 // src/composables/useTheme.ts
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 
 type ThemeMode = 'light' | 'dark' | 'system'
 
 // 从 localStorage 读取，若无效则默认为 'system'
 const themeMode = ref<ThemeMode>((localStorage.getItem('theme-mode') as ThemeMode) || 'system')
 const systemPrefersDark = ref(window.matchMedia('(prefers-color-scheme: dark)').matches)
+
+// 控制台是否处于深色模式（供各视图 —— 尤其终端 xterm 配色 —— 跟随切换）
+const isDark = computed(
+  () => themeMode.value === 'dark' || (themeMode.value === 'system' && systemPrefersDark.value)
+)
 
 function applyTheme(mode: ThemeMode) {
   const isDark = mode === 'dark' || (mode === 'system' && systemPrefersDark.value)
@@ -65,6 +70,7 @@ export function useTheme() {
 
   return {
     themeMode, // 只读，使用 setTheme 修改
+    isDark, // 深色模式指示（终端配色等跟随控制台切换）
     setTheme,
     cycleTheme,
     applyTheme,

@@ -29,6 +29,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
+export interface NodeVersionInfo {
+  id: string // "node24" / "node26"
+  label: string // 显示名，如 "Node.js v24"
+  available: boolean
+}
+
 export interface RuntimeInfo {
   configFile: string
   adminSock: string
@@ -36,6 +42,8 @@ export interface RuntimeInfo {
   appName: string
   fnosAvailable: boolean
   proxyPort: number
+  // node 版本切换选项（node24 始终可用；node26 仅在宿主机存在时可用）
+  nodeVersions?: NodeVersionInfo[]
   // 主目录相关（资源页）：
   defaultHomeSemantic: string // 默认主目录的相对/语义路径，如 /var/apps/Harness/shares/Harness
   defaultHomeDir: string // 默认主目录的实际系统路径
@@ -51,6 +59,7 @@ export interface AppConfig {
   authTTLHours: number
   dshMemLimit: number
   dshMemAuto: boolean
+  nodeVersion: string // dsh 启动使用的 node 版本，"node24"/"node26"，默认 "node24"
   homeDir?: string // 当前设置的主目录实际路径（用于保存配置时保留）
   accessUrls?: string[] // 用户配置的 dsh 访问地址列表
 }

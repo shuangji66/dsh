@@ -661,7 +661,13 @@ func (m *DshManager) buildEnv() []string {
 	}
 
 	if m.renv.Path != "" {
-		set("PATH=", m.renv.Path)
+		pathVal := m.renv.Path
+		// 根据配置的 node 版本，把对应版本的 bin 目录前置到 PATH。
+		// node24（默认）使用系统默认 node，不额外前置；node26 在可用时前置其 bin。
+		if prefix := nodeVersionBinPrefix(cfg.NodeVersion); prefix != "" {
+			pathVal = prefix + ":" + pathVal
+		}
+		set("PATH=", pathVal)
 	}
 	// HOME 使用“当前主目录”（可能已在资源页被切换为某个已授权目录的实际路径），
 	// 默认为主机启动时的 HOME（/var/apps/Harness/shares/Harness 的实际路径）。

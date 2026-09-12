@@ -167,6 +167,11 @@ func (m *AdminMux) SetSPA(fsys fs.FS) {
 
 // --- Settings API ---
 func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	// 每次拉取设置前自愈：若配置为 node26 但 node v26 已被卸载/不存在，
+	// 主动回退到 node24 并改写持久化配置，保证前端拿到的总是有效状态。
+	if ensureValidNodeVersion(m.renv) {
+		logger().Printf("[node] node26 已不存在，版本已回退到 node24 并持久化")
+	}
 	cfg := GetConfig()
 	locked := m.dsh.Running()
 	writeJSON(w, map[string]interface{}{
@@ -178,6 +183,9 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"adminBaseURL":  m.renv.AdminBaseURL,
 			"appName":       m.renv.TRIMAppName,
 			"proxyPort":     m.renv.ProxyPort,
+			// node 版本切换选项：列出可用版本及其标识，前端据此显示下拉选项。
+			// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
+			"nodeVersions": m.nodeVersionsInfo(),
 			// 默认主目录语义路径及其实际系统路径，与当前主目录（dsh 的 HOME）。
 			"defaultHomeSemantic": m.defaultHomeSemantic(),
 			"defaultHomeDir":      m.renv.Home,
@@ -222,6 +230,17 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if req.Config.DshMemLimit > 65536 {
 		writeErr(w, "dsh 内存限制不能超过 65536 MB（64GB）", http.StatusBadRequest)
 		return
+	}
+	// 校验 node 版本：只允许 node24/node26。
+	if !validNodeVersions()[req.Config.NodeVersion] {
+		writeErr(w, "无效的 node 版本: "+req.Config.NodeVersion, http.StatusBadRequest)
+		return
+	}
+	// node26 已不再可用（如被卸载）时，不拒绝保存，而是静默回退到 node24，
+	// 与"卸载后自动回退"语义一致，并随本次保存一并把 node24 持久化。
+	if req.Config.NodeVersion == "node26" && !node26Available() {
+		logger().Printf("[node] 保存时 node26 不可用，回退到 node24")
+		req.Config.NodeVersion = "node24"
 	}
 	locked := m.dsh.Running()
 	if err := SaveConfig(m.renv, req.Config, locked); err != nil {
@@ -548,6 +567,22 @@ func (m *AdminMux) defaultHomeSemantic() string {
 		name = "Harness"
 	}
 	return "/var/apps/" + name + "/shares/" + name
+}
+
+// nodeVersionsInfo 返回 node 版本切换选项列表，供前端渲染下拉菜单。
+// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
+func (m *AdminMux) nodeVersionsInfo() []map[string]interface{} {
+	info := []map[string]interface{}{
+		{"id": "node24", "label": "Node.js v24", "available": true},
+	}
+	if node26Available() {
+		info = append(info, map[string]interface{}{
+			"id":        "node26",
+			"label":     "Node.js v26",
+			"available": true,
+		})
+	}
+	return info
 }
 
 // setHomeReq 是“设置为主目录”请求体。

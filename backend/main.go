@@ -120,6 +120,12 @@ func main() {
     cfg := LoadConfig(&renv)
     initConfig(&cfg)
 
+    // 启动时检测 node 版本：若此前选了 node26 但 node v26 已被卸载/不存在，
+    // 主动回退到 node24 并改写持久化配置，避免用失效版本启动 dsh。
+    if ensureValidNodeVersion(&renv) {
+        logger().Printf("[node] node26 已不存在，版本已回退到 node24 并持久化")
+    }
+
     auth := NewAuth()
     if cfg.AuthEnabled {
         if cfg.Password == "" {

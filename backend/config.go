@@ -20,6 +20,10 @@ type AppConfig struct {
 	// DshMemAuto 为 true（默认）时由系统 node 自动分配内存，不传 NODE_OPTIONS。
 	DshMemLimit int  `json:"dshMemLimit"`
 	DshMemAuto  bool `json:"dshMemAuto"`
+	// NodeVersion 指定 dsh 启动时使用的 node 版本（"node24" / "node26"）。
+	// 默认 "node24"（系统默认 node）。当宿主机存在 /var/apps/nodejs_v26/target/bin/node
+	// 时，用户可切换到 "node26"，dsh 启动时会把对应版本的 bin 目录前置到 PATH。
+	NodeVersion string `json:"nodeVersion"`
 	// HomeDir 是 dsh 进程的 HOME 环境变量（实际系统目录）。空表示使用启动时的
 	// 默认主目录（= /var/apps/Harness/shares/Harness 的实际路径 /vol1/@appshare/Harness）。
 	// 资源页可把某个已授权目录设为新的主目录，保存后重启 dsh 生效。
@@ -105,6 +109,7 @@ func defaultConfig() AppConfig {
 		AuthTTLHours:  envOrInt("auth_ttl_hours", 4),
 		DshMemLimit:   2048,
 		DshMemAuto:    true,
+		NodeVersion:   "node24",
 	}
 }
 
@@ -137,6 +142,62 @@ func envBool(s string) bool {
 	return true
 }
 
+// --- node 版本切换 ---
+
+// nodeVersionBinDir 为每个可切换的 node 版本对应的 bin 目录路径。
+// node24 使用系统默认 node（即启动时的 PATH），不需要额外 bin 目录。
+const node26BinDir = "/var/apps/nodejs_v26/target/bin"
+
+// validNodeVersions 返回当前合法的 node 版本标识集合（用于校验配置值）。
+func validNodeVersions() map[string]bool {
+	return map[string]bool{"node24": true, "node26": true}
+}
+
+// normalizeNodeVersion 把非法/空值归一化为默认的 "node24"。
+func normalizeNodeVersion(v string) string {
+	if validNodeVersions()[v] {
+		return v
+	}
+	return "node24"
+}
+
+// node26Available 检测宿主机是否存在 node v26 的 node 二进制。
+// 仅当 /var/apps/nodejs_v26/target/bin/node 存在时，node26 才可作为切换选项。
+func node26Available() bool {
+	fi, err := os.Stat(node26BinDir + "/node")
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// nodeVersionBinPrefix 返回指定 node 版本要前置到 PATH 的 bin 目录。
+// node24 返回空串（使用系统默认 node）；node26 返回 node26 的 bin 目录
+// （仅当该版本可用时才返回）。
+func nodeVersionBinPrefix(v string) string {
+	if normalizeNodeVersion(v) == "node26" && node26Available() {
+		return node26BinDir
+	}
+	return ""
+}
+
+// ensureValidNodeVersion 检测当前持久化配置里的 node 版本是否仍可用。
+// 若配置为 node26，但宿主机上 node v26 已被卸载/不存在，则主动回退到 node24
+// 并把持久化配置改写为 node24（自动落盘）。返回 true 表示发生了回退。
+// 这样用户此前选了 node26 后即便 node26 被卸载，下次启动或拉取设置时也能自愈。
+func ensureValidNodeVersion(renv *RuntimeEnv) bool {
+	cur := GetConfig()
+	if cur.NodeVersion != "node26" {
+		return false
+	}
+	if node26Available() {
+		return false
+	}
+	next := cur
+	next.NodeVersion = "node24"
+	if err := SaveConfig(renv, &next, false); err != nil {
+		return false
+	}
+	return true
+}
+
 // LoadConfig reads the JSON config file; falls back to defaults if missing.
 func LoadConfig(renv *RuntimeEnv) AppConfig {
 	def := defaultConfig()
@@ -163,6 +224,10 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	}
 	if v.DshMemLimit <= 0 {
 		v.DshMemLimit = 2048
+	}
+	// 旧配置文件可能没有 nodeVersion 字段，回退到默认 node24。
+	if v.NodeVersion == "" {
+		v.NodeVersion = "node24"
 	}
 	return &v
 }

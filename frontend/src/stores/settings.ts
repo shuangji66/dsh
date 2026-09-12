@@ -14,6 +14,7 @@ export const useSettingsStore = defineStore('settings', () => {
     authTTLHours: 4,
     dshMemLimit: 2048,
     dshMemAuto: true,
+    nodeVersion: 'node24',
     homeDir: '',
     accessUrls: []
   })

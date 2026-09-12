@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -8,12 +8,21 @@ import { useTheme } from '@/composables/useTheme'
 import { useConsolePrefs, type DefaultPage } from '@/composables/useConsolePrefs'
 
 const store = useSettingsStore()
-const { config, locked, loading } = storeToRefs(store)
+const { config, runtime, locked, loading } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
 const { themeMode, setTheme } = useTheme()
 const { locale } = useI18n()
 const { defaultPage, setDefaultPage } = useConsolePrefs()
+
+// node 版本切换选项：来自后端 runtime.nodeVersions。
+// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
+const nodeVersions = computed(() => runtime.value?.nodeVersions ?? [])
+
+// node26 是否可用（未安装时提示可安装 v26 进行切换，但可能存在未知问题）
+const node26Usable = computed(() =>
+  nodeVersions.value.some((v) => v.id === 'node26' && v.available)
+)
 
 // 访问密码明文/密文切换
 const showPassword = ref(false)
@@ -106,6 +115,12 @@ function onMemAutoToggle() {
   toast.show(t('saved_mem_restart'), 'info', 5000)
 }
 
+// node 版本切换：即时保存，切换后需重启 dsh 服务生效
+function onNodeVersionChange() {
+  store.save(false)
+  toast.show(t('saved_node_version_restart'), 'info', 5000)
+}
+
 // 鉴权登录开关：即时保存。开启前先做前端密码强度校验（i18n 提示，失败回滚开关）；
 // 关闭鉴权时不校验密码，允许直接关闭。
 async function onAuthToggle() {
@@ -165,6 +180,18 @@ async function onAuthToggle() {
             class="g-input disabled:cursor-not-allowed"
           />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_dsh_port_hint') }}</p>
+        </div>
+
+        <!-- node 版本切换 -->
+        <div class="py-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_node_version') }}</label>
+          <select v-model="config.nodeVersion" class="g-input" @change="onNodeVersionChange">
+            <option v-for="v in nodeVersions" :key="v.id" :value="v.id">{{ v.label }}</option>
+          </select>
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
+            <template v-if="node26Usable">{{ t('settings_node_version_hint') }}</template>
+            <template v-else>{{ t('settings_node_version_no26_hint') }}</template>
+          </p>
         </div>
 
         <!-- node栈内存限制（MB） -->

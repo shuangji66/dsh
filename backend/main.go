@@ -89,132 +89,132 @@ func removePidFile(path string) {
 }
 
 func main() {
-    renv := loadRuntimeEnv()
+	renv := loadRuntimeEnv()
 
-    cleanupLog := setupLogFile()
-    defer cleanupLog()
+	cleanupLog := setupLogFile()
+	defer cleanupLog()
 
-    // HARNESS_PID_FILE 记录的是 harness 控制台自身 PID（用于平台识别控制台
-    // 进程），dsh 服务 PID 单独由 HARNESS_DSH_PID_FILE 记录（见 DshManager，
-    // 随 dsh 启动/自重启/停止实时刷新），二者不要混用。
-    pidFile := renv.PidFile
-    if pidFile != "" {
-        if err := writePidFile(pidFile, os.Getpid()); err != nil {
-            logger().Printf("failed to write pid file %s: %v", pidFile, err)
-        } else {
-            logger().Printf("pid written to %s", pidFile)
-        }
-        defer removePidFile(pidFile)
-    }
-    // 退出时顺带清理 dsh 服务 PID 文件（正常退出前 dsh.Stop() 已移除，
-    // 这里兜底处理异常退出路径）。
-    defer removePidFile(renv.DshPidFile)
+	// HARNESS_PID_FILE 记录的是 harness 控制台自身 PID（用于平台识别控制台
+	// 进程），dsh 服务 PID 单独由 HARNESS_DSH_PID_FILE 记录（见 DshManager，
+	// 随 dsh 启动/自重启/停止实时刷新），二者不要混用。
+	pidFile := renv.PidFile
+	if pidFile != "" {
+		if err := writePidFile(pidFile, os.Getpid()); err != nil {
+			logger().Printf("failed to write pid file %s: %v", pidFile, err)
+		} else {
+			logger().Printf("pid written to %s", pidFile)
+		}
+		defer removePidFile(pidFile)
+	}
+	// 退出时顺带清理 dsh 服务 PID 文件（正常退出前 dsh.Stop() 已移除，
+	// 这里兜底处理异常退出路径）。
+	defer removePidFile(renv.DshPidFile)
 
-    if _, err := net.Dial("unix", renv.AdminSock); err == nil {
-        logger().Printf("Admin socket %s is already in use, another instance is running. Exiting.", renv.AdminSock)
-        os.Exit(1)
-    }
-    os.Remove(renv.AdminSock)
-    logger().Printf("Harness backend starting (pid=%d)", os.Getpid())
+	if _, err := net.Dial("unix", renv.AdminSock); err == nil {
+		logger().Printf("Admin socket %s is already in use, another instance is running. Exiting.", renv.AdminSock)
+		os.Exit(1)
+	}
+	os.Remove(renv.AdminSock)
+	logger().Printf("Harness backend starting (pid=%d)", os.Getpid())
 
-    cfg := LoadConfig(&renv)
-    initConfig(&cfg)
+	cfg := LoadConfig(&renv)
+	initConfig(&cfg)
 
-    // 启动时检测 node 版本：若此前选了 node26 但 node v26 已被卸载/不存在，
-    // 主动回退到 node24 并改写持久化配置，避免用失效版本启动 dsh。
-    if ensureValidNodeVersion(&renv) {
-        logger().Printf("[node] node26 已不存在，版本已回退到 node24 并持久化")
-    }
+	// 启动时检测 node 版本：若此前选了 node26 但 node v26 已被卸载/不存在，
+	// 主动回退到 node24 并改写持久化配置，避免用失效版本启动 dsh。
+	if ensureValidNodeVersion(&renv) {
+		logger().Printf("[node] node26 已不存在，版本已回退到 node24 并持久化")
+	}
 
-    auth := NewAuth()
-    if cfg.AuthEnabled {
-        if cfg.Password == "" {
-            logger().Printf("[Auth] 未设置密码 —— 鉴权未启用，任何人都可访问。")
-        } else if v := validatePassword(cfg.Password); v != "" {
-            logger().Printf("[Auth] 密码校验失败: %s —— 鉴权未启用。", v)
-        } else {
-            logger().Printf("[Auth] 密码校验通过，登录鉴权已启用。")
-        }
-    } else {
-        logger().Printf("[Auth] 鉴权已禁用（AuthEnabled=false）。")
-    }
+	auth := NewAuth()
+	if cfg.AuthEnabled {
+		if cfg.Password == "" {
+			logger().Printf("[Auth] 未设置密码 —— 鉴权未启用，任何人都可访问。")
+		} else if v := validatePassword(cfg.Password); v != "" {
+			logger().Printf("[Auth] 密码校验失败: %s —— 鉴权未启用。", v)
+		} else {
+			logger().Printf("[Auth] 密码校验通过，登录鉴权已启用。")
+		}
+	} else {
+		logger().Printf("[Auth] 鉴权已禁用（AuthEnabled=false）。")
+	}
 
-    dsh := NewDshManager(&renv)
-    upd := newUpdateManager(&renv, dsh)
-    upd.startAutoCheck()
-    upd.startDailyCleanup()
-    admin := newAdminMux(&renv, dsh, auth, upd)
-    admin.SetSPA(embeddedFrontend())
+	dsh := NewDshManager(&renv)
+	upd := newUpdateManager(&renv, dsh)
+	upd.startAutoCheck()
+	upd.startDailyCleanup()
+	admin := newAdminMux(&renv, dsh, auth, upd)
+	admin.SetSPA(embeddedFrontend())
 
-    // 启动 admin socket（非阻塞）
-    go func() {
-        if err := serveAdminSocket(admin); err != nil {
-            logger().Printf("admin socket server: %v", err)
-        }
-    }()
-    logger().Printf("admin console on unix socket %s baseurl %q", renv.AdminSock, renv.AdminBaseURL)
+	// 启动 admin socket（非阻塞）
+	go func() {
+		if err := serveAdminSocket(admin); err != nil {
+			logger().Printf("admin socket server: %v", err)
+		}
+	}()
+	logger().Printf("admin console on unix socket %s baseurl %q", renv.AdminSock, renv.AdminBaseURL)
 
-    // 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
-    if os.Getenv("HARNESS_AUTOSTART") != "0" {
-        if err := dsh.Start(); err != nil {
-            logger().Printf("autostart dsh: %v", err)
-        } else {
-            // dsh 启动成功，等待并捕获其一次性访问 token（新版 dsh 会打印
-            // "dsh web: http://127.0.0.1:<port>/?token=XXX"），并从 Set-Cookie
-            // 换取 dsh 会话 cookie，供反代转发时携带。
-            captureDshSession(dsh)
-            // 执行 node-pty 固定版本与清理（会等待目录生成）。传入空 home 由函数内部
-            // 优先从 config.json 的 homeDir 解析 dsh 实际使用的 HOME。若返回需要重启，
-            // 则在 pnpm install 完成后重启 dsh 使 node-pty 1.2.0-beta.15 生效。
-            restartNeeded, err := ensureNodePty(&renv, "")
-            if err != nil {
-                logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
-            }
-            if restartNeeded {
-                logger().Printf("node-pty setup changed workspace, restarting dsh")
-                if serr := dsh.Stop(); serr != nil {
-                    logger().Printf("restart dsh (stop) after node-pty setup failed: %v", serr)
-                } else if serr := dsh.Start(); serr != nil {
-                    logger().Printf("restart dsh (start) after node-pty setup failed: %v", serr)
-                } else {
-                    // 重启后 dsh 会生成新的访问 token，需重新捕获会话。
-                    captureDshSession(dsh)
-                }
-            }
-        }
-    } else {
-        logger().Printf("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
-    }
+	// 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
+	if os.Getenv("HARNESS_AUTOSTART") != "0" {
+		if err := dsh.Start(); err != nil {
+			logger().Printf("autostart dsh: %v", err)
+		} else {
+			// dsh 启动成功，等待并捕获其一次性访问 token（新版 dsh 会打印
+			// "dsh web: http://127.0.0.1:<port>/?token=XXX"），并从 Set-Cookie
+			// 换取 dsh 会话 cookie，供反代转发时携带。
+			captureDshSession(dsh)
+			// 执行 node-pty 固定版本与清理（会等待目录生成）。传入空 home 由函数内部
+			// 优先从 config.json 的 homeDir 解析 dsh 实际使用的 HOME。若返回需要重启，
+			// 则在 pnpm install 完成后重启 dsh 使 node-pty 1.2.0-beta.15 生效。
+			restartNeeded, err := ensureNodePty(&renv, "")
+			if err != nil {
+				logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
+			}
+			if restartNeeded {
+				logger().Printf("node-pty setup changed workspace, restarting dsh")
+				if serr := dsh.Stop(); serr != nil {
+					logger().Printf("restart dsh (stop) after node-pty setup failed: %v", serr)
+				} else if serr := dsh.Start(); serr != nil {
+					logger().Printf("restart dsh (start) after node-pty setup failed: %v", serr)
+				} else {
+					// 重启后 dsh 会生成新的访问 token，需重新捕获会话。
+					captureDshSession(dsh)
+				}
+			}
+		}
+	} else {
+		logger().Printf("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
+	}
 
-    // 先启动 dsh 并换取会话 cookie，再启动反向代理，使反代能携带 cookie 反代 dsh。
-    startProxy(renv.ProxyPort, auth, dsh)
+	// 先启动 dsh 并换取会话 cookie，再启动反向代理，使反代能携带 cookie 反代 dsh。
+	startProxy(renv.ProxyPort, auth, dsh)
 
-    // 等待退出信号
-    sig := make(chan os.Signal, 1)
-    signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-    select {
-    case s := <-sig:
-        logger().Printf("received signal %v, shutting down", s)
-    case <-stopCh:
-        logger().Printf("shutdown requested, stopping")
-    }
+	// 等待退出信号
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	select {
+	case s := <-sig:
+		logger().Printf("received signal %v, shutting down", s)
+	case <-stopCh:
+		logger().Printf("shutdown requested, stopping")
+	}
 
-    dsh.Stop()
-    os.Remove(renv.AdminSock)
-    logger().Printf("backend stopped")
+	dsh.Stop()
+	os.Remove(renv.AdminSock)
+	logger().Printf("backend stopped")
 }
 
 // captureDshSession 等待并捕获 dsh 的一次性访问 token，并用 token 换取 dsh
 // 会话 cookie，供反向代理转发时携带。每次 dsh 启动都会生成新的 token，因此
 // dsh 重启后需重新调用本函数。
 func captureDshSession(dsh *DshManager) {
-    if tok := dsh.WaitToken(15 * time.Second); tok != "" {
-        // 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
-        // 供反代转发时携带（访问不带 token 的 dsh 地址）。成功时不输出日志。
-        if err := dsh.ExchangeToken(); err != nil {
-            logger().Printf("dsh token exchange failed: %v", err)
-        }
-    }
+	if tok := dsh.WaitToken(15 * time.Second); tok != "" {
+		// 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
+		// 供反代转发时携带（访问不带 token 的 dsh 地址）。成功时不输出日志。
+		if err := dsh.ExchangeToken(); err != nil {
+			logger().Printf("dsh token exchange failed: %v", err)
+		}
+	}
 }
 
 // initConfig applies a config as the process-wide singleton.

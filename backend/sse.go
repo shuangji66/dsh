@@ -88,8 +88,8 @@ func (m *AdminMux) handleDshStream(w http.ResponseWriter, r *http.Request) {
 func readLogSnapshot() map[string]interface{} {
 	path := os.Getenv("HARNESS_LOG_FILE")
 	payload := map[string]interface{}{
-		"path":   path,
-		"exists": path != "",
+		"path":    path,
+		"exists":  path != "",
 		"content": "",
 	}
 	if path == "" {

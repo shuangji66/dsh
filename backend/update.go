@@ -64,13 +64,13 @@ type tagInfo struct {
 
 // UpdateStatus 是一次更新检测的状态（harness 与 dsh 各自一份）。
 type UpdateStatus struct {
-	Kind         updateKind `json:"kind"`
-	LocalVersion string     `json:"localVersion"`     // 本地版本号
-	LatestVersion string    `json:"latestVersion"`    // 仓库最新 tag 版本号（空表示未获取到）
-	HasUpdate    bool       `json:"hasUpdate"`        // 是否有可用更新
-	CheckedAt    time.Time  `json:"checkedAt"`        // 最近检测时间
-	Error        string     `json:"error,omitempty"`  // 最近一次检测/拉取失败原因
-	ReleaseNotes string     `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
+	Kind          updateKind `json:"kind"`
+	LocalVersion  string     `json:"localVersion"`           // 本地版本号
+	LatestVersion string     `json:"latestVersion"`          // 仓库最新 tag 版本号（空表示未获取到）
+	HasUpdate     bool       `json:"hasUpdate"`              // 是否有可用更新
+	CheckedAt     time.Time  `json:"checkedAt"`              // 最近检测时间
+	Error         string     `json:"error,omitempty"`        // 最近一次检测/拉取失败原因
+	ReleaseNotes  string     `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
 
 	// 下载进度（仅更新包下载期间有值；下载完成后清空）。
 	Downloading     bool  `json:"downloading,omitempty"`     // 是否正在下载更新包

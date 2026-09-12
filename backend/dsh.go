@@ -386,6 +386,38 @@ func (m *DshManager) removeDshPidFile() {
 	}
 }
 
+// readDshPidFile 读取 dsh 服务 PID 文件（HARNESS_DSH_PID_FILE，即「dsh.pid」）
+// 中记录的 dsh 进程 PID。文件内容为纯数字（可能带首尾空白），返回记录的正整数；
+// 文件不存在、内容非法或未配置路径时返回 0。
+func (m *DshManager) readDshPidFile() int {
+	if m.dshPidFile == "" {
+		return 0
+	}
+	data, err := os.ReadFile(m.dshPidFile)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// killPidGracefully 对单个 PID 做优雅终止：先发 SIGTERM 等待退出，短暂超时后
+// 若仍未退出则补发 SIGKILL。它只针对该 PID 本身（不杀进程组），用于「dsh.pid」
+// 精确保底——避免进程组 kill 误伤同进程组内其它无关进程。
+func (m *DshManager) killPidGracefully(pid int) {
+	if pid <= 0 || !processAlive(pid) {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	time.Sleep(2 * time.Second)
+	if processAlive(pid) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
 // reapCmd 回收已退出的受管 dsh 子进程（调用 Wait），避免其残留为僵尸进程。
 // 僵尸/已退出进程的 Wait 会立即返回；进程仍存活（如 Stop 后尚在优雅退出）时
 // 不阻塞调用方——由后台 goroutine 内的 Wait 在进程退出后完成回收。ProcessState
@@ -766,8 +798,10 @@ func (m *DshManager) Start() error {
 	return nil
 }
 
-// Stop terminates the dsh process by killing all "MainThread" processes
-// belonging to the current user using pkill, with a fallback to process group kill.
+// Stop terminates the dsh process. 主路径用 pkill 按主线程进程名匹配并终止
+// （node24 为 "MainThread"、node26 为 "node-MainThread"，用正则同时覆盖）；
+// 未命中/超时时进入精确保底：先按「dsh.pid」文件记录的 PID 精确杀进程，
+// 若仍存活再退回进程组 kill。
 // 兼容 dsh-market 自重启：m.cmd 可能已指向退出的旧进程（僵尸或已回收），因此
 // 终结目标按“受管 PID 若失效则用 /proc 中的实时 dsh PID”计算（pkill 按 comm
 // 匹配也覆盖不在 m.cmd 中的新进程），并在结束后回收受管子进程，避免残留僵尸。
@@ -800,28 +834,43 @@ func (m *DshManager) Stop() error {
 		user = "Harness"
 	}
 
-	// 使用 pkill，但设置超时防止卡住
+	// 使用 pkill 匹配 dsh 主线程进程。不同 node 版本下进程名不同：node24 为
+	// "MainThread"，node26 为 "node-MainThread"（node 给线程名加了前缀，15 字符
+	// 正好不超内核 comm 上限）。用 ERE 正则 + -x 同时精确匹配两者。
 	done := make(chan struct{})
 	var pkillErr error
 	go func() {
-		pkillCmd := exec.Command("pkill", "-TERM", "-u", user, "-x", "MainThread")
+		pkillCmd := exec.Command("pkill", "-TERM", "-u", user, "-x", "MainThread|node-MainThread")
 		pkillErr = pkillCmd.Run()
 		close(done)
 	}()
 
+	pkillOK := false
 	select {
 	case <-done:
-		if pkillErr != nil {
-			m.logf("pkill MainThread failed: %v, falling back to process group kill", pkillErr)
-			// 回退到进程组 kill（按实时 pid，兼容自重启后的新进程）
-			m.fallbackKill(target)
-		} else {
+		pkillOK = pkillErr == nil
+		if pkillOK {
 			m.logf("pkill MainThread succeeded")
+		} else {
+			m.logf("pkill MainThread failed: %v, falling back to pid-file kill", pkillErr)
 		}
 	case <-time.After(3 * time.Second):
-		m.logf("pkill MainThread timed out, falling back to process group kill")
-		// 超时则使用 fallback
-		m.fallbackKill(target)
+		m.logf("pkill MainThread timed out, falling back to pid-file kill")
+	}
+
+	// pkill 未命中（node26 进程名变化、返回非 0）或超时时，进入精确保底流程：
+	// 保底1 优先按「dsh.pid」文件记录的 PID 精确杀进程（最精准，不受进程名
+	// 截断/改名影响、不误伤同组其它进程）；若杀后 dsh 仍在运行（或 pid 文件
+	// 缺失/失效），保底2 再退回进程组 kill。
+	if !pkillOK {
+		if pidFilePid := m.readDshPidFile(); pidFilePid > 0 && processAlive(pidFilePid) {
+			m.logf("dsh stop: killing by pid-file pid %d", pidFilePid)
+			m.killPidGracefully(pidFilePid)
+		}
+		if live := m.findDshPid(); live > 0 {
+			m.logf("dsh stop: pid-file kill insufficient, process-group kill pid %d", live)
+			m.fallbackKill(live)
+		}
 	}
 
 	// 停止后回收受管子进程（若已退出立即完成），避免残留僵尸。

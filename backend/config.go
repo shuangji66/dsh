@@ -10,12 +10,12 @@ import (
 
 // AppConfig holds the settings editable from the frontend.
 type AppConfig struct {
-	DshPort       int    `json:"dshPort"`
-	ProxyEnabled  bool   `json:"proxyEnabled"`
-	ProxyAddr     string `json:"proxyAddr"`
-	AuthEnabled   bool   `json:"authEnabled"`
-	Password      string `json:"password,omitempty"`
-	AuthTTLHours  int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 4
+	DshPort      int    `json:"dshPort"`
+	ProxyEnabled bool   `json:"proxyEnabled"`
+	ProxyAddr    string `json:"proxyAddr"`
+	AuthEnabled  bool   `json:"authEnabled"`
+	Password     string `json:"password,omitempty"`
+	AuthTTLHours int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 4
 	// dsh 进程内存限制（MB），默认 2048；通过 NODE_OPTIONS 生效。
 	// DshMemAuto 为 true（默认）时由系统 node 自动分配内存，不传 NODE_OPTIONS。
 	DshMemLimit int  `json:"dshMemLimit"`
@@ -51,7 +51,7 @@ type RuntimeEnv struct {
 	Home          string
 	PnpmHome      string
 	Lang          string
-	ProxyPort     int // 新增
+	ProxyPort     int    // 新增
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（HARNESS_QUICK_CMDS_FILE）
 }
 
@@ -78,20 +78,20 @@ func loadRuntimeEnv() RuntimeEnv {
 		}
 	}
 	return RuntimeEnv{
-		ConfigFile:   envOr("HARNESS_CONFIG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "config.json")),
-		AdminSock:    envOr("HARNESS_ADMIN_SOCK", filepath.Join(appDest, "app.sock")),
-		AdminBaseURL: envOr("HARNESS_ADMIN_BASEURL", appDest),
-		LogFile:      os.Getenv("HARNESS_LOG_FILE"),
-		PidFile:      os.Getenv("HARNESS_PID_FILE"),
-		DshPidFile:   os.Getenv("HARNESS_DSH_PID_FILE"),
-		TRIMApiToken: os.Getenv("TRIM_API_TOKEN"),
-		TRIMAppDest:  appDest,
-		TRIMAppName:  appName,
-		Path:         os.Getenv("PATH"),
-		Home:         os.Getenv("HOME"),
-		PnpmHome:     os.Getenv("PNPM_HOME"),
-		Lang:         os.Getenv("TRIM_SYS_LANGUAGE"),
-		ProxyPort:    proxyPort,
+		ConfigFile:    envOr("HARNESS_CONFIG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "config.json")),
+		AdminSock:     envOr("HARNESS_ADMIN_SOCK", filepath.Join(appDest, "app.sock")),
+		AdminBaseURL:  envOr("HARNESS_ADMIN_BASEURL", appDest),
+		LogFile:       os.Getenv("HARNESS_LOG_FILE"),
+		PidFile:       os.Getenv("HARNESS_PID_FILE"),
+		DshPidFile:    os.Getenv("HARNESS_DSH_PID_FILE"),
+		TRIMApiToken:  os.Getenv("TRIM_API_TOKEN"),
+		TRIMAppDest:   appDest,
+		TRIMAppName:   appName,
+		Path:          os.Getenv("PATH"),
+		Home:          os.Getenv("HOME"),
+		PnpmHome:      os.Getenv("PNPM_HOME"),
+		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
+		ProxyPort:     proxyPort,
 		QuickCmdsFile: envOr("HARNESS_QUICK_CMDS_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "quickcmds.json")),
 	}
 }
@@ -101,15 +101,15 @@ func defaultConfig() AppConfig {
 	authEnabled := envBool(envOr("auth_mode", envOr("PROXY_AUTH", "true")))
 	proxyEnabled := os.Getenv("proxy_mode") == "1"
 	return AppConfig{
-		DshPort:       dshPort,
-		ProxyEnabled:  proxyEnabled,
-		ProxyAddr:     envOr("proxy_addr", "http://127.0.0.1:7890"),
-		AuthEnabled:   authEnabled,
-		Password:      os.Getenv("password"),
-		AuthTTLHours:  envOrInt("auth_ttl_hours", 4),
-		DshMemLimit:   2048,
-		DshMemAuto:    true,
-		NodeVersion:   "node24",
+		DshPort:      dshPort,
+		ProxyEnabled: proxyEnabled,
+		ProxyAddr:    envOr("proxy_addr", "http://127.0.0.1:7890"),
+		AuthEnabled:  authEnabled,
+		Password:     os.Getenv("password"),
+		AuthTTLHours: envOrInt("auth_ttl_hours", 4),
+		DshMemLimit:  2048,
+		DshMemAuto:   true,
+		NodeVersion:  "node24",
 	}
 }
 

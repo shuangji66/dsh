@@ -178,11 +178,11 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"config": cfg,
 		"locked": locked,
 		"runtime": map[string]interface{}{
-			"configFile":    m.renv.ConfigFile,
-			"adminSock":     m.renv.AdminSock,
-			"adminBaseURL":  m.renv.AdminBaseURL,
-			"appName":       m.renv.TRIMAppName,
-			"proxyPort":     m.renv.ProxyPort,
+			"configFile":   m.renv.ConfigFile,
+			"adminSock":    m.renv.AdminSock,
+			"adminBaseURL": m.renv.AdminBaseURL,
+			"appName":      m.renv.TRIMAppName,
+			"proxyPort":    m.renv.ProxyPort,
 			// node 版本切换选项：列出可用版本及其标识，前端据此显示下拉选项。
 			// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
 			"nodeVersions": m.nodeVersionsInfo(),
@@ -355,8 +355,6 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, m.dsh.Status())
 }
-
-
 
 // --- Plugin management (work 区插件卡片) ---
 
@@ -912,9 +910,9 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleDshStop(w, r)
 		case p == "/api/dsh/status" && r.Method == http.MethodGet:
 			writeJSON(w, m.dsh.Status())
-		// 在 buildHandler 的 switch 中添加
-        case p == "/api/dsh/restart" && r.Method == http.MethodPost:
-            m.handleDshRestart(w, r)
+			// 在 buildHandler 的 switch 中添加
+		case p == "/api/dsh/restart" && r.Method == http.MethodPost:
+			m.handleDshRestart(w, r)
 		case p == "/api/dsh/set-home" && r.Method == http.MethodPost:
 			m.handleSetHome(w, r)
 		case p == "/api/dsh/backup" && r.Method == http.MethodPost:
@@ -930,7 +928,7 @@ func (m *AdminMux) buildHandler() http.Handler {
 		case p == "/api/dsh/backup-dir" && r.Method == http.MethodGet:
 			m.handleBackupDir(w, r)
 		case p == "/api/fnos/convert-path" && r.Method == http.MethodPost:
-            m.handleConvertPath(w, r)
+			m.handleConvertPath(w, r)
 		case p == "/api/logs" && r.Method == http.MethodGet:
 			m.handleGetLogs(w, r)
 		case p == "/api/visitors" && r.Method == http.MethodGet:
@@ -1034,27 +1032,27 @@ func serveAdminSocket(m *AdminMux) error {
 }
 
 type convertPathReq struct {
-    Paths    []string `json:"paths"`
-    Language string   `json:"language"`
+	Paths    []string `json:"paths"`
+	Language string   `json:"language"`
 }
 
 func (m *AdminMux) handleConvertPath(w http.ResponseWriter, r *http.Request) {
-    var req convertPathReq
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
-        return
-    }
-    if len(req.Paths) == 0 {
-        writeJSON(w, map[string]interface{}{"ok": true, "result": []map[string]string{}})
-        return
-    }
-    
-    result, err := m.fnos.ConvertPath(req.Paths, req.Language)
-    if err != nil {
-        writeErr(w, "路径转换失败: "+err.Error(), http.StatusInternalServerError)
-        return
-    }
-    writeJSON(w, map[string]interface{}{"ok": true, "result": result})
+	var req convertPathReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeJSON(w, map[string]interface{}{"ok": true, "result": []map[string]string{}})
+		return
+	}
+
+	result, err := m.fnos.ConvertPath(req.Paths, req.Language)
+	if err != nil {
+		writeErr(w, "路径转换失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "result": result})
 }
 
 // --- 自我更新 API ---
@@ -1295,6 +1293,7 @@ func (m *AdminMux) handleRollbackStatus(w http.ResponseWriter, r *http.Request) 
 	status := m.update.GetRollbackStatus()
 	writeJSON(w, map[string]interface{}{"ok": true, "status": status})
 }
+
 // --- dsh 数据备份与恢复 API ---
 
 // handleListDshDataBackups 返回 dsh 数据备份列表（dsh-data-<版本>-<时间戳>.tar.gz）。

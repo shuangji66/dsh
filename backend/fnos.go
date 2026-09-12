@@ -95,96 +95,96 @@ func (c *FnosClient) GetPlatformConfig() (map[string]interface{}, error) {
 
 // ConvertPath 将内部路径转换为语义化路径
 func (c *FnosClient) ConvertPath(paths []string, language string) ([]map[string]string, error) {
-    if len(paths) == 0 {
-        return []map[string]string{}, nil
-    }
-    if language == "" {
-        language = "zh-CN"
-    }
+	if len(paths) == 0 {
+		return []map[string]string{}, nil
+	}
+	if language == "" {
+		language = "zh-CN"
+	}
 
-    code, msg, data, err := c.call("trim.file.convertPath", map[string]interface{}{
-        "path":     paths,
-        "language": language,
-    })
-    if err != nil {
-        return nil, err
-    }
-    if code != 0 {
-        return nil, fmt.Errorf("fnOS code=%d msg=%s", code, msg)
-    }
+	code, msg, data, err := c.call("trim.file.convertPath", map[string]interface{}{
+		"path":     paths,
+		"language": language,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("fnOS code=%d msg=%s", code, msg)
+	}
 
-    // 将 data 转为 JSON 字节，以便尝试两种解析
-    b, _ := json.Marshal(data)
+	// 将 data 转为 JSON 字节，以便尝试两种解析
+	b, _ := json.Marshal(data)
 
-    // 1. 尝试直接解析为数组（最常见情况）
-    var arr []struct {
-        Path         string `json:"path"`
-        SemanticPath string `json:"semanticPath"`
-    }
-    if err := json.Unmarshal(b, &arr); err == nil {
-        result := make([]map[string]string, len(arr))
-        for i, item := range arr {
-            result[i] = map[string]string{
-                "path":         item.Path,
-                "semanticPath": item.SemanticPath,
-            }
-        }
-        return result, nil
-    }
+	// 1. 尝试直接解析为数组（最常见情况）
+	var arr []struct {
+		Path         string `json:"path"`
+		SemanticPath string `json:"semanticPath"`
+	}
+	if err := json.Unmarshal(b, &arr); err == nil {
+		result := make([]map[string]string, len(arr))
+		for i, item := range arr {
+			result[i] = map[string]string{
+				"path":         item.Path,
+				"semanticPath": item.SemanticPath,
+			}
+		}
+		return result, nil
+	}
 
-    // 2. 若失败，再尝试解析为包含 status/result 的对象
-    var res struct {
-        Status int `json:"status"`
-        Result []struct {
-            Path         string `json:"path"`
-            SemanticPath string `json:"semanticPath"`
-        } `json:"result"`
-    }
-    if err := json.Unmarshal(b, &res); err != nil {
-        return nil, fmt.Errorf("解析转换响应失败: %v (原始数据: %s)", err, string(b))
-    }
-    if res.Status != 0 {
-        return nil, fmt.Errorf("convert status=%d", res.Status)
-    }
+	// 2. 若失败，再尝试解析为包含 status/result 的对象
+	var res struct {
+		Status int `json:"status"`
+		Result []struct {
+			Path         string `json:"path"`
+			SemanticPath string `json:"semanticPath"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(b, &res); err != nil {
+		return nil, fmt.Errorf("解析转换响应失败: %v (原始数据: %s)", err, string(b))
+	}
+	if res.Status != 0 {
+		return nil, fmt.Errorf("convert status=%d", res.Status)
+	}
 
-    result := make([]map[string]string, len(res.Result))
-    for i, item := range res.Result {
-        result[i] = map[string]string{
-            "path":         item.Path,
-            "semanticPath": item.SemanticPath,
-        }
-    }
-    return result, nil
+	result := make([]map[string]string, len(res.Result))
+	for i, item := range res.Result {
+		result[i] = map[string]string{
+			"path":         item.Path,
+			"semanticPath": item.SemanticPath,
+		}
+	}
+	return result, nil
 }
 
 // GetUserAccessibleFolders 查询当前用户的已授权目录
 // 需要传入 uid（从统一网关获取的当前用户ID）
 func (c *FnosClient) GetUserAccessibleFolders(uid int) ([]string, string, error) {
-    code, msg, data, err := c.call("trim.file.getUserAccessibleFolders", map[string]interface{}{
-        "uid": uid,
-    })
-    if err != nil {
-        return nil, "", err
-    }
-    if code != 0 {
-        return nil, msg, fmt.Errorf("fnOS code=%d msg=%s", code, msg)
-    }
-    var res struct {
-        Paths []string `json:"paths"`
-    }
-    b, _ := json.Marshal(data)
-    _ = json.Unmarshal(b, &res)
-    return res.Paths, msg, nil
+	code, msg, data, err := c.call("trim.file.getUserAccessibleFolders", map[string]interface{}{
+		"uid": uid,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if code != 0 {
+		return nil, msg, fmt.Errorf("fnOS code=%d msg=%s", code, msg)
+	}
+	var res struct {
+		Paths []string `json:"paths"`
+	}
+	b, _ := json.Marshal(data)
+	_ = json.Unmarshal(b, &res)
+	return res.Paths, msg, nil
 }
 
 // DelUserAccessibleFolder 删除用户的授权目录
 func (c *FnosClient) DelUserAccessibleFolder(uid int, path string) (bool, string, error) {
-    code, msg, _, err := c.call("trim.file.delUserAccessibleFolder", map[string]interface{}{
-        "uid":  uid,
-        "path": path,
-    })
-    if err != nil {
-        return false, "", err
-    }
-    return code == 0, msg, nil
+	code, msg, _, err := c.call("trim.file.delUserAccessibleFolder", map[string]interface{}{
+		"uid":  uid,
+		"path": path,
+	})
+	if err != nil {
+		return false, "", err
+	}
+	return code == 0, msg, nil
 }

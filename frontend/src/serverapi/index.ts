@@ -100,6 +100,14 @@ export interface QuickCmd {
   auto: boolean
 }
 
+// 终端活动会话摘要（后端 /api/sessions 返回，前端启动时据此恢复会话）
+export interface SessionInfo {
+  id: string
+  created: string
+  size: number
+  exited: boolean
+}
+
 export interface SettingsPayload {
   config: AppConfig
   locked: boolean
@@ -336,5 +344,15 @@ export const api = {
     request<{ ok: boolean; path: string; commands: QuickCmd[] }>('/api/quickcmds', {
       method: 'POST',
       body: JSON.stringify({ commands })
-    })
+    }),
+  // 终端会话：列表 / 历史 / 关闭 / 清屏（临时镜像保存与恢复）
+  sessions: () => request<{ ok: boolean; sessions: SessionInfo[] }>('/api/sessions'),
+  sessionHistory: (id: string) =>
+    request<{ ok: boolean; id: string; size: number; content: string }>(
+      '/api/session/history?id=' + encodeURIComponent(id)
+    ),
+  closeSession: (id: string) =>
+    request<{ ok: boolean; id: string }>('/api/session?id=' + encodeURIComponent(id), { method: 'DELETE' }),
+  clearSessionHistory: (id: string) =>
+    request<{ ok: boolean; id: string }>('/api/session/clear?id=' + encodeURIComponent(id), { method: 'POST' })
 }

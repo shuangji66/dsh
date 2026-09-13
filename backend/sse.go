@@ -85,8 +85,7 @@ func (m *AdminMux) handleDshStream(w http.ResponseWriter, r *http.Request) {
 
 // readLogSnapshot reads the current log file content (capped) plus its path and
 // existence flag. It returns an empty payload when the file is unreadable.
-func readLogSnapshot() map[string]interface{} {
-	path := os.Getenv("HARNESS_LOG_FILE")
+func readLogSnapshot(path string) map[string]interface{} {
 	payload := map[string]interface{}{
 		"path":    path,
 		"exists":  path != "",
@@ -127,7 +126,7 @@ func (m *AdminMux) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	interval := fastInterval
 
 	sendIfChanged := func() bool {
-		snap := readLogSnapshot()
+		snap := readLogSnapshot(m.renv.LogFile)
 		content, _ := snap["content"].(string)
 		if content == last {
 			return false

@@ -34,10 +34,9 @@ func logger() *log.Logger {
 	return log.New(logOut, "[Harness] ", log.LstdFlags)
 }
 
-// setupLogFile 根据环境变量打开日志文件；未设置则返回 nil，表示不落盘。
-// 返回的清理函数负责关闭并删除日志文件（主进程停止时删除日志）。
-func setupLogFile() func() {
-	path := os.Getenv("HARNESS_LOG_FILE")
+// setupLogFile 根据运行时日志路径（RuntimeEnv.LogFile，含默认值）打开日志文件；
+// 路径为空则返回 nil，表示不落盘。返回的清理函数负责关闭并删除日志文件。
+func setupLogFile(path string) func() {
 	if path == "" {
 		return func() {}
 	}
@@ -91,7 +90,7 @@ func removePidFile(path string) {
 func main() {
 	renv := loadRuntimeEnv()
 
-	cleanupLog := setupLogFile()
+	cleanupLog := setupLogFile(renv.LogFile)
 	defer cleanupLog()
 
 	// HARNESS_PID_FILE 记录的是 harness 控制台自身 PID（用于平台识别控制台
@@ -145,6 +144,16 @@ func main() {
 	upd.startDailyCleanup()
 	admin := newAdminMux(&renv, dsh, auth, upd)
 	admin.SetSPA(embeddedFrontend())
+
+	// 准备终端会话临时镜像目录（进程停止时整目录清除）
+	createdSessionDir := false
+	if renv.SessionDir != "" && renv.SessionDir != "/" && renv.SessionDir != "." {
+		if err := os.MkdirAll(renv.SessionDir, 0o700); err != nil {
+			logger().Printf("failed to create session dir %s: %v", renv.SessionDir, err)
+		} else {
+			createdSessionDir = true
+		}
+	}
 
 	// 启动 admin socket（非阻塞）
 	go func() {
@@ -200,6 +209,11 @@ func main() {
 	}
 
 	dsh.Stop()
+	// 停止控制台：终止全部终端会话（进程 + 历史文件），并删除临时会话目录
+	admin.sessions.CloseAll()
+	if createdSessionDir {
+		os.RemoveAll(renv.SessionDir)
+	}
 	os.Remove(renv.AdminSock)
 	logger().Printf("backend stopped")
 }

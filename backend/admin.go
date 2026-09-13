@@ -19,22 +19,24 @@ import (
 // AdminMux serves the admin SPA, settings API, fnOS proxy, and terminal on the
 // unix admin socket, under the configured baseurl.
 type AdminMux struct {
-	renv   *RuntimeEnv
-	dsh    *DshManager
-	fnos   *FnosClient
-	auth   *Auth
-	update *UpdateManager
-	spa    http.Handler
+	renv     *RuntimeEnv
+	dsh      *DshManager
+	fnos     *FnosClient
+	auth     *Auth
+	update   *UpdateManager
+	sessions *SessionManager
+	spa      http.Handler
 }
 
 // newAdminMux wires the admin SPA mux onto the unix socket.
 func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManager) *AdminMux {
 	return &AdminMux{
-		renv:   renv,
-		dsh:    dsh,
-		auth:   auth,
-		fnos:   NewFnosClient(renv),
-		update: upd,
+		renv:     renv,
+		dsh:      dsh,
+		auth:     auth,
+		fnos:     NewFnosClient(renv),
+		update:   upd,
+		sessions: NewSessionManager(renv),
 	}
 }
 
@@ -52,6 +54,62 @@ func writeErr(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})
+}
+
+// sessionInfo is the JSON summary of a live terminal session.
+type sessionInfo struct {
+	ID      string `json:"id"`
+	Created string `json:"created"`
+	Size    int64  `json:"size"`
+	Exited  bool   `json:"exited"`
+}
+
+// handleSessions 返回活动终端会话列表（供前端启动时恢复会话）。
+func (m *AdminMux) handleSessions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]interface{}{"ok": true, "sessions": m.sessions.list()})
+}
+
+// handleSessionHistory 读取指定会话的历史镜像内容。
+func (m *AdminMux) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeErr(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	data, err := m.sessions.history(id)
+	if err != nil {
+		writeErr(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "id": id, "size": len(data), "content": string(data)})
+}
+
+// handleCloseSession 关闭指定会话（终止进程 + 删除历史文件）。
+func (m *AdminMux) handleCloseSession(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeErr(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	if err := m.sessions.closeByID(id); err != nil {
+		writeErr(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "id": id})
+}
+
+// handleClearSession 清空指定会话的历史镜像文件（前端「清屏」同步）。
+func (m *AdminMux) handleClearSession(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeErr(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	if err := m.sessions.clearHistory(id); err != nil {
+		writeErr(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "id": id})
 }
 
 // inSet reports whether s is one of the allowed values.
@@ -252,9 +310,9 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 
 // handleGetLogs 读取日志文件内容并返回给前端。
 func (m *AdminMux) handleGetLogs(w http.ResponseWriter, r *http.Request) {
-	path := os.Getenv("HARNESS_LOG_FILE")
+	path := m.renv.LogFile
 	if path == "" {
-		writeErr(w, "日志文件未配置（未设置 HARNESS_LOG_FILE）", http.StatusNotFound)
+		writeErr(w, "日志文件未配置", http.StatusNotFound)
 		return
 	}
 	data, err := os.ReadFile(path)
@@ -271,7 +329,7 @@ func (m *AdminMux) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleDownloadLog 以附件形式下发日志原文件，供前端“导出”按钮下载。
 func (m *AdminMux) handleDownloadLog(w http.ResponseWriter, r *http.Request) {
-	path := os.Getenv("HARNESS_LOG_FILE")
+	path := m.renv.LogFile
 	if path == "" {
 		writeErr(w, "日志文件未配置", http.StatusNotFound)
 		return
@@ -881,7 +939,7 @@ func getUIDFromRequest(r *http.Request) int {
 // --- AdminMux builder and socket serving (from adminmux.go) ---
 func (m *AdminMux) buildHandler() http.Handler {
 	base := strings.TrimRight(m.renv.AdminBaseURL, "/")
-	term := NewTerminalHandler(m.renv)
+	term := &terminalHandler{mgr: m.sessions}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -980,6 +1038,14 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleGetQuickCmds(w, r)
 		case p == "/api/quickcmds" && r.Method == http.MethodPost:
 			m.handleSaveQuickCmds(w, r)
+		case p == "/api/sessions" && r.Method == http.MethodGet:
+			m.handleSessions(w, r)
+		case p == "/api/session/history" && r.Method == http.MethodGet:
+			m.handleSessionHistory(w, r)
+		case p == "/api/session" && r.Method == http.MethodDelete:
+			m.handleCloseSession(w, r)
+		case p == "/api/session/clear" && r.Method == http.MethodPost:
+			m.handleClearSession(w, r)
 		case strings.HasPrefix(p, "/api/fnos/"):
 			m.handleFnos(w, r)
 		default:

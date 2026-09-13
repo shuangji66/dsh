@@ -53,6 +53,7 @@ type RuntimeEnv struct {
 	Lang          string
 	ProxyPort     int    // 新增
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（HARNESS_QUICK_CMDS_FILE）
+	SessionDir    string // 终端会话临时镜像目录（HARNESS_SESSION_DIR，停止时整目录清除）
 }
 
 var (
@@ -79,11 +80,11 @@ func loadRuntimeEnv() RuntimeEnv {
 	}
 	return RuntimeEnv{
 		ConfigFile:    envOr("HARNESS_CONFIG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "config.json")),
-		AdminSock:     envOr("HARNESS_ADMIN_SOCK", filepath.Join(appDest, "app.sock")),
-		AdminBaseURL:  envOr("HARNESS_ADMIN_BASEURL", appDest),
-		LogFile:       os.Getenv("HARNESS_LOG_FILE"),
-		PidFile:       os.Getenv("HARNESS_PID_FILE"),
-		DshPidFile:    os.Getenv("HARNESS_DSH_PID_FILE"),
+		AdminSock:     envOr("HARNESS_ADMIN_SOCK", filepath.Join(os.Getenv("TRIM_APPDEST"), "app.sock")),
+		AdminBaseURL:  envOr("HARNESS_ADMIN_BASEURL", "/app/Harness"),
+		LogFile:       envOr("HARNESS_LOG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "harness.log")),
+		PidFile:       envOr("HARNESS_PID_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "harness.pid")),
+		DshPidFile:    envOr("HARNESS_DSH_PID_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "dsh.pid")),
 		TRIMApiToken:  os.Getenv("TRIM_API_TOKEN"),
 		TRIMAppDest:   appDest,
 		TRIMAppName:   appName,
@@ -93,6 +94,7 @@ func loadRuntimeEnv() RuntimeEnv {
 		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
 		ProxyPort:     proxyPort,
 		QuickCmdsFile: envOr("HARNESS_QUICK_CMDS_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "quickcmds.json")),
+		SessionDir:    envOr("HARNESS_SESSION_DIR", filepath.Join(os.Getenv("TRIM_PKGVAR"), "terminal-sessions")),
 	}
 }
 

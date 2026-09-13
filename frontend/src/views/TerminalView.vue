@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import { onMounted, onBeforeUnmount, onActivated, onDeactivated, ref, watch, nextTick } from 'vue'
+import { onMounted, onBeforeUnmount, onActivated, onDeactivated, ref, watch, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
@@ -73,6 +73,13 @@ const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
 const basePath = document.baseURI ? new URL(document.baseURI).pathname.replace(/\/$/, '') : ''
 const wsEndpoint = basePath + '/terminal'
 
+// 后端会话 id：新建会话在 WS 控制帧 \x1b]id;<id>\x07 回填；
+// 恢复历史时从 /api/sessions 取得非退出会话的 id 并以 ?id= 挂载回放。
+const sessionId = ref<string | null>(null)
+
+// 会话不存在标记：收到 "session not found" 后丢弃旧 id，连接关闭时自动重建
+let recreateOnClose = false
+
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let sock: WebSocket | null = null
@@ -118,6 +125,7 @@ const cmdLoading = ref(false)
 function wsUrl(): string {
   const u = new URL(wsEndpoint, location.href)
   u.protocol = wsProtocol
+  if (sessionId.value) u.searchParams.set('id', sessionId.value)
   return u.toString()
 }
 
@@ -390,30 +398,8 @@ onMounted(() => {
   }
   el.value.addEventListener('paste', onPasteEvent)
 
-  // WebSocket
-  sock = new WebSocket(wsUrl())
-  sock.binaryType = 'arraybuffer'
-
-  sock.onopen = () => {
-    // 连接建立后重新 fit 并同步 PTY 尺寸，确保后端 bash 的 cols/rows 与
-    // 前端渲染一致，避免换行错位、命令重叠。
-    fitAndResize()
-    startHeartbeat()
-  }
-  sock.onmessage = (ev) => {
-    const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)
-    term?.write(data)
-    scrollToBottom()
-  }
-  sock.onclose = () => {
-    stopHeartbeat()
-    term?.writeln('\r\n\x1b[31m' + t('term_conn_closed') + '\x1b[0m')
-    scrollToBottom()
-  }
-  sock.onerror = () => {
-    term?.writeln('\r\n\x1b[31m' + t('term_ws_error') + '\x1b[0m')
-    scrollToBottom()
-  }
+  // 先恢复会话（若有未退出的活动会话则以 ?id= 挂载回放历史），再建立 WebSocket
+  restoreSession().then(() => connect())
 
   term.onData((data) => {
     if (!sock || sock.readyState !== WebSocket.OPEN) return
@@ -446,6 +432,91 @@ onMounted(() => {
     }
   })
 })
+
+// 处理来自后端的数据：剥离会话控制帧（\x1b]id;、\x1b]ready\x07、\x1b]exit\x07），
+// 其余内容写入终端。
+function handleData(raw: string) {
+  if (!raw) return
+  let rest = raw
+  rest = rest.replace(/\x1b\]id;([0-9a-f]+)\x07/g, (_, id: string) => {
+    sessionId.value = id
+    return ''
+  })
+  rest = rest.replace(/\x1b\]ready\x07/g, () => '')
+  rest = rest.replace(/\x1b\]exit\x07/g, () => '')
+  // 会话已不存在（如后端重启）：丢弃旧 id，稍后自动重建新会话
+  if (rest.includes('session not found')) {
+    recreateOnClose = true
+    sessionId.value = null
+    rest = '\r\n\x1b[33m' + t('term_conn_closed') + '\x1b[0m\r\n'
+  }
+  if (rest) {
+    term?.write(rest)
+    scrollToBottom()
+  }
+}
+
+// 建立 WebSocket：sessionId 为空则新建会话（后端回 \x1b]id;<id>\x07 回填），
+// 否则以 ?id= 挂载已有会话（后端回放历史 + \x1b]ready\x07 后进入实时流）。
+function connect() {
+  if (!el.value) return
+  disconnect()
+  sock = new WebSocket(wsUrl())
+  sock.binaryType = 'arraybuffer'
+
+  sock.onopen = () => {
+    // 连接建立后重新 fit 并同步 PTY 尺寸，确保后端 bash 的 cols/rows 与
+    // 前端渲染一致，避免换行错位、命令重叠。
+    fitAndResize()
+    startHeartbeat()
+  }
+  sock.onmessage = (ev) => {
+    const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)
+    handleData(data)
+  }
+  sock.onclose = () => {
+    stopHeartbeat()
+    if (recreateOnClose) {
+      recreateOnClose = false
+      connect()
+      return
+    }
+    term?.writeln('\r\n\x1b[31m' + t('term_conn_closed') + '\x1b[0m')
+    scrollToBottom()
+  }
+  sock.onerror = () => {
+    term?.writeln('\r\n\x1b[31m' + t('term_ws_error') + '\x1b[0m')
+    scrollToBottom()
+  }
+}
+
+function disconnect() {
+  if (heartbeatTimer !== null) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+  if (sock) {
+    sock.onmessage = null
+    sock.onclose = null
+    sock.onerror = null
+    sock.onopen = null
+    sock.close()
+    sock = null
+  }
+}
+
+// 启动时恢复会话：列出后端活动会话，取第一个未退出的会话 id 以 ?id= 挂载，
+// 从而回放其历史消息；无会话则新建。
+async function restoreSession() {
+  try {
+    const res = await api.sessions()
+    const list = res.sessions || []
+    const live = list.find((s) => !s.exited)
+    if (live) sessionId.value = live.id
+  } catch (e) {
+    console.warn('restore sessions error:', e)
+  }
+}
 
 // 控制台主题（浅色/深色/跟随系统）切换时，实时更新终端底色与字体色
 watch(
@@ -489,7 +560,7 @@ onBeforeUnmount(() => {
     el.value.removeEventListener('paste', onPasteEvent)
     onPasteEvent = null
   }
-  sock?.close()
+  disconnect()
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
@@ -508,37 +579,20 @@ onBeforeUnmount(() => {
 })
 
 const reconnect = () => {
-  sock?.close()
-  setTimeout(() => {
-    sock = new WebSocket(wsUrl())
-    sock.binaryType = 'arraybuffer'
-    sock.onmessage = (ev) => {
-      const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)
-      term?.write(data)
-      scrollToBottom()
-    }
-    sock.onopen = () => {
-      term?.writeln('' + t('term_reconnected') + '')
-      scrollToBottom()
-      fitAndResize()
-      startHeartbeat()
-    }
-    sock.onclose = () => {
-      stopHeartbeat()
-      term?.writeln('\r\n\x1b[31m' + t('term_conn_closed') + '\x1b[0m')
-      scrollToBottom()
-    }
-    sock.onerror = () => {
-      term?.writeln('\r\n\x1b[31m' + t('term_ws_error') + '\x1b[0m')
-      scrollToBottom()
-    }
-  }, 200)
+  // 重连 = 重置终端显示，随后重新挂载会话——后端会从临时历史文件回放全部内容
+  // 后再进入实时流，实现「重连同同步加载会话历史消息」。
+  term?.reset()
+  connect()
 }
 
 function clearTerminal() {
   if (term) {
     term.clear()
     scrollToBottom()
+  }
+  // 清屏同步清空后端临时历史文件：重连/刷新后不再回放已清除的内容
+  if (sessionId.value) {
+    api.clearSessionHistory(sessionId.value).catch((e) => console.warn('clear session history:', e))
   }
 }
 

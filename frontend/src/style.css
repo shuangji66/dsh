@@ -1,6 +1,48 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind CSS v4 入口：以 CSS-first 方式引入，替代 v3 的 @tailwind 三指令。 */
+@import "tailwindcss";
+
+/* 显式声明内容源（相对本 CSS 文件所在目录 src/）：
+   index.html 在 frontend 根、组件在 src/ 下。v4 的 @tailwindcss/postcss
+   会自动源检测，这里显式声明以保证 .vue/.ts/.js 里的类万无一失地被扫描。 */
+@source "../index.html";
+@source "./**/*.{vue,ts,js,jsx,tsx}";
+
+/* 暗色模式：class 策略（对应 <html class="dark">，与原 darkMode:'class' 等价）。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Genesis 设计令牌：从 v3 的 tailwind.config.js theme.extend 迁移到 v4 的 @theme。
+   变量命名规则：--color-* / --font-* / --shadow-* / --max-width-*。 */
+@theme {
+  /* ===== 颜色 ===== */
+  /* 品牌主色（indigo） */
+  --color-brand: #6366F1;
+  --color-brand-hover: #4F46E5;
+  --color-brand-soft: rgba(99, 102, 241, 0.12);
+  /* 语义色 */
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-danger: #EF4444;
+  /* 中性层：背景 / 表面 / 边框 / 文本 */
+  --color-bg: #FAFAFA;
+  --color-surface: #FFFFFF;
+  --color-line: #E8E8EC;
+  --color-ink: #0A0A0A;
+  --color-ink-soft: #6B6B6B;
+  --color-ink-faint: #9C9C9C;
+
+  /* ===== 字体 ===== */
+  --font-sans: 'DM Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-display: 'General Sans', 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* ===== 阴影 ===== */
+  --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.08);
+  --shadow-glow: 0 4px 12px rgba(99, 102, 241, 0.35);
+  --shadow-pop: 0 10px 40px rgba(0, 0, 0, 0.12);
+
+  /* ===== 宽度 ===== */
+  --max-width-content: 1280px;
+}
 
 html, body, #app {
   height: 100%;

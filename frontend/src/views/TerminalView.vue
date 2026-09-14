@@ -173,6 +173,35 @@ function stopHeartbeat() {
   }
 }
 
+// FitAddon 用挂载点「父元素」computedStyle 的 height/width 估算行列数。Tailwind
+// 全局 box-sizing:border-box，Chrome 系浏览器此时返回的是 **border-box** 尺寸（含
+// 边框与内边距），于是挂在容器上的 border/padding 会被当成可绘制空间：网格比真实
+// 内容区更高/更宽，最后一行被排进内缩区并被 overflow:hidden 裁掉 —— 桌面端表现为
+// 「终端最底部的消息被页面底框遮挡」。故 10px 内缩放在模板外层的 padding 上，
+// 挂载点自身零 border / 零 padding；这里再按真实内容盒尺寸做一次收敛校正，
+// 兜住不同浏览器的 computedStyle 差异与亚像素舍入。
+function clampGridToContainer(container: HTMLElement) {
+  if (!term) return
+  const rect = container.getBoundingClientRect()
+  const cs = getComputedStyle(container)
+  const horizontal = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) +
+    (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0)
+  const vertical = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) +
+    (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0)
+  const availW = rect.width - horizontal
+  const availH = rect.height - vertical
+  // 网格实际绘制尺寸在 .xterm-screen 上（= rows × 行高、cols × 列宽）
+  const screen = container.querySelector('.xterm-screen') as HTMLElement | null
+  if (!screen || availW <= 0 || availH <= 0 || term.rows <= 0 || term.cols <= 0) return
+  const grid = screen.getBoundingClientRect()
+  if (grid.width <= 0 || grid.height <= 0) return
+  let { cols, rows } = term
+  // 0.5px 容差：忽略亚像素舍入，避免无谓的反复 resize
+  if (rows > 1 && grid.height > availH + 0.5) rows = Math.max(1, Math.floor(availH / (grid.height / rows)))
+  if (cols > 2 && grid.width > availW + 0.5) cols = Math.max(2, Math.floor(availW / (grid.width / cols)))
+  if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows)
+}
+
 function fitAndResize() {
   if (!fitAddon || !term || !el.value) return
   try {
@@ -188,6 +217,8 @@ function fitAndResize() {
       return
     }
     fitAddon.fit()
+    // fit 之后校正：确保网格不越过容器内容盒（不被内缩边框裁切）
+    clampGridToContainer(container)
     const cols = term.cols
     const rows = term.rows
     if (cols > 0 && rows > 0) {
@@ -779,14 +810,22 @@ function showToast(msg: string) {
       </div>
     </div>
 
-    <!-- 终端容器，绑定触摸事件（相对定位，承载复制提示气泡）
-         深色模式：#1A1A1A 底 / #4EC9B0 字；浅色模式：#faf5e9 底 / #1a1814 字（跟随控制台主题） -->
-    <div ref="el" class="flex-1 term-container overflow-hidden relative border-l-[10px] border-b-[10px]
-      bg-[#faf5e9] border-[#faf5e9] dark:bg-[#1A1A1A] dark:border-[#1A1A1A]" @touchstart="onTouchStart"
-      @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd">
-      <!-- 复制/粘贴反馈提示 -->
-      <div
-        class="term-copy-toast absolute bottom-2 right-2 z-20 px-3 py-1.5 rounded-md bg-black/70 dark:bg-white/85 text-white dark:text-black text-xs font-medium shadow-card opacity-0 pointer-events-none transition-opacity duration-200 whitespace-nowrap">
+    <!-- 终端内缩外框：左 / 下各留 10px 与终端同色的呼吸区（视觉上的“页面底框”）。
+         关键：内缩量只能放在这一层的 padding 上，绝不能放到下面 xterm 挂载容器自身
+         的 border / padding 上 —— FitAddon 按挂载点父元素 computedStyle 的 height/width
+         计算行列数，而 Tailwind 全局 box-sizing:border-box 下 Chrome 返回的是 border-box
+         尺寸，边框那 10px 会被误算成可用空间，最后一行便会排进内缩区并被 overflow:hidden
+         裁掉（桌面端表现为“最底部的消息被底框遮挡”）。 -->
+    <div class="flex-1 min-h-0 pl-[10px] pb-[10px] bg-[#faf5e9] dark:bg-[#1A1A1A]">
+      <!-- 终端容器（xterm 挂载点：保持零 border / 零 padding），绑定触摸事件；
+           相对定位以承载复制提示气泡。
+           深色模式：#1A1A1A 底 / #4EC9B0 字；浅色模式：#faf5e9 底 / #1a1814 字（跟随控制台主题） -->
+      <div ref="el" class="term-container overflow-hidden relative bg-[#faf5e9] dark:bg-[#1A1A1A]"
+        @touchstart="onTouchStart" @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd">
+        <!-- 复制/粘贴反馈提示 -->
+        <div
+          class="term-copy-toast absolute bottom-2 right-2 z-20 px-3 py-1.5 rounded-md bg-black/70 dark:bg-white/85 text-white dark:text-black text-xs font-medium shadow-card opacity-0 pointer-events-none transition-opacity duration-200 whitespace-nowrap">
+        </div>
       </div>
     </div>
 

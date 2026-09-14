@@ -89,6 +89,7 @@ h1, h2, h3, h4 {
   border-radius: 6px;
 }
 
+/* 终端容器（xterm 挂载点）：只负责铺满外框，尺寸全部交给 xterm 自己管理。 */
 .term-container {
   height: 100%;
   width: 100%;
@@ -109,9 +110,12 @@ h1, h2, h3, h4 {
   transition: opacity 200ms ease;
   pointer-events: none;
 }
-/* 注意：不要给 .term-container 或其 .xterm 子元素设置 padding / margin /
-   height:100% / box-sizing，否则会干扰 xterm FitAddon 的尺寸测量，导致
-   cols/rows 计算偏差（文字提前换行或命令重叠）。xterm 会自行管理自身尺寸。 */
+/* 注意：不要给 .term-container（xterm 挂载点）设置 border / padding / margin。
+   FitAddon 是按挂载点父元素 computedStyle 的 height / width 估算行列数的，而
+   Tailwind 全局 box-sizing:border-box 下 Chrome 系浏览器返回的是 border-box 尺寸
+   （含边框与内边距），这部分空间会被误当成可绘制区，网格随之超高/超宽，最后一行
+   被排到内缩区并由 overflow:hidden 裁掉（表现为终端底部消息被页面底框遮挡）。
+   需要“内缩留白”时，请像 TerminalView 那样在外层包一个只带 padding 的容器。 */
 
 .icon-svg {
   display: inline-block;

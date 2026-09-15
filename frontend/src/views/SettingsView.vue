@@ -115,6 +115,13 @@ function onMemAutoToggle() {
   toast.show(t('saved_mem_restart'), 'info', 5000)
 }
 
+// 浏览器兼容模式：即时保存。反代按该开关决定是否修正引擎兼容判断，
+// 该修正发生在页面加载阶段，因此提示用户刷新页面即可生效（无需重启 dsh）。
+async function onBrowserCompatToggle() {
+  await store.save(false)
+  toast.show(t('settings_browser_compat_saved'), 'success', 5000)
+}
+
 // node 版本切换：即时保存，切换后需重启 dsh 服务生效
 function onNodeVersionChange() {
   store.save(false)
@@ -221,6 +228,21 @@ async function onAuthToggle() {
           </div>
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
             {{ config.dshMemAuto ? t('settings_dsh_mem_auto_hint') : t('settings_dsh_mem_hint') }}
+          </p>
+        </div>
+
+        <!-- 浏览器兼容模式（开关）：修复 Firefox/Safari 会话历史无法加载 -->
+        <div class="py-4">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_browser_compat') }}</span>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" v-model="config.browserCompat" class="sr-only peer" @change="onBrowserCompatToggle">
+              <div class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></div>
+              <div class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+            </label>
+          </div>
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
+            {{ t('settings_browser_compat_hint') }}
           </p>
         </div>
 

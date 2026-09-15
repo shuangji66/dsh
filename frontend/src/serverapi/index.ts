@@ -62,6 +62,9 @@ export interface AppConfig {
   nodeVersion: string // dsh 启动使用的 node 版本，"node24"/"node26"，默认 "node24"
   homeDir?: string // 当前设置的主目录实际路径（用于保存配置时保留）
   accessUrls?: string[] // 用户配置的 dsh 访问地址列表
+  // 浏览器兼容模式：修正 dsh 客户端只适配 V8 的原生函数格式判断，
+  // 供 Firefox/Zen/Safari 等非 V8 内核正常加载会话历史。默认关闭。
+  browserCompat: boolean
 }
 
 export interface DshStatus {

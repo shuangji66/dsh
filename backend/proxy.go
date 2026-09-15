@@ -210,8 +210,27 @@ const bootstrapScript = `(function () {
   try { window.__DSH_OPEN_IN_APP_BLOCKED__ = true; } catch (_e) {}
 })();`
 
+// browserCompatFlagScript 输出浏览器兼容开关的运行时标记。
+//
+// 为什么把开关放在 HTML 而不是直接改写 bundle 字节：
+// dsh 的插件 bundle 响应带 `Cache-Control: public, max-age=31536000, immutable`，
+// 浏览器对普通刷新（F5）会直接命中磁盘缓存、不再回源，若按开关状态改变 bundle
+// 内容，切换后在旧缓存过期前不会生效（实测 fromCache=true）。
+// 而 HTML 文档每次刷新都会回源（实测 fromCache=false），因此让 bundle 内容保持
+// 与开关无关的恒定形态（缓存安全），把开关状态放在 HTML 里注入为全局标记，
+// 即可做到“切换开关 → 普通刷新 → 立即生效”。
+func browserCompatFlagScript(enabled bool) string {
+	v := "false"
+	if enabled {
+		v = "true"
+	}
+	return "<script>window.__DSH_BROWSER_COMPAT__=" + v + ";</script>"
+}
+
 func injectIntoHTML(body []byte) []byte {
-	inject := "<style>[data-slot=\"settings.action\"] { display:none !important; }</style><script>" + bootstrapScript + "</script>"
+	inject := "<style>[data-slot=\"settings.action\"] { display:none !important; }</style>" +
+		browserCompatFlagScript(GetConfig().BrowserCompat) +
+		"<script>" + bootstrapScript + "</script>"
 	s := string(body)
 	idx := strings.Index(strings.ToLower(s), "<head")
 	var pos int
@@ -225,18 +244,152 @@ func injectIntoHTML(body []byte) []byte {
 	return []byte(inject + s)
 }
 
+// sessionWatchdogInit 注入到 dsh client bundle 中的自愈探针实现。
+//
+// 背景：dsh 的 session-controller 只在 ClientSessions.followCurrent() 里打开会话
+// 事件窗口，而 followCurrent() 带有 `current === this.watched` 守卫：一旦 watched
+// 被锁定，若 open() 因任何原因失败（连接代际取消、开场快照超时等），就再没有任何
+// 路径会重试。connection/reset 只调用 handleConnected()（仅刷新列表，不重建窗口），
+// 于是界面停留在空窗口、只显示“深度求索中...”，必须整页刷新或切换会话才能恢复。
+//
+// 该探针在会话窗口未就绪时做有界重试：
+//   - openState === "cold"   → resync() 在此状态下是空操作，需直接 open()；
+//   - openState 为其他非 open → resync()。
+//
+// 契约：锚点未命中时静默跳过（dsh 升级后格式变化不会破坏页面）；任何异常都被吞掉，
+// 绝不影响 dsh 自身逻辑。
+const sessionWatchdogInit = `
+if (globalThis.__DSH_SESSION_WATCHDOG_START__ === void 0) {
+  globalThis.__DSH_SESSION_WATCHDOG_START__ = function (sessions) {
+    try {
+      if (sessions === null || sessions === void 0 || sessions.__watchdogArmed === true) return;
+      sessions.__watchdogArmed = true;
+      var MAX_NUDGES = 3;
+      var nudges = 0;
+      var timer = null;
+      var ticks = 0;
+      var sessionOf = function (id) {
+        try {
+          var record = sessions.scopes.get(id);
+          if (record === null || record === void 0) return void 0;
+          if (record.session !== void 0) return record.session;
+          return record.binding === void 0 ? void 0 : record.binding.session;
+        } catch (_e) { return void 0; }
+      };
+      var inspect = function () {
+        var snapshot;
+        try { snapshot = sessions.list.getSnapshot(); } catch (_e) { return; }
+        var current = snapshot.current;
+        if (current === void 0) return;
+        if (snapshot.byId[current] === void 0) return;
+        var session = sessionOf(current);
+        if (session === void 0) return;
+        var state = session.openState;
+        if (state === "open") return;
+        if (nudges >= MAX_NUDGES) return;
+        nudges += 1;
+        try {
+          if (state === "cold") session.open();
+          else session.resync();
+        } catch (_e) {}
+      };
+      // 页面恢复可见与 bfcache 还原是刷新后最容易处于“窗口未就绪”的时刻。
+      try { window.addEventListener("pageshow", inspect); } catch (_e) {}
+      try {
+        document.addEventListener("visibilitychange", function () {
+          if (document.visibilityState === "visible") inspect();
+        });
+      } catch (_e) {}
+      // 有界收敛窗口：只在启动后一段时间内探测，避免常驻定时器。
+      try {
+        timer = setInterval(function () {
+          ticks += 1;
+          inspect();
+          if (ticks >= 20) clearInterval(timer);
+        }, 1500);
+      } catch (_e) {}
+      try { setTimeout(inspect, 0); } catch (_e) {}
+    } catch (_e) {}
+  };
+}
+`
+
+// sessionWatchdogAnchor 是 session-controller 模块中会话服务注册完成的位置。
+// 它在该模块内唯一（主应用包中不存在），用于把自愈探针挂到会话服务实例上。
+const sessionWatchdogAnchor = `rootCtx.reflect.provide("sessions", this, void 0);`
+
+// nativeFunctionFormatPair 修复 dsh 的 V8-only 原生函数格式判断。
+//
+// dsh-util-values 的 hasIntrinsicConstructor（被内联进 dsh-api-session-controller
+// 客户端 bundle）用精确字符串比较判断“这是不是本 realm 的原生构造器”：
+//
+//	Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`
+//
+// 该字面量只适配 V8 的单行格式。SpiderMonkey（Firefox/Zen）把原生函数源码格式化为
+// 多行（实测 Firefox 156："function Object() {\n    [native code]\n}"），于是精确比较
+// 恒为 false → isIntrinsicObjectPrototype 对任何普通对象都返回 false →
+// snapshotJsonValue 对普通 JSON 返回 undefined → 客户端 assistant-stream 校验抛
+// TypeError("Assistant stream raw chunk must be a lossless JSON object")，历史渲染在
+// 首条消息前中止，界面停在“载入历史…”。
+//
+// 该错误是普通 TypeError，不是 RemoteError，因此 doOpen() 的 catch 不会把它归类为
+// remote failure（isRemoteFailure 只看 isDSHRemoteError 标记），openState 就永久停在
+// "loading"，且没有任何重试路径 —— 这正是刷新/切换会话才能恢复的原因。
+//
+// 修复：比较前把空白折叠为单个空格，使各引擎的原生函数格式统一到 V8 形态。该比较是
+// “重复安装/跨 realm”启发式而非安全边界，折叠空白只会让原本在 V8 下本就通过的值继续
+// 通过，不会放宽任何实际约束。
+const (
+	nativeFnCheckV8Only = "Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`"
+	// nativeFnCheckGated 是同一比较的“运行时开关”形态：
+	//   - 开关关闭（未定义或非 true）时求值为原始表达式，与官方 dsh 完全一致；
+	//   - 开关开启时先折叠空白再比较，修复 SpiderMonkey / JavaScriptCore。
+	// 该替换本身与开关状态无关、对同一份 bundle 恒定，因此 bundle 字节在开关切换
+	// 前后保持不变（对 immutable 缓存安全）；真正的开关判定发生在浏览器运行时，
+	// 由 HTML 注入的 window.__DSH_BROWSER_COMPAT__ 提供。
+	nativeFnCheckGated = "(globalThis.__DSH_BROWSER_COMPAT__ === true ? Function.prototype.toString.call(constructor).replace(/\\s+/gu, \" \") : Function.prototype.toString.call(constructor)) === `function ${name}() { [native code] }`"
+)
+
+// rewriteJSBundle 对转发路径上的 JS 产物做三类改写：
+//  1. 历史遗留的 settings 作用域字面量替换（当前 dsh 版本已无该形态，保留为兼容）；
+//  2. 原生函数格式判断的引擎兼容修复（Firefox/Zen 历史不加载的直接原因）；
+//  3. 注入会话窗口自愈探针。
+//
+// 全部改写都以“锚点未命中则原样返回”为前提，保证 dsh 版本变化时只会退化为不生效，
+// 而不会破坏页面。
 func rewriteJSBundle(buf []byte) []byte {
+	s := string(buf)
+
+	// 1) 兼容性字面量替换（对当前 dsh 无匹配，保留不影响行为）。
 	pairs := [][2]string{
 		{`connection.isLoopback ? "host" : "memory"`, `"host"`},
 		{`connection.isLoopback ? 'host' : 'memory'`, `'host'`},
 		{`connection.isLoopback?"host":"memory"`, `"host"`},
 		{`connection.isLoopback?'host':'memory'`, `'host'`},
 	}
-	s := string(buf)
 	for _, p := range pairs {
 		if strings.Contains(s, p[0]) {
 			s = strings.ReplaceAll(s, p[0], p[1])
 		}
+	}
+
+	// 2) 引擎兼容修复：替换为“运行时受开关控制”的等价表达式。
+	// 替换结果与开关状态无关（同一份 bundle 恒定输出），因此对 immutable 缓存安全；
+	// 是否真正归一化空白由 HTML 注入的 window.__DSH_BROWSER_COMPAT__ 在运行时决定。
+	if strings.Contains(s, nativeFnCheckV8Only) {
+		s = strings.ReplaceAll(s, nativeFnCheckV8Only, nativeFnCheckGated)
+	}
+
+	// 3) 会话窗口自愈探针：仅在 session-controller bundle（含唯一锚点）中注入。
+	// 定义与调用点在同一次替换中紧邻写入，二者同模块同作用域、顺序确定，
+	// 不依赖模块物化顺序（concat 包中第一个 factory 未必是 session-controller）。
+	// 该探针与浏览器兼容开关无关，始终注入：它修的是“窗口打开失败后无重试路径”
+	// 这一与浏览器内核无关的缺陷。会话窗口未就绪时做有界重试
+	if strings.Contains(s, sessionWatchdogAnchor) && !strings.Contains(s, "__DSH_SESSION_WATCHDOG_START__") {
+		s = strings.ReplaceAll(s, sessionWatchdogAnchor,
+			sessionWatchdogInit+
+				sessionWatchdogAnchor+
+				"\n\t\t\ttry { globalThis.__DSH_SESSION_WATCHDOG_START__(this); } catch (_e) {}")
 	}
 	return []byte(s)
 }

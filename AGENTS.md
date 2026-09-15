@@ -93,6 +93,13 @@
 - **`PROFILE_TEMPLATES.web.bundles` 注入** —— 只在 `server-build.yaml` 的 CI 中对
   `dsh-app-boot` 做，本地不涉及。
 - **代理端口默认 `13079`、dsh 端口默认 `13080`** —— 冲突排查先看这两个。
+- **dsh 的插件 bundle 带一年期 `immutable` 强缓存且无 `ETag`/`Last-Modified`** ——
+  响应头为 `Cache-Control: public, max-age=31536000, immutable`；`rev` 由 dsh 自身生成、
+  不随 harness 升级变化，且该路由严格校验 `rev`（改写/省略一律 404），故 URL 无法被
+  harness 击穿。**普通刷新不回源**，升级后必须清除浏览器缓存或强制刷新才能拿到新字节。
+  因此 `proxy.go` 里的注入刻意保持「与开关无关的恒定形态」，把开关状态放到每次回源的
+  HTML 中（`window.__DSH_BROWSER_COMPAT__`），详见 README「浏览器兼容模式」一节。
+  调试注入时：前端/注入改动看不到效果，先排查缓存，不要直接怀疑代码。
 
 ---
 

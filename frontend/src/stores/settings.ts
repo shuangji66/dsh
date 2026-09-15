@@ -16,7 +16,8 @@ export const useSettingsStore = defineStore('settings', () => {
     dshMemAuto: true,
     nodeVersion: 'node24',
     homeDir: '',
-    accessUrls: []
+    accessUrls: [],
+    browserCompat: false
   })
   const runtime = ref<RuntimeInfo | null>(null)
   const status = ref<DshStatus | null>(null)

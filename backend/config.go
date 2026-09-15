@@ -30,6 +30,28 @@ type AppConfig struct {
 	HomeDir string `json:"homeDir"`
 	// AccessURLs 是用户配置的 dsh 访问地址列表，显示在概览页供快速访问。
 	AccessURLs []string `json:"accessUrls,omitempty"`
+	// BrowserCompat 为浏览器兼容模式开关，默认关闭。
+	//
+	// 开启时反代会修正 dsh 客户端 bundle 中一处只适配 V8 的原生函数格式判断
+	// （`Function.prototype.toString.call(c) === "function X() { [native code] }"`）。
+	// SpiderMonkey（Firefox/Zen）与 JavaScriptCore（Safari/WebKit）把原生函数源码
+	// 格式化为多行，使该判断恒为 false，进而让会话历史加载抛
+	// TypeError（"Assistant stream raw chunk must be a lossless JSON object"），
+	// 表现为历史区永久停留“载入历史…”。
+	//
+	// 修正方式是在比较前把空白折叠为单个空格。该变换对 V8（Chrome/Edge）是恒等
+	// 变换，不影响其行为，因此 Chromium 用户开启也无副作用；默认关闭只是让未受
+	// 影响的用户与官方 dsh 行为保持一致。
+	//
+	// 生效时机（重要，与缓存机制有关）：
+	//   - 切换本开关：bundle 字节不随开关变化（替换结果是恒定形态，真正的判定发生在
+	//     浏览器运行时，由 HTML 注入的 window.__DSH_BROWSER_COMPAT__ 提供），而 HTML
+	//     每次刷新都回源，因此切换开关后普通刷新即可生效。
+	//   - 但若浏览器缓存的 bundle 是“升级前”的旧字节（例如本次部署首次引入该修复时），
+	//     dsh 的插件资源带 `Cache-Control: public, max-age=31536000, immutable` 且无
+	//     ETag/Last-Modified，普通刷新不会回源，必须清除浏览器缓存或强制刷新
+	//     （Ctrl+Shift+R）才能拿到新字节。详见 README「浏览器兼容模式」一节。
+	BrowserCompat bool `json:"browserCompat"`
 }
 
 // RuntimeEnv 添加 ProxyPort

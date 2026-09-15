@@ -18,6 +18,9 @@
 - **访问 Token / Cookie 交换** — 从 dsh 启动日志捕获一次性访问 token，换取 dsh 会话
   Cookie，供反向代理转发时携带，实现免 token 访问。
 - **反向代理** — 把 dsh 的 Web 界面经统一端口（默认 `13079`）对外暴露，并叠加登录鉴权。
+- **浏览器兼容模式** — 可开关的反代注入，修复 Firefox / Zen / Safari 等非 V8 引擎上
+  「会话历史无法加载」的问题；默认关闭，Chromium 开启无副作用。
+  （见上文「浏览器兼容模式」一节）
 - **登录鉴权** — 密码校验（≥8 位、大小写字母/数字/符号组合）、会话 Cookie、TTL
   有效期，以及访客管理（在线访客列表 / 踢出，SSE 实时推送）。
 - **Web 终端** — 基于 `creack/pty` + xterm.js 的交互式 bash 会话，通过 WebSocket 传输。
@@ -138,7 +141,72 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 
 运行时配置（`config.json`）字段：`dshPort`、`proxyEnabled`、`proxyAddr`、
 `authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
-`homeDir`、`accessUrls`。可通过设置页修改并保存。
+`homeDir`、`accessUrls`、`browserCompat`。可通过设置页修改并保存。
+
+---
+
+## 浏览器兼容模式（`browserCompat`）
+
+**用途** — 修复 **Firefox / Zen（SpiderMonkey）** 与 **Safari / 苹果设备（JavaScriptCore）**
+上「会话历史一直显示『载入历史…』、且 AI 输出后无法恢复实时对话」的问题。默认**关闭**，
+在设置页「node 栈内存限制」与「启用登录鉴权」之间切换；Chromium 内核（Chrome / Edge）
+开启无副作用。
+
+### 问题成因
+
+dsh 客户端 bundle 中有一处只适配 V8 的原生函数格式判断：
+
+```js
+Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`
+```
+
+非 V8 引擎把原生函数源码格式化为**多行**（实测 Firefox 156 与 WebKit 均为
+`"function Object() {\n    [native code]\n}"`），该比较恒为 `false`，于是普通对象被判为
+「非本 realm 原生原型」→ `snapshotJsonValue` 返回 `undefined` → 客户端抛
+`TypeError: Assistant stream raw chunk must be a lossless JSON object`，历史渲染在首条消息
+前中止。
+
+由于该错误是普通 `TypeError` 而非 `RemoteError`，dsh 不会把它归类为可重试的远端失败，
+`openState` 永久停留在 `"loading"`，因此**必须刷新页面或切换会话**才能恢复。
+
+触发条件是「**流式进行中刷新**」：该校验（`expandAssistantStream`）只在处理
+`assistantStream.activeAttempt.stream`（正在进行的尝试的 baseline）时执行，已完成的
+历史记录不走这条路径。所以在 Chromium 上难以复现，长会话即便含大量 chunk 记录也正常。
+
+### 修复方式
+
+在反代转发路径上把该比较替换为**运行时受开关控制**的等价表达式（比较前把空白折叠为
+单个空格，使各引擎统一到 V8 形态）。该变换对 V8 是恒等变换，V8 下原本通过的判断依旧
+通过，不会放宽任何实际约束（该判断是「重复安装 / 跨 realm」启发式，非安全边界）。
+
+### 生效时机与缓存（重要）
+
+dsh 的插件资源（`/plugins/??…&rev=<dsh 自己的 rev>`）响应带：
+
+```
+Cache-Control: public, max-age=31536000, immutable
+```
+
+且**无 `ETag` / `Last-Modified`**；`rev` 由 dsh 自身生成，**不随 harness 升级而改变**，
+且该路由严格校验 `rev`（改写或省略一律 404），因此 URL 无法被 harness 改写以击穿缓存。
+实测结论：
+
+| 场景 | 资源字节 | 普通刷新（F5） |
+| --- | --- | --- |
+| **切换开关**（开 ↔ 关） | 不变 | ✅ 生效 |
+| **升级 harness 后**（首次引入 / 变更该修复） | 变化 | ❌ 不生效，需清缓存 |
+
+开关状态不写进 bundle 字节，而是由**每次都回源的 HTML** 注入
+`window.__DSH_BROWSER_COMPAT__`，所以「切开关 → 普通刷新」即可生效；但若浏览器本地缓存
+仍是**升级前**的旧 bundle 字节，普通刷新不会回源，**必须清除浏览器缓存或强制刷新
+（Ctrl+Shift+R）**才能拿到新字节。设置页的开关提示中已说明这一点。
+
+### 与「会话自愈探针」的区别
+
+反代另有一处注入（`sessionWatchdogInit`，见 `backend/proxy.go`）**与本开关无关、始终启用**：
+它修复的是 dsh `ClientSessions.followCurrent()` 仅在 `current !== watched` 时打开事件窗口、
+一旦 `open()` 失败便无任何重试路径的缺陷（`connection/reset` 只刷新列表不重建窗口，
+`resync()` 在 `cold` 状态下又是空操作）。该缺陷与浏览器内核无关，Chromium 同样会遇到。
 
 ---
 
@@ -160,6 +228,12 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 - **鉴权未启用** — 未设置 `password` 或密码强度校验失败时后端会打印警告，任何人可访问。
 - **反代不带凭据** — 旧版 dsh 或日志未就绪导致未捕获 token 时，反代将不带 Cookie。
 - **CPU/内存读不到** — dsh 装插件自重启后 PID 变化，后端会自动在 `/proc` 中重新发现。
+- **Firefox / Safari 打开会话只有「载入历史…」（且一直显示「深度求索中…」）** —
+  非 V8 引擎的已知问题，开启设置页的「浏览器兼容模式」。若开启后仍无效，是浏览器
+  仍在使用升级前的旧 bundle 缓存：**清除浏览器缓存或强制刷新（Ctrl+Shift+R）**；
+  详见上文「浏览器兼容模式」一节。
+- **改动了反代注入 / 前端后刷新看不到变化** — dsh 插件资源带一年期 `immutable` 强缓存
+  且无 `ETag`，普通刷新不回源。清除浏览器缓存或强制刷新；必要时重启 dsh 使其 `rev` 变化。
 
 ---
 

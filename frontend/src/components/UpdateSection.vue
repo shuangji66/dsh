@@ -53,6 +53,10 @@ const deleteConfirmName = ref<string | null>(null) // 待删除的备份名
 let es: EventSource | null = null
 let reloadTimer: ReturnType<typeof setTimeout> | null = null
 let rollbackPollTimer: ReturnType<typeof setInterval> | null = null
+// 安装前的控制台版本号与就绪轮询计时器（harness 自我更新专用，见
+// startHarnessReadyPoll）。
+let preInstallVersion = ''
+let readyPollTimer: ReturnType<typeof setInterval> | null = null
 
 // 从后端快照合并到本地响应式状态
 function merge(snap: { harness: UpdateStatus; dsh: UpdateStatus }) {
@@ -204,16 +208,94 @@ async function doInstall() {
   if (busy.value || !downloaded.value) return
   installConfirmVisible.value = false
   installing.value = true
+  // 记录安装前的本地版本号，供 harness 就绪轮询比对（见 startHarnessReadyPoll）。
+  preInstallVersion = versionText(kind)
   try {
     await api.updateInstall(kind)
-    // 后端异步安装（备份→替换→重启）；完成经 SSE 推送。
-    // 兜底超时：安装耗时短，60 秒未收到完成状态则刷新页面。
-    reloadTimer = setTimeout(() => {
-      window.location.reload()
-    }, 60000)
+    if (kind === 'harness') {
+      // harness 自我更新会用新二进制 exec 替换当前进程映像：推送 phase="done" 的
+      // 那个进程随即消失，前端**永远**收不到成功推送（此前只能干等 60 秒兜底计时器，
+      // 即“等待弹窗时间太久”）。改为轮询新进程上报的版本号，进程一就绪立刻收尾。
+      startHarnessReadyPoll()
+    } else {
+      // dsh 安装不换进程，成功状态经 SSE 推送；兜底超时 60 秒后刷新页面。
+      reloadTimer = setTimeout(() => {
+        window.location.reload()
+      }, 60000)
+    }
   } catch (e) {
     installing.value = false
     toast.show((e as Error).message || t('update_failed'), 'error')
+  }
+}
+
+// --- harness 自我更新就绪轮询 ---
+
+// 轮询间隔与总时长上限。上限只是兜底（exec 失败、或重装同版本导致版本号不变），
+// 正常情况进程一就绪（通常 1~3 秒）就会命中并立即收尾。
+const HARNESS_READY_POLL_INTERVAL = 1000
+const HARNESS_READY_POLL_TIMEOUT = 60000
+
+// startHarnessReadyPoll 轮询后端，直到确认控制台已换到新进程。
+//
+// 为什么不能等 SSE：harness 自我更新由 syscall.Exec 用新二进制替换当前进程映像，
+// 推送 phase="done" 的那个进程随即消亡，前端**永远**收不到成功推送——此前只能干等
+// 60 秒兜底计时器，即“等待弹窗时间太久”。这里改为主动探测新进程，任一成立即就绪：
+//   1) 版本号已不同于安装前的版本号（最可靠，正常升级必然满足）；
+//   2) 出现过服务短暂不可用（exec 切换时 admin socket 会断开），且恢复后状态已不是
+//      phase="installing"（新进程内存全新、phase 为空；旧进程在整个安装期间都是
+//      installing）——用于覆盖“重装同一版本”这种版本号不变的场景。
+// 条件 2 额外要求 phase 已非 installing，是为了防误判：偶发一次请求失败（网络抖动、
+// 非重启引起）也会置位 outage 标记，若只看 outage 就会在旧进程仍安装时就判定完成。
+// 两条都无法确认时兜底超时，停止轮询并提示手动刷新（不自动 reload，避免新进程
+// 尚未开始监听时刷新出错误页）。
+function startHarnessReadyPoll() {
+  stopHarnessReadyPoll()
+  const startedAt = Date.now()
+  // 是否观察到服务短暂不可用（exec 切换期间 admin socket 会短暂断开）。
+  let sawOutage = false
+  readyPollTimer = setInterval(async () => {
+    const timedOut = Date.now() - startedAt > HARNESS_READY_POLL_TIMEOUT
+    try {
+      const snap = await api.updateStatus()
+      const local = snap.harness?.localVersion || ''
+      merge(snap)
+      // 版本号比对必须以“安装前版本号已知”为前提：若安装前版本号为空（初始快照
+      // 请求失败），任意非空返回值都会被误判为“已换新进程”，从而在 exec 完成前
+      // 就 reload。此时退化为只认 outage 信号。
+      const versionChanged =
+        !!preInstallVersion && !!local && local !== preInstallVersion
+      const restarted = sawOutage && snap.harness?.phase !== 'installing'
+      if (versionChanged || restarted) {
+        stopHarnessReadyPoll()
+        installing.value = false
+        updatingDone.value = true
+        // 短暂显示“安装成功”，随后关闭弹窗并刷新页面（此时新进程已在服务）。
+        setTimeout(() => {
+          dialogVisible.value = false
+          window.location.reload()
+        }, 1200)
+        return
+      }
+    } catch {
+      // 重启期间 admin socket 短暂不可用，属预期情况，作为就绪信号记录下来。
+      sawOutage = true
+    }
+    if (timedOut) {
+      // 无法确认新进程就绪（如 exec 失败；该错误通常会先经 SSE 推送并由
+      // watchForCompletion 处理）。这里只结束“安装中”视图并提示手动刷新，
+      // 由用户确认实际版本，不自动 reload（新进程可能尚未开始监听）。
+      stopHarnessReadyPoll()
+      installing.value = false
+      toast.show(t('update_manual_refresh'), 'info')
+    }
+  }, HARNESS_READY_POLL_INTERVAL)
+}
+
+function stopHarnessReadyPoll() {
+  if (readyPollTimer) {
+    clearInterval(readyPollTimer)
+    readyPollTimer = null
   }
 }
 
@@ -225,11 +307,13 @@ const downloadPct = computed(() => {
 })
 // 是否已知更新包总大小（Content-Length）
 const downloadTotalKnown = computed(() => (dialogStatus.value.totalBytes ?? 0) > 0)
-// 进度条宽度：已知总量按百分比；未知总量用半宽脉冲动画表示“进行中”。
+// 进度条宽度：已知总量按百分比；未知总量时不设置宽度（交给 .progress-indeterminate
+// 的 CSS 动画），绝不能用固定百分比占位——否则会显示成“卡在 50%”的假进度。
 const progressBarStyle = computed(() =>
-  downloadTotalKnown.value ? { width: downloadPct.value + '%' } : { width: '50%' }
+  downloadTotalKnown.value ? { width: downloadPct.value + '%' } : {}
 )
-const progressBarClass = computed(() => (downloadTotalKnown.value ? '' : 'animate-pulse'))
+// 未知总量时用不确定进度动画（来回滑动的窄条）表示“进行中”
+const progressBarClass = computed(() => (downloadTotalKnown.value ? '' : 'progress-indeterminate'))
 // 已下载 / 总量文字
 const downloadSizeText = computed(() => {
   const d = dialogStatus.value
@@ -304,6 +388,7 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   // 用户取消下载：退出进行中状态，可重新下载。
   if (st.cancelled || (st.error && st.error.includes('用户取消'))) {
     clearTimeout(reloadTimer ?? undefined)
+    stopHarnessReadyPoll()
     installing.value = false
     cancelling.value = false
     cancelConfirmVisible.value = false
@@ -313,6 +398,9 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   // 失败（下载失败 / 安装失败）：退出进行中状态。
   if (st.error) {
     clearTimeout(reloadTimer ?? undefined)
+    // 若正在等 harness 新进程就绪，失败推送说明不会再就绪，立即停止轮询，
+    // 避免 60 秒后再弹一次“请手动刷新”的重复提示。
+    stopHarnessReadyPoll()
     installing.value = false
     cancelling.value = false
     cancelConfirmVisible.value = false
@@ -322,8 +410,11 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   }
   // 安装成功：后端完成解压并推送明确成功信号 phase==="done"（非空，JSON
   // omitempty 不会把它省略），前端即可结束弹窗——无需等待 dsh 完全启动成功。
+  // 注意：只有 dsh 安装会走到这里；harness 自我更新时推送进程已被 exec 换掉，
+  // 由 startHarnessReadyPoll 的轮询负责收尾。
   if (installing.value && st.phase === 'done') {
     clearTimeout(reloadTimer ?? undefined)
+    stopHarnessReadyPoll()
     installing.value = false
     updatingDone.value = true
     // 短暂显示“安装成功”，随后关闭弹窗并刷新页面。
@@ -468,6 +559,7 @@ onBeforeUnmount(() => {
   es = null
   if (reloadTimer) clearTimeout(reloadTimer)
   if (rollbackPollTimer) clearInterval(rollbackPollTimer)
+  stopHarnessReadyPoll()
 })
 
 // 侦测后端推送的各阶段状态变化：下载进度、下载完成、安装完成/失败、取消。

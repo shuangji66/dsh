@@ -133,6 +133,34 @@ html, body {
   touch-action: pan-y; /* 仅允许垂直滚动 */
 }
 
+/* ===== 不确定进度条（indeterminate） =====
+   更新包下载时若服务端未返回 Content-Length（totalBytes=0），无法计算百分比。
+   此时不能用固定宽度（如 50%）占位——那会让进度条看起来“卡在 50%”，与实际
+   进度无关。改用一条来回滑动的窄条表示“进行中但总量未知”。
+   轨道需 overflow:hidden，窄条按轨道宽度的 40% 往返平移。 */
+.progress-indeterminate {
+  width: 40%;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes progress-indeterminate {
+  /* 起点：窄条完全移出轨道左侧（-100% 自身宽度） */
+  0% {
+    transform: translateX(-100%);
+  }
+  /* 终点：窄条完全移出轨道右侧（100% 轨道宽 = 250% 自身宽） */
+  100% {
+    transform: translateX(250%);
+  }
+}
+/* 尊重系统的“减少动态效果”偏好：改为静态半透明条，避免动画引发不适 */
+@media (prefers-reduced-motion: reduce) {
+  .progress-indeterminate {
+    width: 100%;
+    opacity: 0.5;
+    animation: none;
+  }
+}
+
 /* ===== 可复用组件类 ===== */
 @layer components {
   /* 卡片：白色表面、1px 细边框、12px 圆角、悬浮上移 + 轻投影 */

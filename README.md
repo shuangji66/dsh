@@ -218,7 +218,16 @@ Cache-Control: public, max-age=31536000, immutable
    dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie。
 3. **反向代理** — 携带该 Cookie 把 dsh 反代到 `PROXY_PORT`，叠加登录鉴权。
 4. **node-pty** — 等待 `$HOME/.dsh/profiles/web` 目录生成后安装并 patch node-pty。
-5. **退出** — 收到 `SIGINT/SIGTERM/SIGQUIT` 或 `stopCh` 后停止 dsh、移除 socket。
+5. **自我更新（harness / dsh）** — 分「下载 → 安装」两步：下载可取消，包存放在
+   `TRIM_PKGVAR/backup/pending/`，安装成功后删除。两条分支收尾方式不同：
+   - **dsh**：备份 → 替换 `server/` → 重启 dsh → 推送 `phase="done"`，前端据 SSE 收尾。
+   - **harness**：备份 → 替换自身二进制 → 停止 dsh → 删除更新包与临时目录 →
+     `syscall.Exec` 换新映像。`exec` 之后本进程的任何代码都不再执行（`defer` 也不触发），
+     因此**成功状态无法经 SSE 推送**——推送进程已消亡，前端改为轮询新进程上报的版本号
+     判定就绪。同理，任何清理动作都必须放在 `exec` 之前显式完成。
+   - 启动时会清理 `pending/` 下的残留更新包（`pending` 只存在于内存，进程重启即失效；
+     上述 `exec` 路径尤其会留下孤儿文件）。
+6. **退出** — 收到 `SIGINT/SIGTERM/SIGQUIT` 或 `stopCh` 后停止 dsh、移除 socket。
 
 ---
 
@@ -234,6 +243,12 @@ Cache-Control: public, max-age=31536000, immutable
   详见上文「浏览器兼容模式」一节。
 - **改动了反代注入 / 前端后刷新看不到变化** — dsh 插件资源带一年期 `immutable` 强缓存
   且无 `ETag`，普通刷新不回源。清除浏览器缓存或强制刷新；必要时重启 dsh 使其 `rev` 变化。
+- **`vue-tsc` 报 `baseUrl` 已废弃（TS5101）** — TypeScript 6 起 `baseUrl` 被标记废弃。
+  本项目已移除 `baseUrl`，`paths` 改用相对本 tsconfig 的 `./src/*` 写法（`@/*` 别名
+  在 vue-tsc 与 Vite 两侧均保持可用）。改回 `baseUrl` 会重新触发该报错。
+- **前端类型检查命令** — `cd frontend && npm run typecheck`（即 `vue-tsc --noEmit`）。
+  注意 TypeScript 需为 **6.x**：TS 7 移除了 `typescript/lib/tsc` 子路径导出，
+  `vue-tsc` 3.x 依赖它，会直接以 `ERR_PACKAGE_PATH_NOT_EXPORTED` 崩溃。
 
 ---
 

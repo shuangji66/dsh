@@ -79,25 +79,24 @@ onMounted(() => store.load())
 // --- dsh 访问地址（DynamicList 风格） ---
 const newAccessUrl = ref('')
 
-// 确保 config.accessUrls 为数组
-function ensureAccessUrls() {
+// 确保 config.accessUrls 为数组，并返回该数组（便于调用处获得非 undefined 的窄化类型）
+function ensureAccessUrls(): string[] {
   if (!Array.isArray(config.value.accessUrls)) config.value.accessUrls = []
+  return config.value.accessUrls
 }
 
 // 添加一个访问地址并自动保存（每添加一个就刷新概览页数据）
 function addAccessUrl() {
   const url = newAccessUrl.value.trim()
   if (!url) return
-  ensureAccessUrls()
-  config.value.accessUrls.push(url)
+  ensureAccessUrls().push(url)
   newAccessUrl.value = ''
   store.save()
 }
 
 // 移除一个访问地址
 function removeAccessUrl(idx: number) {
-  ensureAccessUrls()
-  config.value.accessUrls.splice(idx, 1)
+  ensureAccessUrls().splice(idx, 1)
   store.save()
 }
 

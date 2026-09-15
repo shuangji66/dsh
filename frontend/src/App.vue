@@ -24,7 +24,8 @@ const toggleCollapse = () => {
   collapsed.value = !collapsed.value
 }
 
-// 导航项：label 用 i18n 翻译
+// 导航项：label 用 i18n 翻译。用 as const 固定 icon 为字面量联合类型，
+// 模板里 icons[item.icon] 才能被 vue-tsc 正确推导（否则 icon 退化为 string）。
 const nav = [
   { name: 'overview', labelKey: 'nav_overview', icon: 'overview' },
   { name: 'settings', labelKey: 'nav_settings', icon: 'settings' },
@@ -32,7 +33,7 @@ const nav = [
   { name: 'plugins', labelKey: 'nav_plugins', icon: 'plugin' },
   { name: 'terminal', labelKey: 'nav_terminal', icon: 'terminal' },
   { name: 'logs', labelKey: 'nav_logs', icon: 'logs' }
-]
+] as const
 
 // 打开时的默认页面
 function defaultView(): string {

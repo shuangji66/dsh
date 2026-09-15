@@ -1229,6 +1229,9 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		// 避免与 refreshDshVersion 的更新互相覆盖。
 		// 注意：phase 必须置为非空的 "done"——Phase 字段带 json omitempty，
 		// 空字符串会被省略导致前端收不到（前端以 phase==="done" 为成功信号关弹窗）。
+		// 另外：kind==harness 时安装成功会 exec 换新映像，本 goroutine 随之消亡，
+		// 这段推送**实际不会执行**（只有 exec 失败、以错误返回时才会走上面的错误
+		// 分支）；harness 的成功判定由前端轮询新进程版本号完成。
 		upd := m.update
 		upd.updateStatus(kind, func(st *UpdateStatus) {
 			st.CheckedAt = time.Now()

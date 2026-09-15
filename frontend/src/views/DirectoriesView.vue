@@ -303,12 +303,14 @@ async function openPicker() {
       // 回调地址指向本应用基路径下的 callback.html（由后端托管提供）
       const basePath = document.baseURI ? new URL(document.baseURI).pathname.replace(/\/$/, '') : ''
       const redirectUri = window.location.origin + basePath + '/callback.html'
+      // 注意：openAppAuth 的 pickUserFile 只支持 appName / redirectUri / state /
+      // directory / accept / sidebarGroup（见 SDK 的 buildAppAuthUrl），title 与
+      // okText 不在 AppAuthPickFileParams 内、也不会被拼进 URL；弹窗标题由宿主
+      // 授权页自行决定，故此处不传（桥接模式 pickUserFile 仍支持，见下方分支）。
       await sdk.openAppAuth('pickUserFile', {
         appName,
         redirectUri,
         directory: true,
-        title: t('directory_pick_title'),
-        okText: t('directory_pick_ok'),
         sidebarGroup: ['myFiles', 'external', 'favorites', 'team'],
       })
       toast.show(t('directory_open_window'), 'info', 4000)

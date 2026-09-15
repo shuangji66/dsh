@@ -132,6 +132,8 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	// 本地 dsh 版本立即通过 `dsh -V` 获取（原 /api/dsh/version 端点已移除，
 	// 改由更新状态统一提供 dsh 版本号）。
 	m.statuses[updateKindDsh] = &UpdateStatus{Kind: updateKindDsh, LocalVersion: m.localDshVersion()}
+	// 启动时清理上次未能回收的更新包（自我更新 exec、异常退出等场景的残留）。
+	m.clearOrphanPending()
 	return m
 }
 
@@ -1132,6 +1134,38 @@ func (m *UpdateManager) clearPending() {
 	m.pending = nil
 }
 
+// clearOrphanPending 删除 pendingDir 下所有“无主”更新包文件。
+//
+// pending 只存在于内存，进程重启后即丢失：无论上次是安装前崩溃、安装过程被中断，
+// 还是 harness 自我更新（旧进程被 exec 换掉，内存中的 pending 随进程消亡），重启后
+// 磁盘上都会留下永远不会被 clearPending 回收的 .tar.gz。这些文件只用于“下载→安装”
+// 两步之间传递，没有任何跨重启续用价值（版本号变化后也无法复用），因此在启动时
+// 整目录清理，避免每次自我更新都残留一个更新包。
+//
+// 注意：只清 pendingDir，不触碰 backupDir 里的 harness-*/server-* 备份（那些是回滚
+// 依据，由 30 天清理任务负责）。
+func (m *UpdateManager) clearOrphanPending() {
+	dir := m.pendingDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		full := filepath.Join(dir, e.Name())
+		if err := os.Remove(full); err == nil {
+			removed++
+			logger().Printf("[update] 清理残留更新包: %s", e.Name())
+		}
+	}
+	if removed > 0 {
+		logger().Printf("[update] 共清理 %d 个残留更新包", removed)
+	}
+}
+
 // cancelProgressReader 包装下载响应体：在每次读取时检查取消信号，并按节流
 // 节奏上报进度（每 500ms 或每 256KB 一次），避免高频回调刷爆 SSE。
 type cancelProgressReader struct {
@@ -1247,9 +1281,11 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 }
 
 // installUpdate 安装已下载的更新包（第二步）。读取 pending 中的 .tar.gz，解压后
-// 调用 applyHarness / applyServer 执行“备份→替换→重启”。安装阶段耗时短、不可取消。
-// 安装失败时保留 pending（用户可重试安装）；安装成功后仅 dsh 情形清除 pending
-// （harness 成功时进程会被 exec 换新映像，根本不会执行到这里）。
+// 调用 installHarness / installDsh 执行“备份→替换→重启”。安装阶段耗时短、不可取消。
+// 安装失败时保留 pending（用户可重试安装）；成功时由各分支清 pending：
+//   - dsh：清 pending 并正常返回，由调用方推送 phase=done。
+//   - harness：先清 pending 再 exec 换新映像，本函数永不返回（故不会有 phase=done 推送，
+//     前端以轮询新进程版本号判定就绪——见 UpdateSection.vue 的 startHarnessReadyPoll）。
 func (m *UpdateManager) installUpdate(k updateKind) error {
 	m.applying.Lock()
 	defer m.applying.Unlock()
@@ -1287,9 +1323,9 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 	var installErr error
 	switch k {
 	case updateKindHarness:
-		installErr = m.applyHarness(tmpDir)
+		installErr = m.installHarness(tmpDir)
 	case updateKindDsh:
-		installErr = m.applyServer(tmpDir)
+		installErr = m.installDsh(tmpDir)
 	default:
 		installErr = fmt.Errorf("未知的更新类型 %s", k)
 	}
@@ -1298,11 +1334,39 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
 		return installErr
 	}
-	// 安装成功：dsh 情形清除待安装包；harness 情形进程已被 exec 替换（若 exec
-	// 失败返回 nil，则保留包供重试）。
-	if k == updateKindDsh {
-		m.clearPending()
+	return nil
+}
+
+// installHarness 完成 harness 自我更新的最后阶段：替换二进制、停止 dsh、清理
+// 更新包与临时目录，最后 exec 换新映像。
+//
+// 关键顺序约束：syscall.Exec 会**立刻**用新程序替换当前进程映像，本进程此后的
+// 任何语句都不会再执行（defer 也不会触发）。因此删除待安装更新包、清理解压临时
+// 目录这些收尾动作必须在 exec 之前显式完成，否则它们会永久残留——这正是此前
+// 「harness 自我更新后更新包未被删除」的原因。
+//
+// 返回值：exec 成功则永不返回；exec 失败返回错误（此时新二进制已就位，重启后生效）。
+func (m *UpdateManager) installHarness(extractDir string) error {
+	newBin, err := m.applyHarness(extractDir)
+	if err != nil {
+		return err
 	}
+	// 收尾（必须在 exec 之前）：删除待安装更新包、清理解压临时目录。
+	m.clearPending()
+	os.RemoveAll(extractDir)
+	logger().Printf("[update] harness 更新包与临时目录已清理，准备重启控制台")
+	m.restartHarness(newBin)
+	// 仅当 exec 失败时才会走到这里。
+	return fmt.Errorf("重启控制台失败（新二进制已就位，手动重启后生效）")
+}
+
+// installDsh 完成 dsh 服务更新的最后阶段：替换 server 目录并（异步）重启 dsh，
+// 随后删除待安装更新包。返回 nil 表示安装成功；调用方负责推送成功状态。
+func (m *UpdateManager) installDsh(extractDir string) error {
+	if err := m.applyServer(extractDir); err != nil {
+		return err
+	}
+	m.clearPending()
 	return nil
 }
 
@@ -1350,29 +1414,40 @@ func findExecutable(dir, name string) (string, error) {
 	return found, nil
 }
 
-// applyHarness 备份并替换控制台二进制，随后重启控制台。
-func (m *UpdateManager) applyHarness(extractDir string) error {
+// applyHarness 备份并替换控制台二进制，并停止 dsh 服务；**不**重启控制台，而是
+// 返回新二进制路径交由调用方在收尾之后 exec。
+//
+// 之所以不在此处直接 exec：exec 会立刻用新映像替换当前进程，本进程的内存状态与
+// 后续语句（清理更新包、清理解压目录）全部消失——这正是此前“自我更新后更新包
+// 残留”的原因。所有收尾动作必须由调用方在 exec 之前完成。
+func (m *UpdateManager) applyHarness(extractDir string) (string, error) {
 	newBin, err := findExecutable(extractDir, "harness")
 	if err != nil {
-		return err
+		return "", err
 	}
 	binDir := m.harnessBinDir()
 	dest := filepath.Join(binDir, "harness")
 
 	// 先做备份（压缩当前二进制）。用独立 staging 目录避免打包整棵临时树。
+	// 这里**不用 defer** 清理 staging 目录：本函数返回后调用方还会 exec 换新映像，
+	// 但 exec 只发生在 applyHarness 返回之后，因此只要在返回前显式删除即可；
+	// 用 defer 反而会在 exec 后永不执行、留下 /tmp 残留（此前 /tmp/backup-stage
+	// 就是这样攒下来的）。目录名带随机后缀，避免并发/残留目录互相干扰。
+	stage, err := os.MkdirTemp("", "harness-backup-stage-")
+	if err != nil {
+		return "", fmt.Errorf("创建备份临时目录失败: %w", err)
+	}
 	backupName := fmt.Sprintf("harness-%s-%s.tar.gz", harnessVersion, time.Now().Format("20060102150405"))
 	backupPath := filepath.Join(m.backupDir(), backupName)
-	stage := filepath.Join(filepath.Dir(extractDir), "backup-stage")
-	if err := os.MkdirAll(stage, 0755); err != nil {
-		return fmt.Errorf("创建备份临时目录失败: %w", err)
-	}
-	defer os.RemoveAll(stage)
 	if err := copyFile(dest, filepath.Join(stage, "harness")); err != nil {
-		return fmt.Errorf("读取当前二进制用于备份失败: %w", err)
+		os.RemoveAll(stage)
+		return "", fmt.Errorf("读取当前二进制用于备份失败: %w", err)
 	}
 	if err := tgzDir(stage, backupPath); err != nil {
-		return fmt.Errorf("备份当前二进制失败: %w", err)
+		os.RemoveAll(stage)
+		return "", fmt.Errorf("备份当前二进制失败: %w", err)
 	}
+	os.RemoveAll(stage)
 	logger().Printf("[update] harness 已备份到 %s", backupPath)
 
 	// 替换二进制：在目标同目录下先写入临时文件，再 atomic rename 替换。
@@ -1381,28 +1456,28 @@ func (m *UpdateManager) applyHarness(extractDir string) error {
 	tmpNew := filepath.Join(binDir, ".harness.new")
 	if err := copyFile(newBin, tmpNew); err != nil {
 		os.Remove(tmpNew)
-		return fmt.Errorf("复制新二进制失败: %w", err)
+		return "", fmt.Errorf("复制新二进制失败: %w", err)
 	}
 	if err := os.Rename(tmpNew, dest); err != nil {
 		os.Remove(tmpNew)
-		return fmt.Errorf("替换二进制失败: %w", err)
+		return "", fmt.Errorf("替换二进制失败: %w", err)
 	}
 	if err := os.Chmod(dest, 0755); err != nil {
 		logger().Printf("[update] chmod 失败: %v", err)
 	}
 
-	logger().Printf("[update] harness 二进制已更新，准备重启控制台")
 	// 先停止 dsh 服务，再由新二进制 exec 覆盖当前进程镜像（保持同一 PID，fnOS 监管不失效）。
 	// 新 harness 进程启动时会自动拉起 dsh，先停止可避免端口冲突或残留进程。
 	logger().Printf("[update] 停止 dsh 服务")
 	if err := m.dsh.Stop(); err != nil {
 		logger().Printf("[update] 停止 dsh 失败: %v", err)
 	}
-	m.restartHarness(dest)
-	return nil
+	logger().Printf("[update] harness 二进制已更新，等待收尾后重启控制台")
+	return dest, nil
 }
 
-// restartHarness 用新二进制替换当前进程镜像。
+// restartHarness 用新二进制替换当前进程镜像。正常情况下不会返回（进程映像已被
+// 替换）；仅当 exec 失败时返回，此时进程仍以旧镜像运行。
 func (m *UpdateManager) restartHarness(newBin string) {
 	// 让当前进程以新二进制重新 exec；若失败，记录错误（进程仍以旧镜像运行）。
 	env := os.Environ()

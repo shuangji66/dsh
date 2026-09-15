@@ -155,6 +155,66 @@ jobs:
             }
           " "$FILE"
 
+      # ---------- 修补 dsh 附件存储的「祖先目录 fsync」（fnOS 上传失败） ----------
+      # 背景：@deepseek-ai/dsh-attachment-local 落盘附件时做崩溃可耐久发布，会对每一级
+      # 祖先目录 open(O_RDONLY) + fsync，并一路上溯到文件系统根 "/"。fnOS 把 /vol1 与
+      # /vol1/@appshare 设为 mode 000（仅由 trim_acl 授予穿越 x，不给读 r），应用以
+      # 自身 uid（无 CAP_DAC_OVERRIDE）无法读取这些祖先目录，首次上传即抛
+      # `EACCES: permission denied, open '/vol1/@appshare'`，WEB 端上传文件与图片整体
+      # 失败（会话/设置等其他落盘路径不上溯到根，故不受影响）。
+      # 修法：上溯时遇到打不开的祖先即停止（不可读的祖先本就无法 fsync），授权目录内
+      # 已创建的条目仍保持原有同步语义。仅改这一处，不动权限、不改存储位置。
+      - name: 修补 dsh 附件存储的祖先 fsync（fnOS /vol1 不可读）
+        run: |
+          cat > /tmp/patch-attachment-fsync.cjs <<'PATCH_EOF'
+          const fs = require('fs');
+          const path = process.argv[2];
+          const MARKER = 'dsh:fnos-ancestor-fsync';
+          const ANCHOR_RE = /([ \t]+let level = target;\r?\n[ \t]+while \(level !== stop\) \{\r?\n[ \t]+const parent = dirname\(level\);\r?\n)([ \t]+)(await syncDirectory\(parent\);)(\r?\n)/;
+
+          if (!fs.existsSync(path)) {
+            console.log(`::warning::未找到 ${path}，跳过附件 fsync 修补（请确认 dsh 包布局是否变化）`);
+            process.exit(0);
+          }
+          const src = fs.readFileSync(path, 'utf8');
+          if (src.includes(MARKER)) {
+            console.log('附件 fsync 补丁已存在，无需重复注入');
+            process.exit(0);
+          }
+          const m = src.match(ANCHOR_RE);
+          if (m) {
+            const ind = m[2];
+            const nl = m[4];
+            const replacement = m[1] +
+              ind + 'try {' + nl +
+              ind + '\t' + m[3] + nl +
+              ind + '} catch (error) {' + nl +
+              ind + '\t/* ' + MARKER + ' —— fnOS 把 /vol1 与 /vol1/@appshare 设为 mode 000，' + nl +
+              ind + '\t   仅由 trim_acl 授予穿越；非 root 无法 open(O_RDONLY) 祖先目录，' + nl +
+              ind + '\t   耐久性 fsync 因此抛 EACCES，使 WEB 端上传文件/图片整体失败。' + nl +
+              ind + '\t   不可读的祖先本就无法同步，故停止上溯；授权目录内已创建的' + nl +
+              ind + '\t   条目仍已同步。 */' + nl +
+              ind + '\tif (error && (error.code === "EACCES" || error.code === "EPERM")) return;' + nl +
+              ind + '\tthrow error;' + nl +
+              ind + '}' + nl;
+            fs.writeFileSync(path, src.replace(ANCHOR_RE, replacement));
+            if (!fs.readFileSync(path, 'utf8').includes(MARKER)) {
+              console.error(`补丁写入后校验失败: ${path}`);
+              process.exit(1);
+            }
+            console.log('已注入附件存储的祖先 fsync 修补（无法读取的祖先即停止上溯）');
+            process.exit(0);
+          }
+          if (src.includes('parse(home).root')) {
+            console.error(`锚点缺失，但仍存在「上溯到文件系统根」的耐久化逻辑: ${path}`);
+            console.error('请人工核对上游改动，更新本步骤的 ANCHOR_RE 与替换体后再发布。');
+            process.exit(1);
+          }
+          console.log('::warning::上游似已移除「上溯到 /」的耐久化逻辑，跳过本补丁（请人工确认上传可用）');
+          PATCH_EOF
+          node /tmp/patch-attachment-fsync.cjs \
+            "/var/apps/Harness/target/server/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js"
+
       - name: 压缩 server 目录，以版本号+平台命名
         run: |
           VERSION="${{ needs.fetch-version.outputs.dsh_version }}"

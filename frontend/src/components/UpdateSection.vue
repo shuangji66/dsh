@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, sseUrl, type UpdateKind, type UpdateStatus, type ServerBackup } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
+import { useEventStream } from '@/composables/useEventStream'
 import MarkdownText from '@/components/MarkdownText.vue'
 
 // 概览页传入：dsh 访问地址列表（显示在版本号下方）
@@ -50,16 +51,17 @@ const selectedRollback = ref<string | null>(null) // 选中的备份名
 const confirmRollbackVisible = ref(false) // 回滚二次确认
 const deleteConfirmName = ref<string | null>(null) // 待删除的备份名
 
-let es: EventSource | null = null
 let reloadTimer: ReturnType<typeof setTimeout> | null = null
 let rollbackPollTimer: ReturnType<typeof setInterval> | null = null
+// 进度兜底轮询计时器（见 startProgressPoll）：SSE 不可用时仍能显示真实进度。
+let progressPollTimer: ReturnType<typeof setInterval> | null = null
 // 安装前的控制台版本号与就绪轮询计时器（harness 自我更新专用，见
 // startHarnessReadyPoll）。
 let preInstallVersion = ''
 let readyPollTimer: ReturnType<typeof setInterval> | null = null
 
-// 从后端快照合并到本地响应式状态
-function merge(snap: { harness: UpdateStatus; dsh: UpdateStatus }) {
+// 从后端快照合并到本地响应式状态（允许只带 harness 或 dsh 的部分快照）
+function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus }) {
   if (snap.harness) {
     harnessStatus.value = { ...snap.harness, localVersion: snap.harness.localVersion || '' }
   }
@@ -89,25 +91,16 @@ function latestText(kind: UpdateKind): string {
   return kind === 'harness' ? harnessStatus.value.latestVersion : dshStatus.value.latestVersion
 }
 
-// 通过 SSE 监听后端推送的更新检测结果
-function connectUpdateStream() {
-  es?.close()
-  const s = new EventSource(sseUrl('/api/update/stream'))
-  es = s
-  s.addEventListener('update', (ev) => {
-    try {
-      const data = JSON.parse((ev as MessageEvent).data)
-      if (data && (data.harness || data.dsh)) merge(data)
-    } catch {
-      /* ignore malformed frames */
-    }
-  })
-  s.onerror = () => {
-    // 连接断开时释放旧连接；EventSource 会内置重连
-    s.close()
-    es = null
+// 通过 SSE 监听后端推送的更新检测结果。
+// 用 useEventStream 而非裸 EventSource：断线（反代掐断空闲长连接、后端重启等）
+// 后会自动重连；重连成功时后端立刻补发一份初始快照，下载进度随即追平。此前在
+// onerror 里 close() 会让浏览器永久放弃该连接，下载进度再也送不到页面。
+const updateStream = useEventStream(() => sseUrl('/api/update/stream'), {
+  update: (data) => {
+    const d = data as { harness?: UpdateStatus; dsh?: UpdateStatus }
+    if (d && (d.harness || d.dsh)) merge(d)
   }
-}
+})
 
 // “检查更新”按钮：通知后端执行一次检测，随后 SSE 推送最新结果
 async function doCheck(kind: UpdateKind) {
@@ -149,15 +142,46 @@ async function doDownload() {
   applyLocalDownloading()
   try {
     await api.updateDownload(kind)
-    // 后端异步下载；进度/完成经 SSE 推送。
-    // 兜底超时：若长时间未收到任何推送（下载卡死/进程异常）则刷新页面。
-    reloadTimer = setTimeout(() => {
-      window.location.reload()
-    }, 45000)
+    // 后端异步下载，进度/完成状态经 SSE 推送。
+    // 除 SSE 外再启动一个秒级轮询兜底：某些反向代理会缓冲甚至直接掐断
+    // text/event-stream（此时 SSE 长时间收不到任何事件），轮询能保证进度条
+    // 依然展示真实百分比，而不是一直停在 0%。
+    startProgressPoll(kind)
   } catch (e) {
     // 请求阶段即失败（参数错误等）：回滚到待更新状态。
     toast.show((e as Error).message || t('update_failed'), 'error')
     applyLocalReset()
+  }
+}
+
+// --- 进度兜底轮询 ---
+
+// startProgressPoll 在下载期间以 1 秒间隔拉取一次状态快照，直接驱动进度显示。
+//
+// 为什么不能只靠 SSE：SSE 会经过反向代理（fnOS 网关 / 用户自建 nginx 等），
+// 这类中间层可能对 text/event-stream 做缓冲，或按空闲超时掐断长连接。一旦事件
+// 长时间到不了前端，进度就只能停在乐观初值 0%（历史上「实际在下载却一直显示
+// 0%」的另一半原因）。轮询走的是普通 GET，不受缓冲影响，作为兜底始终有效；
+// 下载结束（成功/失败/取消）即停止，不引入长期轮询开销。
+function startProgressPoll(kind: UpdateKind) {
+  stopProgressPoll()
+  progressPollTimer = setInterval(async () => {
+    try {
+      const snap = await api.updateStatus()
+      merge(snap)
+      const st = kind === 'harness' ? snap.harness : snap.dsh
+      // 下载阶段结束（已就绪 / 报错 / 取消 / 回到空闲）即停止兜底轮询。
+      if (!st || st.phase !== 'downloading') stopProgressPoll()
+    } catch {
+      // 单次请求失败（如后端重启）忽略，下一拍继续。
+    }
+  }, 1000)
+}
+
+function stopProgressPoll() {
+  if (progressPollTimer) {
+    clearInterval(progressPollTimer)
+    progressPollTimer = null
   }
 }
 
@@ -383,11 +407,13 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   // 按钮自动变为“安装更新”。
   if (st.phase === 'downloaded') {
     clearTimeout(reloadTimer ?? undefined)
+    stopProgressPoll()
     return
   }
   // 用户取消下载：退出进行中状态，可重新下载。
   if (st.cancelled || (st.error && st.error.includes('用户取消'))) {
     clearTimeout(reloadTimer ?? undefined)
+    stopProgressPoll()
     stopHarnessReadyPoll()
     installing.value = false
     cancelling.value = false
@@ -398,6 +424,7 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   // 失败（下载失败 / 安装失败）：退出进行中状态。
   if (st.error) {
     clearTimeout(reloadTimer ?? undefined)
+    stopProgressPoll()
     // 若正在等 harness 新进程就绪，失败推送说明不会再就绪，立即停止轮询，
     // 避免 60 秒后再弹一次“请手动刷新”的重复提示。
     stopHarnessReadyPoll()
@@ -550,15 +577,15 @@ function openAccessUrl(url: string) {
 onMounted(() => {
   // 拉取一次后端状态快照作为初始值
   api.updateStatus().then(merge).catch(() => {})
-  connectUpdateStream()
+  updateStream.start()
   fetchBackups()
 })
 
 onBeforeUnmount(() => {
-  es?.close()
-  es = null
+  // SSE 连接由 useEventStream 自行释放（其内部注册了 onBeforeUnmount）。
   if (reloadTimer) clearTimeout(reloadTimer)
   if (rollbackPollTimer) clearInterval(rollbackPollTimer)
+  stopProgressPoll()
   stopHarnessReadyPoll()
 })
 

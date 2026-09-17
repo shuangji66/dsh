@@ -25,6 +25,21 @@ func sseSend(w http.ResponseWriter, event, data string) {
 	}
 }
 
+// ssePing 发送一行 SSE 注释（以 `:` 开头）并立即刷出，用作心跳。
+//
+// 注释行会被 EventSource 忽略（不触发任何事件、不影响业务逻辑），但它产生真实
+// 字节流量，这才是关键：反向代理按「上游是否有字节」判定长连接是否存活（fnOS
+// 网关 nginx 的 `location /app/` 下 proxy_read_timeout 300s）。若 SSE 在无数据
+// 可推时一个字节都不发，空闲满 5 分钟就会被掐断；前端断流后，更新包下载期间
+// 的真实进度再也送不到页面，表现为「实际在下载却一直显示 0%」。
+// 因此凡可能长时间静默的 SSE，都必须周期性调用 ssePing。
+func ssePing(w http.ResponseWriter) {
+	fmt.Fprint(w, ": ping\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // sseJSON encodes v as a compact JSON string for an SSE data line.
 func sseJSON(v interface{}) string {
 	b, _ := json.Marshal(v)
@@ -157,6 +172,10 @@ func (m *AdminMux) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 				if noChangeCount >= idleThreshold {
 					interval = slowInterval
 				}
+				// 无变化时也必须发心跳：日志长时间不更新（内容不变则不推事件）
+				// 会让连接零字节静默，超过反向代理的 proxy_read_timeout 就被
+				// 掐断，日志页将不再自动刷新。
+				ssePing(w)
 			}
 			timer.Reset(interval)
 		}

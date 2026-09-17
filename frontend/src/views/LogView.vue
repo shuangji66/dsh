@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, onMounted, nextTick } from 'vue'
 import { useToastStore } from '@/stores/toast'
 import { sseUrl } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
+import { useEventStream } from '@/composables/useEventStream'
 
 const toast = useToastStore()
 const { t } = useI18n()
@@ -11,7 +12,6 @@ const logPath = ref('')
 const loading = ref(true)
 const error = ref('')
 const stickToBottom = ref(true) // 是否跟随底部自动滚动
-let logES: EventSource | null = null
 
 // 导出日志原文件：浏览器下载后端附件
 function exportLog() {
@@ -63,32 +63,15 @@ function onScroll() {
   stickToBottom.value = box.scrollHeight - box.scrollTop - box.clientHeight < 40
 }
 
-// 通过 SSE 监听后端主动推送，替换 2 秒轮询
-function connectLogStream() {
-  logES?.close()
-  const es = new EventSource(sseUrl('/api/logs/stream'))
-  logES = es
-  es.addEventListener('log', (ev) => {
-    try {
-      const data = JSON.parse((ev as MessageEvent).data)
-      applySnapshot(data)
-    } catch {
-      /* ignore malformed frames */
-    }
-  })
-  es.onerror = () => {
-    es.close()
-    logES = null
-  }
-}
-
-onMounted(() => {
-  connectLogStream()
+// 通过 SSE 监听后端主动推送，替换 2 秒轮询。
+// 用 useEventStream：日志内容长时间不变时后端只发心跳，若连接被反代掐断，
+// 重连后会立刻补发一份快照，日志页不会卡在旧内容上不再刷新。
+const logStream = useEventStream(() => sseUrl('/api/logs/stream'), {
+  log: (data) => applySnapshot(data as { path?: string; content?: string; exists?: boolean })
 })
 
-onBeforeUnmount(() => {
-  logES?.close()
-  logES = null
+onMounted(() => {
+  logStream.start()
 })
 </script>
 

@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
+import { useEventStream } from '@/composables/useEventStream'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import UpdateSection from '@/components/UpdateSection.vue'
 
@@ -18,8 +19,6 @@ const { t } = useI18n()
 const visitors = ref<Visitor[]>([])
 const visitorsLoading = ref(false)
 const deleting = ref<string | null>(null)
-let visitorES: EventSource | null = null
-let statusES: EventSource | null = null
 
 // “关于”弹窗
 const aboutVisible = ref(false)
@@ -120,45 +119,21 @@ async function initialLoad() {
   }
 }
 
-// 通过 SSE 监听后端主动推送，替换高频轮询
-function connectVisitorStream() {
-  visitorES?.close()
-  const es = new EventSource(sseUrl('/api/visitors/stream'))
-  visitorES = es
-  es.addEventListener('visitors', (ev) => {
-    try {
-      const data = JSON.parse((ev as MessageEvent).data)
-      if (Array.isArray(data)) visitors.value = data
-    } catch {
-      /* ignore malformed frames */
-    }
-  })
-  es.onerror = () => {
-    // 连接断开时后端自动重连（EventSource 内置）；关闭前先释放旧连接避免堆积
-    es.close()
-    visitorES = null
+// 通过 SSE 监听后端主动推送，替换高频轮询。
+// 用 useEventStream（断线自动重连）而不是裸 EventSource：断线后自行重连，重连
+// 成功时后端立刻补发初始快照，CPU/内存与登录列表随即恢复正常刷新。
+const visitorStream = useEventStream(() => sseUrl('/api/visitors/stream'), {
+  visitors: (data) => {
+    if (Array.isArray(data)) visitors.value = data as Visitor[]
   }
-}
+})
 
 // 通过 SSE 每 1 秒接收 dsh 运行状态（CPU 使用率 / 内存占用），实现自动刷新
-function connectStatusStream() {
-  statusES?.close()
-  const es = new EventSource(sseUrl('/api/dsh/stream'))
-  statusES = es
-  es.addEventListener('status', (ev) => {
-    try {
-      const data = JSON.parse((ev as MessageEvent).data) as DshStatus
-      status.value = data
-    } catch {
-      /* ignore malformed frames */
-    }
-  })
-  es.onerror = () => {
-    // 连接断开时后端自动重连；先释放旧连接避免堆积
-    es.close()
-    statusES = null
+const statusStream = useEventStream(() => sseUrl('/api/dsh/stream'), {
+  status: (data) => {
+    status.value = data as DshStatus
   }
-}
+})
 
 async function removeVisitor(id: string) {
   deleting.value = id
@@ -175,15 +150,8 @@ async function removeVisitor(id: string) {
 onMounted(() => {
   store.load()
   initialLoad()
-  connectVisitorStream()
-  connectStatusStream()
-})
-
-onBeforeUnmount(() => {
-  visitorES?.close()
-  visitorES = null
-  statusES?.close()
-  statusES = null
+  visitorStream.start()
+  statusStream.start()
 })
 </script>
 

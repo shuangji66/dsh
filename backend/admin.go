@@ -1302,7 +1302,12 @@ func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		case <-ch:
 			send()
 		case <-keepalive.C:
-			// 心跳：保证连接存活（无需重复推送快照）
+			// 心跳：写一行 SSE 注释，保证「始终有字节下行」。此前这里是个空分支，
+			// 空闲时零字节：fnOS 网关 nginx（location /app/ 下 proxy_read_timeout
+			// 300s）会在 5 分钟后判定上游超时并掐断长连接，前端在重连前收不到任何
+			// 更新进度——下载明明在进行，页面却一直停在 0%（注释行不触发前端事件，
+			// 仅用于保活）。
+			ssePing(w)
 		}
 	}
 }

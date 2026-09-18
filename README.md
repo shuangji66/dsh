@@ -201,12 +201,16 @@ Cache-Control: public, max-age=31536000, immutable
 仍是**升级前**的旧 bundle 字节，普通刷新不会回源，**必须清除浏览器缓存或强制刷新
 （Ctrl+Shift+R）**才能拿到新字节。设置页的开关提示中已说明这一点。
 
-### 与「会话自愈探针」的区别
+### 与「会话自愈探针」的关系（已移除）
 
-反代另有一处注入（`sessionWatchdogInit`，见 `backend/proxy.go`）**与本开关无关、始终启用**：
-它修复的是 dsh `ClientSessions.followCurrent()` 仅在 `current !== watched` 时打开事件窗口、
-一旦 `open()` 失败便无任何重试路径的缺陷（`connection/reset` 只刷新列表不重建窗口，
-`resync()` 在 `cold` 状态下又是空操作）。该缺陷与浏览器内核无关，Chromium 同样会遇到。
+反代曾额外注入一处与本开关无关、始终启用的「会话自愈探针」（旧 `sessionWatchdogInit`）：
+它针对的是 dsh `ClientSessions.followCurrent()` 仅在 `current !== watched` 时打开事件窗口、
+一旦 `open()` 失败便无重试路径的缺陷。
+
+新版 dsh 已重构该机制：`sessions.list` 快照不再有 `current` 字段，`followCurrent()` 方法
+已被删除，改由视图层显式 `sessions.retain(target, { source: "mainView" })` 打开窗口。
+探针的入口条件（`snapshot.current`）因此恒不成立，只剩一个空转定时器，故**已移除**。
+详见 `backend/proxy.go` 的 `rewriteJSBundle` 注释。
 
 ---
 

@@ -9,6 +9,7 @@ import { useI18n } from '@/composables/useI18n'
 import { useTheme } from '@/composables/useTheme'
 import { useToastStore } from '@/stores/toast'
 import { api, type QuickCmd } from '@/serverapi'
+import { randomId } from '@/utils/randomId'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import QuickCmdsDialog from '@/components/QuickCmdsDialog.vue'
 import QuickCmdEditDialog from '@/components/QuickCmdEditDialog.vue'
@@ -709,7 +710,7 @@ async function onQuickCmdSave(payload: { name: string; content: string; auto: bo
     editingCmd.value.auto = payload.auto
   } else {
     quickCmds.value.push({
-      id: crypto.randomUUID(),
+      id: randomId(),
       name: payload.name,
       content: payload.content,
       auto: payload.auto

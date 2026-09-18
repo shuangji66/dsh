@@ -15,10 +15,14 @@ import (
 //   - randomUUID polyfill (non-secure HTTP contexts),
 //   - client privileged-state injection: __DSH_TRANSPORT__ ownsHost,
 //   - module-loader hook that forces connection.isLoopback = true,
-//   - settings-scope enqueue fix (keeps plugin-config / model-settings writable),
 //   - open-in-app block: 服务器部署没有本地 GUI 应用，"在本地编辑器打开工作区"
 //     （/open-in-app/apps、/open-in-app/icon/<app>、/open-in-app/open）无效，
 //     注入脚本拦截整个 /open-in-app/ 前缀，apps 探测失败即隐藏头部按钮。
+//
+// 历史：第 3 项曾同时 patch ui-settings 的 SettingsScopeController.enqueue
+// （用于兜住设置写入），但新版 ui-settings 只导出 apply/inject、不再导出该类，
+// 该分支恒不生效（且自带 try/catch，属静默死代码），已移除；设置可写性现由
+// 上面的 ownsHost 注入保证（isLoopback → persistence="host"）。
 const bootstrapScript = `(function () {
   // 1. randomUUID polyfill for non-secure (HTTP IP) contexts
   var c = window.crypto;
@@ -38,9 +42,7 @@ const bootstrapScript = `(function () {
   // （client-connection 检测到 ownsHost 时把 isLoopback 初始化为 true）
   try { window.__DSH_TRANSPORT__ = Object.assign(window.__DSH_TRANSPORT__ || {}, { ownsHost: true }); } catch (_e) {}
 
-  // 3. 模块加载器 Hook：单个 loader.load 内处理 connection 与 settings 两个模块
-  //   - connection：劫持句柄，强制 isLoopback = true
-  //   - ui-settings：修复 SettingsScopeController.enqueue，避免设置保存被丢弃
+  // 3. 模块加载器 Hook：劫持 connection 模块句柄，强制 isLoopback = true
   var hookModuleLoader = function (loader) {
     if (!loader || typeof loader.load !== "function" || loader.__hooked) return loader;
     var rawLoad = loader.load.bind(loader);
@@ -73,24 +75,6 @@ const bootstrapScript = `(function () {
                 return rawApply.apply(this, arguments);
               };
             }
-            return modExports;
-          };
-        } else if (handoff.id === "@deepseek-ai/dsh-client-ui-settings") {
-          var rawSettings = handoff.factory;
-          handoff.factory = function () {
-            var modExports = rawSettings.apply(this, arguments);
-            try {
-              var Ctl = modExports && modExports.SettingsScopeController;
-              if (Ctl && Ctl.prototype && typeof Ctl.prototype.enqueue === "function") {
-                var oe = Ctl.prototype.enqueue;
-                Ctl.prototype.enqueue = function (op) {
-                  if (this.disposed) return Promise.resolve();
-                  var self = this;
-                  var t = this.tail.then(function () { if (self.disposed) return; return op(); });
-                  this.tail = t.catch(function () {}); return t;
-                };
-              }
-            } catch (_e) {}
             return modExports;
           };
         }
@@ -244,80 +228,6 @@ func injectIntoHTML(body []byte) []byte {
 	return []byte(inject + s)
 }
 
-// sessionWatchdogInit 注入到 dsh client bundle 中的自愈探针实现。
-//
-// 背景：dsh 的 session-controller 只在 ClientSessions.followCurrent() 里打开会话
-// 事件窗口，而 followCurrent() 带有 `current === this.watched` 守卫：一旦 watched
-// 被锁定，若 open() 因任何原因失败（连接代际取消、开场快照超时等），就再没有任何
-// 路径会重试。connection/reset 只调用 handleConnected()（仅刷新列表，不重建窗口），
-// 于是界面停留在空窗口、只显示“深度求索中...”，必须整页刷新或切换会话才能恢复。
-//
-// 该探针在会话窗口未就绪时做有界重试：
-//   - openState === "cold"   → resync() 在此状态下是空操作，需直接 open()；
-//   - openState 为其他非 open → resync()。
-//
-// 契约：锚点未命中时静默跳过（dsh 升级后格式变化不会破坏页面）；任何异常都被吞掉，
-// 绝不影响 dsh 自身逻辑。
-const sessionWatchdogInit = `
-if (globalThis.__DSH_SESSION_WATCHDOG_START__ === void 0) {
-  globalThis.__DSH_SESSION_WATCHDOG_START__ = function (sessions) {
-    try {
-      if (sessions === null || sessions === void 0 || sessions.__watchdogArmed === true) return;
-      sessions.__watchdogArmed = true;
-      var MAX_NUDGES = 3;
-      var nudges = 0;
-      var timer = null;
-      var ticks = 0;
-      var sessionOf = function (id) {
-        try {
-          var record = sessions.scopes.get(id);
-          if (record === null || record === void 0) return void 0;
-          if (record.session !== void 0) return record.session;
-          return record.binding === void 0 ? void 0 : record.binding.session;
-        } catch (_e) { return void 0; }
-      };
-      var inspect = function () {
-        var snapshot;
-        try { snapshot = sessions.list.getSnapshot(); } catch (_e) { return; }
-        var current = snapshot.current;
-        if (current === void 0) return;
-        if (snapshot.byId[current] === void 0) return;
-        var session = sessionOf(current);
-        if (session === void 0) return;
-        var state = session.openState;
-        if (state === "open") return;
-        if (nudges >= MAX_NUDGES) return;
-        nudges += 1;
-        try {
-          if (state === "cold") session.open();
-          else session.resync();
-        } catch (_e) {}
-      };
-      // 页面恢复可见与 bfcache 还原是刷新后最容易处于“窗口未就绪”的时刻。
-      try { window.addEventListener("pageshow", inspect); } catch (_e) {}
-      try {
-        document.addEventListener("visibilitychange", function () {
-          if (document.visibilityState === "visible") inspect();
-        });
-      } catch (_e) {}
-      // 有界收敛窗口：只在启动后一段时间内探测，避免常驻定时器。
-      try {
-        timer = setInterval(function () {
-          ticks += 1;
-          inspect();
-          if (ticks >= 20) clearInterval(timer);
-        }, 1500);
-      } catch (_e) {}
-      try { setTimeout(inspect, 0); } catch (_e) {}
-    } catch (_e) {}
-  };
-}
-`
-
-// sessionWatchdogAnchor 是 session-controller 模块中会话服务注册完成的位置。
-// 它在该模块内唯一（主应用包中不存在），用于把自愈探针挂到会话服务实例上。
-const sessionWatchdogAnchor = `rootCtx.reflect.provide("sessions", this, void 0);`
-
 // nativeFunctionFormatPair 修复 dsh 的 V8-only 原生函数格式判断。
 //
 // dsh-util-values 的 hasIntrinsicConstructor（被内联进 dsh-api-session-controller
@@ -350,47 +260,33 @@ const (
 	nativeFnCheckGated = "(globalThis.__DSH_BROWSER_COMPAT__ === true ? Function.prototype.toString.call(constructor).replace(/\\s+/gu, \" \") : Function.prototype.toString.call(constructor)) === `function ${name}() { [native code] }`"
 )
 
-// rewriteJSBundle 对转发路径上的 JS 产物做三类改写：
-//  1. 历史遗留的 settings 作用域字面量替换（当前 dsh 版本已无该形态，保留为兼容）；
-//  2. 原生函数格式判断的引擎兼容修复（Firefox/Zen 历史不加载的直接原因）；
-//  3. 注入会话窗口自愈探针。
+// rewriteJSBundle 对转发路径上的 JS 产物做一类改写：原生函数格式判断的引擎兼容修复
+// （Firefox/Zen 历史不加载的直接原因）。
 //
-// 全部改写都以“锚点未命中则原样返回”为前提，保证 dsh 版本变化时只会退化为不生效，
+// 该改写以“锚点未命中则原样返回”为前提，保证 dsh 版本变化时只会退化为不生效，
 // 而不会破坏页面。
+//
+// 已移除的两处历史改写（均为恒不生效的死代码，且其目标已由别的机制覆盖）：
+//   - settings 作用域字面量替换（`connection.isLoopback ? "host" : "memory"` → `"host"`）：
+//     该形态仅存在于 dsh ≤0.1.1-rc.2；自 0.1.2-alpha.5 起改为
+//     `ctx.remote.$host.isLoopback ? "host" : "memory"`，四处 pattern 全部零匹配。
+//     而 dsh ≥0.1.2-alpha.5 的 `$host.isLoopback` 派生自 `connection.isLoopback`，
+//     已由 bootstrapScript 的 ownsHost 注入置为 true，无需再改写字节。
+//     注：dsh-client-ui-settings-general 的同名判断是 `? new SettingsDocumentStore(...)
+//     : void 0` 形态，本就不在替换范围内。
+//   - 会话窗口自愈探针（依赖旧版 sessions.list 快照的 `current` 字段与
+//     `followCurrent()`）：新版 session-controller 已删除该字段与方法，改用显式
+//     sessions.retain(target, {source:"mainView"}) 打开窗口，探针入口条件恒不成立。
 func rewriteJSBundle(buf []byte) []byte {
 	s := string(buf)
 
-	// 1) 兼容性字面量替换（对当前 dsh 无匹配，保留不影响行为）。
-	pairs := [][2]string{
-		{`connection.isLoopback ? "host" : "memory"`, `"host"`},
-		{`connection.isLoopback ? 'host' : 'memory'`, `'host'`},
-		{`connection.isLoopback?"host":"memory"`, `"host"`},
-		{`connection.isLoopback?'host':'memory'`, `'host'`},
-	}
-	for _, p := range pairs {
-		if strings.Contains(s, p[0]) {
-			s = strings.ReplaceAll(s, p[0], p[1])
-		}
-	}
-
-	// 2) 引擎兼容修复：替换为“运行时受开关控制”的等价表达式。
+	// 引擎兼容修复：替换为“运行时受开关控制”的等价表达式。
 	// 替换结果与开关状态无关（同一份 bundle 恒定输出），因此对 immutable 缓存安全；
 	// 是否真正归一化空白由 HTML 注入的 window.__DSH_BROWSER_COMPAT__ 在运行时决定。
 	if strings.Contains(s, nativeFnCheckV8Only) {
 		s = strings.ReplaceAll(s, nativeFnCheckV8Only, nativeFnCheckGated)
 	}
 
-	// 3) 会话窗口自愈探针：仅在 session-controller bundle（含唯一锚点）中注入。
-	// 定义与调用点在同一次替换中紧邻写入，二者同模块同作用域、顺序确定，
-	// 不依赖模块物化顺序（concat 包中第一个 factory 未必是 session-controller）。
-	// 该探针与浏览器兼容开关无关，始终注入：它修的是“窗口打开失败后无重试路径”
-	// 这一与浏览器内核无关的缺陷。会话窗口未就绪时做有界重试
-	if strings.Contains(s, sessionWatchdogAnchor) && !strings.Contains(s, "__DSH_SESSION_WATCHDOG_START__") {
-		s = strings.ReplaceAll(s, sessionWatchdogAnchor,
-			sessionWatchdogInit+
-				sessionWatchdogAnchor+
-				"\n\t\t\ttry { globalThis.__DSH_SESSION_WATCHDOG_START__(this); } catch (_e) {}")
-	}
 	return []byte(s)
 }
 

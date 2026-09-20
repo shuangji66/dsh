@@ -3,11 +3,13 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,8 +29,18 @@ import (
 // 与 dsh 服务版本（dsh -V）相互独立。
 var harnessVersion = "1.0.0"
 
-// errUpdateCancelled 表示更新下载被用户主动取消（前端点“取消更新”触发）。
+// errUpdateCancelled 表示更新下载被用户主动取消（前端点“取消更新”触发）：
+// 半成品文件会被删除，状态回到空闲，下次从零开始。
 var errUpdateCancelled = errors.New("用户取消更新")
+
+// errUpdatePaused 表示更新下载被用户暂停（前端点“暂停”触发）：半成品文件保留，
+// 状态置 paused，下次“继续下载”用 HTTP Range 从已下载字节续传。
+var errUpdatePaused = errors.New("用户暂停下载")
+
+// errUpdateNetworkFailed 表示「代理」与「直连」两条路各 2 次机会全部失败。
+// 用它把「网络/代理问题」与「包本身的问题」（如完整性校验失败、404）区分开：
+// 前端据此显示“请检查网络或代理”的本地化提示，而不是让用户去猜。
+var errUpdateNetworkFailed = errors.New("代理与直连均失败")
 
 // --- GitHub 仓库与发布资源常量 ---
 const (
@@ -38,15 +50,16 @@ const (
 
 	// updateCheckInterval 是每小时自动检测更新的周期。
 	updateCheckInterval = time.Hour
+
+	// updateHeaderTimeout 是单次下载请求等待响应头的上限（不限制整体时长：
+	// 大包在慢网下可能下很久，整体超时会把它掐断）。
+	updateHeaderTimeout = 30 * time.Second
+	// updateIdleTimeout 是「传输空闲」上限：连续这么久没有新字节才判定本次尝试失败。
+	updateIdleTimeout = 60 * time.Second
 )
 
-// updateAccelerators 是常见 GitHub 加速源前缀（按顺序回退）。
-var updateAccelerators = []string{
-	"https://gh-proxy.com/",
-	"https://ghproxy.net/",
-	"https://ghfast.top/",
-	"https://gh.api.99988866.xyz/",
-}
+// updateRetryBackoff 是同一通路上两次尝试之间的退避时间（变量而非常量：测试里会调小）。
+var updateRetryBackoff = 800 * time.Millisecond
 
 // updateKind 表示更新目标：harness 控制台、dsh 服务或插件市场（dshmarket）。
 type updateKind string
@@ -87,6 +100,11 @@ type UpdateStatus struct {
 	ReadyToInstall bool `json:"readyToInstall,omitempty"`
 	// Cancelled 表示最近一次更新被用户主动取消（仅失败推送时置位）。
 	Cancelled bool `json:"cancelled,omitempty"`
+	// Paused 表示下载被用户暂停，半成品已保留，可继续下载（phase=paused）。
+	Paused bool `json:"paused,omitempty"`
+	// ErrorHint 是给前端的结构化错误归类（目前只有 "network"：代理与直连均失败），
+	// 前端据此显示本地化的“请检查网络或代理”提示；Error 里则是原始错误文本。
+	ErrorHint string `json:"errorHint,omitempty"`
 
 	// 以下两个字段仅市场（kind=market）使用，见 market.go：
 	// MarketScope 说明当前生效的那份 dshmarket 由谁提供 ——
@@ -124,10 +142,10 @@ type UpdateManager struct {
 	rollbackOk   bool
 	rollbackErr  string
 
-	// cancelMu 保护 cancelCh：cancelCh 非 nil 表示正在下载更新包，
-	// 关闭它即通知下载协程中断（前端“取消更新”按钮触发）。
-	cancelMu sync.Mutex
-	cancelCh chan struct{}
+	// ctrlMu 保护 ctrl：ctrl 非 nil 表示正在下载更新包。中断原因决定半成品的
+	// 去留：取消（cancel）删除，暂停（pause）保留以便续传（见 downloadControl）。
+	ctrlMu sync.Mutex
+	ctrl   *downloadControl
 
 	// pendingMu 保护 pending：记录某个 kind 已下载完成、等待用户确认安装的更新包。
 	pendingMu sync.Mutex
@@ -582,9 +600,10 @@ func stripHTMLToText(seg string) string {
 
 // --- HTTP 客户端（代理回退） ---
 
-// httpClientForUpdate 构造用于更新下载/拉取的 HTTP 客户端。优先使用持久化
-// JSON 配置（GetConfig().ProxyAddr）中的代理地址；若不可用，回退到不带代理的
-// 直连客户端（后续下载再叠加加速源前缀）。探测代理可用性通过一次轻量 HEAD 完成。
+// httpClientForUpdate 构造用于「元数据拉取」（GitHub tag / release notes / npm
+// registry）的 HTTP 客户端：优先用配置里的代理，不可用时回退直连，带 60s 总超时。
+// 注意大文件下载不走它 —— 下载用 updateClients() 的「代理/直连」双通路 + 断点续传，
+// 且不设总超时（见该函数注释）。探测代理可用性通过一次轻量 HEAD 完成。
 func (m *UpdateManager) httpClientForUpdate() *http.Client {
 	cfg := GetConfig()
 	if cfg.ProxyEnabled && cfg.ProxyAddr != "" && proxyReachable(cfg.ProxyAddr) {
@@ -772,90 +791,6 @@ func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
 		asset = fmt.Sprintf("server-%s-%s.tar.gz", arch, version)
 	}
 	return fmt.Sprintf("%s/releases/download/%s/%s", updateRepoURL, tag, asset)
-}
-
-// downloadToFile 下载 url 到本地文件，返回文件大小。会依次尝试加速源回退，
-// 并沿用既有的代理直连客户端。先尝试加速源（若命中 200 即成功），否则直连。
-// progress 为可选的下载进度回调（downloadled/total 字节，节流上报）；cancel 为
-// 可选的取消信号 —— 关闭后立即中断下载（已下载的临时文件会被删除），并返回
-// errUpdateCancelled。
-//
-// useAccelerators 控制是否叠加 GitHub 加速源前缀：只有 GitHub 资源能套，
-// npm registry 的 tarball 套上 gh 前缀只会 404（市场更新走 false）。
-func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downloaded, total int64), cancel <-chan struct{}, useAccelerators bool) (int64, error) {
-	// 待尝试的 URL 序列：加速源前缀 + 直连。
-	candidates := []string{rawURL}
-	if useAccelerators {
-		for _, acc := range updateAccelerators {
-			candidates = append(candidates, acc+rawURL)
-		}
-	}
-	client := m.httpClientForUpdate()
-
-	var lastErr error
-	for _, u := range candidates {
-		req, err := http.NewRequest("GET", u, nil)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("User-Agent", "harness-console")
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("请求 %s 失败: %w", u, err)
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("请求 %s 返回 %d", u, resp.StatusCode)
-			continue
-		}
-		out, err := os.Create(dest)
-		if err != nil {
-			resp.Body.Close()
-			return 0, err
-		}
-		// 用可取消 reader 包装响应体：支持进度上报与取消中断。
-		var total int64
-		if resp.ContentLength > 0 {
-			total = resp.ContentLength
-		}
-		reader := io.Reader(resp.Body)
-		if cancel != nil {
-			reader = &cancelProgressReader{
-				r:        resp.Body,
-				cancel:   cancel,
-				progress: progress,
-				total:    total,
-			}
-		}
-		n, err := io.Copy(out, reader)
-		out.Close()
-		resp.Body.Close()
-		if err != nil {
-			os.Remove(dest)
-			if errors.Is(err, errUpdateCancelled) {
-				// 用户取消：不再尝试其它镜像源。
-				lastErr = errUpdateCancelled
-				break
-			}
-			lastErr = fmt.Errorf("下载 %s 中断: %w", u, err)
-			continue
-		}
-		// 下载完成时上报一次最终进度
-		if progress != nil {
-			progress(n, total)
-		}
-		logger().Printf("[update] 下载成功 %s (%d bytes)", u, n)
-		return n, nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("所有下载源均失败")
-	}
-	if errors.Is(lastErr, errUpdateCancelled) {
-		logger().Printf("[update] 下载已被用户取消")
-	}
-	return 0, lastErr
 }
 
 // extractTarGz 解压 .tar.gz 到目标目录。保持 tar 内的相对路径不变（不剥离顶层目录）。
@@ -1124,18 +1059,6 @@ func (m *UpdateManager) setDownloadProgress(k updateKind, downloading bool, pct 
 	})
 }
 
-// CancelUpdate 请求取消当前正在进行的更新下载。若当前没有下载（cancelCh 为
-// nil），调用被安全忽略。取消会中断下载并在 applyUpdate 中表现为“下载失败: 用户取消”，
-// 已下载的临时文件会被清理，不会触碰磁盘上的二进制/server 目录。
-func (m *UpdateManager) CancelUpdate() {
-	m.cancelMu.Lock()
-	defer m.cancelMu.Unlock()
-	if m.cancelCh != nil {
-		close(m.cancelCh)
-		m.cancelCh = nil
-	}
-}
-
 // pendingDir 返回存放“已下载待安装”更新包的目录（在持久备份目录下，跨两步保留）。
 func (m *UpdateManager) pendingDir() string {
 	dir := filepath.Join(m.backupDir(), "pending")
@@ -1203,35 +1126,497 @@ func (m *UpdateManager) clearOrphanPending() {
 	}
 }
 
-// cancelProgressReader 包装下载响应体：在每次读取时检查取消信号，并按节流
-// 节奏上报进度（每 500ms 或每 256KB 一次），避免高频回调刷爆 SSE。
-type cancelProgressReader struct {
+// --- 下载中断控制 ---
+
+// downloadControl 承载一次下载的中断信号，并区分原因：取消要删半成品、暂停要留。
+type downloadControl struct {
+	ch chan struct{}
+	mu sync.Mutex
+	// reason 为空表示未被中断；"cancel" / "pause" 由前端按钮设置。
+	reason string
+	// pausable 为 false 时忽略暂停请求（插件市场：包小、不走续传，暂停没有意义）。
+	pausable bool
+}
+
+func newDownloadControl(pausable bool) *downloadControl {
+	return &downloadControl{ch: make(chan struct{}), pausable: pausable}
+}
+
+// stop 记录中断原因并广播（只生效一次：先到者为准）。
+// 返回 true 表示这次请求真的生效了（暂停在不支持暂停的下载上会被忽略）。
+func (c *downloadControl) stop(reason string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if reason == "pause" && !c.pausable {
+		return false
+	}
+	if c.reason != "" {
+		return false
+	}
+	c.reason = reason
+	close(c.ch)
+	return true
+}
+
+// stopped 返回是否被中断及原因。
+func (c *downloadControl) stopped() (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reason != "", c.reason
+}
+
+// stopDownload 请求中断当前下载（reason 为 "cancel" 或 "pause"）。
+// 返回是否真的生效；没有进行中的下载、或该下载不支持暂停时返回 false。
+func (m *UpdateManager) stopDownload(reason string) bool {
+	m.ctrlMu.Lock()
+	c := m.ctrl
+	m.ctrlMu.Unlock()
+	if c == nil {
+		return false
+	}
+	return c.stop(reason)
+}
+
+// CancelUpdate 请求取消当前正在进行的更新下载：半成品文件会被删除，状态回到空闲。
+func (m *UpdateManager) CancelUpdate() {
+	if m.stopDownload("cancel") {
+		logger().Printf("[update] 已请求取消下载")
+	}
+}
+
+// PauseUpdate 请求暂停当前正在进行的更新下载：半成品文件保留，可继续续传。
+// 返回是否真的命中了一个进行中的下载（没有则忽略）。
+func (m *UpdateManager) PauseUpdate() bool {
+	if m.stopDownload("pause") {
+		logger().Printf("[update] 已请求暂停下载（半成品保留，可继续）")
+		return true
+	}
+	return false
+}
+
+// --- 下载策略（通路 / 续传 / 暂停） ---
+
+// updateRoute 是一条下载通路：要么走配置里的代理，要么直连。
+// 按用户要求已移除 GitHub 加速源前缀分支 —— 只剩这两条。
+type updateRoute struct {
+	label  string
+	client *http.Client
+}
+
+// downloadPlan 描述一次下载的策略：走哪些通路、能否续传、能否暂停。
+//
+// 目前有两种组合，差异是刻意的：
+//   - harness / dsh 的发布资产：代理+直连各 2 次，支持 Range 续传与暂停（包大、网络差）；
+//   - 插件市场 tarball：**只直连、不走代理**，失败重试，不支持暂停与续传
+//     （包只有几百 KB，续传带来的复杂度不值得；registry 通常也不需要代理）。
+type downloadPlan struct {
+	routes   []updateRoute
+	resume   bool
+	pausable bool
+}
+
+// downloadPlanFor 按更新类型给出下载策略。
+func (m *UpdateManager) downloadPlanFor(k updateKind) downloadPlan {
+	if k == updateKindMarket {
+		return downloadPlan{routes: marketRoutesFn(m), resume: false, pausable: false}
+	}
+	return downloadPlan{routes: updateRoutesFn(m), resume: true, pausable: true}
+}
+
+// updateRoutesFn 便于测试注入发布资产的通路列表；生产实现见 updateClients。
+var updateRoutesFn = func(m *UpdateManager) []updateRoute { return m.updateClients() }
+
+// marketRoutesFn 给出插件市场的通路：**只有直连**（用户要求：市场不走代理）。
+// 同样是变量，便于测试注入。
+var marketRoutesFn = func(m *UpdateManager) []updateRoute { return []updateRoute{m.directRoute()} }
+
+// updateClients 构造发布资产的下载通路序列：代理（已启用且可达时）在前，直连兜底。
+//
+// 说明两点与旧实现不同的地方：
+//   - 不再使用 GitHub 加速源前缀（用户要求），包只能从原始地址取；
+//   - 下载客户端不设总超时（Timeout=0）：旧的 60 秒总超时会掐断大包/慢网，
+//     改为「建连 30s + 响应头 30s + 传输空闲 60s」三个更贴合实际的限制
+//     （见 updateTransport 与 downloadOnce 的看门狗）。
+func (m *UpdateManager) updateClients() []updateRoute {
+	routes := make([]updateRoute, 0, 2)
+	cfg := GetConfig()
+	if cfg.ProxyEnabled && cfg.ProxyAddr != "" && proxyReachableFn(cfg.ProxyAddr) {
+		if proxyURL, err := url.Parse(cfg.ProxyAddr); err == nil {
+			routes = append(routes, updateRoute{
+				label:  "代理 " + cfg.ProxyAddr,
+				client: &http.Client{Transport: updateTransport(proxyURL)},
+			})
+		} else {
+			logger().Printf("[update] 代理地址无法解析，本次只用直连: %v", err)
+		}
+	}
+	routes = append(routes, m.directRoute())
+	return routes
+}
+
+// directRoute 构造直连通路。
+func (m *UpdateManager) directRoute() updateRoute {
+	return updateRoute{label: "直连", client: &http.Client{Transport: updateTransport(nil)}}
+}
+
+// updateTransport 构造下载用的 Transport：proxyURL 为 nil 表示直连。
+// 显式给建连/TLS/响应头超时，避免黑洞路由下无限等待（http.Transport 的零值
+// DialContext 是不带超时的 net.Dial）。
+func updateTransport(proxyURL *url.URL) *http.Transport {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	tr := &http.Transport{
+		DialContext:           dialer.DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: updateHeaderTimeout,
+		ExpectContinueTimeout: time.Second,
+	}
+	if proxyURL != nil {
+		tr.Proxy = http.ProxyURL(proxyURL)
+	}
+	return tr
+}
+
+// proxyReachableFn 便于测试注入代理可达性探测；生产实现见 proxyReachable。
+var proxyReachableFn = func(addr string) bool { return proxyReachable(addr) }
+
+// downloadToFile 下载 rawURL 到 dest，支持断点续传、暂停与重试。
+//
+// 重试策略（用户要求）：每条通路各 2 次机会，代理在前、直连在后；每次失败后保留
+// 已下载字节，下一次用 `Range: bytes=<offset>-` 续传，所以代理断在 60% 时直连会
+// 从 60% 接着下，而不是重来。
+//
+// 返回：(已下载总字节, 错误)。错误可能是：
+//   - errUpdateCancelled：用户取消（半成品已删除）；
+//   - errUpdatePaused：用户暂停（半成品保留，可续传）；
+//   - errUpdateNetworkFailed：所有通路与重试均失败（前端据此提示检查网络/代理）。
+//
+// progress 为节流后的进度回调；ctrl 为中断信号（可为 nil，表示不可中断）；
+// plan 决定通路与续传/暂停能力（见 downloadPlan）。
+func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downloaded, total int64), ctrl *downloadControl, plan downloadPlan) (int64, error) {
+	const attemptsPerRoute = 2
+
+	var lastErr error
+	// networkOnly 记录「所有失败都是网络/服务端性质」。只要有任何一次败在本地磁盘
+	// （目录不可写、磁盘满），最终就不该提示用户「检查网络或代理」。
+	networkOnly := true
+	for _, route := range plan.routes {
+		for try := 1; try <= attemptsPerRoute; try++ {
+			if ctrl != nil {
+				if stop, reason := ctrl.stopped(); stop {
+					return finishInterruptedDownload(dest, reason)
+				}
+			}
+			if !plan.resume {
+				// 不支持续传（插件市场）：每次尝试都从零开始，清掉上一轮的残留，
+				// 避免半截文件与本次写入拼在一起。
+				os.Remove(dest)
+			}
+			offset := partialSize(dest)
+			logger().Printf("[update] 下载尝试 %s 第 %d/%d 次（已有 %d 字节）", route.label, try, attemptsPerRoute, offset)
+
+			n, err := m.downloadOnce(route, rawURL, dest, progress, ctrl, plan.resume)
+			if err == nil {
+				logger().Printf("[update] 下载成功（%s，共 %d 字节）", route.label, n)
+				return n, nil
+			}
+			if errors.Is(err, errUpdateCancelled) || errors.Is(err, errUpdatePaused) {
+				reason := "cancel"
+				if stop, r := ctrlState(ctrl); stop {
+					reason = r
+				}
+				return finishInterruptedDownload(dest, reason)
+			}
+			if isLocalIOError(err) {
+				networkOnly = false
+			}
+			lastErr = fmt.Errorf("%s 第 %d 次: %w", route.label, try, err)
+			logger().Printf("[update] %v", lastErr)
+			if try < attemptsPerRoute {
+				// 短暂退避再试，避免对同一故障点连续猛打。
+				time.Sleep(updateRetryBackoff)
+			}
+		}
+	}
+	if !plan.resume {
+		// 不留半成品：这份下载的语义就是「要么完整拿到，要么什么都没有」。
+		os.Remove(dest)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("没有可用的下载通路")
+	}
+	if !networkOnly {
+		// 败在本地磁盘（写不进去）：修网络没用，不要给「检查网络」的误导性提示。
+		return partialSize(dest), fmt.Errorf("下载失败（%d 条通路各 %d 次均未成功）: %v", len(plan.routes), attemptsPerRoute, lastErr)
+	}
+	return partialSize(dest), fmt.Errorf("%w（%d 条通路各 %d 次均未成功）: %v；请检查网络或代理设置后重试",
+		errUpdateNetworkFailed, len(plan.routes), attemptsPerRoute, lastErr)
+}
+
+// isLocalIOError 判断失败是否来自本地文件系统（而非网络/服务端）。
+// 用于决定要不要提示用户「检查网络或代理」。
+func isLocalIOError(err error) bool {
+	var pathErr *os.PathError
+	return errors.As(err, &pathErr)
+}
+
+// finishInterruptedDownload 处理被取消/暂停的下载：取消要删半成品，暂停要留。
+func finishInterruptedDownload(dest, reason string) (int64, error) {
+	if reason == "pause" {
+		n := partialSize(dest)
+		logger().Printf("[update] 下载已暂停，保留半成品 %s（%d 字节）", dest, n)
+		return n, errUpdatePaused
+	}
+	os.Remove(dest)
+	logger().Printf("[update] 下载已取消，已清理半成品 %s", dest)
+	return 0, errUpdateCancelled
+}
+
+// partialSize 返回已下载的字节数（文件不存在时为 0）。
+func partialSize(path string) int64 {
+	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
+		return fi.Size()
+	}
+	return 0
+}
+
+// removeOtherPendingFiles 清掉同 kind 的其它待安装/半成品文件（保留 keep 这一个）。
+//
+// 为什么需要：包名按 kind+版本固定，换版本后旧版本的半成品不会被自动覆盖，
+// 否则会在 pending 目录里无限堆积（只有启动时和“删除更新包”才清）。
+func (m *UpdateManager) removeOtherPendingFiles(k updateKind, keep string) {
+	dir := m.pendingDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix := string(k) + "-"
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		if filepath.Clean(full) == filepath.Clean(keep) {
+			continue
+		}
+		if err := os.Remove(full); err == nil {
+			logger().Printf("[update] 清理旧版本半成品: %s", name)
+		}
+	}
+}
+
+// downloadOnce 执行一次下载尝试（resume 为真时可续传），返回「已下载总字节」。
+//
+// 续传规则（仅 resume=true，即 harness/dsh 的发布资产）：
+//   - 本地已有 offset 字节时带 Range 头；服务器回 206 则追加写入；
+//   - 服务器忽略 Range 回 200（有些代理/CDN 会剥掉 Range）→ 截断重写，本次从头下，
+//     保证文件内容一定是「从头开始的连续前缀」，不会拼出坏包；
+//   - 回 416（本地字节比远端还长）→ 删除半成品重新完整下载，绝不把坏文件当「已下完」。
+//
+// resume=false（插件市场）时：不发 Range、永远截断重写，任何中断都从零重来。
+//
+// 注意：resume=true 时任何错误路径都保留已写入的字节（先 Sync + Close），供下一次续传。
+func (m *UpdateManager) downloadOnce(route updateRoute, rawURL, dest string, progress func(int64, int64), ctrl *downloadControl, resume bool) (int64, error) {
+	offset := int64(0)
+	if resume {
+		offset = partialSize(dest)
+	}
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return offset, err
+	}
+	req.Header.Set("User-Agent", "harness-console")
+	if resume && offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+
+	// 传输空闲看门狗：超过 updateIdleTimeout 没有任何新字节就中断本次尝试
+	// （HTTP 客户端本身不设总超时，否则大包/慢网会被整体掐断）。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	idle := &idleWatchdog{timeout: updateIdleTimeout, onIdle: cancel}
+	defer idle.stop()
+	req = req.WithContext(ctx)
+
+	resp, err := route.client.Do(req)
+	if err != nil {
+		return offset, err
+	}
+	defer resp.Body.Close()
+
+	// 不续传时永远从头写：O_TRUNC 保证不会把上一轮的残留拼进来。
+	truncate := !resume
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		// 206：按 Range 续传（只在 resume=true 时可能收到）
+		if !resume {
+			return 0, fmt.Errorf("服务器返回 206，但本次下载不支持续传")
+		}
+	case http.StatusOK:
+		// 200：服务器未按 Range 返回（或 offset 本来为 0）→ 从头写
+		offset = 0
+		truncate = true
+	case http.StatusRequestedRangeNotSatisfiable:
+		// 416：本地字节数与远端不一致（远端换了资产，或半成品本身损坏）。
+		// 删掉半成品让下一次尝试从头开始 —— 绝不能把这份坏文件当成「已下完」。
+		os.Remove(dest)
+		return 0, fmt.Errorf("远端拒绝了续传（本地 %d 字节与远端不匹配），已清理半成品", offset)
+	default:
+		return offset, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	total := int64(0)
+	if resp.ContentLength > 0 {
+		total = resp.ContentLength + offset
+	}
+	flags := os.O_CREATE | os.O_WRONLY
+	if truncate {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_APPEND
+	}
+	out, err := os.OpenFile(dest, flags, 0o644)
+	if err != nil {
+		return offset, err
+	}
+
+	reader := &downloadReader{
+		r:        resp.Body,
+		ctrl:     ctrl,
+		progress: progress,
+		offset:   offset,
+		total:    total,
+		idle:     idle,
+	}
+	n, copyErr := io.Copy(out, reader)
+	// 先落盘再关闭：半成品必须是「已完整写入的字节」，否则下次续传会从错误位置接。
+	syncErr := out.Sync()
+	closeErr := out.Close()
+	if copyErr == nil {
+		if syncErr != nil {
+			copyErr = syncErr
+		} else if closeErr != nil {
+			copyErr = closeErr
+		}
+	}
+	done := offset + n
+	if copyErr != nil {
+		if wasSet, reason := ctrlState(ctrl); wasSet {
+			return done, fmt.Errorf("%w", interruptedError(reason))
+		}
+		if idle.fired() {
+			return done, fmt.Errorf("传输空闲超过 %s（已下载 %d 字节）", updateIdleTimeout, done)
+		}
+		return done, copyErr
+	}
+	if progress != nil {
+		progress(done, total)
+	}
+	return done, nil
+}
+
+// ctrlState 安全读取中断状态（ctrl 为 nil 时视为未中断）。
+func ctrlState(ctrl *downloadControl) (bool, string) {
+	if ctrl == nil {
+		return false, ""
+	}
+	return ctrl.stopped()
+}
+
+// interruptedError 把中断原因映射为哨兵错误。
+func interruptedError(reason string) error {
+	if reason == "pause" {
+		return errUpdatePaused
+	}
+	return errUpdateCancelled
+}
+
+// idleWatchdog 是「传输空闲」看门狗：每次读取成功都重置截止时间，
+// 到点没有新字节则触发回调（取消本次请求）。
+type idleWatchdog struct {
+	timeout time.Duration
+	onIdle  func()
+	mu      sync.Mutex
+	timer   *time.Timer
+	dead    bool
+}
+
+func (w *idleWatchdog) reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.timer == nil {
+		w.timer = time.AfterFunc(w.timeout, func() {
+			w.mu.Lock()
+			w.dead = true
+			w.mu.Unlock()
+			w.onIdle()
+		})
+		return
+	}
+	w.timer.Reset(w.timeout)
+}
+
+func (w *idleWatchdog) stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+}
+
+func (w *idleWatchdog) fired() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dead
+}
+
+// downloadReader 包装响应体：检查中断信号、按节流上报进度（含续传偏移量），
+// 并在每次读到数据时重置空闲看门狗。
+type downloadReader struct {
 	r        io.Reader
-	cancel   <-chan struct{}
+	ctrl     *downloadControl
 	progress func(downloaded, total int64)
+	offset   int64
 	total    int64
 	n        int64
 	lastAt   time.Time
 	lastN    int64
+	idle     *idleWatchdog
 }
 
-func (cr *cancelProgressReader) Read(p []byte) (int, error) {
-	select {
-	case <-cr.cancel:
-		return 0, fmt.Errorf("update cancelled")
-	default:
+func (dr *downloadReader) Read(p []byte) (int, error) {
+	if stop, reason := ctrlState(dr.ctrl); stop {
+		return 0, interruptedError(reason)
 	}
-	n, err := cr.r.Read(p)
-	cr.n += int64(n)
-	if cr.progress != nil {
-		now := time.Now()
-		if now.Sub(cr.lastAt) >= 500*time.Millisecond || cr.n-cr.lastN >= 256<<10 {
-			cr.progress(cr.n, cr.total)
-			cr.lastAt = now
-			cr.lastN = cr.n
+	n, err := dr.r.Read(p)
+	if n > 0 {
+		dr.n += int64(n)
+		if dr.idle != nil {
+			dr.idle.reset()
+		}
+		// 节流上报：每 500ms 或每 256KB 一次，避免高频回调刷爆 SSE。
+		if dr.progress != nil {
+			now := time.Now()
+			if now.Sub(dr.lastAt) >= 500*time.Millisecond || dr.n-drrLastN(dr) >= 256<<10 {
+				dr.progress(dr.offset+dr.n, dr.total)
+				dr.lastAt = now
+			}
 		}
 	}
 	return n, err
+}
+
+// drrLastN 返回自上次上报以来新增的字节数，并推进上报水位。
+// （把「读取水位」与「上次上报水位」分开，是因为进度回调必须报「含续传偏移」的总量，
+// 而节流判断只看本次尝试新增了多少。）
+func drrLastN(dr *downloadReader) int64 {
+	delta := dr.n - dr.lastN
+	dr.lastN = dr.n
+	return delta
 }
 
 // downloadUpdate 只下载更新包（第一步），不安装。可在下载过程中取消（CancelUpdate
@@ -1273,25 +1658,46 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	arch := m.updateArch()
 	logger().Printf("[update] 开始下载 %s 到 %s (arch=%s)", k, version, arch)
 
-	// 目标包持久保存在“待安装”目录，跨“下载→安装”两步保留。
-	// 文件名带时间戳，避免与同版本上次下载冲突（setPending 会清理同 kind 旧包）。
-	pkgPath := filepath.Join(m.pendingDir(), string(k)+"-"+version+"-"+time.Now().Format("20060102150405")+".tar.gz")
+	// 下载策略：harness/dsh = 代理+直连各 2 次 + Range 续传 + 可暂停；
+	// 插件市场 = 只直连重试，不续传、不暂停（见 downloadPlanFor）。
+	plan := m.downloadPlanFor(k)
 
-	// 建立取消信号：CancelUpdate 关闭 cancelCh 以中断本次下载。
-	cancelCh := make(chan struct{})
-	m.cancelMu.Lock()
-	m.cancelCh = cancelCh
-	m.cancelMu.Unlock()
-	// 进入“下载中”状态（清空上一次的进度/错误/取消残留）。
+	// 目标包持久保存在“待安装”目录，跨“下载→安装”两步保留。
+	// 文件名刻意「按 kind+版本固定」（不再带时间戳）：这样暂停后继续、或失败后重试
+	// 都能命中同一个半成品，断点续传才有意义（市场不续传，另有清理）。
+	// 同 kind 其它版本的残留会被清掉。
+	pkgPath := filepath.Join(m.pendingDir(), string(k)+"-"+version+".tar.gz")
+	m.removeOtherPendingFiles(k, pkgPath)
+	resumeBytes := int64(0)
+	if plan.resume {
+		resumeBytes = partialSize(pkgPath)
+	}
+
+	// 建立中断信号：取消（删半成品）与暂停（留半成品）都经它传达。
+	// 不支持暂停的下载（市场）会直接忽略暂停请求。
+	ctrl := newDownloadControl(plan.pausable)
+	m.ctrlMu.Lock()
+	m.ctrl = ctrl
+	m.ctrlMu.Unlock()
+	defer func() {
+		m.ctrlMu.Lock()
+		m.ctrl = nil
+		m.ctrlMu.Unlock()
+	}()
+	// 进入“下载中”状态。注意保留续传起点：从 0 开始会让进度条瞬间回跳。
 	m.updateStatus(k, func(s *UpdateStatus) {
 		s.Phase = "downloading"
 		s.ReadyToInstall = false
 		s.Cancelled = false
+		s.Paused = false
 		s.Error = ""
+		s.ErrorHint = ""
 		s.Downloading = true
+		s.DownloadedBytes = resumeBytes
 		s.DownloadPct = 0
-		s.DownloadedBytes = 0
-		s.TotalBytes = 0
+		if resumeBytes == 0 {
+			s.TotalBytes = 0
+		}
 	})
 
 	progress := func(downloaded, total int64) {
@@ -1307,26 +1713,56 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	var n int64
 	var err error
 	if rel != nil {
-		// 市场包从 npm registry 下载，并在下载后立刻校验完整性（元数据与字节的
-		// 绑定关系）；不通过就当场失败，不进入“已下载待安装”。安装阶段会再复核一次。
-		n, err = m.downloadMarketTarball(rel, pkgPath, progress, cancelCh)
+		// 市场包从 npm registry 下载（只直连），并在下载后立刻校验完整性
+		// （元数据与字节的绑定关系）；不通过就当场失败，不进入“已下载待安装”。
+		// 安装阶段会再复核一次。
+		n, err = m.downloadMarketTarball(rel, pkgPath, progress, ctrl, plan)
 	} else {
-		// GitHub 资产：允许叠加加速源前缀。
-		n, err = m.downloadToFile(rawURL, pkgPath, progress, cancelCh, true)
+		// GitHub release 资产：代理 / 直连各 2 次机会，支持 Range 续传。
+		n, err = m.downloadToFile(rawURL, pkgPath, progress, ctrl, plan)
 	}
-	m.cancelMu.Lock()
-	m.cancelCh = nil
-	m.cancelMu.Unlock()
 
-	if err != nil {
-		os.Remove(pkgPath)
-		// 取消或失败：退出“下载中”状态（失败原因由 error / cancelled 字段呈现）。
+	switch {
+	case err == nil:
+		// 继续走下面的“已下载待安装”。
+	case errors.Is(err, errUpdatePaused):
+		// 暂停（只有可暂停的下载会走到这里）：半成品保留（downloadToFile 已处理），
+		// 状态置 paused 供前端显示“继续下载”。
+		m.updateStatus(k, func(s *UpdateStatus) {
+			s.Phase = "paused"
+			s.Paused = true
+			s.Downloading = false
+			s.DownloadedBytes = partialSize(pkgPath)
+			s.Error = ""
+			s.ErrorHint = ""
+			s.Cancelled = false
+		})
+		logger().Printf("[update] %s 下载已暂停，已下载 %d 字节", k, partialSize(pkgPath))
+		return err
+	case errors.Is(err, errUpdateCancelled):
 		m.updateStatus(k, func(s *UpdateStatus) {
 			s.Phase = ""
+			s.Paused = false
 			s.Downloading = false
 			s.DownloadPct = 0
 			s.DownloadedBytes = 0
 			s.TotalBytes = 0
+		})
+		return fmt.Errorf("下载失败: %w", err)
+	default:
+		// 失败：可续传的下载保留半成品（下次重试接着下）；市场这类不续传的
+		// 下载已被 downloadToFile 清空。退出“下载中”状态并带上错误归类。
+		m.updateStatus(k, func(s *UpdateStatus) {
+			s.Phase = ""
+			s.Paused = false
+			s.Downloading = false
+			if !plan.resume {
+				s.DownloadedBytes = 0
+				s.TotalBytes = 0
+			}
+			if errors.Is(err, errUpdateNetworkFailed) {
+				s.ErrorHint = "network"
+			}
 		})
 		return fmt.Errorf("下载失败: %w", err)
 	}
@@ -1342,6 +1778,8 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		s.Phase = "downloaded"
 		s.ReadyToInstall = true
 		s.Downloading = false
+		s.Paused = false
+		s.ErrorHint = ""
 		s.DownloadPct = 100
 		s.DownloadedBytes = n
 		if s.TotalBytes <= 0 {
@@ -1454,23 +1892,42 @@ func (m *UpdateManager) installDsh(extractDir string) error {
 
 // DiscardUpdate 删除已下载待安装的更新包（前端“删除更新包”按钮触发），
 // 并把该 kind 重置为初始待更新状态（phase 清空、readyToInstall=false、
-// 取消/错误标记清空），前端按钮回到“下载更新”。无待安装包时忽略。
+// 取消/错误/暂停标记清空），前端按钮回到“下载更新”。
+//
+// 同时清理该 kind 的「半成品」（暂停或失败留下的续传文件）—— 用户点“删除更新包”
+// 的语义就是「这些字节我不要了」，否则下次下载会莫名从中间继续。
 func (m *UpdateManager) DiscardUpdate(k updateKind) error {
 	m.applying.Lock()
 	defer m.applying.Unlock()
 
+	m.removeOtherPendingFiles(k, "")
 	if m.getPending() == nil {
-		return nil // 没有待安装更新包，忽略即可
+		// 没有待安装包也照样复位状态：暂停中的半成品已被上面清掉。
+		m.updateStatus(k, func(s *UpdateStatus) {
+			s.Phase = ""
+			s.Paused = false
+			s.ReadyToInstall = false
+			s.Downloading = false
+			s.DownloadPct = 0
+			s.DownloadedBytes = 0
+			s.TotalBytes = 0
+			s.Error = ""
+			s.ErrorHint = ""
+			s.Cancelled = false
+		})
+		return nil
 	}
 	m.clearPending()
 	m.updateStatus(k, func(s *UpdateStatus) {
 		s.Phase = ""
+		s.Paused = false
 		s.ReadyToInstall = false
 		s.Downloading = false
 		s.DownloadPct = 0
 		s.DownloadedBytes = 0
 		s.TotalBytes = 0
 		s.Error = ""
+		s.ErrorHint = ""
 		s.Cancelled = false
 	})
 	logger().Printf("[update] 已删除 %s 的待安装更新包", k)

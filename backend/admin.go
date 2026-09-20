@@ -1026,6 +1026,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleDiscardUpdate(w, r)
 		case p == "/api/update/cancel" && r.Method == http.MethodPost:
 			m.handleCancelUpdate(w, r)
+		case p == "/api/update/pause" && r.Method == http.MethodPost:
+			m.handlePauseUpdate(w, r)
 		case p == "/api/update/stream" && r.Method == http.MethodGet:
 			m.handleUpdateStream(w, r)
 		case p == "/api/dsh/backups" && r.Method == http.MethodGet:
@@ -1187,26 +1189,36 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 		st.Phase = "downloading"
 		st.ReadyToInstall = false
 		st.Cancelled = false
+		st.Paused = false
 		st.Error = ""
+		st.ErrorHint = ""
 		st.Downloading = true
 		st.DownloadPct = 0
-		st.DownloadedBytes = 0
-		st.TotalBytes = 0
+		// 不在这里清零 DownloadedBytes / TotalBytes：续传时立即清零会让进度条
+		// 瞬间回跳到 0（downloadUpdate 会用真实的续传起点覆盖这两个值）。
 	})
-	// 后台执行，避免占用请求线程；进度/完成/取消均经 SSE 推送。
+	// 后台执行，避免占用请求线程；进度/完成/取消/暂停均经 SSE 推送。
 	go func() {
 		if err := m.update.downloadUpdate(kind); err != nil {
 			logger().Printf("[update] 下载 %s 失败: %v", kind, err)
-			// 在原有状态副本上追加失败/取消信息推送，避免版本号、hasUpdate 等
-			// 字段被冲掉（取消后前端仍可再次发起下载）。
+			// 暂停/取消都不是「错误」，downloadUpdate 已经推送了对应状态，
+			// 这里不要再覆盖成失败（否则弹窗会同时显示“已暂停”和一条红色错误）。
+			if errors.Is(err, errUpdatePaused) || errors.Is(err, errUpdateCancelled) {
+				return
+			}
+			// 在原有状态副本上追加失败信息推送，避免版本号、hasUpdate 等
+			// 字段被冲掉（失败后前端仍可再次发起下载续传）。
 			upd := m.update
 			st := upd.getStatus(kind)
 			st.CheckedAt = time.Now()
 			st.Error = err.Error()
-			st.Cancelled = errors.Is(err, errUpdateCancelled)
+			st.Cancelled = false
+			st.Paused = false
 			st.Downloading = false
-			st.DownloadPct = 0
 			st.Phase = ""
+			if errors.Is(err, errUpdateNetworkFailed) {
+				st.ErrorHint = "network"
+			}
 			upd.setStatus(kind, &st)
 		}
 		// 下载成功：downloadUpdate 已推送 phase=downloaded / readyToInstall=true。
@@ -1281,9 +1293,17 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCancelUpdate 取消正在进行的更新下载（下载完成后取消无效，忽略即可）。
+// 取消会删除半成品文件；若想保留已下载字节下次续传，用 /api/update/pause。
 func (m *AdminMux) handleCancelUpdate(w http.ResponseWriter, r *http.Request) {
 	m.update.CancelUpdate()
 	writeJSON(w, map[string]interface{}{"ok": true, "cancelled": true})
+}
+
+// handlePauseUpdate 暂停正在进行的更新下载：半成品保留，状态置 paused，
+// 前端可再次调 /api/update/download 从已下载字节续传（Range）。
+func (m *AdminMux) handlePauseUpdate(w http.ResponseWriter, r *http.Request) {
+	paused := m.update.PauseUpdate()
+	writeJSON(w, map[string]interface{}{"ok": true, "paused": paused})
 }
 
 // handleDiscardUpdate 删除已下载待安装的更新包，重置为待更新状态（前端“删除更新包”按钮）。

@@ -28,8 +28,9 @@
 - **插件管理** — 列出 / 移除 / 重置 dsh web profile 的插件依赖。
 - **快捷指令** — 持久化的终端快捷命令（`HARNESS_QUICK_CMDS_FILE`）。
 - **日志** — 查看 / 下载 / SSE 实时流式输出 dsh 与主进程日志（`HARNESS_LOG_FILE`）。
-- **更新管理** — 自动检测 harness 控制台 / dsh 服务的新版本（每小时），支持多 GitHub
-  加速源回退，并可一键应用更新、回滚（数据备份 / 恢复）。
+- **更新管理** — 自动检测 harness 控制台 / dsh 服务 / 插件市场的新版本（每小时），
+  下载走「代理 / 直连」两条通路（各 2 次机会，支持暂停与断点续传），
+  并可一键应用更新、回滚（数据备份 / 恢复）。
 - **node-pty 自动安装** — 主进程启动后自动补齐 `node-pty` 预构建文件与 patch。
 
 ---
@@ -60,7 +61,8 @@
 │   ├── dsh.go               # DshManager：dsh 进程生命周期 / token 交换 / 状态 / 插件
 │   ├── proxy.go             # 反向代理（携带 dsh 会话 Cookie）
 │   ├── terminal.go          # WebSocket 交互式 PTY 终端
-│   ├── update.go            # 更新管理（harness / dsh 服务，加速源，回滚/备份）
+│   ├── update.go            # 更新管理（版本检测、下载通路/续传、回滚/备份）
+│   ├── market.go            # 插件市场（dshmarket）就地更新
 │   ├── install.go           # node-pty 自动安装
 │   ├── quickcmds.go         # 终端快捷指令持久化 API
 │   ├── visitors.go          # 访客跟踪 / 踢出 / SSE
@@ -255,6 +257,42 @@ Cache-Control: public, max-age=31536000, immutable
 
 ---
 
+## 更新下载：通路、重试与断点续传
+
+三条更新链路（harness / dsh / 插件市场）共用同一个下载器（`backend/update.go`
+的 `downloadToFile`），但**策略是分开的**（`downloadPlanFor`）：
+
+| | harness / dsh（发布资产） | 插件市场（npm tarball） |
+|---|---|---|
+| 通路 | 代理（启用且探测可达时）+ 直连 | **只有直连，不走代理** |
+| 重试 | 每条通路 2 次（最多 4 次） | 直连 2 次 |
+| 断点续传 | 支持（HTTP Range） | **不支持**，每次从零下 |
+| 暂停 | 支持 | **不支持**（按钮不显示，后端也忽略暂停请求） |
+
+改动前请先读这一节：
+
+- **已移除 GitHub 加速源**（gh-proxy 等）前缀分支：包一律从原始地址取。
+- **失败归类**：所有通路都失败时返回 `errUpdateNetworkFailed`，状态里带
+  `errorHint="network"`，前端用当前语言显示「请检查网络或代理设置后重试」；
+  若其中任一次是败在本地磁盘（写不进去），则不给这个提示 —— 修网络没用。
+- **断点续传**（仅发布资产）：半成品文件名按 `<kind>-<版本>.tar.gz` 固定，失败/暂停后
+  重试都命中同一个文件，用 `Range: bytes=<offset>-` 续传（代理断在 60% 时直连接着下）。
+  - 服务器回 `200`（忽略 Range，如某些代理会剥掉）→ 截断重写，本次从零开始；
+  - 回 `416`（本地字节比远端还长，多半是远端换了资产）→ **删除半成品**并重新完整下载，
+    绝不会把这份坏文件当成「已下完」；
+  - 每次尝试结束都先 `fsync` 再关闭，保证半成品一定是「完整写入的连续前缀」。
+- **暂停 vs 取消**（仅发布资产）：暂停（`POST /api/update/pause`）保留半成品并置
+  `phase="paused"`，前端底部按钮变「继续下载」，再次调 `/api/update/download` 即续传；
+  取消（`POST /api/update/cancel`）删除半成品；「删除更新包」（`/api/update/discard`）
+  会连半成品一起清掉。注意半成品不跨进程重启保留（`pending/` 启动时整目录清理）。
+- **市场不续传**：每次尝试前清掉残留、永远截断重写，失败后不留半成品
+  （「要么完整拿到，要么什么都没有」），成功后再按 `dist.integrity` 校验。
+- **超时策略**：下载客户端不设总超时（旧的 60 秒总超时会掐断大包/慢网），改为
+  建连 30s、响应头 30s、**传输空闲 60s**（空闲看门狗，一有字节就重置）。
+- 进度经 SSE 节流上报（每 500ms 或每 256KB），暂停/续传时字节数连续、不回跳。
+
+---
+
 ## 主要流程
 
 1. **启动** — 解析环境变量 → 读取配置 → 校验密码 → 启动 Admin socket → 自动启动
@@ -263,8 +301,10 @@ Cache-Control: public, max-age=31536000, immutable
    dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie。
 3. **反向代理** — 携带该 Cookie 把 dsh 反代到 `PROXY_PORT`，叠加登录鉴权。
 4. **node-pty** — 等待 `$HOME/.dsh/profiles/web` 目录生成后安装并 patch node-pty。
-5. **自我更新（harness / dsh / 插件市场）** — 分「下载 → 安装」两步：下载可取消，包存放在
-   `TRIM_PKGVAR/backup/pending/`，安装成功后删除。三条分支收尾方式不同：
+5. **自我更新（harness / dsh / 插件市场）** — 分「下载 → 安装」两步：下载可暂停
+   （保留半成品，续传）/ 可取消（删除半成品），代理与直连各 2 次机会，详见上文
+   「更新下载：通路、重试与断点续传」；包存放在 `TRIM_PKGVAR/backup/pending/`，
+   安装成功后删除。三条分支收尾方式不同：
    - **dsh**：备份 → 替换 `server/` → 重启 dsh → 推送 `phase="done"`，前端据 SSE 收尾。
    - **插件市场**：校验 → 停 dsh → 备份并原子替换 `server/` 内那份 dshmarket → 自动拉起
      dsh 并换 token → 等就绪（失败自动回滚）→ 推送 `phase="done"`，详见上文

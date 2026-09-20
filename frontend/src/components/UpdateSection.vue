@@ -65,8 +65,12 @@ const busy = computed(() => {
   const ph = dialogStatus.value.phase
   return ph === 'downloading' || ph === 'installing' || installing.value
 })
-// 下载中（可取消）
+// 下载中（可暂停/取消）
 const downloading = computed(() => dialogStatus.value.phase === 'downloading')
+// 已暂停：半成品保留，底部按钮变为“继续下载”（后端用 Range 从断点续传）
+const paused = computed(() => dialogStatus.value.phase === 'paused')
+// 暂停请求是否已发出（等后端推送 phase=paused）
+const pausing = ref(false)
 // 已下载待安装（显示“安装更新”按钮）
 const downloaded = computed(() => dialogStatus.value.phase === 'downloaded' && dialogStatus.value.readyToInstall)
 // 取消更新
@@ -165,14 +169,17 @@ function openDialog(kind: UpdateKind) {
   dialogVisible.value = true
 }
 
-// 第一步：下载更新包（可取消）。后端下载完成后经 SSE 推送 phase=downloaded，
-// 弹窗按钮随之变为“安装更新”。
+// 第一步：下载更新包（可暂停/取消）。后端下载完成后经 SSE 推送 phase=downloaded，
+// 弹窗按钮随之变为“安装更新”；暂停则推送 phase=paused，底部按钮变“继续下载”
+// （继续时后端按 HTTP Range 从已下载字节续传，不重下）。
 async function doDownload() {
   const kind = dialogKind.value
   if (busy.value) return
   targetVersion.value = dialogStatus.value.latestVersion
   updatingDone.value = false
   installing.value = false
+  pausing.value = false
+  cancelling.value = false
   // 乐观更新：点击后本地立即切到“下载中”视图（进度条 + 取消按钮），
   // 不再依赖 SSE 首帧推送——SSE 断开/丢帧时也能立刻看到进度页，
   // 下载实际已在后台执行；后续收到进度帧再实时刷新数字。
@@ -224,30 +231,37 @@ function stopProgressPoll() {
 
 // 本地立即进入“下载中”状态（供 doDownload 乐观更新，不等 SSE 首帧）。
 function applyLocalDownloading() {
-  const patch = {
-    phase: 'downloading' as string,
+  // 续传（点击“继续下载”）时不要清零已下载字节：否则进度条会从 0 重来，
+  // 而实际是从断点接着下（后端随后会用真实起点覆盖，但那一跳很刺眼）。
+  const resuming = paused.value
+  const patch: Partial<UpdateStatus> = {
+    phase: 'downloading',
     readyToInstall: false,
+    paused: false,
     downloading: true,
-    downloadPct: 0,
-    downloadedBytes: 0,
-    totalBytes: 0,
     error: '',
+    errorHint: '',
     cancelled: false
+  }
+  if (!resuming) {
+    patch.downloadPct = 0
+    patch.downloadedBytes = 0
+    patch.totalBytes = 0
   }
   patchStatus(dialogKind.value, patch)
 }
 
 // 本地把当前弹窗目标重置为“待更新、未下载”状态（下载请求失败时回滚）。
 function applyLocalReset() {
-  const patch = {
-    phase: '' as string,
+  patchStatus(dialogKind.value, {
+    phase: '',
     readyToInstall: false,
+    paused: false,
     downloading: false,
     downloadPct: 0,
     downloadedBytes: 0,
     totalBytes: 0
-  }
-  patchStatus(dialogKind.value, patch)
+  })
 }
 
 // 安装二次确认的正文：市场这次会在安装阶段停 dsh、替换文件、再自动拉起 dsh
@@ -386,18 +400,45 @@ const downloadSizeText = computed(() => {
   return t('update_download_unknown_size', { downloaded: dl })
 })
 
-// 点击“取消更新” → 弹出二次确认（仅下载中有效）
+// 点击“暂停” → 通知后端停止传输但保留半成品；后端推送 phase=paused 后
+// 底部按钮变为“继续下载”，继续时从已下载字节续传（不重下）。
+async function doPause() {
+  if (!downloading.value || pausing.value) return
+  pausing.value = true
+  try {
+    await api.updatePause()
+    // 保持“下载中”视图等 SSE 推送 paused；若推送没到（反代缓冲），下面的
+    // 进度兜底轮询会在 1 秒内看到 phase 变化并切换视图。
+  } catch (e) {
+    pausing.value = false
+    toast.show((e as Error).message || t('update_failed'), 'error')
+  }
+}
+
+// 点击“取消更新” → 弹出二次确认（下载中或已暂停都有效）
 function openCancelConfirm() {
-  if (!downloading.value || cancelling.value) return
+  if ((!downloading.value && !paused.value) || cancelling.value) return
   cancelConfirmVisible.value = true
 }
 
-// 确认取消：通知后端中断下载；中断完成后后端经 SSE 推送 cancelled/error 状态，
-// 由 watchForCompletion 复位 UI。
+// 确认取消：下载中 → 中断传输并删除半成品；已暂停 → 没有进行中的下载，
+// 直接丢弃半成品并复位状态（两者对用户的语义一致：这些字节我不要了）。
 async function doCancelUpdate() {
   if (cancelling.value) return
   cancelling.value = true
   try {
+    if (paused.value) {
+      await api.updateDiscard(dialogKind.value)
+      patchStatus(dialogKind.value, {
+        phase: '', paused: false, readyToInstall: false, downloading: false,
+        downloadPct: 0, downloadedBytes: 0, totalBytes: 0, error: '', errorHint: '',
+      })
+      cancelConfirmVisible.value = false
+      cancelling.value = false
+      pausing.value = false
+      toast.show(t('update_discarded'), 'success')
+      return
+    }
     await api.updateCancel()
     // 保持“下载中”状态等待 SSE 推送；不额外兜底计时器，避免与完成推送竞争。
     // 若取消请求到达时下载恰好已完成（后端无取消目标），则 phase 会变为
@@ -444,6 +485,14 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
     stopProgressPoll()
     return
   }
+  // 下载已暂停：半成品保留，视图切到“已暂停”，底部按钮变“继续下载”。
+  if (st.phase === 'paused' || st.paused) {
+    stopProgressPoll()
+    pausing.value = false
+    cancelling.value = false
+    cancelConfirmVisible.value = false
+    return
+  }
   // 用户取消下载：退出进行中状态，可重新下载。
   if (st.cancelled || (st.error && st.error.includes('用户取消'))) {
     clearTimeout(reloadTimer ?? undefined)
@@ -451,6 +500,7 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
     stopHarnessReadyPoll()
     installing.value = false
     cancelling.value = false
+    pausing.value = false
     cancelConfirmVisible.value = false
     toast.show(t('update_cancelled'), 'info')
     return
@@ -464,6 +514,7 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
     stopHarnessReadyPoll()
     installing.value = false
     cancelling.value = false
+    pausing.value = false
     cancelConfirmVisible.value = false
     installConfirmVisible.value = false
     toast.show(st.error || t('update_failed'), 'error')
@@ -751,7 +802,7 @@ watch(
               <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
             </div>
 
-            <!-- 下载中：进度条 + 取消（可取消） -->
+            <!-- 下载中：进度条 + 暂停（保留已下载字节）/ 取消（放弃已下载字节） -->
             <div v-else-if="downloading" class="py-4">
               <div class="flex items-center justify-between text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">
                 <span>{{ t('update_downloading') }}</span>
@@ -766,8 +817,37 @@ watch(
               </div>
               <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ downloadSizeText }}</div>
 
-              <!-- 取消下载 -->
-              <div class="text-center mt-4">
+              <!-- 暂停（保留半成品，可继续）+ 取消（删除半成品）。
+                   市场包只有几百 KB，且后端对市场下载明确不支持暂停/续传，
+                   所以市场不显示暂停按钮 —— 避免按了没反应。 -->
+              <div class="flex items-center justify-center gap-3 mt-4">
+                <button
+                  v-if="dialogKind !== 'market'"
+                  class="g-btn-secondary"
+                  :disabled="pausing"
+                  @click="doPause"
+                >{{ t('update_pause_btn') }}</button>
+                <button
+                  class="g-btn-secondary text-danger hover:!bg-danger/10 !border-danger/40"
+                  :disabled="cancelling"
+                  @click="openCancelConfirm"
+                >{{ t('update_cancel') }}</button>
+              </div>
+            </div>
+
+            <!-- 已暂停：显示暂停位置 + 继续下载（断点续传）/ 取消 -->
+            <div v-else-if="paused" class="py-4">
+              <div class="flex items-center justify-between text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">
+                <span>{{ t('update_paused') }}</span>
+                <span v-if="downloadTotalKnown">{{ downloadPct }}%</span>
+              </div>
+              <div class="h-2 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+                <div class="h-full rounded-full bg-brand/50" :style="progressBarStyle"></div>
+              </div>
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ downloadSizeText }}</div>
+              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-3 leading-relaxed">{{ t('update_paused_hint') }}</div>
+
+              <div class="flex items-center justify-center gap-3 mt-4">
                 <button
                   class="g-btn-secondary text-danger hover:!bg-danger/10 !border-danger/40"
                   :disabled="cancelling"
@@ -809,7 +889,7 @@ watch(
                 </div>
               </div>
 
-              <!-- 取消 / 失败提示（取消显示中性提示，不再当作错误） -->
+              <!-- 失败提示：取消显示中性提示，网络类失败额外给一条本地化指引 -->
               <div
                 v-if="dialogStatus.error || dialogStatus.cancelled"
                 class="mt-3 rounded-lg px-3 py-2 text-xs break-words"
@@ -818,6 +898,10 @@ watch(
                   : 'bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]'"
               >
                 {{ dialogStatus.cancelled ? t('update_cancelled') : dialogStatus.error }}
+                <!-- 代理与直连各 2 次都失败时，后端给 errorHint=network，这里用当前语言提示 -->
+                <div v-if="dialogStatus.errorHint === 'network'" class="mt-1 font-medium">
+                  {{ t('update_error_network_hint') }}
+                </div>
               </div>
 
               <template v-else>
@@ -849,12 +933,12 @@ watch(
                 class="g-btn-primary"
                 @click="openInstallConfirm"
               >{{ t('update_install_btn') }}</button>
-              <!-- 空闲且有待更新 → 下载更新（取消后可重新下载） -->
+              <!-- 空闲且有待更新 → 下载更新 / 继续下载（暂停后断点续传）/ 重新下载（取消后） -->
               <button
                 v-else-if="dialogStatus.hasUpdate && !busy && !updatingDone"
                 class="g-btn-primary"
                 @click="doDownload"
-              >{{ dialogStatus.cancelled ? t('update_redownload') : t('update_download_btn') }}</button>
+              >{{ paused ? t('update_resume_btn') : dialogStatus.cancelled ? t('update_redownload') : t('update_download_btn') }}</button>
             </div>
           </div>
         </div>

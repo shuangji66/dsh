@@ -133,12 +133,18 @@ export interface UpdateStatus {
   downloadPct?: number // 下载进度百分比（0-100；total 未知时为估算值）
   downloadedBytes?: number // 已下载字节数
   totalBytes?: number // 总字节数（未知为 0）
-  // 两阶段更新流程阶段：''(空闲) / downloading(下载中) / downloaded(已下载待安装) / installing(安装中)
+  // 两阶段更新流程阶段：
+  // ''(空闲) / downloading(下载中) / paused(已暂停，可续传) / downloaded(已下载待安装) / installing(安装中)
   phase?: string
   // 更新包已下载就绪，等待用户点击“安装”
   readyToInstall?: boolean
   // 最近一次更新是否被用户主动取消
   cancelled?: boolean
+  // 下载是否被用户暂停（phase=paused）：半成品已保留，可继续断点续传
+  paused?: boolean
+  // 后端给错误的结构化归类：目前只有 'network'（代理与直连各 2 次均失败），
+  // 前端据此显示本地化的“请检查网络或代理”提示。
+  errorHint?: string
   // 仅市场：当前生效的那份 dshmarket 由谁提供（见后端 market.go）
   // server = 由 server 包提供，控制台可就地更新；profile = 由 profile 提供，
   // 应在市场面板内更新；external = 位置在 server 目录之外；missing = 未找到。
@@ -345,9 +351,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ kind })
     }),
-  // 取消正在进行的更新下载（下载完成后的取消请求被忽略）
+  // 取消正在进行的更新下载（下载完成后的取消请求被忽略）。半成品会被删除；
+  // 想保留已下载字节下次续传请用 updatePause。
   updateCancel: () =>
     request<{ ok: boolean; cancelled: boolean }>('/api/update/cancel', {
+      method: 'POST'
+    }),
+  // 暂停下载：半成品保留，再次调 updateDownload 即从已下载字节断点续传
+  updatePause: () =>
+    request<{ ok: boolean; paused: boolean }>('/api/update/pause', {
       method: 'POST'
     }),
   // 删除已下载待安装的更新包，重置为待更新状态

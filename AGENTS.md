@@ -47,8 +47,12 @@
   `tokenScanner` 从 dsh 日志捕获 `?token=`；`ExchangeToken` 换 `dsh-auth-*` Cookie。
 - `proxy.go` — 反向代理，转发时**携带 dsh 会话 Cookie**。
 - `terminal.go` — WebSocket + `creack/pty` 的交互式 bash。
-- `update.go` — 更新 harness / dsh 服务；含 GitHub 加速源回退数组 `updateAccelerators`；
-  `harnessVersion` 由 `-ldflags -X` 注入。
+- `update.go` — 更新 harness / dsh 服务与插件市场：版本检测、下载、备份与回滚；
+  `harnessVersion` 由 `-ldflags -X` 注入。下载策略按类型分开（`downloadPlanFor`）：
+  发布资产（harness/dsh）走「代理+直连各 2 次 + HTTP Range 断点续传 + 暂停/取消」，
+  插件市场**只直连、不支持续传/暂停**（包小、registry 通常不需要代理）。
+- `market.go` — 插件市场（dshmarket）就地更新：解析实际生效的安装位置（server 包内置
+  vs profile 自带）、npm registry 取版本、完整性校验、原子替换与失败回滚。
 - `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
 - `quickcmds.go` — 终端快捷指令持久化（`HARNESS_QUICK_CMDS_FILE`）。

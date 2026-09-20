@@ -429,18 +429,21 @@ func (m *UpdateManager) marketInfo() map[string]interface{} {
 // --- 下载与完整性校验 ---
 
 // downloadMarketTarball 下载 registry 上的市场 tarball 并校验完整性，返回文件大小。
-// 刻意不走 GitHub 加速源（downloadToFile 的第五参传 false）：registry 的 tarball
-// 地址不是 GitHub 资源，套 gh 前缀只会 404。
+//
+// 市场走**独立下载策略**（`downloadPlanFor(updateKindMarket)`）：只直连、不走代理，
+// 失败重试，且不支持断点续传与暂停 —— 包只有几百 KB，registry 通常也不需要代理，
+// 续传/暂停带来的状态复杂度不值得。
 func (m *UpdateManager) downloadMarketTarball(rel *marketRelease, dest string,
-	progress func(downloaded, total int64), cancel <-chan struct{}) (int64, error) {
+	progress func(downloaded, total int64), ctrl *downloadControl, plan downloadPlan) (int64, error) {
 	if rel.Integrity == "" && rel.Shasum == "" {
 		return 0, fmt.Errorf("registry（%s）未提供 integrity/shasum，无法校验下载字节，拒绝安装", rel.Registry)
 	}
-	n, err := m.downloadToFile(rel.Tarball, dest, progress, cancel, false)
+	n, err := m.downloadToFile(rel.Tarball, dest, progress, ctrl, plan)
 	if err != nil {
 		return n, err
 	}
 	if err := verifyFileIntegrity(dest, rel.Integrity, rel.Shasum); err != nil {
+		// 字节与元数据不符：这份文件没有任何保留价值，删掉让下次从零开始。
 		os.Remove(dest)
 		return 0, fmt.Errorf("市场包完整性校验失败（来源 %s）: %w", rel.Registry, err)
 	}

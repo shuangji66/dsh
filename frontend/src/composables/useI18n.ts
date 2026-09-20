@@ -329,6 +329,13 @@ const zh: Record<string, string> = {
   update_download_size: '{downloaded} / {total}',
   update_download_unknown_size: '已下载 {downloaded}',
   update_cancel: '取消更新',
+  // 暂停 / 续传（下载中可暂停，半成品保留，继续时从断点续传）
+  update_pause_btn: '暂停',
+  update_paused: '已暂停',
+  update_paused_hint: '已下载的部分会保留，点“继续下载”从这里接着下。',
+  update_resume_btn: '继续下载',
+  // 代理与直连各 2 次均失败（后端 errorHint=network）
+  update_error_network_hint: '代理与直连均无法完成下载，请检查网络或代理设置后重试。',
   update_cancelled: '已取消更新，可重新下载',
   update_cancel_confirm_title: '取消更新',
   update_cancel_confirm_msg: '确定要取消当前更新吗？已下载的临时文件将被清理，不会影响现有版本。',
@@ -663,6 +670,13 @@ const en: Record<string, string> = {
   update_download_size: '{downloaded} / {total}',
   update_download_unknown_size: 'Downloaded {downloaded}',
   update_cancel: 'Cancel update',
+  // Pause / resume (pausing keeps the partial file; resuming continues from it)
+  update_pause_btn: 'Pause',
+  update_paused: 'Paused',
+  update_paused_hint: 'Downloaded bytes are kept — click "Resume" to continue from here.',
+  update_resume_btn: 'Resume',
+  // Shown when both routes (proxy and direct) failed twice (backend errorHint=network)
+  update_error_network_hint: 'Neither the proxy nor a direct connection could finish the download. Check your network or proxy settings and try again.',
   update_cancelled: 'Update cancelled, you can download again',
   update_cancel_confirm_title: 'Cancel Update',
   update_cancel_confirm_msg: 'Cancel the current update? Downloaded temp files will be cleaned up; the current version is not affected.',

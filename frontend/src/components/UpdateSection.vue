@@ -757,28 +757,19 @@ watch(
       </div>
     </div>
 
-    <!-- dsh 快捷访问地址列表（显示在版本号下方，带分隔线） -->
+    <!-- dsh 快捷访问地址列表（显示在版本号下方，带分隔线）：整行是描边按钮，点击即打开 -->
     <div v-if="accessUrls && accessUrls.length" class="mt-3 border-t border-line dark:border-[#2A2A32] pt-3">
       <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mb-2">{{ t('access_urls_overview_title') }}</div>
-      <div class="space-y-1">
-        <template v-for="(url, i) in accessUrls" :key="i">
-          <div class="flex items-center gap-2 py-0.5">
-            <!-- 访问图标（地址左侧） -->
-            <button
-              class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-brand dark:hover:text-brand transition-colors"
-              :title="t('access_urls_open')"
-              @click="openAccessUrl(url)"
-            >
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-            </button>
-            <!-- 访问地址（左对齐 + 下划线） -->
-            <button
-              class="flex-1 min-w-0 text-left text-xs font-mono text-ink dark:text-[#EDEDF0] underline underline-offset-4 decoration-ink-soft/40 dark:decoration-[#A6A6AD]/40 truncate hover:text-brand dark:hover:text-brand transition-colors"
-              :title="url"
-              @click="openAccessUrl(url)"
-            >{{ url }}</button>
-          </div>
-        </template>
+      <div class="flex flex-col gap-1.5">
+        <button
+          v-for="(url, i) in accessUrls"
+          :key="i"
+          class="w-full text-left px-3 py-2 rounded-lg bg-transparent border border-ink/15 dark:border-white/40
+            text-xs font-mono truncate text-ink dark:text-white
+            hover:bg-black/5 dark:hover:bg-white/10 transition-colors duration-150"
+          :title="url"
+          @click="openAccessUrl(url)"
+        >{{ url }}</button>
       </div>
     </div>
 

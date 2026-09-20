@@ -368,7 +368,6 @@ const zh: Record<string, string> = {
   access_urls_overview_title: '快捷访问',
   access_urls_add: '添加',
   access_urls_placeholder: '输入 dsh 访问地址',
-  access_urls_open: '在新标签页打开',
   access_urls_empty: '暂无访问地址',
   access_urls_saved: '访问地址已保存',
 }
@@ -713,7 +712,6 @@ const en: Record<string, string> = {
   access_urls_overview_title: 'Quick access',
   access_urls_add: 'Add',
   access_urls_placeholder: 'Enter dsh access URL',
-  access_urls_open: 'Open in new tab',
   access_urls_empty: 'No access URLs configured',
   access_urls_saved: 'Access URLs saved',
 }

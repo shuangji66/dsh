@@ -753,7 +753,9 @@ func (m *UpdateManager) localDshVersion() string {
 	if m.dsh == nil {
 		return ""
 	}
-	out, err := m.dsh.runDshCmd("-V")
+	// 带超时：`dsh -V` 在 newUpdateManager 里是**同步**调用的（控制台启动路径），
+	// 一旦 dsh 侧卡住会把整个控制台启动拖死，这里必须兜住。
+	out, err := m.dsh.runDshCmdTimeout(30*time.Second, "-V")
 	if err != nil {
 		return ""
 	}
@@ -1013,6 +1015,11 @@ func (m *UpdateManager) harnessBinDir() string {
 	}
 	return "/var/apps/Harness/target/bin"
 }
+
+// serverDirFn 是「dsh server 目录在哪」的唯一入口：更新 dsh 服务、回滚 server 备份、
+// 以及市场定位 dshmarket 都走它。变量形式便于测试注入临时目录（否则测试会碰到真实
+// 的 /var/apps/Harness/target/server）。
+var serverDirFn = func(m *UpdateManager) string { return m.serverDir() }
 
 // serverDir 返回 dsh server 目录。优先 /var/apps/Harness/target/server。
 func (m *UpdateManager) serverDir() string {
@@ -1867,6 +1874,11 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 //
 // 返回值：exec 成功则永不返回；exec 失败返回错误（此时新二进制已就位，重启后生效）。
 func (m *UpdateManager) installHarness(extractDir string) error {
+	// 停在最前面：这条路径随后会替换自身二进制并停 dsh，若此时有插件操作在跑，
+	// 同样会把它的 profile 写锁一起带走。被拒绝时什么都不动，更新包保留（可重试）。
+	if err := m.replaceBusyGuard("更新 harness 控制台"); err != nil {
+		return err
+	}
 	newBin, err := m.applyHarness(extractDir)
 	if err != nil {
 		return err
@@ -2073,14 +2085,16 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 		srcServer = found
 	}
 
-	serverDir := m.serverDir()
+	serverDir := serverDirFn(m)
 	parent := filepath.Dir(serverDir)
 
 	// 下载已成功；先停止 dsh 服务，再执行备份替换，确保备份一致、替换不冲突。
+	//
+	// 走统一入口：先过忙守卫（有插件操作在跑就拒绝，避免把它连根拔掉并留下陈旧
+	// profile 写锁），再停止并等端口释放；被拒绝时不产生任何停机、也不会改盘。
 	logger().Printf("[update] 停止 dsh 服务")
-	if err := m.dsh.Stop(); err != nil {
-		logger().Printf("[update] 停止 dsh 服务失败: %v", err)
-		// 即便停止失败也继续尝试备份替换
+	if err := m.stopDshForReplacement("更新 dsh 服务"); err != nil {
+		return err
 	}
 
 	// 备份当前 server 目录（文件名带上当前 dsh 版本号）
@@ -2278,13 +2292,15 @@ func (m *UpdateManager) RollbackServer(backupPath string) error {
 // doRollbackServer 执行实际的回滚步骤。
 func (m *UpdateManager) doRollbackServer(backupPath string) error {
 	logger().Printf("[rollback] 开始回滚 server，备份文件: %s", backupPath)
-	serverDir := m.serverDir()
+	serverDir := serverDirFn(m)
 
-	// 1. 停止 dsh 服务
+	// 1. 停止 dsh 服务。同样是「替换 server 产物」，走统一入口：先过忙守卫，
+	//    避免在插件安装进行中杀 dsh（那会留下陈旧的 profile 写锁）。
+	//    守卫只在市场/控制台的插件操作**确实在跑**时拒绝，且市场不回答时视为不忙，
+	//    所以「dsh 已经坏了要回滚」这种场景不会被挡。
 	logger().Printf("[rollback] 停止 dsh 服务")
-	if err := m.dsh.Stop(); err != nil {
-		logger().Printf("[rollback] 停止 dsh 失败: %v", err)
-		// 继续尝试回滚，即使 stop 失败
+	if err := m.stopDshForReplacement("回滚 dsh 服务"); err != nil {
+		return err
 	}
 
 	// 2. 删除当前 server 目录
@@ -2457,6 +2473,13 @@ func (m *UpdateManager) doRestoreDshData(backupPath string) error {
 	}
 	dshDir := filepath.Join(home, ".dsh")
 	logger().Printf("[restore] 开始恢复 dsh 数据，备份文件: %s", backupPath)
+
+	// 这条路径会删掉整个 ~/.dsh 并重建，先确认没有插件操作在跑：正在装的插件会被
+	// 连同 profile 一起删掉，用户会看到一次莫名其妙的失败。被拒绝时不产生任何破坏。
+	// （市场不回答时视为不忙，所以「dsh 坏了要恢复数据」不会被挡。）
+	if err := m.replaceBusyGuard("恢复 dsh 数据"); err != nil {
+		return err
+	}
 
 	// 1. 停止 dsh 服务
 	logger().Printf("[restore] 停止 dsh 服务")

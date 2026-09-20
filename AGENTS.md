@@ -97,6 +97,35 @@
 - **`PROFILE_TEMPLATES.web.bundles` 注入** —— 只在 `server-build.yaml` 的 CI 中对
   `dsh-app-boot` 做，本地不涉及。
 - **代理端口默认 `13079`、dsh 端口默认 `13080`** —— 冲突排查先看这两个。
+- **dsh 的跨进程写锁会因「持有者被杀」而残留，代价是 120 秒白等** ——
+  `@deepseek-ai/dsh-atomic-write` 的 `withFileLock` 用 `<文件>.lock` + `wx` 独占创建、
+  只在 `finally` 里删除；持有者被杀死（用户取消安装、进程被重启带走）就永久残留，
+  而实现上**不清理陈旧锁**，等待上限又可以是 120 秒（plugin-manager 的 `lockWaitMs`
+  默认值）。于是 `profiles/web/package.json.lock` 一旦残留，「插件列表 / 安装 / 更新」
+  全部会等满 120 秒再失败（现象：市场内无法更新、控制台插件列表空白，浏览器轮询还会
+  不断堆积挂起的 dsh 进程）。harness 现在在**启动 dsh 前**与**执行 `dsh plugin …` 前**
+  会清掉「锁文件里的 PID 已不存在」的锁（`DshManager.cleanStaleProfileLocks`）。
+  由此推出三条硬约束：
+  1. **不要按进程名杀 node**：`pkill -x MainThread|node-MainThread` 会命中该用户下
+     *所有* Node 进程 —— 包括插件市场正在跑的 `dsh plugin --profile web add`（它正持有
+     上面那把锁）及其 pnpm 子进程，杀完就留下陈旧锁。`DshManager.Stop` 已改为只按
+     PID / 进程组精准终止，不要再退回按名杀。
+  2. **凡是会停 dsh（或删 ~/.dsh）的操作，动手前必须过忙守卫**：插件的安装/卸载
+     （不论市场面板发起还是控制台插件页发起）都在 dsh 进程内持有那把锁，停 dsh 会连带
+     终止它的进程组，把持有者一起带走 —— 安装白做，还留下陈旧锁。
+     - `UpdateManager.stopDshForReplacement()`：替换 `server/` 产物的三条路径
+       （更新 dsh 服务 / 更新市场 / 回滚 server 备份）统一走它 —— 先 `replaceBusyGuard()`，
+       再停 dsh 并等端口释放；被拒绝时不产生任何停机、不改盘。
+     - `replaceBusyGuard()` 也用在**更新 harness 控制台**与**恢复 dsh 数据**（会删 `~/.dsh`）
+       的入口，动手之前先挡。
+     - 守卫来源：市场 `/dsh-market/status` 的 busy + `DshManager.PluginCmdRunning()`；
+       市场不回答视为不忙（回滚/恢复这类抢修不被挡）。
+     - 唯一例外是概览页的「停止/重启 dsh」按钮：那是用户的即时意图，**不挡**；改为在确认
+       弹窗里提示 —— 弹窗打开时查 `GET /api/dsh/busy`（`AdminMux.dshBusySnapshot()`），
+       有插件操作在跑就显示风险提示。这个端点刻意不塞进高频轮询的 `/api/dsh/status`。
+  3. **「server 目录在哪」只有一个入口**：`serverDirFn` —— 更新 dsh 服务、回滚备份、
+     市场定位 dshmarket 都用它，测试也因此能注入临时目录（否则会碰到真实的
+     `/var/apps/Harness/target/server`）。
 - **dsh 的插件 bundle 带一年期 `immutable` 强缓存且无 `ETag`/`Last-Modified`** ——
   响应头为 `Cache-Control: public, max-age=31536000, immutable`；`rev` 由 dsh 自身生成、
   不随 harness 升级变化，且该路由严格校验 `rev`（改写/省略一律 404），故 URL 无法被

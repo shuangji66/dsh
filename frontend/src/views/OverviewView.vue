@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -56,10 +56,37 @@ function openGithub() {
 const lifecycleAction = ref<'stop' | 'restart' | null>(null)
 const lifecycleDialogVisible = ref(false)
 
+// 打开弹窗时顺便查一次「有没有插件操作在跑」：有的话弹窗里多显示一条风险提示
+// （停 dsh 会中断那次安装/卸载，并可能留下陈旧的 profile 写锁，之后插件列表与
+// 安装都会白等 120 秒）。这两个按钮刻意不硬挡 —— 点它是用户的即时意图。
+// 查询不阻塞弹窗：先显示，答案到了再补上提示；查不到（dsh 不可达）就不显示。
+type LifecycleBusy = { busy: boolean; source?: 'market' | 'console'; detail?: string }
+const lifecycleBusy = ref<LifecycleBusy | null>(null)
+
 function openLifecycleConfirm(action: 'stop' | 'restart') {
   lifecycleAction.value = action
   lifecycleDialogVisible.value = true
+  lifecycleBusy.value = null
+  api
+    .dshBusy()
+    .then((r) => {
+      // 期间用户可能已经确认/关闭了弹窗，避免把过期结果写回去
+      if (lifecycleDialogVisible.value) lifecycleBusy.value = r
+    })
+    .catch(() => {
+      lifecycleBusy.value = null
+    })
 }
+
+// 忙碌提示文案：按来源区分（市场面板的安装 vs 控制台的插件命令），并带上正在处理的对象。
+const lifecycleBusyText = computed(() => {
+  const b = lifecycleBusy.value
+  if (!b?.busy) return ''
+  const detail = b.detail?.trim() || ''
+  return b.source === 'console'
+    ? t('lifecycle_busy_console', { detail: detail || 'dsh plugin …' })
+    : t('lifecycle_busy_market', { detail: detail || t('lifecycle_busy_unknown_target') })
+})
 
 async function executeLifecycle(action: 'stop' | 'restart') {
   if (action === 'stop') await store.stopDsh()
@@ -233,12 +260,22 @@ onMounted(() => {
     <ConfirmDialog
       v-model:visible="lifecycleDialogVisible"
       :title="lifecycleAction === 'restart' ? t('confirm_restart_title') : t('confirm_stop_title')"
-      :message="lifecycleAction === 'restart' ? t('confirm_restart_msg') : t('confirm_stop_msg')"
       :confirm-text="t('confirm_ok')"
       :cancel-text="t('confirm_cancel')"
       danger
       @confirm="onLifecycleConfirm"
-    />
+    >
+      <!-- 默认插槽：原确认文案 + （有插件操作在跑时）额外风险提示 -->
+      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed whitespace-pre-line" :class="lifecycleBusyText ? 'mb-3' : 'mb-6'">
+        {{ lifecycleAction === 'restart' ? t('confirm_restart_msg') : t('confirm_stop_msg') }}
+      </p>
+      <div
+        v-if="lifecycleBusyText"
+        class="mb-6 rounded-lg px-3 py-2 text-xs leading-relaxed bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-[#B45309] dark:text-[#FBBF24]"
+      >
+        {{ lifecycleBusyText }}
+      </div>
+    </ConfirmDialog>
 
     <!-- 关于弹窗 -->
     <Teleport to="body">

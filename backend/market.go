@@ -133,16 +133,14 @@ const (
 // 生产实现直接调用既有方法：Stop 走 pkill 语义，start 走 startDshCaptured
 // （它内部异步 WaitToken + ExchangeToken，即「拉起服务后换 token」这一步）。
 var (
-	marketStopDshFn  = func(m *UpdateManager) error { return m.dsh.Stop() }
+	dshStopFn        = func(m *UpdateManager) error { return m.dsh.Stop() }
 	marketStartDshFn = func(m *UpdateManager) error {
 		return m.startDshCaptured()
 	}
 	marketReadyFn = func(m *UpdateManager, max time.Duration) marketWaitResult {
 		return waitMarketDsh(m, max)
 	}
-	// marketServerDirFn 便于测试注入 server 目录；生产实现即 UpdateManager.serverDir。
-	marketServerDirFn = func(m *UpdateManager) string { return m.serverDir() }
-	marketPortFreeFn  = func(m *UpdateManager, max time.Duration) {
+	dshPortFreeFn = func(m *UpdateManager, max time.Duration) {
 		checker := newBackendChecker(GetConfig().DshPort)
 		deadline := time.Now().Add(max)
 		for time.Now().Before(deadline) {
@@ -215,7 +213,7 @@ func canonicalPath(path string) string {
 //  2. $DSH_HOME/profiles/node_modules/dshmarket（共享 fallback symlink）→ 解析。
 //  3. 直接扫 server 目录下的两个已知位置（npm 是否提升取决于依赖树，两种都可能有）。
 func (m *UpdateManager) resolveMarketTarget() marketTarget {
-	return resolveMarketTargetIn(m.dsh.effectiveHome(), marketServerDirFn(m))
+	return resolveMarketTargetIn(m.dsh.effectiveHome(), serverDirFn(m))
 }
 
 // resolveMarketTargetIn 是 resolveMarketTarget 的实际实现（拆出来便于单测用临时目录
@@ -620,6 +618,97 @@ func marketUnresolvedDeps(doc *marketManifest, targetDir string) []string {
 	return missing
 }
 
+// --- 安装阶段的市场“忙”探测 ---
+
+// marketBusyFn 探测插件市场此刻是否正在安装/更新插件。市场自带
+// `GET /dsh-market/status`（返回 busy / phase / target 等），这里只读其中的 busy。
+// 变量形式便于测试注入。
+var marketBusyFn = func(m *UpdateManager) (bool, string) {
+	cfg := GetConfig()
+	if cfg.DshPort <= 0 {
+		return false, ""
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/dsh-market/status", cfg.DshPort)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		// 市场没回答（老版本没有这个路由、dsh 正在启动等）→ 不阻塞更新。
+		return false, ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return false, ""
+	}
+	var st struct {
+		Busy    bool   `json:"busy"`
+		Phase   string `json:"phase"`
+		Target  string `json:"target"`
+		Pending bool   `json:"installing"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
+		return false, ""
+	}
+	if !st.Busy && !st.Pending {
+		return false, ""
+	}
+	detail := st.Target
+	if detail == "" {
+		detail = st.Phase
+	}
+	return true, detail
+}
+
+// replaceBusyGuard 在「停 dsh 之前」检查是否有插件操作正在跑，返回拒绝原因。
+//
+// 为什么必须挡（线上故障的根因）：插件的安装/卸载会在 dsh 进程内持有 plugin-manager
+// 的 profile 写锁（`profiles/web/package.json.lock`）。那把锁只在正常收尾时删除，
+// 且 dsh 侧**不清理陈旧锁**、等待上限 120 秒 —— 一旦持有者被杀，之后所有插件操作
+// （含插件列表）都会白等 120 秒再失败。而「更新 dsh 服务 / 更新市场 / 回滚 server」
+// 都必须停 dsh（并连带终止它的进程组），正好会杀掉这些持有者。因此先确认没有在跑的操作。
+//
+// 两个来源互补：
+//   - 市场面板内的安装 → 它 spawn 的 `dsh plugin …` 子进程 → 查市场的 /dsh-market/status；
+//   - 控制台自己的插件命令（插件页的列表/卸载）→ 查 DshManager 的命令计数。
+func (m *UpdateManager) replaceBusyGuard(action string) error {
+	if m.dsh != nil && m.dsh.PluginCmdRunning() {
+		return fmt.Errorf("控制台正在执行插件命令（dsh plugin …）。%s需要停止 dsh，"+
+			"会中断那次操作并留下陈旧的 profile 写锁（之后插件列表/安装都会失败）；"+
+			"请稍等它结束再重试", action)
+	}
+	busy, detail := marketBusyFn(m)
+	if !busy {
+		return nil
+	}
+	if detail != "" {
+		detail = "正在处理 " + detail
+	} else {
+		detail = "正在安装/更新插件"
+	}
+	return fmt.Errorf("插件市场%s。%s需要停止 dsh，会中断那次操作并留下陈旧的 profile 写锁"+
+		"（之后插件列表/安装都会失败）；请等它完成或先在市场里取消，再重试", detail, action)
+}
+
+// stopDshForReplacement 为「替换 dsh 产物」（更新 dsh 服务 / 更新市场 / 回滚 server）
+// 停 dsh：先过忙守卫（拒绝时不产生任何停机），再停止并等端口释放。
+//
+// 统一入口的意义：三处替换 server 产物的路径共用同一套前置检查与停机序列，
+// 不会再出现「某一条路径忘了守卫」。
+func (m *UpdateManager) stopDshForReplacement(action string) error {
+	if err := m.replaceBusyGuard(action); err != nil {
+		return err
+	}
+	if err := dshStopFn(m); err != nil {
+		// 与旧行为一致：停止失败也继续尝试替换，但后面必须确认它真的停了。
+		logger().Printf("[update] 停止 dsh 服务失败（继续尝试替换）: %v", err)
+	}
+	dshPortFreeFn(m, 30*time.Second)
+	return nil
+}
+
 // --- 安装（停 dsh → 备份 → 原子替换 → 拉起 dsh → 就绪判定/回滚） ---
 
 // installMarket 执行市场就地更新。extractDir 是 installUpdate 已解压好的更新包目录。
@@ -663,12 +752,10 @@ func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error
 	oldVersion := target.Version
 	logger().Printf("[market] 开始更新市场 %s → %s（目录 %s）", oldVersion, p.Version, target.Dir)
 
-	// 2) 停 dsh。
-	if err := marketStopDshFn(m); err != nil {
-		// 与 applyServer 一致：停止失败也继续尝试，但后面必须确认它真的停了。
-		logger().Printf("[market] 停止 dsh 服务失败（继续尝试替换）: %v", err)
+	// 2) 停 dsh（含忙守卫：有插件操作在跑就拒绝，且此时还没产生任何停机）。
+	if err := m.stopDshForReplacement("更新插件市场"); err != nil {
+		return err
 	}
-	marketPortFreeFn(m, 30*time.Second)
 
 	// 3)(4) 备份 + 原子替换。
 	rollback, cleanup, err := m.swapMarketDir(target.Dir, srcDir, oldVersion)
@@ -743,10 +830,10 @@ func waitMarketDsh(m *UpdateManager, max time.Duration) marketWaitResult {
 // 先确认没有残留进程：dsh.Stop 失败时 Start 会以「already running」直接报错。
 func (m *UpdateManager) marketRestartDsh() {
 	if m.dsh.Running() {
-		if err := marketStopDshFn(m); err != nil {
+		if err := dshStopFn(m); err != nil {
 			logger().Printf("[market] 拉起前停止残留 dsh 失败: %v", err)
 		}
-		marketPortFreeFn(m, 30*time.Second)
+		dshPortFreeFn(m, 30*time.Second)
 	}
 	if err := marketStartDshFn(m); err != nil {
 		logger().Printf("[market] 启动 dsh 服务失败: %v", err)

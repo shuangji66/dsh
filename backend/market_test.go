@@ -81,23 +81,27 @@ func setupMarketTest(t *testing.T) (m *UpdateManager, home, serverDir, targetDir
 
 	prevCfg := GetConfig()
 	initConfig(&AppConfig{HomeDir: home, DshPort: 0})
-	prevServerDir := marketServerDirFn
-	marketServerDirFn = func(*UpdateManager) string { return serverDir }
-	prevStop, prevStart, prevReady, prevPortFree := marketStopDshFn, marketStartDshFn, marketReadyFn, marketPortFreeFn
+	prevServerDir := serverDirFn
+	serverDirFn = func(*UpdateManager) string { return serverDir }
+	prevStop, prevStart, prevReady, prevPortFree := dshStopFn, marketStartDshFn, marketReadyFn, dshPortFreeFn
+	prevBusy := marketBusyFn
+	// 默认「市场不忙」：既有安装用例不该去连真实 dsh 端口。
+	marketBusyFn = func(*UpdateManager) (bool, string) { return false, "" }
 	seq := []string{}
 	calls = &seq
-	marketStopDshFn = func(*UpdateManager) error { seq = append(seq, "stop"); return nil }
+	dshStopFn = func(*UpdateManager) error { seq = append(seq, "stop"); return nil }
 	marketStartDshFn = func(*UpdateManager) error { seq = append(seq, "start"); return nil }
 	marketReadyFn = func(*UpdateManager, time.Duration) marketWaitResult {
 		seq = append(seq, "ready")
 		return marketWaitReady
 	}
-	marketPortFreeFn = func(*UpdateManager, time.Duration) { seq = append(seq, "portfree") }
+	dshPortFreeFn = func(*UpdateManager, time.Duration) { seq = append(seq, "portfree") }
 	t.Setenv("TRIM_PKGVAR", t.TempDir())
 	t.Cleanup(func() {
 		initConfig(&prevCfg)
-		marketServerDirFn = prevServerDir
-		marketStopDshFn, marketStartDshFn, marketReadyFn, marketPortFreeFn = prevStop, prevStart, prevReady, prevPortFree
+		serverDirFn = prevServerDir
+		dshStopFn, marketStartDshFn, marketReadyFn, dshPortFreeFn = prevStop, prevStart, prevReady, prevPortFree
+		marketBusyFn = prevBusy
 	})
 
 	m = &UpdateManager{

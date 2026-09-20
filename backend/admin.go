@@ -966,6 +966,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleDshStart(w, r)
 		case p == "/api/dsh/stop" && r.Method == http.MethodPost:
 			m.handleDshStop(w, r)
+		case p == "/api/dsh/busy" && r.Method == http.MethodGet:
+			m.handleDshBusy(w, r)
 		case p == "/api/dsh/status" && r.Method == http.MethodGet:
 			writeJSON(w, m.dsh.Status())
 			// 在 buildHandler 的 switch 中添加
@@ -1126,6 +1128,35 @@ func (m *AdminMux) handleConvertPath(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- 自我更新 API ---
+
+// dshBusySnapshot 汇总「是否有插件操作正在进行」，供停止/重启 dsh 的确认弹窗提示。
+//
+// 这两个按钮**刻意不硬挡**（点它是用户的即时意图），但要把代价说清楚：停 dsh 会
+// 中断正在进行的插件安装/卸载，并且可能留下陈旧的 profile 写锁（之后插件列表与安装
+// 都会白等 120 秒）。所以由前端在弹窗打开时按需查一次 —— 不放进高频轮询的
+// /api/dsh/status，避免每次轮询都去探测市场。
+//
+// 拆成独立函数是为了可测：处理器只做 JSON 包装。
+func (m *AdminMux) dshBusySnapshot() map[string]interface{} {
+	// 控制台自己发起的插件命令：本地计数，不需要网络，优先报它（更准确）。
+	if m.dsh != nil && m.dsh.PluginCmdRunning() {
+		return map[string]interface{}{
+			"ok": true, "busy": true, "source": "console", "detail": "dsh plugin …",
+		}
+	}
+	// 市场面板内的安装/更新：它 spawn 的子进程，只能问市场自己。
+	if busy, detail := marketBusyFn(m.update); busy {
+		return map[string]interface{}{
+			"ok": true, "busy": true, "source": "market", "detail": detail,
+		}
+	}
+	return map[string]interface{}{"ok": true, "busy": false}
+}
+
+// handleDshBusy 返回 dshBusySnapshot（GET /api/dsh/busy）。
+func (m *AdminMux) handleDshBusy(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, m.dshBusySnapshot())
+}
 
 // validUpdateKind 校验更新类型：harness（控制台）/ dsh（服务）/ market（插件市场）。
 func validUpdateKind(k updateKind) bool {

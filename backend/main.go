@@ -142,6 +142,9 @@ func main() {
 	upd := newUpdateManager(&renv, dsh)
 	upd.startAutoCheck()
 	upd.startDailyCleanup()
+	// 巡检并清理陈旧的 dsh 写锁（持有者已死）：这类锁会让插件列表/安装白等 120 秒
+	// 再失败，见 cleanStaleProfileLocks。
+	dsh.startStaleLockWatch()
 	admin := newAdminMux(&renv, dsh, auth, upd)
 	admin.SetSPA(embeddedFrontend())
 

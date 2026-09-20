@@ -241,9 +241,30 @@ Cache-Control: public, max-age=31536000, immutable
   以及非 `@deepseek-ai/*` 依赖在目标位置可解析）→ **停止 dsh** → 备份当前目录到
   `TRIM_PKGVAR/backup/market-<旧版本>-<时间戳>.tar.gz` → staging + `rename` 原子替换 →
   **自动拉起 dsh 并重新换取会话 token**（`startDshCaptured`）。
+- **停 dsh 之前先确认没有插件操作在跑**：插件的安装/卸载都在 dsh 进程内持有 profile
+  写锁，而停 dsh 会把它连根拔掉并留下陈旧锁（安装本身也白做）。
+  - 替换 `server/` 产物的三条路径（**更新 dsh 服务 / 更新市场 / 回滚 server 备份**）
+    统一走 `stopDshForReplacement()`：先过 `replaceBusyGuard()`，忙则拒绝并说明原因
+    （此时**不产生任何停机、也不改盘**），空闲才停 dsh 并等端口释放。
+  - **更新 harness 控制台**与**恢复 dsh 数据**（后者会删掉整个 `~/.dsh`）也在动手前
+    先过同一道 `replaceBusyGuard()`。
+  - 守卫的两个来源互补：市场面板发起的安装 → 查 `/dsh-market/status` 的 `busy`；
+    控制台插件页发起的命令 → 查 `DshManager.PluginCmdRunning()`。
+  - 市场不回答（老版本没这个路由 / dsh 已经坏了）时视为「不忙」，所以回滚、恢复这类
+    抢修操作不会被守卫挡住。
+  - **例外（刻意不挡，但会提示）**：概览页的「停止 / 重启 dsh 服务」按钮 —— 那是用户明确的
+    即时意图。弹窗打开时会查一次 `GET /api/dsh/busy`（市场 `/dsh-market/status` 的 busy +
+    控制台插件命令计数），有插件操作在跑就多显示一条**风险提示**（说明会中断它、可能留下陈旧
+    写锁、通常 30 秒内自愈），由用户自行决定。该端点不放进高频轮询的 `/api/dsh/status`，
+    避免每次轮询都去探测市场。
 - 拉起后等 dsh 监听端口（上限 10 秒，端口开放后再等 2 秒确认没在装配阶段退出；
   进程已退出则立即判定失败，不等满上限）；**起不来就自动回滚**到旧目录并再次拉起，
   错误原样返回前端。实测本机 dsh 从进程启动到插件树装配完成约 2.4 秒。
+- 停/起 dsh 走 `DshManager.Stop/Start` 的**精准终止**路径（PID / 进程组），
+  不使用按进程名杀 —— `pkill -x MainThread|node-MainThread` 会命中该用户下所有 Node
+  进程，包括市场正在跑的安装，杀完就留下陈旧写锁。启动 dsh 前与执行 `dsh plugin …`
+  前会顺带清理「锁文件里的 PID 已不存在」的陈旧锁（`cleanStaleProfileLocks`），
+  否则插件列表 / 安装会白等 120 秒再失败。
 - 备份前缀是 `market-`，不会出现在「dsh 服务回滚」列表里；它由每日清理任务按 30 天回收。
 - 只在「当前生效的那份由 server 包提供」时才允许更新。若市场已按 dsh 官方方式装进
   profile（`$DSH_HOME/profiles/web/node_modules/dshmarket`），控制台会显示

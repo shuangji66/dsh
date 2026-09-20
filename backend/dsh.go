@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -46,6 +47,37 @@ type DshManager struct {
 	dshPidFile    string
 	dshPidFilePid int // 最近一次写入 dsh PID 文件的 PID，用于避免重复写入（0 表示未写过）
 	pidMu         sync.Mutex
+
+	// pluginCmdMu 保护 pluginCmdN：正在执行的 `dsh plugin …` 命令计数。
+	// 这些命令会在 dsh 进程内持有 profile 写锁（plugin-manager 的
+	// package.json.lock），所以「更新 dsh 服务 / 更新市场 / 回滚 server 目录」之前
+	// 必须先确认没有正在跑的命令，否则杀掉它们就会留下陈旧锁。用独立互斥锁：
+	// Stop 会长时间持有 m.mu，不能共用。
+	pluginCmdMu sync.Mutex
+	pluginCmdN  int
+}
+
+// beginPluginCmd / endPluginCmd 维护「正在执行插件命令」的计数。
+func (m *DshManager) beginPluginCmd() {
+	m.pluginCmdMu.Lock()
+	m.pluginCmdN++
+	m.pluginCmdMu.Unlock()
+}
+
+func (m *DshManager) endPluginCmd() {
+	m.pluginCmdMu.Lock()
+	if m.pluginCmdN > 0 {
+		m.pluginCmdN--
+	}
+	m.pluginCmdMu.Unlock()
+}
+
+// PluginCmdRunning 报告是否正在执行 `dsh plugin …`（控制台侧发起的插件操作）。
+// 市场面板内的安装走它自己 spawn 的子进程，由 marketBusyFn 覆盖，两者互补。
+func (m *DshManager) PluginCmdRunning() bool {
+	m.pluginCmdMu.Lock()
+	defer m.pluginCmdMu.Unlock()
+	return m.pluginCmdN > 0
 }
 
 // clkTCK 为 Linux 的时钟频率（每秒时钟滴答数，通常为 100）。
@@ -763,6 +795,10 @@ func (m *DshManager) Start() error {
 	cfg := GetConfig()
 	// dsh 可执行文件统一按 PATH 解析（node_modules/.bin/dsh），不再用额外覆盖。
 	bin := "dsh"
+	// 启动前自愈：清掉持有者已不存在的 profile 写锁。上一次 dsh 被停掉/被杀死时，
+	// plugin-manager 可能来不及删除它的 `package.json.lock`，那份陈旧锁会让之后
+	// 所有插件操作白等 120 秒再失败（见 cleanStaleProfileLocks）。
+	m.cleanStaleProfileLocks()
 	// 每次启动都重置 token 与会话 cookie，避免复用上一次启动的旧凭据。
 	m.tokenMu.Lock()
 	m.token = ""
@@ -829,48 +865,29 @@ func (m *DshManager) Stop() error {
 		return nil
 	}
 
-	user := os.Getenv("USER")
-	if user == "" {
-		user = "Harness"
+	// 停止方式：**只按 PID / 进程组精准终止**，不再用
+	// `pkill -TERM -u <user> -x "MainThread|node-MainThread"`。
+	//
+	// 为什么去掉按进程名杀：node 进程的 comm 就是 "MainThread"/"node-MainThread"，
+	// 该 pkill 会杀掉该用户下**所有** Node 进程 —— 包括插件市场正在跑的
+	// `dsh plugin --profile web add`（dsh-plugin-manager 正持有 profile 写锁
+	// `profiles/web/package.json.lock`）以及它的 pnpm 子进程。杀掉锁持有者会留下
+	// 陈旧锁文件，而该锁的等待上限是 120 秒且实现上不清理陈旧锁，于是之后每一次
+	// 「插件列表 / 安装 / 更新」都会白等 120 秒再失败（线上现象：市场内无法更新、
+	// 控制台插件列表空白，且浏览器轮询不断堆积挂起的 dsh 进程）。
+	// 精准路径本来就已经写好（pid 文件 → 进程组兜底），这里改为始终走它。
+	if pidFilePid := m.readDshPidFile(); pidFilePid > 0 && processAlive(pidFilePid) {
+		m.logf("dsh stop: killing by pid-file pid %d", pidFilePid)
+		m.killPidGracefully(pidFilePid)
 	}
-
-	// 使用 pkill 匹配 dsh 主线程进程。不同 node 版本下进程名不同：node24 为
-	// "MainThread"，node26 为 "node-MainThread"（node 给线程名加了前缀，15 字符
-	// 正好不超内核 comm 上限）。用 ERE 正则 + -x 同时精确匹配两者。
-	done := make(chan struct{})
-	var pkillErr error
-	go func() {
-		pkillCmd := exec.Command("pkill", "-TERM", "-u", user, "-x", "MainThread|node-MainThread")
-		pkillErr = pkillCmd.Run()
-		close(done)
-	}()
-
-	pkillOK := false
-	select {
-	case <-done:
-		pkillOK = pkillErr == nil
-		if pkillOK {
-			m.logf("pkill MainThread succeeded")
-		} else {
-			m.logf("pkill MainThread failed: %v, falling back to pid-file kill", pkillErr)
-		}
-	case <-time.After(3 * time.Second):
-		m.logf("pkill MainThread timed out, falling back to pid-file kill")
+	if live := m.findDshPid(); live > 0 {
+		m.logf("dsh stop: killing process group of dsh pid %d", live)
+		m.fallbackKill(live)
 	}
-
-	// pkill 未命中（node26 进程名变化、返回非 0）或超时时，进入精确保底流程：
-	// 保底1 优先按「dsh.pid」文件记录的 PID 精确杀进程（最精准，不受进程名
-	// 截断/改名影响、不误伤同组其它进程）；若杀后 dsh 仍在运行（或 pid 文件
-	// 缺失/失效），保底2 再退回进程组 kill。
-	if !pkillOK {
-		if pidFilePid := m.readDshPidFile(); pidFilePid > 0 && processAlive(pidFilePid) {
-			m.logf("dsh stop: killing by pid-file pid %d", pidFilePid)
-			m.killPidGracefully(pidFilePid)
-		}
-		if live := m.findDshPid(); live > 0 {
-			m.logf("dsh stop: pid-file kill insufficient, process-group kill pid %d", live)
-			m.fallbackKill(live)
-		}
+	// 受管子进程仍在（例如 pid 文件没跟上）时再补一刀。
+	if tracked > 0 && processAlive(tracked) && tracked != target {
+		m.logf("dsh stop: killing tracked pid %d", tracked)
+		m.killPidGracefully(tracked)
 	}
 
 	// 停止后回收受管子进程（若已退出立即完成），避免残留僵尸。
@@ -950,24 +967,152 @@ type PluginInfo struct {
 
 // runPluginCmd 以 dsh 的运行环境执行 `dsh plugin --profile web <args...>`，
 // 返回合并后的 stdout/stderr 输出。
+//
+// 执行前会先清掉「持有者已死」的 profile 写锁：dsh 的 plugin-manager 在插件列表 /
+// 安装 / 卸载时都会先拿 `profiles/web/package.json.lock`，而陈旧锁会让这条命令
+// 白等 120 秒再失败（见 cleanStaleProfileLocks）。顺手在这里自愈，控制台就不会
+// 出现「插件列表空白 + 请求挂起」。
 func (m *DshManager) runPluginCmd(args ...string) (string, error) {
+	m.cleanStaleProfileLocks()
+	// 登记「插件命令进行中」：更新 dsh 服务 / 更新市场 / 回滚都要先看这个计数，
+	// 否则会把这批命令连同它持有的 profile 写锁一起带走（见 PluginCmdRunning）。
+	m.beginPluginCmd()
+	defer m.endPluginCmd()
 	// 注意：Go 不允许向变参函数混合传字面量与 slice...，需先拼成一个切片再一次性展开。
 	all := append([]string{"plugin", "--profile", "web"}, args...)
-	return m.runDshCmd(all...)
+	// 带超时：即使遇到无法自愈的挂起（例如持有者还活着但在等网络），也不能让
+	// 控制台的 HTTP 请求无限挂住、并不断堆积 dsh 子进程。
+	return m.runDshCmdTimeout(pluginCmdTimeout, all...)
+}
+
+// --- 陈旧的 dsh 写锁清理 ---
+
+// pluginCmdTimeout 是控制台侧插件命令（list / remove）的上限。dsh 的 profile 写锁
+// 等待上限是 120 秒，这里留出余量让「确实在等锁」的命令自己报错，只拦真正的挂死。
+const pluginCmdTimeout = 180 * time.Second
+
+// profileLockCandidates 返回会顺带清理的 dsh 写锁路径。
+// 刻意不递归 .dsh：sessions/**/session.lock 是长生命周期会话锁，语义不同。
+func (m *DshManager) profileLockCandidates() []string {
+	home := m.effectiveHome()
+	if home == "" {
+		return nil
+	}
+	dshHome := filepath.Join(home, ".dsh")
+	return []string{
+		// dsh-plugin-manager：插件列表 / 安装 / 卸载都会先拿它（等待上限 120 秒）
+		filepath.Join(dshHome, "profiles", "web", "package.json.lock"),
+		// dsh-app-boot：模块 fallback 目录的写锁
+		filepath.Join(dshHome, "profiles", "node_modules.lock"),
+		// 设置与凭据文件的写锁（dsh-settings-file / dsh-credentials-local）
+		filepath.Join(dshHome, "settings.yaml.lock"),
+		filepath.Join(dshHome, ".credentials.yaml.lock"),
+	}
+}
+
+// staleLockWatchInterval 是陈旧写锁巡检周期。
+const staleLockWatchInterval = 30 * time.Second
+
+// startStaleLockWatch 常驻巡检并清理陈旧的 dsh 写锁。
+//
+// 为什么需要常驻：锁是在 dsh 进程内创建的，而 harness 只在「启动 dsh」与「执行
+// dsh plugin …」时顺带清理。如果锁是在控制台空闲时被留下的，用户下一次在**市场面板里**
+// 操作仍会白等 120 秒再失败。30 秒一次的巡检把这个窗口压到可忽略，代价只是每周期
+// 四次 stat/read。
+func (m *DshManager) startStaleLockWatch() {
+	go func() {
+		for {
+			time.Sleep(staleLockWatchInterval)
+			m.cleanStaleProfileLocks()
+		}
+	}()
+}
+
+// cleanStaleProfileLocks 删除「持有者进程已不存在」的 dsh 写锁文件，返回清理条数。
+//
+// 为什么 harness 要管这件事：dsh 的跨进程写锁（@deepseek-ai/dsh-atomic-write 的
+// withFileLock）是 `<文件>.lock` + `wx` 独占创建，只在 finally 里删除。持有者被杀死
+// （用户取消安装、进程被重启带走等）就会永久残留；而实现的争用判定只看 EEXIST、
+// 不清理陈旧锁，等待上限又可以是 120 秒（plugin-manager 的 lockWaitMs 默认值），
+// 于是之后每一次插件操作都会白等 120 秒再失败 —— 线上表现为「市场内无法更新、
+// 控制台插件列表空白」，且浏览器轮询会不断堆积挂起的 dsh 进程。
+//
+// 判活依据就是锁文件里写的持有者 PID（writeFile(lockPath, `${process.pid}\n`)），
+// 因此只有该 PID 确实不存在时才删；读不出 PID（写了一半就死 / 格式变化）时不动它。
+func (m *DshManager) cleanStaleProfileLocks() int {
+	cleaned := 0
+	for _, path := range m.profileLockCandidates() {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue // 文件不存在 = 本来就没有锁，正常
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil || pid <= 0 {
+			m.logf("stale lock: 无法解析持有者 PID，保守跳过 %s", path)
+			continue
+		}
+		if processAlive(pid) {
+			continue // 真有人在用，绝不删
+		}
+		if err := os.Remove(path); err != nil {
+			m.logf("stale lock: 删除失败 %s: %v", path, err)
+			continue
+		}
+		cleaned++
+		m.logf("stale lock: 已清理陈旧锁 %s（持有者 pid %d 已不存在）", path, pid)
+	}
+	return cleaned
 }
 
 // runDshCmd 以 dsh 的运行环境执行 `dsh <args...>`（如 `dsh -V` 获取版本号），
 // 返回合并后的 stdout/stderr 输出。dsh 可执行文件统一按 PATH 解析。
 func (m *DshManager) runDshCmd(args ...string) (string, error) {
+	return m.runDshCmdTimeout(0, args...)
+}
+
+// runDshCmdTimeout 与 runDshCmd 相同，但 timeout > 0 时到点终止子进程并返回错误，
+// 避免命令挂死时把调用方（控制台 HTTP 请求）一起拖住、并不断堆积 dsh 子进程。
+func (m *DshManager) runDshCmdTimeout(timeout time.Duration, args ...string) (string, error) {
 	cmd := exec.Command("dsh", args...)
 	cmd.Env = m.buildEnv()
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return strings.TrimSpace(out.String()), err
+	if timeout <= 0 {
+		if err := cmd.Run(); err != nil {
+			return strings.TrimSpace(out.String()), err
+		}
+		return strings.TrimSpace(out.String()), nil
 	}
-	return strings.TrimSpace(out.String()), nil
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return strings.TrimSpace(out.String()), err
+		}
+		return strings.TrimSpace(out.String()), nil
+	case <-time.After(timeout):
+		// 先 TERM 让它有机会走收尾（例如释放 profile 写锁），给 3 秒再强杀。
+		// 注意只杀这个子进程本身，不做进程组 kill：这些 CLI 子进程没有独立进程组，
+		// `kill(-pid)` 会命中 harness 自己所在的进程组。
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		} else {
+			<-done
+		}
+		return strings.TrimSpace(out.String()),
+			fmt.Errorf("执行 dsh %s 超时（%s）", strings.Join(args, " "), timeout)
+	}
 }
 
 // parsePluginList 解析 `dsh plugin --profile web list` 的输出，返回

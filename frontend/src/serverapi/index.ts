@@ -270,6 +270,11 @@ export const api = {
   // 统一备份目录实际路径（供转换语义路径）
   backupDir: () => request<{ ok: boolean; path: string }>('/api/dsh/backup-dir'),
   dshStatus: () => request<DshStatus>('/api/dsh/status'),
+  // 是否有插件操作正在进行（市场面板的安装/更新 或 控制台的 dsh plugin 命令）。
+  // 供「停止/重启 dsh」确认弹窗显示额外风险提示：这两个按钮刻意不硬挡，
+  // 但停 dsh 会中断那次操作，并可能留下陈旧的 profile 写锁。
+  dshBusy: () =>
+    request<{ ok: boolean; busy: boolean; source?: 'market' | 'console'; detail?: string }>('/api/dsh/busy'),
   // 读取日志文件内容
   logs: () => request<{ ok: boolean; path: string; content: string; exists: boolean }>('/api/logs'),
   // 用户授权相关（已存在，确认导出）

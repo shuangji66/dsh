@@ -132,6 +132,10 @@ const zh: Record<string, string> = {
   confirm_stop_title: '停止 dsh 服务',
   confirm_restart_title: '重启 dsh 服务',
   confirm_stop_msg: '确定要停止 dsh 服务吗？',
+  // 停止/重启弹窗在「有插件操作在跑」时的额外风险提示（不硬挡，只说明代价）
+  lifecycle_busy_market: '注意：插件市场正在处理 {detail}。现在停止/重启 dsh 会中断这次插件操作，并可能留下陈旧的写锁，导致之后插件列表与插件安装失败（通常 30 秒内自愈）。建议等它结束，或先在市场里取消。',
+  lifecycle_busy_console: '注意：控制台正在执行插件命令（{detail}）。现在停止/重启 dsh 会中断它，并可能留下陈旧的写锁，导致之后插件列表与插件安装失败（通常 30 秒内自愈）。建议等它结束再操作。',
+  lifecycle_busy_unknown_target: '插件安装/更新',
   confirm_restart_msg: '确定要重启 dsh 服务吗？',
   confirm_ok: '确定',
   confirm_cancel: '取消',
@@ -480,6 +484,10 @@ const en: Record<string, string> = {
   confirm_stop_title: 'Stop dsh service',
   confirm_restart_title: 'Restart dsh service',
   confirm_stop_msg: 'Are you sure you want to stop the dsh service?',
+  // Extra warning in the stop/restart dialog when a plugin operation is running
+  lifecycle_busy_market: 'Heads up: the plugin market is working on {detail}. Stopping or restarting dsh now interrupts that operation and may leave a stale lock, which makes the plugin list and plugin installs fail (usually self-heals within 30s). Wait for it to finish, or cancel it in the market first.',
+  lifecycle_busy_console: 'Heads up: the console is running a plugin command ({detail}). Stopping or restarting dsh now interrupts it and may leave a stale lock, which makes the plugin list and plugin installs fail (usually self-heals within 30s). Please wait for it to finish.',
+  lifecycle_busy_unknown_target: 'a plugin install/update',
   confirm_restart_msg: 'Are you sure you want to restart the dsh service?',
   confirm_ok: 'Confirm',
   confirm_cancel: 'Cancel',

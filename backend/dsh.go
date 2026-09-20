@@ -742,6 +742,15 @@ func (m *DshManager) buildEnv() []string {
 		set("PNPM_HOME=", m.renv.PnpmHome)
 	}
 
+	// 代理只作为环境变量交给 dsh。dsh ≥0.1.5 的 @deepseek-ai/dsh-http-proxy 会在加载任何
+	// 插件前从启动环境解析代理策略（小写优先、大写兜底，ALL_PROXY 兜底两种 scheme）并安装
+	// 为全局 dispatcher；该包还会把解析结果同时写回小写+大写发给自己的子进程，并由
+	// dsh-subprocess 给自建环境的子进程补上 NODE_USE_ENV_PROXY。
+	//
+	// 因此这里不再设置 NODE_USE_ENV_PROXY：对 dsh 自身的 fetch 它已无作用（dispatcher 已
+	// 覆盖），却会让 node 在启动时解析 HTTP_PROXY/HTTPS_PROXY —— 遇到无法解析的值（漏写
+	// scheme 的 127.0.0.1:7890、空白等）node 直接以 ERR_INVALID_URL 退出，dsh 随之完全起
+	// 不来；而 dsh 自身对这类值只是报告并跳过，继续直连。
 	if cfg.ProxyEnabled && cfg.ProxyAddr != "" {
 		set("http_proxy=", cfg.ProxyAddr)
 		set("https_proxy=", cfg.ProxyAddr)
@@ -749,8 +758,9 @@ func (m *DshManager) buildEnv() []string {
 		set("HTTPS_PROXY=", cfg.ProxyAddr)
 		set("all_proxy=", cfg.ProxyAddr)
 		set("ALL_PROXY=", cfg.ProxyAddr)
-		set("NODE_USE_ENV_PROXY=", "1")
 	} else {
+		// 关闭代理时清掉启动环境里的代理变量，否则 dsh 仍会从环境解析出策略。
+		// NODE_USE_ENV_PROXY 不在此列：它不由 harness 定义，交给 dsh 按自己的策略决定。
 		out := env[:0]
 		for _, e := range env {
 			key := e
@@ -767,7 +777,7 @@ func (m *DshManager) buildEnv() []string {
 			key = e[:idx]
 			switch key {
 			case "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
-				"all_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY":
+				"all_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy":
 				continue
 			}
 			out = append(out, e)

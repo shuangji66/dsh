@@ -208,9 +208,13 @@ func NewSessionManager(renv *RuntimeEnv) *SessionManager {
 }
 
 // terminalEnv builds the environment for the bash session: current app user's
-// PATH and HOME are captured from the runtime; proxy settings follow config.
+// PATH and HOME are captured from the runtime, then the harness process
+// environment is appended as-is.
+//
+// 这里刻意不注入代理设置：终端是用户自己的 shell，控制台的代理配置只服务于 dsh 与
+// harness 的对外请求（dsh 进程见 DshManager.buildEnv）。注入只会让控制台配置与平台
+// 自己导出的代理变量在同一份环境里并存，而 os.Environ() 本来就带着后者。
 func terminalEnv(renv *RuntimeEnv) []string {
-	cfg := GetConfig()
 	env := []string{
 		"HOME=" + renv.Home,
 		"PATH=" + renv.Path,
@@ -223,9 +227,6 @@ func terminalEnv(renv *RuntimeEnv) []string {
 	}
 	if renv.PnpmHome != "" {
 		env = append(env, "PNPM_HOME="+renv.PnpmHome)
-	}
-	if cfg.ProxyEnabled && cfg.ProxyAddr != "" {
-		env = append(env, "http_proxy="+cfg.ProxyAddr, "https_proxy="+cfg.ProxyAddr, "HTTP_PROXY="+cfg.ProxyAddr, "HTTPS_PROXY="+cfg.ProxyAddr)
 	}
 	env = append(env, os.Environ()...)
 	return env

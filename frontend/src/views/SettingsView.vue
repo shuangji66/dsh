@@ -169,7 +169,7 @@ async function onAuthToggle() {
           <div v-if="config.proxyEnabled" class="py-4">
             <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
             <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" />
-            <p v-if="!config.proxyAddr" class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
+            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
               {{ t('settings_proxy_hint') }}
             </p>
           </div>

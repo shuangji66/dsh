@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useI18n } from '@/composables/useI18n'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import type { QuickCmd } from '@/serverapi'
 
 const props = defineProps<{
@@ -26,6 +27,9 @@ watch(
   () => props.visible,
   (v) => (open.value = v)
 )
+
+// 弹窗打开期间锁定页面滚动，避免在弹窗背后继续滚动/拖动页面
+useBodyScrollLock(() => open.value)
 
 function close() {
   open.value = false
@@ -62,8 +66,8 @@ function moveDown(idx: number) {
       leave-from-class="opacity-100"
       leave-to-class="opacity-0"
     >
-      <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div class="absolute inset-0 bg-black/50" @click="close"></div>
+      <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="g-modal-mask" @click="close"></div>
         <div
           class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card flex flex-col"
         >

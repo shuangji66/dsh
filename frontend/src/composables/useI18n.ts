@@ -95,7 +95,10 @@ const zh: Record<string, string> = {
   about_github: 'Github 仓库',
   about_credits: '鸣谢',
   about_features: '特性',
-  // 关于弹窗特性介绍（简短词组）
+  // 关于弹窗特性介绍（按类别分组，条目为简短词组）
+  about_group_runtime: '运行与维护',
+  about_group_access: '访问与安全',
+  about_group_tools: '扩展与工具',
   about_feature_lifecycle: '生命周期管理',
   about_feature_monitor: 'CPU / 内存实时监控',
   about_feature_update: '自我更新与版本回滚',
@@ -446,7 +449,10 @@ const en: Record<string, string> = {
   about_github: 'GitHub Repository',
   about_credits: 'Acknowledgements',
   about_features: 'Features',
-  // About dialog feature list (short phrases)
+  // About dialog feature list (grouped, short phrases)
+  about_group_runtime: 'Runtime & maintenance',
+  about_group_access: 'Access & security',
+  about_group_tools: 'Extensions & tools',
   about_feature_lifecycle: 'Lifecycle management',
   about_feature_monitor: 'Realtime CPU / memory monitor',
   about_feature_update: 'Self-update & version rollback',

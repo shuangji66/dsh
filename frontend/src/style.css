@@ -260,4 +260,18 @@ html, body {
   .g-status {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
   }
+
+  /* 弹窗遮罩：只负责压暗（半透明黑）与吃掉触摸拖拽。
+     背景模糊不在这一层，而在弹窗容器（Transition 根）上 —— 即 .vue 里的
+     `fixed inset-0 ... backdrop-blur-sm`。踩过的坑：Chromium 下 backdrop-filter
+     的元素一旦处在「正在做 opacity 动画的祖先」里，模糊会推迟到动画结束才生效，
+     表现为遮罩先到、模糊慢半拍地“啪”一下出现；而该元素自己既做 opacity 动画
+     又带 backdrop-filter 是正常的（已实测对比四种结构）。所以：blur 放容器、
+     压暗放遮罩，别再把 backdrop-blur 加回遮罩子元素上。
+     触摸设备上从遮罩起手的拖拽不再滚动页面；页面滚动的彻底锁定由
+     useBodyScrollLock 负责（弹窗打开时调用）。 */
+  .g-modal-mask {
+    @apply absolute inset-0 bg-black/50;
+    touch-action: none;
+  }
 }

@@ -6,6 +6,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { TrimApp } from '@trimjs/web-app'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { api, type DshDataBackup } from '@/serverapi'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
@@ -60,6 +61,18 @@ const backupDirConverted = ref('')
 // 移除授权目录的确认弹窗状态
 const removeDirDialogVisible = ref(false)
 const removeDirTarget = ref<string | null>(null)
+
+// 任一弹窗打开期间锁定页面滚动（弹窗会叠加：恢复备份弹窗之上还有二次确认）
+const anyDialogOpen = computed(
+  () =>
+    setHomeDialogVisible.value ||
+    backupDialogVisible.value ||
+    removeDirDialogVisible.value ||
+    restoreVisible.value ||
+    confirmRestoreVisible.value ||
+    restoreDeleteName.value !== null
+)
+useBodyScrollLock(anyDialogOpen)
 
 async function loadHomeInfo() {
   if (!settings.runtime) await settings.load()
@@ -514,8 +527,8 @@ onBeforeUnmount(() => {
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="restoreVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="restoreBusy ? null : (restoreVisible = false)"></div>
+        <div v-if="restoreVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="restoreBusy ? null : (restoreVisible = false)"></div>
           <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">{{ t('confirm_restore_title') }}</h3>
 
@@ -586,8 +599,8 @@ onBeforeUnmount(() => {
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="confirmRestoreVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="confirmRestoreVisible = false"></div>
+        <div v-if="confirmRestoreVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="confirmRestoreVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('confirm_restore_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('confirm_restore_msg', { name: selectedRestore || '' }) }}</p>
@@ -610,8 +623,8 @@ onBeforeUnmount(() => {
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="restoreDeleteName" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="restoreDeleteName = null"></div>
+        <div v-if="restoreDeleteName" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="restoreDeleteName = null"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('restore_delete_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('restore_delete_confirm_msg', { name: restoreDeleteName || '' }) }}</p>

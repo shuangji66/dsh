@@ -6,6 +6,7 @@ import { useToastStore } from '@/stores/toast'
 import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import UpdateSection from '@/components/UpdateSection.vue'
 
@@ -27,19 +28,31 @@ function openAbout() {
   aboutVisible.value = true
 }
 
-// 关于弹窗特性介绍：简短词组，对应 useI18n 中的 about_feature_* 键
-const aboutFeatures = [
-  'about_feature_lifecycle',
-  'about_feature_monitor',
-  'about_feature_update',
-  'about_feature_auth',
-  'about_feature_proxy',
-  'about_feature_dirs',
-  'about_feature_backup',
-  'about_feature_plugins',
-  'about_feature_terminal',
-  'about_feature_logs',
-  'about_feature_console',
+// 关于弹窗特性介绍：按类别分组，条目为简短词组，
+// 分别对应 useI18n 里的 about_group_* / about_feature_* 键。
+const aboutFeatureGroups = [
+  {
+    title: 'about_group_runtime',
+    features: [
+      'about_feature_lifecycle',
+      'about_feature_monitor',
+      'about_feature_update',
+      'about_feature_backup',
+    ],
+  },
+  {
+    title: 'about_group_access',
+    features: ['about_feature_auth', 'about_feature_proxy', 'about_feature_dirs'],
+  },
+  {
+    title: 'about_group_tools',
+    features: [
+      'about_feature_plugins',
+      'about_feature_terminal',
+      'about_feature_logs',
+      'about_feature_console',
+    ],
+  },
 ]
 
 // 打开 GitHub 用户主页（新标签页）
@@ -55,6 +68,9 @@ function openGithub() {
 // 停止/重启的二次确认弹窗：无论是否忙碌，每次点击都先弹窗确认
 const lifecycleAction = ref<'stop' | 'restart' | null>(null)
 const lifecycleDialogVisible = ref(false)
+
+// 任一弹窗（停止/重启确认、"关于"）打开期间锁定页面滚动
+useBodyScrollLock(() => lifecycleDialogVisible.value || aboutVisible.value)
 
 // 打开弹窗时顺便查一次「有没有插件操作在跑」：有的话弹窗里多显示一条风险提示
 // （停 dsh 会中断那次安装/卸载，并可能留下陈旧的 profile 写锁，之后插件列表与
@@ -287,9 +303,10 @@ onMounted(() => {
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="aboutVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="aboutVisible = false"></div>
-          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+        <div v-if="aboutVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="aboutVisible = false"></div>
+          <!-- 比默认弹窗略宽：特性按类别双列排布，窄了会大量折行 -->
+          <div class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-4">{{ t('about_title') }}</h3>
 
             <!-- Github 仓库按钮 -->
@@ -303,15 +320,18 @@ onMounted(() => {
               {{ t('about_github') }}
             </button>
 
-            <!-- 特性介绍（简短词组） -->
+            <!-- 特性介绍：按类别分组，条目双列排布（窄弹窗里省高度） -->
             <div class="mb-5">
-              <div class="text-sm font-medium text-ink dark:text-white mb-2">{{ t('about_features') }}</div>
-              <ul class="space-y-1.5">
-                <li v-for="f in aboutFeatures" :key="f" class="flex items-start gap-2">
-                  <svg class="mt-0.5 w-3.5 h-3.5 text-brand shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  <span class="text-xs text-ink-soft dark:text-[#A6A6AD] leading-relaxed">{{ t(f) }}</span>
-                </li>
-              </ul>
+              <div class="text-sm font-medium text-ink dark:text-white mb-2.5">{{ t('about_features') }}</div>
+              <div v-for="g in aboutFeatureGroups" :key="g.title" class="mb-3 last:mb-0">
+                <div class="text-[11px] font-medium text-ink-faint dark:text-[#8A8A92] mb-1.5">{{ t(g.title) }}</div>
+                <ul class="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                  <li v-for="f in g.features" :key="f" class="flex items-start gap-1.5">
+                    <svg class="mt-0.5 w-3 h-3 text-brand shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    <span class="text-xs text-ink-soft dark:text-[#A6A6AD] leading-snug">{{ t(f) }}</span>
+                  </li>
+                </ul>
+              </div>
             </div>
 
             <!-- 鸣谢 -->

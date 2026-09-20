@@ -4,6 +4,7 @@ import { api, sseUrl, type UpdateKind, type UpdateStatus, type ServerBackup } fr
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import MarkdownText from '@/components/MarkdownText.vue'
 
 // 概览页传入：dsh 访问地址列表（显示在版本号下方）
@@ -453,6 +454,19 @@ async function doCancelUpdate() {
 // --- 删除已下载的更新包 ---
 const discardConfirmVisible = ref(false) // 删除更新包二次确认
 
+// 任一弹窗打开期间锁定页面滚动（弹窗会叠加：更新弹窗之上还有取消/安装/回滚等二次确认）
+const anyDialogOpen = computed(
+  () =>
+    dialogVisible.value ||
+    cancelConfirmVisible.value ||
+    installConfirmVisible.value ||
+    discardConfirmVisible.value ||
+    rollbackVisible.value ||
+    confirmRollbackVisible.value ||
+    deleteConfirmName.value !== null
+)
+useBodyScrollLock(anyDialogOpen)
+
 function openDiscardConfirm() {
   if (!downloaded.value || busy.value) return
   discardConfirmVisible.value = true
@@ -783,8 +797,8 @@ watch(
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="dialogVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="closeDialog"></div>
+        <div v-if="dialogVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="closeDialog"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-1">{{ dialogTitle }}</h3>
 
@@ -947,8 +961,8 @@ watch(
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="cancelConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="cancelConfirmVisible = false"></div>
+        <div v-if="cancelConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="cancelConfirmVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_cancel_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_cancel_confirm_msg') }}</p>
@@ -971,8 +985,8 @@ watch(
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="installConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="installConfirmVisible = false"></div>
+        <div v-if="installConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="installConfirmVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_install_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ installConfirmMsg }}</p>
@@ -995,8 +1009,8 @@ watch(
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="discardConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="discardConfirmVisible = false"></div>
+        <div v-if="discardConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="discardConfirmVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_discard_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_discard_confirm_msg') }}</p>
@@ -1019,8 +1033,8 @@ watch(
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="rollbackVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="rollbackRunning ? null : (rollbackVisible = false)"></div>
+        <div v-if="rollbackVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="rollbackRunning ? null : (rollbackVisible = false)"></div>
           <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">{{ t('rollback_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-4">{{ t('rollback_desc') }}</p>
@@ -1094,8 +1108,8 @@ watch(
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="confirmRollbackVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="confirmRollbackVisible = false"></div>
+        <div v-if="confirmRollbackVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="confirmRollbackVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('rollback_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('rollback_confirm_msg', { name: selectedRollback || '' }) }}</p>
@@ -1118,8 +1132,8 @@ watch(
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <div v-if="deleteConfirmName" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div class="absolute inset-0 bg-black/50" @click="deleteConfirmName = null"></div>
+        <div v-if="deleteConfirmName" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+          <div class="g-modal-mask" @click="deleteConfirmName = null"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('rollback_delete_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('rollback_delete_confirm_msg', { name: deleteConfirmName || '' }) }}</p>

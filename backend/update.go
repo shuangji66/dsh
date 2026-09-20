@@ -482,23 +482,38 @@ func fetchTagsViaHTML(client *http.Client) ([]string, error) {
 	return names, nil
 }
 
-// fetchReleaseNotes 获取指定 tag 的 release 正文（不含标题 name）。优先走
+// releaseRepo 描述「更新日志取自哪个 GitHub 仓库」：控制台与 dsh 服务来自本仓库，
+// 插件市场（dshmarket）来自它自己的仓库（见 market.go 的 marketReleaseRepo）。
+type releaseRepo struct {
+	owner string
+	name  string
+}
+
+// url 返回仓库页面地址（拉 release 页面 HTML 用）。
+func (r releaseRepo) url() string {
+	return "https://github.com/" + r.owner + "/" + r.name
+}
+
+// harnessReleaseRepo 是本控制台与 dsh 服务的发布仓库。
+var harnessReleaseRepo = releaseRepo{owner: updateRepoOwner, name: updateRepoName}
+
+// fetchReleaseNotes 获取指定仓库、指定 tag 的 release 正文（不含标题 name）。优先走
 // GitHub Releases API（取 body 字段）；API 受速率限制或不可用时，回退到非 API
 // 的 release 页面 HTML（此页面不受 API 限流），解析其中的 markdown-body 正文。
 // 任何失败都返回空串，不影响更新检测主流程。返回的正文保留原始 Markdown
 // 文本（API 路径）或经 stripHTMLToText 还原的可读文本（HTML 回退路径），
 // 由前端做轻量 Markdown 渲染展示。
-func fetchReleaseNotes(client *http.Client, tag string) string {
-	if body := fetchReleaseNotesViaAPI(client, tag); body != "" {
+func fetchReleaseNotes(client *http.Client, repo releaseRepo, tag string) string {
+	if body := fetchReleaseNotesViaAPI(client, repo, tag); body != "" {
 		return body
 	}
-	return fetchReleaseNotesViaHTML(client, tag)
+	return fetchReleaseNotesViaHTML(client, repo, tag)
 }
 
 // fetchReleaseNotesViaAPI 通过 GitHub Releases API 的 body 字段获取正文。
-func fetchReleaseNotesViaAPI(client *http.Client, tag string) string {
+func fetchReleaseNotesViaAPI(client *http.Client, repo releaseRepo, tag string) string {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
-		updateRepoOwner, updateRepoName, url.PathEscape(tag))
+		repo.owner, repo.name, url.PathEscape(tag))
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return ""
@@ -530,8 +545,8 @@ func fetchReleaseNotesViaAPI(client *http.Client, tag string) string {
 // GitHub API 速率限制。正文位于 <div ... data-test-selector="body-content"
 // class="markdown-body ...">...</div>，仅含正文（标题单独在页面其它位置）。
 // 提取后用纯文本方式展开，保留换行。
-func fetchReleaseNotesViaHTML(client *http.Client, tag string) string {
-	pageURL := fmt.Sprintf("%s/releases/tag/%s", updateRepoURL, url.PathEscape(tag))
+func fetchReleaseNotesViaHTML(client *http.Client, repo releaseRepo, tag string) string {
+	pageURL := fmt.Sprintf("%s/releases/tag/%s", repo.url(), url.PathEscape(tag))
 	req, err := http.NewRequest("GET", pageURL, nil)
 	if err != nil {
 		return ""
@@ -676,11 +691,11 @@ func (m *UpdateManager) checkOnce() {
 	notesClient := m.httpClientForUpdate()
 	harnessNotes := ""
 	if h != nil {
-		harnessNotes = fetchReleaseNotes(notesClient, h.name)
+		harnessNotes = fetchReleaseNotes(notesClient, harnessReleaseRepo, h.name)
 	}
 	dshNotes := ""
 	if d != nil {
-		dshNotes = fetchReleaseNotes(notesClient, d.name)
+		dshNotes = fetchReleaseNotes(notesClient, harnessReleaseRepo, d.name)
 	}
 
 	// 用 updateStatus 就地修改（而非 setStatus 全量替换），保留 Phase / ReadyToInstall

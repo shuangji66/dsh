@@ -54,6 +54,11 @@ import (
 const (
 	// marketPackageName 是市场的 npm 包名（与 profile bundles 里的名字一致）。
 	marketPackageName = "dshmarket"
+	// marketReleaseRepoOwner / marketReleaseRepoName 是市场的 GitHub 仓库：npm 上只有
+	// 版本号与包本身，更新日志在那个仓库对应 tag 的 Release 正文里（其 release.yml 用
+	// gh release create --generate-notes 生成，并校验 tag 必须等于 package.json 版本）。
+	marketReleaseRepoOwner = "dsh-market"
+	marketReleaseRepoName  = "dsh-market"
 	// marketBackupPrefix 是市场备份文件名前缀（见文件头第 5 条）。
 	marketBackupPrefix = "market-"
 	// marketStagingSuffix / marketOldSuffix 是替换过程中在目标同级目录留下的
@@ -382,12 +387,41 @@ func (m *UpdateManager) refreshMarketLocal() marketTarget {
 	return target
 }
 
-// refreshMarketStatus 做一次完整的市场检测：本地解析 + registry 最新版。
+// marketReleaseRepo 是市场 Release 的来源仓库（更新日志）。
+var marketReleaseRepo = releaseRepo{owner: marketReleaseRepoOwner, name: marketReleaseRepoName}
+
+// marketReleaseTag 把 registry 给出的版本号拼成市场仓库的 tag（1.52.0 → v1.52.0）。
+func marketReleaseTag(version string) string { return "v" + version }
+
+// marketReleaseBody 清理市场 release 正文：其 release.yml 用
+// `gh release create --generate-notes --notes "npm: … · dist-tag: latest"` 生成，
+// gh 会把这段元信息写在正文最前面，而它属于「标题」性质的一行、不是更新内容，
+// 这里去掉它；其余（What's Changed 列表、Full Changelog 等）原样保留。
+func marketReleaseBody(body string) string {
+	body = strings.TrimSpace(body)
+	first, rest, _ := strings.Cut(body, "\n")
+	if !strings.HasPrefix(first, "npm: ") || !strings.Contains(first, "dist-tag:") {
+		return body
+	}
+	return strings.TrimSpace(rest)
+}
+
+// refreshMarketStatus 做一次完整的市场检测：本地解析 + registry 最新版 + 更新日志。
 // 任何一步失败都只写进市场的 Error，不影响 harness/dsh 两条更新链路。
 func (m *UpdateManager) refreshMarketStatus() {
 	target := m.resolveMarketTarget()
 	now := time.Now()
 	rel, err := m.marketLatest()
+	hasUpdate := err == nil && rel != nil && target.Version != "" &&
+		compareVersion(rel.Version, target.Version) > 0
+	// 更新日志：版本来自 npm registry，tag 与正文来自市场仓库的 Release（见
+	// marketReleaseTag）。只在本机确实落后时才拉 —— GitHub 匿名配额按出口 IP 共享，
+	// 不该为「已是最新」的市场每小时多花一次请求；拉不到就是空串，前端回退到
+	// 通用说明文案（update_market_notice）。
+	notes := ""
+	if hasUpdate {
+		notes = marketReleaseBody(fetchReleaseNotes(m.httpClientForUpdate(), marketReleaseRepo, marketReleaseTag(rel.Version)))
+	}
 	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 		st.Kind = updateKindMarket
 		st.CheckedAt = now
@@ -398,11 +432,13 @@ func (m *UpdateManager) refreshMarketStatus() {
 			st.LatestVersion = ""
 			st.HasUpdate = false
 			st.Error = err.Error()
+			st.ReleaseNotes = ""
 			return
 		}
 		st.LatestVersion = rel.Version
 		st.Error = ""
-		st.HasUpdate = target.Version != "" && compareVersion(rel.Version, target.Version) > 0
+		st.HasUpdate = hasUpdate
+		st.ReleaseNotes = notes
 	})
 }
 

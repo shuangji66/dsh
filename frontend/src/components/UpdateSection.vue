@@ -913,7 +913,8 @@ watch(
                   </div>
                 </div>
 
-                <!-- 市场：npm 上没有 release 正文，改为说明「这次更新会发生什么」 -->
+                <!-- 市场：更新日志取自 dsh-market/dsh-market 的 Release（后端按 npm 版本拼 tag 拉取）。
+                     拉不到（限流/无此 tag）时回退到说明「这次更新会发生什么」 -->
                 <div v-else-if="dialogKind === 'market' && dialogStatus.hasUpdate" class="mt-3 rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] leading-relaxed">
                   {{ t('update_market_notice') }}
                 </div>

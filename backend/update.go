@@ -48,12 +48,15 @@ var updateAccelerators = []string{
 	"https://gh.api.99988866.xyz/",
 }
 
-// updateKind 表示更新目标：harness 控制台或 dsh 服务。
+// updateKind 表示更新目标：harness 控制台、dsh 服务或插件市场（dshmarket）。
 type updateKind string
 
 const (
 	updateKindHarness updateKind = "harness"
 	updateKindDsh     updateKind = "dsh"
+	// updateKindMarket 表示「就地把 server 目录里那份 dshmarket 换成 npm 最新版」。
+	// 它不是 GitHub release 资产（版本来自 npm registry），细节见 market.go。
+	updateKindMarket updateKind = "market"
 )
 
 // tagInfo 描述一个从仓库读取到的 tag 及其解析出的版本号。
@@ -84,6 +87,14 @@ type UpdateStatus struct {
 	ReadyToInstall bool `json:"readyToInstall,omitempty"`
 	// Cancelled 表示最近一次更新被用户主动取消（仅失败推送时置位）。
 	Cancelled bool `json:"cancelled,omitempty"`
+
+	// 以下两个字段仅市场（kind=market）使用，见 market.go：
+	// MarketScope 说明当前生效的那份 dshmarket 由谁提供 ——
+	// server（由 server 包提供，控制台可就地更新）/ profile（由 profile 提供，
+	// 应在市场面板内更新）/ external（位置在 server 目录之外）/ missing（未找到）。
+	MarketScope string `json:"marketScope,omitempty"`
+	// MarketDir 是当前生效的 dshmarket 安装目录（诊断用）。
+	MarketDir string `json:"marketDir,omitempty"`
 }
 
 // PendingUpdate 记录某个 kind 已下载完成、等待用户确认安装的更新包。
@@ -92,6 +103,9 @@ type PendingUpdate struct {
 	Kind    updateKind
 	Version string
 	PkgPath string // 已下载更新包的 .tar.gz 完整路径
+	// 仅市场使用：npm registry 给出的完整性值，安装前再复核一次（见 market.go）。
+	Integrity string
+	Shasum    string
 }
 
 // UpdateManager 管理控制台与 dsh 的版本检测、SSE 推送与自我更新。
@@ -132,6 +146,10 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	// 本地 dsh 版本立即通过 `dsh -V` 获取（原 /api/dsh/version 端点已移除，
 	// 改由更新状态统一提供 dsh 版本号）。
 	m.statuses[updateKindDsh] = &UpdateStatus{Kind: updateKindDsh, LocalVersion: m.localDshVersion()}
+	// 市场（dshmarket）先做一次本地解析：不联网，只把「当前生效的那份在哪、什么
+	// 版本、由谁提供」填进状态；最新版等 checkOnce/手动检查时才查 registry。
+	m.statuses[updateKindMarket] = &UpdateStatus{Kind: updateKindMarket}
+	m.refreshMarketLocal()
 	// 启动时清理上次未能回收的更新包（自我更新 exec、异常退出等场景的残留）。
 	m.clearOrphanPending()
 	return m
@@ -614,7 +632,12 @@ func (m *UpdateManager) checkOnce() {
 	if err != nil {
 		logger().Printf("[update] 拉取 tag 失败: %v", err)
 		m.mu.Lock()
-		for _, st := range m.statuses {
+		for k, st := range m.statuses {
+			// 市场的版本来自 npm registry，与 GitHub tag 拉取无关；把 tag 的错误
+			// 覆盖到市场状态上只会误导（它的错误由 refreshMarketStatus 负责写）。
+			if k == updateKindMarket {
+				continue
+			}
 			st.LatestVersion = ""
 			st.HasUpdate = false
 			st.CheckedAt = now
@@ -623,6 +646,7 @@ func (m *UpdateManager) checkOnce() {
 		}
 		m.mu.Unlock()
 		m.notify()
+		m.refreshMarketStatus()
 		return
 	}
 
@@ -672,13 +696,21 @@ func (m *UpdateManager) checkOnce() {
 		}
 	})
 
-	// 仅当 harness 或 dsh 任一个有更新时才打印检测结果，无更新时不刷日志。
+	// 市场检测：版本来自 npm registry，与 GitHub tag 是两条独立链路。
+	m.refreshMarketStatus()
+
+	// 仅当 harness / dsh / 市场 任一个有更新时才打印检测结果，无更新时不刷日志。
 	hs := m.getStatus(updateKindHarness)
 	ds := m.getStatus(updateKindDsh)
+	ms := m.getStatus(updateKindMarket)
 	if hs.HasUpdate || ds.HasUpdate {
 		logger().Printf("[update] 发现更新 harness 本地=%s 最新=%s | dsh 本地=%s 最新=%s",
 			harnessVersion, hs.LatestVersion,
 			dshLocal, ds.LatestVersion)
+	}
+	if ms.HasUpdate {
+		logger().Printf("[market] 发现更新 市场本地=%s 最新=%s（%s）",
+			ms.LocalVersion, ms.LatestVersion, ms.MarketScope)
 	}
 }
 
@@ -747,11 +779,16 @@ func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
 // progress 为可选的下载进度回调（downloadled/total 字节，节流上报）；cancel 为
 // 可选的取消信号 —— 关闭后立即中断下载（已下载的临时文件会被删除），并返回
 // errUpdateCancelled。
-func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downloaded, total int64), cancel <-chan struct{}) (int64, error) {
+//
+// useAccelerators 控制是否叠加 GitHub 加速源前缀：只有 GitHub 资源能套，
+// npm registry 的 tarball 套上 gh 前缀只会 404（市场更新走 false）。
+func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downloaded, total int64), cancel <-chan struct{}, useAccelerators bool) (int64, error) {
 	// 待尝试的 URL 序列：加速源前缀 + 直连。
 	candidates := []string{rawURL}
-	for _, acc := range updateAccelerators {
-		candidates = append(candidates, acc+rawURL)
+	if useAccelerators {
+		for _, acc := range updateAccelerators {
+			candidates = append(candidates, acc+rawURL)
+		}
 	}
 	client := m.httpClientForUpdate()
 
@@ -1206,10 +1243,33 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	defer m.applying.Unlock()
 
 	st := m.getStatus(k)
-	if st.LatestVersion == "" {
-		return fmt.Errorf("尚未获取到最新版本号，请先执行检查更新")
+	// 版本与下载地址的来源按 kind 分流：harness/dsh 用 GitHub tag + release 资产，
+	// 市场用 npm registry 的 /dshmarket/latest（顺带拿到 integrity，见 market.go）。
+	var (
+		version string
+		rawURL  string
+		rel     *marketRelease
+	)
+	if k == updateKindMarket {
+		// 先确认这份市场确实归控制台管：由 profile 提供的那份改了也不生效
+		// （profile 条目优先于安装闭包，见 market.go），没必要白下一份。
+		if target := m.resolveMarketTarget(); target.Scope != marketScopeServer {
+			return fmt.Errorf("当前市场由 %s 提供（%s），控制台不更新这份安装", target.Scope, target.Reason)
+		}
+		r, err := m.marketLatest()
+		if err != nil {
+			return fmt.Errorf("获取市场最新版本失败: %w", err)
+		}
+		rel = r
+		version = r.Version
+		rawURL = r.Tarball
+	} else {
+		if st.LatestVersion == "" {
+			return fmt.Errorf("尚未获取到最新版本号，请先执行检查更新")
+		}
+		version = st.LatestVersion
+		rawURL = m.assetURL(k, version, m.updateArch())
 	}
-	version := st.LatestVersion
 	arch := m.updateArch()
 	logger().Printf("[update] 开始下载 %s 到 %s (arch=%s)", k, version, arch)
 
@@ -1234,17 +1294,26 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		s.TotalBytes = 0
 	})
 
-	n, err := m.downloadToFile(m.assetURL(k, version, arch), pkgPath,
-		func(downloaded, total int64) {
-			pct := 0
-			if total > 0 {
-				pct = int(downloaded * 100 / total)
-				if pct > 100 {
-					pct = 100
-				}
+	progress := func(downloaded, total int64) {
+		pct := 0
+		if total > 0 {
+			pct = int(downloaded * 100 / total)
+			if pct > 100 {
+				pct = 100
 			}
-			m.setDownloadProgress(k, true, pct, downloaded, total)
-		}, cancelCh)
+		}
+		m.setDownloadProgress(k, true, pct, downloaded, total)
+	}
+	var n int64
+	var err error
+	if rel != nil {
+		// 市场包从 npm registry 下载，并在下载后立刻校验完整性（元数据与字节的
+		// 绑定关系）；不通过就当场失败，不进入“已下载待安装”。安装阶段会再复核一次。
+		n, err = m.downloadMarketTarball(rel, pkgPath, progress, cancelCh)
+	} else {
+		// GitHub 资产：允许叠加加速源前缀。
+		n, err = m.downloadToFile(rawURL, pkgPath, progress, cancelCh, true)
+	}
 	m.cancelMu.Lock()
 	m.cancelCh = nil
 	m.cancelMu.Unlock()
@@ -1263,7 +1332,12 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	}
 
 	// 下载成功：记录待安装包，推送“已下载待安装”。
-	m.setPending(&PendingUpdate{Kind: k, Version: version, PkgPath: pkgPath})
+	pending := &PendingUpdate{Kind: k, Version: version, PkgPath: pkgPath}
+	if rel != nil {
+		pending.Integrity = rel.Integrity
+		pending.Shasum = rel.Shasum
+	}
+	m.setPending(pending)
 	m.updateStatus(k, func(s *UpdateStatus) {
 		s.Phase = "downloaded"
 		s.ReadyToInstall = true
@@ -1275,15 +1349,21 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		}
 		s.Error = ""
 		s.Cancelled = false
+		if rel != nil {
+			// 让“仓库最新版本”与刚下载到的这份保持一致（检测与下载之间可能
+			// 刚好有新版发布）。
+			s.LatestVersion = version
+		}
 	})
 	logger().Printf("[update] %s 更新包已下载到 %s (%d bytes)，等待安装", k, pkgPath, n)
 	return nil
 }
 
 // installUpdate 安装已下载的更新包（第二步）。读取 pending 中的 .tar.gz，解压后
-// 调用 installHarness / installDsh 执行“备份→替换→重启”。安装阶段耗时短、不可取消。
+// 调用 installHarness / installDsh / installMarket 执行“备份→替换→重启”。
+// 安装阶段耗时短、不可取消。
 // 安装失败时保留 pending（用户可重试安装）；成功时由各分支清 pending：
-//   - dsh：清 pending 并正常返回，由调用方推送 phase=done。
+//   - dsh / 市场：清 pending 并正常返回，由调用方推送 phase=done。
 //   - harness：先清 pending 再 exec 换新映像，本函数永不返回（故不会有 phase=done 推送，
 //     前端以轮询新进程版本号判定就绪——见 UpdateSection.vue 的 startHarnessReadyPoll）。
 func (m *UpdateManager) installUpdate(k updateKind) error {
@@ -1326,6 +1406,8 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 		installErr = m.installHarness(tmpDir)
 	case updateKindDsh:
 		installErr = m.installDsh(tmpDir)
+	case updateKindMarket:
+		installErr = m.installMarket(p, tmpDir)
 	default:
 		installErr = fmt.Errorf("未知的更新类型 %s", k)
 	}
@@ -1968,7 +2050,7 @@ func (m *UpdateManager) startDailyCleanup() {
 	}()
 }
 
-// runBackupCleanup 扫描 backupDir，删除超过 30 天的 harness/server/dsh-data 备份文件。
+// runBackupCleanup 扫描 backupDir，删除超过 30 天的 harness/server/market 备份文件。
 func (m *UpdateManager) runBackupCleanup() {
 	dir := m.backupDir()
 	entries, err := os.ReadDir(dir)
@@ -1979,8 +2061,12 @@ func (m *UpdateManager) runBackupCleanup() {
 	removed := 0
 	for _, e := range entries {
 		name := e.Name()
-		// 仅自动清理 harness 与 server 备份；dsh-data-* 不在自动清理范围内
-		if !isBackupFile(name, "harness-") && !isBackupFile(name, "server-") {
+		// 自动清理 harness / server / 市场备份；dsh-data-* 不在自动清理范围内。
+		// 市场备份用 market- 前缀（不能用 server-，否则会出现在「dsh 服务回滚」
+		// 列表里 —— 见 market.go 文件头第 5 条），所以这里要显式带上它，
+		// 否则市场备份永远不会被回收。
+		if !isBackupFile(name, "harness-") && !isBackupFile(name, "server-") &&
+			!isBackupFile(name, marketBackupPrefix) {
 			continue
 		}
 		if !strings.HasSuffix(name, ".tar.gz") {

@@ -1013,6 +1013,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleUpdateStatus(w, r)
 		case p == "/api/update/check" && r.Method == http.MethodPost:
 			m.handleUpdateCheck(w, r)
+		case p == "/api/market/info" && r.Method == http.MethodGet:
+			m.handleMarketInfo(w, r)
 		case p == "/api/update/apply" && r.Method == http.MethodPost:
 			// 兼容旧版一键更新：更新已拆分为“下载”与“安装”两步。
 			writeErr(w, "更新已拆分为“下载”与“安装”两步，请使用 /api/update/download 与 /api/update/install", http.StatusGone)
@@ -1123,18 +1125,29 @@ func (m *AdminMux) handleConvertPath(w http.ResponseWriter, r *http.Request) {
 
 // --- 自我更新 API ---
 
-// handleUpdateStatus 返回当前 harness 与 dsh 的版本检测结果。
+// validUpdateKind 校验更新类型：harness（控制台）/ dsh（服务）/ market（插件市场）。
+func validUpdateKind(k updateKind) bool {
+	switch k {
+	case updateKindHarness, updateKindDsh, updateKindMarket:
+		return true
+	}
+	return false
+}
+
+// handleUpdateStatus 返回当前 harness、dsh 与插件市场的版本检测结果。
 func (m *AdminMux) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	snap := m.update.snapshot()
 	writeJSON(w, map[string]interface{}{
 		"ok":      true,
 		"harness": snap[updateKindHarness],
 		"dsh":     snap[updateKindDsh],
+		"market":  snap[updateKindMarket],
 	})
 }
 
 // handleUpdateCheck 执行一次手动检查更新（“检查更新”按钮）并返回最新结果。
 // 同步执行：前端在拿到响应后即可依据结果提示“暂无更新”或显示红点。
+// 市场一并检测：版本来自 npm registry（见 market.go 的 refreshMarketStatus）。
 func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	m.update.checkOnce()
 	snap := m.update.snapshot()
@@ -1142,10 +1155,17 @@ func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"harness": snap[updateKindHarness],
 		"dsh":     snap[updateKindDsh],
+		"market":  snap[updateKindMarket],
 	})
 }
 
-// handleUpdateDownload 执行“下载更新包”（第一步，可取消）。body 中 kind 为 harness 或 dsh。
+// handleMarketInfo 返回市场安装位置的只读诊断信息（scope/dir/version/latest/
+// updatable/reason）。不触发网络与磁盘写，供 UI 解释“为什么不能更新”。
+func (m *AdminMux) handleMarketInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, m.update.marketInfo())
+}
+
+// handleUpdateDownload 执行“下载更新包”（第一步，可取消）。body 中 kind 为 harness、dsh 或 market。
 // 下载进度经 SSE 推送；下载成功后推送 phase=downloaded，弹窗按钮变为“安装”。
 func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -1156,8 +1176,8 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	kind := updateKind(body.Kind)
-	if kind != updateKindHarness && kind != updateKindDsh {
-		writeErr(w, "kind 必须为 harness 或 dsh", http.StatusBadRequest)
+	if !validUpdateKind(kind) {
+		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
 		return
 	}
 	// 同步置“下载中”状态：在返回 HTTP 响应前后端状态即已就绪（downloadUpdate
@@ -1196,7 +1216,9 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 
 // handleUpdateInstall 执行“安装更新包”（第二步，不可取消）。读取待安装包并执行
 // 备份替换+重启。对 dsh：成功后推送最新状态，前端刷新；对 harness：成功即 exec
-// 换新进程，由新进程重启 dsh，前端靠页面刷新兜底。
+// 换新进程，由新进程重启 dsh，前端靠页面刷新兜底；对 market：安装阶段会先停 dsh，
+// 替换 server 目录里那份 dshmarket，再自动拉起 dsh 并重新换取会话 token
+// （见 market.go 的 installMarket），成功后同样推送最新状态。
 func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Kind string `json:"kind"`
@@ -1206,8 +1228,8 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := updateKind(body.Kind)
-	if kind != updateKindHarness && kind != updateKindDsh {
-		writeErr(w, "kind 必须为 harness 或 dsh", http.StatusBadRequest)
+	if !validUpdateKind(kind) {
+		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
 		return
 	}
 	go func() {
@@ -1249,6 +1271,11 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		if kind != updateKindHarness {
 			go upd.refreshDshVersion()
 		}
+		// 市场：安装完成后目录里的版本号已变，重新解析一次让版本行立刻正确
+		// （前端随后会刷新页面，这里只是让状态先对齐）。
+		if kind == updateKindMarket {
+			upd.refreshMarketLocal()
+		}
 	}()
 	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始安装更新"})
 }
@@ -1269,8 +1296,8 @@ func (m *AdminMux) handleDiscardUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := updateKind(body.Kind)
-	if kind != updateKindHarness && kind != updateKindDsh {
-		writeErr(w, "kind 必须为 harness 或 dsh", http.StatusBadRequest)
+	if !validUpdateKind(kind) {
+		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
 		return
 	}
 	if err := m.update.DiscardUpdate(kind); err != nil {
@@ -1280,7 +1307,7 @@ func (m *AdminMux) handleDiscardUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"ok": true, "discarded": true})
 }
 
-// handleUpdateStream 通过 SSE 推送更新检测结果变更。
+// handleUpdateStream 通过 SSE 推送更新检测结果变更（harness / dsh / 市场三份）。
 func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 	setSSEHeaders(w)
 	ctx := r.Context()
@@ -1288,6 +1315,7 @@ func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 		sseSend(w, "update", sseJSON(map[string]interface{}{
 			"harness": m.update.getStatus(updateKindHarness),
 			"dsh":     m.update.getStatus(updateKindDsh),
+			"market":  m.update.getStatus(updateKindMarket),
 		}))
 	}
 	send() // 初始快照

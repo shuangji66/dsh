@@ -118,15 +118,15 @@ export interface SettingsPayload {
   status: DshStatus
 }
 
-// 更新检测结果（harness 控制台 / dsh 服务各一份）
+// 更新检测结果（harness 控制台 / dsh 服务 / 插件市场 各一份）
 export interface UpdateStatus {
-  kind: 'harness' | 'dsh'
+  kind: UpdateKind
   localVersion: string
   latestVersion: string
   hasUpdate: boolean
   checkedAt: string
   error?: string
-  // 最新 release 的更新内容（正文，不含标题；可能为空串）
+  // 最新 release 的更新内容（正文，不含标题；可能为空串。市场来自 npm，恒为空）
   releaseNotes?: string
   // 下载进度（更新包下载期间由后端 SSE 推送）
   downloading?: boolean // 是否正在下载更新包
@@ -139,14 +139,36 @@ export interface UpdateStatus {
   readyToInstall?: boolean
   // 最近一次更新是否被用户主动取消
   cancelled?: boolean
+  // 仅市场：当前生效的那份 dshmarket 由谁提供（见后端 market.go）
+  // server = 由 server 包提供，控制台可就地更新；profile = 由 profile 提供，
+  // 应在市场面板内更新；external = 位置在 server 目录之外；missing = 未找到。
+  marketScope?: MarketScope
+  // 仅市场：当前生效的安装目录（诊断用）
+  marketDir?: string
 }
 
-export type UpdateKind = 'harness' | 'dsh'
+export type UpdateKind = 'harness' | 'dsh' | 'market'
+
+// 市场安装位置的归属
+export type MarketScope = 'server' | 'profile' | 'external' | 'missing'
+
+// 市场诊断信息（GET /api/market/info）
+export interface MarketInfo {
+  ok: boolean
+  scope: MarketScope
+  dir: string
+  version: string
+  latest: string
+  updatable: boolean
+  reason: string
+  error?: string
+}
 
 // 自我更新 SSE 推送与 REST 接口的载荷
 export interface UpdatePayload {
   harness: UpdateStatus
   dsh: UpdateStatus
+  market: UpdateStatus
 }
 
 // dsh server 备份条目
@@ -305,8 +327,14 @@ export const api = {
       method: 'POST'
     }),
   // 自我更新：版本检测状态 / 手动检查 / 下载更新（可取消） / 安装更新 / 取消下载 / SSE 推送
-  updateStatus: () => request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus }>('/api/update/status'),
-  updateCheck: () => request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus }>('/api/update/check', { method: 'POST' }),
+  updateStatus: () =>
+    request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus; market: UpdateStatus }>('/api/update/status'),
+  updateCheck: () =>
+    request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus; market: UpdateStatus }>('/api/update/check', {
+      method: 'POST'
+    }),
+  // 市场诊断：当前生效的那份 dshmarket 在哪、由谁提供、能否由控制台更新
+  marketInfo: () => request<MarketInfo>('/api/market/info'),
   updateDownload: (kind: UpdateKind) =>
     request<{ ok: boolean; started: boolean; kind: UpdateKind; msg?: string }>('/api/update/download', {
       method: 'POST',

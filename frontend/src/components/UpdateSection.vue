@@ -12,13 +12,47 @@ const props = defineProps<{ accessUrls?: string[] }>()
 const toast = useToastStore()
 const { t } = useI18n()
 
-// 后端推送的更新状态（harness / dsh 各一份）。本地版本号由 `/api/update/status`
-// 统一提供（dsh 版本原 `/api/dsh/version` 端点已移除）。
+// 后端推送的更新状态（harness / dsh / 插件市场 各一份）。本地版本号由
+// `/api/update/status` 统一提供（dsh 版本原 `/api/dsh/version` 端点已移除）。
 const harnessStatus = ref<UpdateStatus>({ kind: 'harness', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
 const dshStatus = ref<UpdateStatus>({ kind: 'dsh', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
+// 市场（dshmarket）：它是 server 包自带的 bundle，不是 profile 依赖，因此控制台
+// 提供就地更新入口（后端 market.go）。marketScope 说明当前生效的那份由谁提供。
+const marketStatus = ref<UpdateStatus>({ kind: 'market', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '' })
 
 // 各目标是否正在“检查更新”
-const checking = ref<Record<UpdateKind, boolean>>({ harness: false, dsh: false })
+const checking = ref<Record<UpdateKind, boolean>>({ harness: false, dsh: false, market: false })
+
+// 按 kind 取对应的状态对象：三条链路的字段完全一致，只有数据来源不同。
+function statusOf(kind: UpdateKind): UpdateStatus {
+  if (kind === 'harness') return harnessStatus.value
+  if (kind === 'dsh') return dshStatus.value
+  return marketStatus.value
+}
+
+// 就地更新某个 kind 的状态（SSE 推送与本地乐观更新共用）。
+function patchStatus(kind: UpdateKind, patch: Partial<UpdateStatus>) {
+  if (kind === 'harness') harnessStatus.value = { ...harnessStatus.value, ...patch }
+  else if (kind === 'dsh') dshStatus.value = { ...dshStatus.value, ...patch }
+  else marketStatus.value = { ...marketStatus.value, ...patch }
+}
+
+// 市场能否由控制台更新：只有 profile 接管、位置在 server 目录之外或压根找不到时
+// 才禁用（scope 未知时先放行，真有问题后端会拒绝并给出原因）。
+const marketUpdatable = computed(() => {
+  const scope = marketStatus.value.marketScope
+  return scope === undefined || scope === 'server'
+})
+
+// 市场不可更新时的说明文案（按 scope 本地化，reason 作为 title 显示诊断细节）。
+const marketHint = computed(() => {
+  switch (marketStatus.value.marketScope) {
+    case 'profile': return t('update_market_scope_profile')
+    case 'external': return t('update_market_scope_external')
+    case 'missing': return t('update_market_scope_missing')
+    default: return ''
+  }
+})
 
 // 弹窗状态
 const dialogVisible = ref(false)
@@ -60,35 +94,38 @@ let progressPollTimer: ReturnType<typeof setInterval> | null = null
 let preInstallVersion = ''
 let readyPollTimer: ReturnType<typeof setInterval> | null = null
 
-// 从后端快照合并到本地响应式状态（允许只带 harness 或 dsh 的部分快照）
-function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus }) {
+// 从后端快照合并到本地响应式状态（允许只带部分 kind 的快照）
+function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus }) {
   if (snap.harness) {
     harnessStatus.value = { ...snap.harness, localVersion: snap.harness.localVersion || '' }
   }
   if (snap.dsh) {
     dshStatus.value = { ...snap.dsh, localVersion: snap.dsh.localVersion || '' }
   }
+  if (snap.market) {
+    marketStatus.value = { ...snap.market, localVersion: snap.market.localVersion || '' }
+  }
 }
 
 // 弹窗所指向的目标状态
-const dialogStatus = computed<UpdateStatus>(() =>
-  dialogKind.value === 'harness' ? harnessStatus.value : dshStatus.value
-)
+const dialogStatus = computed<UpdateStatus>(() => statusOf(dialogKind.value))
 
 // 弹窗标题
-const dialogTitle = computed(() =>
-  dialogKind.value === 'harness' ? t('update_dialog_title_harness') : t('update_dialog_title_dsh')
-)
+const dialogTitle = computed(() => {
+  if (dialogKind.value === 'harness') return t('update_dialog_title_harness')
+  if (dialogKind.value === 'dsh') return t('update_dialog_title_dsh')
+  return t('update_dialog_title_market')
+})
 
 // 版本号右上角红点：有更新时显示
 function hasUpdateDot(kind: UpdateKind): boolean {
-  return kind === 'harness' ? harnessStatus.value.hasUpdate : dshStatus.value.hasUpdate
+  return statusOf(kind).hasUpdate
 }
 function versionText(kind: UpdateKind): string {
-  return kind === 'harness' ? harnessStatus.value.localVersion : dshStatus.value.localVersion
+  return statusOf(kind).localVersion
 }
 function latestText(kind: UpdateKind): string {
-  return kind === 'harness' ? harnessStatus.value.latestVersion : dshStatus.value.latestVersion
+  return statusOf(kind).latestVersion
 }
 
 // 通过 SSE 监听后端推送的更新检测结果。
@@ -97,8 +134,8 @@ function latestText(kind: UpdateKind): string {
 // onerror 里 close() 会让浏览器永久放弃该连接，下载进度再也送不到页面。
 const updateStream = useEventStream(() => sseUrl('/api/update/stream'), {
   update: (data) => {
-    const d = data as { harness?: UpdateStatus; dsh?: UpdateStatus }
-    if (d && (d.harness || d.dsh)) merge(d)
+    const d = data as { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus }
+    if (d && (d.harness || d.dsh || d.market)) merge(d)
   }
 })
 
@@ -109,7 +146,7 @@ async function doCheck(kind: UpdateKind) {
     // 后端同步执行检测并返回最新结果
     const snap = await api.updateCheck()
     merge(snap)
-    const st = kind === 'harness' ? snap.harness : snap.dsh
+    const st = statusOf(kind)
     if (st?.error) {
       toast.show(st.error, 'error')
     } else if (st && !st.hasUpdate) {
@@ -169,7 +206,7 @@ function startProgressPoll(kind: UpdateKind) {
     try {
       const snap = await api.updateStatus()
       merge(snap)
-      const st = kind === 'harness' ? snap.harness : snap.dsh
+      const st = kind === 'harness' ? snap.harness : kind === 'dsh' ? snap.dsh : snap.market
       // 下载阶段结束（已就绪 / 报错 / 取消 / 回到空闲）即停止兜底轮询。
       if (!st || st.phase !== 'downloading') stopProgressPoll()
     } catch {
@@ -197,11 +234,7 @@ function applyLocalDownloading() {
     error: '',
     cancelled: false
   }
-  if (dialogKind.value === 'harness') {
-    harnessStatus.value = { ...harnessStatus.value, ...patch }
-  } else {
-    dshStatus.value = { ...dshStatus.value, ...patch }
-  }
+  patchStatus(dialogKind.value, patch)
 }
 
 // 本地把当前弹窗目标重置为“待更新、未下载”状态（下载请求失败时回滚）。
@@ -214,12 +247,14 @@ function applyLocalReset() {
     downloadedBytes: 0,
     totalBytes: 0
   }
-  if (dialogKind.value === 'harness') {
-    harnessStatus.value = { ...harnessStatus.value, ...patch }
-  } else {
-    dshStatus.value = { ...dshStatus.value, ...patch }
-  }
+  patchStatus(dialogKind.value, patch)
 }
+
+// 安装二次确认的正文：市场这次会在安装阶段停 dsh、替换文件、再自动拉起 dsh
+// （并重新换取会话 token），所以文案要单独说清，不能只说“重启服务”。
+const installConfirmMsg = computed(() =>
+  dialogKind.value === 'market' ? t('update_market_install_confirm_msg') : t('update_install_confirm_msg')
+)
 
 // 第二步：安装更新包（不可取消）。先弹二次确认，再调 /api/update/install。
 function openInstallConfirm() {
@@ -242,10 +277,13 @@ async function doInstall() {
       // 即“等待弹窗时间太久”）。改为轮询新进程上报的版本号，进程一就绪立刻收尾。
       startHarnessReadyPoll()
     } else {
-      // dsh 安装不换进程，成功状态经 SSE 推送；兜底超时 60 秒后刷新页面。
+      // dsh / 市场安装都不换 harness 进程，成功状态经 SSE 推送（市场还要等 dsh
+      // 重启并就绪后才推 done：后端上限 10 秒 + 2 秒确认，进程退出则立即判定失败），
+      // 这里只做兜底刷新：市场给足余量，避免 dsh 尚未就绪时刷新出启动等待页。
+      const fallbackMs = kind === 'market' ? 30000 : 60000
       reloadTimer = setTimeout(() => {
         window.location.reload()
-      }, 60000)
+      }, fallbackMs)
     }
   } catch (e) {
     installing.value = false
@@ -389,11 +427,7 @@ async function doDiscard() {
     toast.show(t('update_discarded'), 'success')
     // 后端已推送 phase="" / readyToInstall=false；若 SSE 暂未送达，
     // 本地也主动复位，保证按钮立刻回到“下载更新”。
-    if (dialogKind.value === 'harness') {
-      harnessStatus.value = { ...harnessStatus.value, phase: '', readyToInstall: false, downloading: false }
-    } else {
-      dshStatus.value = { ...dshStatus.value, phase: '', readyToInstall: false, downloading: false }
-    }
+    patchStatus(dialogKind.value, { phase: '', readyToInstall: false, downloading: false })
   } catch (e) {
     toast.show((e as Error).message || t('update_failed'), 'error')
   }
@@ -591,7 +625,7 @@ onBeforeUnmount(() => {
 
 // 侦测后端推送的各阶段状态变化：下载进度、下载完成、安装完成/失败、取消。
 watch(
-  () => dialogKind.value === 'harness' ? harnessStatus.value : dshStatus.value,
+  () => statusOf(dialogKind.value),
   (st) => {
     if (dialogVisible.value) watchForCompletion(dialogKind.value, st)
   },
@@ -640,6 +674,31 @@ watch(
           </button>
           <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" :title="t('update_check')" :disabled="checking.dsh" @click="doCheck('dsh')">
             <svg :class="checking.dsh ? 'animate-spin' : ''" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 插件市场版本（dshmarket）：server 包自带的那份，控制台可就地更新 -->
+      <div class="flex items-center justify-between gap-3 py-2">
+        <span class="text-xs text-ink-soft dark:text-[#A6A6AD] whitespace-nowrap">{{ t('update_market_ver') }}</span>
+        <div class="flex items-center gap-3 min-w-0">
+          <!-- 版本号：可更新时点击打开弹窗；由 profile 提供/找不到时置灰并说明原因 -->
+          <button
+            class="relative font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50"
+            :class="marketUpdatable ? 'text-ink dark:text-white' : 'text-ink-soft dark:text-[#A6A6AD] cursor-not-allowed'"
+            :title="marketUpdatable ? '' : (marketStatus.marketDir || marketStatus.marketScope || '')"
+            :disabled="!marketUpdatable"
+            @click="openDialog('market')"
+          >
+            {{ versionText('market') || '—' }}
+            <span v-if="hasUpdateDot('market')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
+          </button>
+          <!-- 不可更新时的原因（本地化短文案） -->
+          <span v-if="!marketUpdatable" class="text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ marketHint }}</span>
+          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" :title="t('update_check')" :disabled="checking.market" @click="doCheck('market')">
+            <svg :class="checking.market ? 'animate-spin' : ''" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
             </svg>
           </button>
@@ -770,6 +829,11 @@ watch(
                   </div>
                 </div>
 
+                <!-- 市场：npm 上没有 release 正文，改为说明「这次更新会发生什么」 -->
+                <div v-else-if="dialogKind === 'market' && dialogStatus.hasUpdate" class="mt-3 rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] leading-relaxed">
+                  {{ t('update_market_notice') }}
+                </div>
+
                 <!-- 无更新提示 -->
                 <div v-else-if="!dialogStatus.hasUpdate" class="mt-3 text-sm text-ink-soft dark:text-[#A6A6AD]">
                   {{ t('update_no_update') }}
@@ -835,7 +899,7 @@ watch(
           <div class="absolute inset-0 bg-black/50" @click="installConfirmVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_install_confirm_title') }}</h3>
-            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_install_confirm_msg') }}</p>
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ installConfirmMsg }}</p>
             <div class="flex justify-end gap-3 mt-6">
               <button class="g-btn-secondary" @click="installConfirmVisible = false">{{ t('confirm_cancel') }}</button>
               <button class="g-btn-primary" @click="doInstall">{{ t('update_install_confirm_ok') }}</button>

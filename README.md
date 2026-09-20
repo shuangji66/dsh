@@ -214,6 +214,47 @@ Cache-Control: public, max-age=31536000, immutable
 
 ---
 
+## 插件市场（dshmarket）的更新
+
+**背景**：本项目的 dshmarket 不是 profile 依赖，而是构建 server 包时被写进
+`@deepseek-ai/dsh` 的 `dependencies`（见 `.github/workflows/server-build.yaml` 与
+`.tools/harness-fpk-build.yaml`）。安装后它落在
+`<server>/node_modules/@deepseek-ai/dsh/node_modules/dshmarket`，dsh 启动时再把它镜像成
+`$DSH_HOME/profiles/node_modules/dshmarket` —— **市场跑的是哪一份字节，由 server 目录决定**。
+
+由此有两个后果：
+
+- 市场面板里的 `selfManaged` 恒为 `false`（它不在 profile `package.json` 的 `dependencies`
+  里），面板**没有**自更新入口，直接打市场的 `/dsh-market/update` 也会被
+  `plugin is not installed` 挡掉；
+- dsh server 包只在 `@deepseek-ai/dsh` 有新版本时才会重建，于是 dsh 版本空窗期内，
+  市场会一直停在构建 server 包时 npm 解析出来的那个版本。
+
+**所以控制台自己提供入口**：概览页的「插件市场版本」一行（`backend/market.go`），
+与 harness / dsh 一样分「下载 → 安装」两步，走同一套 SSE 进度与二次确认：
+
+- 版本来自 npm registry（`npmmirror` → 腾讯云镜像 → `registry.npmjs.org` 依次回退），
+  下载后校验 `dist.integrity`（SRI，缺失时退 `dist.shasum`）；**两个都没有则拒绝安装**。
+- 安装阶段顺序：校验新包（包名/版本/`lib/`/`dsh.bundle.patch`/`exports["./client"]`，
+  以及非 `@deepseek-ai/*` 依赖在目标位置可解析）→ **停止 dsh** → 备份当前目录到
+  `TRIM_PKGVAR/backup/market-<旧版本>-<时间戳>.tar.gz` → staging + `rename` 原子替换 →
+  **自动拉起 dsh 并重新换取会话 token**（`startDshCaptured`）。
+- 拉起后等 dsh 监听端口（上限 10 秒，端口开放后再等 2 秒确认没在装配阶段退出；
+  进程已退出则立即判定失败，不等满上限）；**起不来就自动回滚**到旧目录并再次拉起，
+  错误原样返回前端。实测本机 dsh 从进程启动到插件树装配完成约 2.4 秒。
+- 备份前缀是 `market-`，不会出现在「dsh 服务回滚」列表里；它由每日清理任务按 30 天回收。
+- 只在「当前生效的那份由 server 包提供」时才允许更新。若市场已按 dsh 官方方式装进
+  profile（`$DSH_HOME/profiles/web/node_modules/dshmarket`），控制台会显示
+  「由 profile 提供，请在市场面板内更新」并禁用按钮 —— 那种情况下改 server 目录里那份
+  不会生效（profile 条目优先）。`GET /api/market/info` 返回 scope / 目录 / 版本 / 原因，
+  便于排查。
+
+**与 server 包升级的关系**：升级 dsh 服务（或回滚 server 备份）会整目录替换 `server/`，
+因此会覆盖掉控制台就地更新过的那份市场 —— 这是预期行为（新 server 包自带它构建时的
+最新市场）。
+
+---
+
 ## 主要流程
 
 1. **启动** — 解析环境变量 → 读取配置 → 校验密码 → 启动 Admin socket → 自动启动
@@ -222,9 +263,12 @@ Cache-Control: public, max-age=31536000, immutable
    dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie。
 3. **反向代理** — 携带该 Cookie 把 dsh 反代到 `PROXY_PORT`，叠加登录鉴权。
 4. **node-pty** — 等待 `$HOME/.dsh/profiles/web` 目录生成后安装并 patch node-pty。
-5. **自我更新（harness / dsh）** — 分「下载 → 安装」两步：下载可取消，包存放在
-   `TRIM_PKGVAR/backup/pending/`，安装成功后删除。两条分支收尾方式不同：
+5. **自我更新（harness / dsh / 插件市场）** — 分「下载 → 安装」两步：下载可取消，包存放在
+   `TRIM_PKGVAR/backup/pending/`，安装成功后删除。三条分支收尾方式不同：
    - **dsh**：备份 → 替换 `server/` → 重启 dsh → 推送 `phase="done"`，前端据 SSE 收尾。
+   - **插件市场**：校验 → 停 dsh → 备份并原子替换 `server/` 内那份 dshmarket → 自动拉起
+     dsh 并换 token → 等就绪（失败自动回滚）→ 推送 `phase="done"`，详见上文
+     「插件市场（dshmarket）的更新」。
    - **harness**：备份 → 替换自身二进制 → 停止 dsh → 删除更新包与临时目录 →
      `syscall.Exec` 换新映像。`exec` 之后本进程的任何代码都不再执行（`defer` 也不触发），
      因此**成功状态无法经 SSE 推送**——推送进程已消亡，前端改为轮询新进程上报的版本号

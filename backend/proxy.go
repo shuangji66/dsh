@@ -1,14 +1,21 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// readyPath 是反代自留的就绪状态端点：等待页用它轮询当前启动阶段，收到
+// ready=true 后跳转到真正的 dsh 界面。与 /_login、/_logout 同属反代自留路径
+// （绝对路径，与登录跳转同样的根挂载假设），不会转发给 dsh。
+const readyPath = "/_ready"
 
 // bootstrapScript is the browser-side patch that mirrors proxy.js BOOTSTRAP_SCRIPT.
 // It follows REVERSE_PROXY_ADAPTATION.md:
@@ -290,16 +297,25 @@ func rewriteJSBundle(buf []byte) []byte {
 	return []byte(s)
 }
 
-// waitingPageHTML is served while the forwarded dsh backend is not yet ready.
-// Its look mirrors the auth login page (see loginPageHTML), and it shows both
-// Chinese and English text at once. A spinner replaces the previous hourglass
-// glyph. Inline JS records when the wait started (sessionStorage) and reveals a
-// timeout message once dsh has been unavailable for a while.
+// waitingPageHTML 是反代在「dsh 尚未就绪」时对外提供的等待页。
+//
+// 反代从控制台启动的第一刻就在监听（早于 dsh 启动），所以本页承担了原来完全
+// 缺失的那段体验：页面样式与登录页一致（见 loginPageHTML）、中英文并列显示，
+// 并新增两项行为：
+//   - 轮询 /_ready 拿到真实状态（__WAIT_STATE__ 由服务端首次注入）。启动过程
+//     （starting/auth/deps）只显示一句话「正在等待 DeepSeek Harness 服务就绪」——
+//     换取凭据、安装 node-pty 都是内部细节，不对外展示；只有需要用户动手的状态
+//     （已停止 / 启动失败 / 未自动启动）才分别给出指引。旧版不看状态、10 秒后
+//     无条件报「启动失败」，属误报；
+//   - 一旦 /_ready 报告就绪立即 location.replace 跳转，不再靠整页刷新撞时机。
+//
+// 无 JS（或轮询被中间层拦掉）时仍有兜底：serveWaitingPage 会带上 10 秒的
+// <meta refresh>，整页重载同样会重新判定能否放行。
 const waitingPageHTML = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#FAFAFA">
-<title>服务启动中</title>
+<title>正在等待 DeepSeek Harness 服务就绪</title>
 <style>
   :root{
     --brand:#6366F1;
@@ -314,6 +330,9 @@ const waitingPageHTML = `<!DOCTYPE html>
     --err-bg:rgba(239,68,68,.08);
     --err-border:rgba(239,68,68,.35);
     --err-color:#dc2626;
+    --warn-bg:rgba(217,119,6,.08);
+    --warn-border:rgba(217,119,6,.3);
+    --warn-color:#b45309;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -327,6 +346,9 @@ const waitingPageHTML = `<!DOCTYPE html>
       --err-bg:rgba(248,113,113,.12);
       --err-border:rgba(248,113,113,.35);
       --err-color:#f87171;
+      --warn-bg:rgba(251,191,36,.1);
+      --warn-border:rgba(251,191,36,.3);
+      --warn-color:#fbbf24;
     }
   }
   *{box-sizing:border-box}
@@ -350,48 +372,141 @@ const waitingPageHTML = `<!DOCTYPE html>
   .sub .en{display:block;color:var(--ink-faint);margin-top:4px}
   .err{display:none;margin-top:20px;padding:10px 12px;background:var(--err-bg);
     border:1px solid var(--err-border);border-radius:6px;font-size:13px;
-    color:var(--err-color);text-align:left;line-height:1.6;word-break:break-all}
-  .err .en{display:block;color:var(--err-color);opacity:.8;margin-top:4px}
+    color:var(--err-color);text-align:left;line-height:1.6;word-break:break-word}
+  .hint{display:none;margin-top:16px;padding:10px 12px;background:var(--warn-bg);
+    border:1px solid var(--warn-border);border-radius:6px;font-size:13px;
+    color:var(--warn-color);text-align:left;line-height:1.6;word-break:break-word}
+  .hint .en{display:block;opacity:.85;margin-top:4px}
 </style></head><body><div class="wrap">
   <div class="card">
-    <div class="spinner"></div>
-    <h1>服务启动中 / Starting service</h1>
-    <p class="sub">dsh web 尚未就绪，页面将每隔 2 秒自动重试…
-      <span class="en">dsh web is not ready yet. This page will retry every 2 seconds.</span>
+    <div class="spinner" id="spinner"></div>
+    <h1 id="title">正在等待 DeepSeek Harness 服务就绪 / Waiting for the DeepSeek Harness service to be ready</h1>
+    <p class="sub" id="sub">服务就绪后本页会自动跳转，请稍候…
+      <span class="en">This page jumps automatically once the service is ready.</span>
     </p>
-    <div class="err" id="timeout">
-      dsh 服务启动失败，请检查日志，卸载不兼容的插件后重试
-      <span class="en">Failed to start dsh. Please check the logs, uninstall incompatible plugins and retry.</span>
+    <div class="err" id="detail"></div>
+    <div class="hint" id="hint">
+      已等待 <b id="elapsed">0</b> 秒仍未就绪。若长时间没有进展，请到控制台查看日志，
+      必要时卸载不兼容的插件后重试。
+      <span class="en">Still not ready after <b id="elapsed-en">0</b>s. Check the console
+        logs if this persists; uninstall incompatible plugins and retry if needed.</span>
     </div>
   </div>
 </div>
 <script>
+window.__DSH_WAIT__=__WAIT_STATE__;
 (function(){
+  // HINT_AFTER：等待超过这个时长才给出「可能需要排查」的黄色提示（旧版固定在
+  // 10 秒后就报「启动失败」，属于误报）。
+  var READY='/_ready', POLL=1500, HINT_AFTER=30000;
+  // 启动过程（starting/auth/deps）对用户是同一件事——等服务就绪，内部细节
+  // （依赖准备、凭据落定之类）不对外展示；下面几个阶段是「需要用户动手」的状态，
+  // 才分别给出指引。
+  var WAITING=['正在等待 DeepSeek Harness 服务就绪',
+    'Waiting for the DeepSeek Harness service to be ready',
+    '服务就绪后本页会自动跳转，请稍候。',
+    'This page jumps automatically once the service is ready.'];
+  var TEXT={
+    starting:WAITING, auth:WAITING, deps:WAITING,
+    stopped:['dsh 服务已停止','The dsh service is stopped',
+      '可在控制台「概览」页重新启动 dsh 服务，启动后本页会自动跳转。',
+      'Restart dsh from the console overview page; this page jumps once it is up.'],
+    failed:['dsh 服务启动失败','Failed to start the dsh service',
+      '请检查控制台日志，必要时卸载不兼容的插件后重试。',
+      'Check the console logs; uninstall incompatible plugins and retry if needed.'],
+    disabled:['未自动启动 dsh 服务','dsh auto-start is disabled',
+      '控制台以 HARNESS_AUTOSTART=0 启动；请在控制台「概览」页手动启动 dsh。',
+      'The console started with HARNESS_AUTOSTART=0; start dsh from the console overview page.'],
+    ready:['服务已就绪，正在跳转…','Ready, redirecting…',
+      '正在进入 dsh 界面。','Entering the dsh interface.']
+  };
+  var titleEl=document.getElementById('title');
+  var subEl=document.getElementById('sub');
+  var detailEl=document.getElementById('detail');
+  var hintEl=document.getElementById('hint');
+  var spinnerEl=document.getElementById('spinner');
+  var elapsedEl=document.getElementById('elapsed');
+  var elapsedEnEl=document.getElementById('elapsed-en');
+
+  // 等待起点（跨整页重载保留），仅用于显示已等待时长；跳转成功后清除（见 poll）。
   var KEY='dsh_start_wait_ts';
-  var now=Date.now();
-  var start=0;
+  var start=0, now=Date.now();
   try{ start=parseInt(sessionStorage.getItem(KEY)||'0',10)||0; }catch(e){}
-  if(!start){ start=now; try{ sessionStorage.setItem(KEY,String(start)); }catch(e){} }
-  var waited=now-start;
-  var timeoutEl=document.getElementById('timeout');
-  var LIMIT=10000; // 10s
-  if(!timeoutEl) return;
-  if(waited>=LIMIT){ timeoutEl.style.display='block'; }
-  else {
-    setTimeout(function(){ timeoutEl.style.display='block'; }, LIMIT-waited+250);
+  if(!start||start>now){ start=now; try{ sessionStorage.setItem(KEY,String(start)); }catch(e){} }
+
+  function render(s){
+    var t=TEXT[(s&&s.phase)||'starting']||TEXT.starting;
+    titleEl.textContent=t[0]+' / '+t[1];
+    subEl.innerHTML=t[2]+'<span class="en">'+t[3]+'</span>';
+    var broken=s&&(s.phase==='failed'||s.phase==='stopped'||s.phase==='disabled');
+    spinnerEl.style.display=broken?'none':'';
+    if(s&&s.phase==='failed'&&s.detail){ detailEl.textContent=s.detail; detailEl.style.display='block'; }
+    else { detailEl.style.display='none'; }
   }
+
+  function tickElapsed(){
+    var secs=Math.max(0,Math.round((Date.now()-start)/1000));
+    elapsedEl.textContent=secs;
+    elapsedEnEl.textContent=secs;
+    if(secs*1000>=HINT_AFTER) hintEl.style.display='block';
+  }
+  setInterval(tickElapsed,1000);
+  tickElapsed();
+
+  var busy=false, jumped=false;
+  function poll(){
+    if(busy||jumped) return;
+    busy=true;
+    fetch(READY,{cache:'no-store',headers:{'Accept':'application/json'}})
+      .then(function(res){
+        // 被重定向（登录失效）或非 200：交给整页重载去走登录流程。
+        if(res.redirected||!res.ok) throw new Error('not ready');
+        return res.json();
+      })
+      .then(function(s){
+        busy=false;
+        if(s&&s.ready){
+          jumped=true;
+          render({phase:'ready'});
+          // 本次等待结束：清掉起点，下一次等待（例如之后某次 dsh 重启）从 0 计时，
+          // 而不是沿用上一次的时长把黄色提示立刻顶出来。
+          try{ sessionStorage.removeItem(KEY); }catch(e){}
+          location.replace(location.href);
+          return;
+        }
+        render(s||{});
+        setTimeout(poll,POLL);
+      })
+      .catch(function(){
+        busy=false;
+        setTimeout(function(){ location.reload(); },POLL);
+      });
+  }
+  render(window.__DSH_WAIT__);
+  poll();
 })();
 </script>
 </body></html>`
 
-// serveWaitingPage writes the styled "starting" page used while the upstream
-// dsh backend is not ready yet. It auto-refreshes every 2 seconds.
-func serveWaitingPage(w http.ResponseWriter, r *http.Request) {
+// waitingPageHTMLFor 把当前阶段注入页面脚本。detail 是任意错误文本，用 JSON
+// 编码注入（encoding/json 默认转义 < > & 为 \u003c 等），既不会截断脚本，
+// 也不会让错误文本变成可执行标记。
+func waitingPageHTMLFor(st proxyState) string {
+	raw, err := json.Marshal(st)
+	if err != nil {
+		raw = []byte(`{"phase":"starting"}`)
+	}
+	return strings.Replace(waitingPageHTML, "__WAIT_STATE__", string(raw), 1)
+}
+
+// serveWaitingPage 在 dsh 尚未就绪（或正在重启）时输出等待页。页面脚本会轮询
+// /_ready，并在就绪后立即跳转；Refresh 头是无 JS 客户端的兜底路径。
+func serveWaitingPage(w http.ResponseWriter, r *http.Request, st proxyState) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Refresh", "2; url="+r.URL.RequestURI())
+	w.Header().Set("Refresh", "10; url="+r.URL.RequestURI())
 	w.WriteHeader(200)
-	io.WriteString(w, waitingPageHTML)
+	io.WriteString(w, waitingPageHTMLFor(st))
 }
 
 // BackendChecker performs reachability checks on the upstream dsh port.
@@ -430,16 +545,88 @@ func (b *BackendChecker) wait(max time.Duration) bool {
 type reverseProxy struct {
 	auth *Auth
 	dsh  *DshManager
+	// boot 是控制台启动流水线的阶段（见 boot.go）。反代早于 dsh 启动即开始监听，
+	// 就绪判定必须同时看它、dsh 端口与会话凭据，详见 state()。
+	boot *bootState
+	// runMu/runAt/runAlive 缓存“dsh 进程是否还在”（state() 里区分“启动中/已停止”
+	// 用）。DshManager.Running() 在 dsh 已不存在时会每次重扫 /proc，而等待页上的
+	// 浏览器会持续轮询 /_ready —— 加一层 2 秒共享缓存，避免多个等待页把 /proc
+	// 扫成热点（该值只影响等待页文案，滞后 2 秒无副作用）。
+	runMu    sync.Mutex
+	runAt    time.Time
+	runAlive bool
 }
 
-func newReverseProxy(a *Auth, dsh *DshManager) *reverseProxy {
-	return &reverseProxy{auth: a, dsh: dsh}
+func newReverseProxy(a *Auth, dsh *DshManager, boot *bootState) *reverseProxy {
+	if boot == nil {
+		boot = newBootState()
+	}
+	return &reverseProxy{auth: a, dsh: dsh, boot: boot}
 }
 
 // getChecker returns a BackendChecker using the current DshPort from config.
 func (p *reverseProxy) getChecker() *BackendChecker {
 	cfg := GetConfig()
 	return newBackendChecker(cfg.DshPort)
+}
+
+// dshAliveCached 是 DshManager.Running() 的 2 秒共享缓存（见 reverseProxy 字段注释）。
+func (p *reverseProxy) dshAliveCached() bool {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+	if time.Since(p.runAt) < 2*time.Second {
+		return p.runAlive
+	}
+	p.runAlive = p.dsh.Running()
+	p.runAt = time.Now()
+	return p.runAlive
+}
+
+// state 汇总「现在能否把请求放行给 dsh」，同时给出等待页要显示的阶段。
+//
+// 放行需要同时满足三件事，缺一不可：
+//  1. 启动流水线已收尾（boot 不再是 starting/auth/deps）——流水线收尾可能重启
+//     dsh（例如 node-pty 的 pnpm install 之后），提前放行会让界面随即失效；
+//  2. dsh 端口已监听；
+//  3. 本代 dsh 的会话凭据已落定（SessionSettled）—— 否则带不出 dsh-auth-* cookie，
+//     转发过去只会被 dsh 拒绝。
+//
+// 返回的 checker 复用本次端口探测的结果，避免热路径上重复拨号。
+func (p *reverseProxy) state() (proxyState, *BackendChecker) {
+	checker := p.getChecker()
+	portUp := checker.quick(500 * time.Millisecond)
+	settled := p.dsh.SessionSettled()
+	phase, detail := p.boot.get()
+
+	switch {
+	case p.boot.booting():
+		// 启动流水线进行中：即使端口已通也不放行，按流水线的阶段显示等待页。
+	case portUp && settled:
+		return proxyState{Phase: phaseReady, Ready: true, Detail: detail}, checker
+	case !portUp:
+		// 端口未监听。流水线之外只有几种情况要区分：显式说明（启动失败 / 未自动
+		// 启动）原样保留；进程还在（自重启、更新后拉起）显示“启动中”；进程不在
+		// （用户手动停止）显示“已停止”。
+		if phase != phaseFailed && phase != phaseDisabled {
+			if p.dshAliveCached() {
+				phase = phaseStarting
+			} else {
+				phase = phaseStopped
+			}
+			detail = ""
+		}
+	default:
+		// 端口通了但凭据还没换到：继续等凭据。
+		phase = phaseAuth
+		detail = ""
+	}
+	return proxyState{Phase: phase, Detail: detail}, checker
+}
+
+// serveReadyState 输出等待页轮询用的就绪状态（JSON）。不缓存：轮询必须拿到实时值。
+func (p *reverseProxy) serveReadyState(w http.ResponseWriter, st proxyState) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, st)
 }
 
 func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -451,17 +638,25 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handleUpgrade(w, r)
 		return
 	}
-	checker := p.getChecker()
-	if !checker.quick(500 * time.Millisecond) {
-		serveWaitingPage(w, r)
-		return
+	st, checker := p.state()
+	// 鉴权先于就绪判断。反代从控制台启动的第一刻就在监听，此时 dsh 往往还没起来：
+	// 若沿用旧的「先看 dsh 是否就绪、再鉴权」顺序，访客在控制台启动期间只能看到
+	// 等待页而无法登录。现在未登录先给登录页，登录后再看等待页/放行。
+	// 仅面板后端的内部探测路径（如 /dsh-market/）视为可信、跳过鉴权；
+	// 普通浏览器流量（含经 nginx 嵌套反代到达的）必须通过面板登录鉴权。
+	if !p.isInternalRequest(r) {
+		if !p.auth.isAuthed(r) {
+			next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
+			http.Redirect(w, r, authLogin+"?next="+url.QueryEscape(next), http.StatusFound)
+			return
+		}
+		if r.URL.Path == readyPath {
+			p.serveReadyState(w, st)
+			return
+		}
 	}
-	if !p.isInternalRequest(r) && !p.auth.isAuthed(r) {
-		// 鉴权失效：自动重定向到登录页（dsh 网页打开时下一次请求即被重定向）
-		// 仅面板后端的内部探测路径（如 /dsh-market/）视为可信、跳过鉴权；
-		// 普通浏览器流量（含经 nginx 嵌套反代到达的）必须通过面板登录鉴权。
-		next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
-		http.Redirect(w, r, authLogin+"?next="+url.QueryEscape(next), http.StatusFound)
+	if !st.Ready {
+		serveWaitingPage(w, r, st)
 		return
 	}
 	// 记录访客（IP、最近访问时间、登录有效期）
@@ -527,6 +722,14 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	checker := p.getChecker()
+	// 凭据门禁与 HTTP 一致（见 state）：本代 dsh 的会话 cookie 还没换取完成时，
+	// 上游会因缺少 dsh-auth-* cookie 拒绝升级，直接 503 让客户端稍后重试。
+	if !p.dsh.SessionSettled() {
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	// 保留原有的 10 秒容忍窗口：dsh 自重启（市场一键重启）期间端口会短暂消失，
+	// 此时客户端已在界面上，等它回来比立刻 503 更友好。
 	if !checker.wait(10 * time.Second) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 		return

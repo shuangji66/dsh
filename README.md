@@ -18,6 +18,9 @@
 - **访问 Token / Cookie 交换** — 从 dsh 启动日志捕获一次性访问 token，换取 dsh 会话
   Cookie，供反向代理转发时携带，实现免 token 访问。
 - **反向代理** — 把 dsh 的 Web 界面经统一端口（默认 `13079`）对外暴露，并叠加登录鉴权。
+  **控制台启动的第一刻就监听**：dsh 还没起来时不再“无响应”，而是先给登录页、再给
+  带阶段的等待页，dsh 完成启动（含换取凭据、安装依赖）后等待页自动跳转。
+  （见下文「启动期间的等待页与放行门禁」一节）
 - **浏览器兼容模式** — 可开关的反代注入，修复 Firefox / Zen / Safari 等非 V8 引擎上
   「会话历史无法加载」的问题；默认关闭，Chromium 开启无副作用。
   （见上文「浏览器兼容模式」一节）
@@ -54,12 +57,13 @@
 ├── Makefile                 # make dev / release / clean（前端→embed→Go 单二进制）
 ├── build.sh                 # 等价构建脚本
 ├── backend/                 # Go 后端
-│   ├── main.go              # 入口：runtime env、日志、启动 dsh、反向代理、优雅退出
+│   ├── main.go              # 入口：runtime env、日志、启动反代、启动 dsh、优雅退出
+│   ├── boot.go              # 启动阶段状态机（等待页文案 / 反代放行门禁的输入）
 │   ├── config.go            # 应用配置 & 运行时环境（环境变量解析）
 │   ├── admin.go             # Admin 管理 mux：SPA、API 路由、Unix socket 服务
 │   ├── auth.go              # 登录鉴权（Cookie / HMAC / 密码校验）
 │   ├── dsh.go               # DshManager：dsh 进程生命周期 / token 交换 / 状态 / 插件
-│   ├── proxy.go             # 反向代理（携带 dsh 会话 Cookie）
+│   ├── proxy.go             # 反向代理（携带 dsh 会话 Cookie）+ 等待页 / /_ready
 │   ├── terminal.go          # WebSocket 交互式 PTY 终端
 │   ├── update.go            # 更新管理（版本检测、下载通路/续传、回滚/备份）
 │   ├── market.go            # 插件市场（dshmarket）就地更新
@@ -314,14 +318,68 @@ Cache-Control: public, max-age=31536000, immutable
 
 ---
 
+## 启动期间的等待页与放行门禁
+
+反代**在 dsh 启动之前**就已经监听 `PROXY_PORT`（见 `main.go`：`startProxy` 紧跟在
+Admin socket 之后）。旧实现把反代放在“dsh 启动 → 换取 Cookie → 安装 node-pty”之后，
+这期间访问反代端口既没有页面也没有响应，只能干等（首次启动装依赖时可能是几分钟）。
+
+现在的顺序与门禁：
+
+1. 反代开始监听，**先鉴权**：未登录的访客直接看到登录页（旧顺序是先判 dsh 是否就绪、
+   后鉴权，导致启动期间根本无法登录）；`/_login`、`/_logout`、`/_ready` 是反代自留
+   路径，不会转发给 dsh。
+2. 已登录但 dsh 未就绪 → 等待页（`serveWaitingPage`）。页面**只显示一句话**「正在等待
+   DeepSeek Harness 服务就绪」，并按 **1.5 秒**轮询 `GET /_ready`
+   （JSON：`{phase, ready, detail}`）——换取凭据、安装 node-pty 等内部阶段不对外展示。
+3. `/_ready` 报告 `ready=true` 时，页面立即 `location.replace` 跳到真正的 dsh 界面
+   （不再靠整页刷新撞时机）；无 JS 客户端仍有 10 秒 `<meta refresh>` 兜底。
+
+放行（把请求转发给 dsh）**只有一个判定入口**：`reverseProxy.state()`，三个条件全部满足
+才放行，等待页与 `/_ready` 的返回值都来自同一处，避免“轮询说就绪 → 跳转 → 又是等待页”
+的抖动：
+
+| 条件 | 含义 | 不满足时的阶段 |
+| --- | --- | --- |
+| 启动流水线已收尾 | 不在 `starting / auth / deps` 阶段（收尾可能重启 dsh，提前放行会让界面随即失效） | `starting` / `auth` / `deps`（页面统一显示「等待服务就绪」） |
+| dsh 端口已监听 | `PROXY_PORT` 后端可连 | 进程在 → `starting`；进程不在 → `stopped` |
+| 本代凭据已落定 | `DshManager.SessionSettled()`：本代 dsh 的 `dsh-auth-*` Cookie 已换取（或确认无需凭据） | `auth` |
+
+`phase` 取值（`/_ready` 原样返回，便于排查；页面只区分「等待中」与「需要动手」两类）：
+
+- 等待中（页面统一显示「正在等待 DeepSeek Harness 服务就绪」）：`starting`（拉起 dsh）、
+  `auth`（换取凭据）、`deps`（安装/校正 node-pty），以及启动流水线之外的 `starting`
+  （dsh 正在自重启/被拉起）。
+- 需要用户动手（页面停转并给出对应指引）：`stopped`（dsh 未在运行）、`failed`
+  （`dsh.Start()` 失败，`detail` 为原因）、`disabled`（`HARNESS_AUTOSTART=0`）。
+- 等待超过 **30 秒**才出现“可能需要排查”的黄色提示（旧版固定在 10 秒后就报
+  「启动失败」，属误报）。
+
+改动这块时注意：
+
+- 凡是**启动或重启 dsh** 的路径，都必须经 `captureDshSession` 换取凭据（它会调用
+  `markSessionSettled`）。漏掉就不会标记落定，反代会一直停在等待页。
+  `DshManager.Start()` 每次都会递增启动代号，使上一代凭据立即失效。
+- 旧版 dsh 不打印 token（`WaitToken` 空等 15 秒超时）时同样算“落定”，最坏多显示
+  15 秒等待页，不会永久卡住；反代随后可以不带 Cookie 转发（既有行为）。
+- WebSocket 升级同样有门禁：未登录 → `401`；凭据未落定 → `503`；端口未就绪时保留
+  10 秒容忍窗口（dsh 市场一键自重启期间客户端已在界面上，等它回来比立刻断开友好）。
+
+---
+
 ## 主要流程
 
-1. **启动** — 解析环境变量 → 读取配置 → 校验密码 → 启动 Admin socket → 自动启动
+1. **启动** — 解析环境变量 → 读取配置 → 校验密码 → 启动 Admin socket →
+   **启动反向代理**（先监听、先鉴权，dsh 未就绪时给等待页）→ 自动启动
    `dsh web --no-open --port <port>`（除非 `HARNESS_AUTOSTART=0`）。
 2. **凭据交换** — 从 dsh 日志扫描一次性访问 token（`?token=`），用它访问一次
-   dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie。
-3. **反向代理** — 携带该 Cookie 把 dsh 反代到 `PROXY_PORT`，叠加登录鉴权。
-4. **node-pty** — 等待 `$HOME/.dsh/profiles/web` 目录生成后安装并 patch node-pty。
+   dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie，并标记本代凭据已落定
+   （`markSessionSettled`，反代据此放行）。
+3. **放行** — 三条件齐备（流水线收尾 + 端口就绪 + 凭据落定）后，反代携带该 Cookie
+   把 dsh 反代到 `PROXY_PORT`；等待页轮询到 `ready` 即自动跳转。详见上文
+   「启动期间的等待页与放行门禁」。
+4. **node-pty** — 等待 `$HOME/.dsh/profiles/web` 目录生成后安装并 patch node-pty
+   （仍在放行门禁内：此阶段即使端口已通也不放行）。
 5. **自我更新（harness / dsh / 插件市场）** — 分「下载 → 安装」两步：下载可暂停
    （保留半成品，续传）/ 可取消（删除半成品），代理与直连各 2 次机会，详见上文
    「更新下载：通路、重试与断点续传」；包存放在 `TRIM_PKGVAR/backup/pending/`，
@@ -345,6 +403,13 @@ Cache-Control: public, max-age=31536000, immutable
 - **Admin socket 已被占用** — 说明已有实例在运行，主进程会直接退出。
 - **鉴权未启用** — 未设置 `password` 或密码强度校验失败时后端会打印警告，任何人可访问。
 - **反代不带凭据** — 旧版 dsh 或日志未就绪导致未捕获 token 时，反代将不带 Cookie。
+- **控制台启动期间打开反代地址只看到等待页** — 正常：dsh 还没就绪。页面只显示
+  「正在等待 DeepSeek Harness 服务就绪」，就绪后自动跳转（内部阶段不对外展示）；等待
+  超过 30 秒会出现“可能需要排查”的提示。若一直停在那里，多半是 dsh 起不来（不兼容的
+  插件等），去控制台看日志。想手动确认状态可带登录 Cookie 请求 `GET /_ready`
+  （返回 `{phase, ready, detail}`，`phase` 见上文「启动期间的等待页与放行门禁」）。
+- **dsh 重启后页面白屏/接口报错** — dsh 正在重启（市场一键重启、更新 server 等），反代
+  此时返回等待页；刷新即可，等待页也会在 dsh 回来后自动跳转。
 - **CPU/内存读不到** — dsh 装插件自重启后 PID 变化，后端会自动在 `/proc` 中重新发现。
 - **Firefox / Safari 打开会话只有「载入历史…」（且一直显示「深度求索中…」）** —
   非 V8 引擎的已知问题，开启设置页的「浏览器兼容模式」。若开启后仍无效，是浏览器

@@ -36,16 +36,21 @@
 **后端（Go，`backend/`）**
 
 - `main.go` — 入口。顺序：解析环境 → 建日志 → 写 PID → 查 socket 占用 → 读配置 →
-  校验密码 → 起 Admin socket → 起 dsh（非 `HARNESS_AUTOSTART=0`）→ 换 Cookie →
-  装 node-pty → 起反代 → 等信号退出。
+  校验密码 → 起 Admin socket → **起反代**（早于 dsh：先监听、先鉴权，未就绪给等待页）
+  → 起 dsh（非 `HARNESS_AUTOSTART=0`）→ 换 Cookie → 装 node-pty → 标记就绪 → 等信号退出。
+- `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled`）+ `proxyState`。
+  反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
 - `config.go` — `AppConfig`（前端可改）与 `RuntimeEnv`（环境变量）。**反向代理端口
   （`ProxyPort`）只从环境变量读，不随配置保存。**
 - `admin.go` — Admin mux（Unix socket）：`buildHandler()` 里一个大的 `switch` 分发
   所有 `/api/*` 路由；`spaHandler` 提供内嵌前端。
 - `dsh.go` — `DshManager`：进程生命周期；`effectivePID`/`findDshPid` 处理**装插件自重启**
   后 PID 变化（扫 `/proc/<pid>/cmdline` 匹配 `dsh web ... --port <port>`）；
-  `tokenScanner` 从 dsh 日志捕获 `?token=`；`ExchangeToken` 换 `dsh-auth-*` Cookie。
-- `proxy.go` — 反向代理，转发时**携带 dsh 会话 Cookie**。
+  `tokenScanner` 从 dsh 日志捕获 `?token=`；`ExchangeToken` 换 `dsh-auth-*` Cookie；
+  `SessionSettled`/`markSessionSettled` 记录「本代凭据是否已换取完成」（反代放行门禁）。
+- `proxy.go` — 反向代理，转发时**携带 dsh 会话 Cookie**；`ServeHTTP` 里顺序是
+  「鉴权路由 → 就绪状态 `/_ready` → 鉴权 → 等待页/转发」，放行判定只在
+  `reverseProxy.state()` 一处；等待页（`waitingPageHTML`）轮询 `/_ready` 并自动跳转。
 - `terminal.go` — WebSocket + `creack/pty` 的交互式 bash。
 - `update.go` — 更新 harness / dsh 服务与插件市场：版本检测、下载、备份与回滚；
   `harnessVersion` 由 `-ldflags -X` 注入。下载策略按类型分开（`downloadPlanFor`）：
@@ -94,6 +99,17 @@
   源码树中 `backend/embed` 通常不存在/为空，属正常。
 - **token 仅捕获一次** —— `tokenScanner` 命中后回调置空；每次 `dsh.Start()` 会重置
   token 与 Cookie。旧版 dsh 不打印 token，`WaitToken` 会空等超时返回 `""`。
+- **反代放行门禁只有一个入口 `reverseProxy.state()`** —— 反代从控制台启动的第一刻就在
+  监听（早于 dsh），放行必须同时满足「启动流水线已收尾（`bootState` 不是
+  starting/auth/deps）+ dsh 端口已监听 + `DshManager.SessionSettled()`」；等待页与
+  `GET /_ready` 共用这一份判定，避免“轮询说就绪 → 跳转 → 又是等待页”的抖动。
+  由此两条硬约束：
+  1. **任何启动/重启 dsh 的路径都必须经 `captureDshSession`** —— `Start()` 每次递增
+    启动代号使上一代凭据失效，`captureDshSession` 在等待 token 结束（拿到或 15 秒超时）
+     后调用 `markSessionSettled` 标记落定。漏掉就不会落定，反代永远停在等待页。
+  2. **不要为了“更快看到界面”放宽门禁**（例如只留 `checker.quick()`）：端口通了但凭据
+     没换到就放行，只会把用户送进 dsh 的未授权响应；而把 `deps` 阶段的放行提前，会让
+     流水线收尾重启 dsh 时界面随即失效。
 - **`PROFILE_TEMPLATES.web.bundles` 注入** —— 只在 `server-build.yaml` 的 CI 中对
   `dsh-app-boot` 做，本地不涉及。
 - **代理端口默认 `13079`、dsh 端口默认 `13080`** —— 冲突排查先看这两个。

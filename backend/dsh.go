@@ -35,6 +35,13 @@ type DshManager struct {
 	token       string // 新版 dsh 启动时在日志输出的一次性访问 token
 	authMu      sync.RWMutex
 	authCookie  string // 用 token 换取到的 dsh 会话 cookie（形如 "dsh-auth-xxx=yyy"）
+	// sessionMu 保护下面两个「启动代号」：每代 dsh 启动都会生成新的 token，需要用
+	// 它异步换取会话凭据（见 captureDshSession），换取完成之前反代不应放行转发
+	// （否则转发到 dsh 必然被拒）。用独立互斥锁：Start 会长时间持有 m.mu，而标记
+	// 来自异步的 captureDshSession。
+	sessionMu       sync.Mutex
+	sessionGen      int // dsh 启动代号：每次 Start 递增
+	sessionReadyGen int // 已完成凭据换取（或确认无需凭据）的启动代号
 	// livePidMu 保护对 livePid 的并发读写。
 	livePidMu sync.Mutex
 	livePid   int // 实际在运行的 dsh 进程 pid。dsh 装插件自重启后 m.cmd 的 pid 会失效，
@@ -154,6 +161,35 @@ func (m *DshManager) setAuthCookie(ck string) {
 	m.authMu.Lock()
 	m.authCookie = ck
 	m.authMu.Unlock()
+}
+
+// bumpSessionGen 在每次 dsh 启动时递增启动代号，使此前那代的凭据不再算「已落定」。
+func (m *DshManager) bumpSessionGen() {
+	m.sessionMu.Lock()
+	m.sessionGen++
+	m.sessionMu.Unlock()
+}
+
+// SessionSettled 报告本代 dsh 的访问凭据是否已尘埃落定。
+//
+// dsh 每次启动都会打印一次性 token，harness 需要用它换取 dsh-auth-* 会话 cookie
+// （见 captureDshSession，由 Start 之后的调用方异步执行）。在换取完成之前反代
+// 转发必然拿不到凭据、只会收到 dsh 的未授权响应，因此反代据此决定「继续显示
+// 等待页」还是「放行」（见 reverseProxy.state）。
+//
+// 旧版 dsh 不打印 token 时，等待会在 15 秒后超时并同样标记为已落定，所以最坏
+// 情况只是多显示 15 秒等待页，不会永远卡住。
+func (m *DshManager) SessionSettled() bool {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.sessionReadyGen >= m.sessionGen
+}
+
+// markSessionSettled 由 captureDshSession 在等待 token（拿到或超时）结束后调用。
+func (m *DshManager) markSessionSettled() {
+	m.sessionMu.Lock()
+	m.sessionReadyGen = m.sessionGen
+	m.sessionMu.Unlock()
 }
 
 // ExchangeToken 用启动日志中捕获的一次性 token 访问一次带 token 的 dsh 地址
@@ -809,11 +845,13 @@ func (m *DshManager) Start() error {
 	// plugin-manager 可能来不及删除它的 `package.json.lock`，那份陈旧锁会让之后
 	// 所有插件操作白等 120 秒再失败（见 cleanStaleProfileLocks）。
 	m.cleanStaleProfileLocks()
-	// 每次启动都重置 token 与会话 cookie，避免复用上一次启动的旧凭据。
+	// 每次启动都重置 token 与会话 cookie，避免复用上一次启动的旧凭据；同时递增
+	// 启动代号，让反代判定「本代凭据尚未落定」而继续显示等待页（见 SessionSettled）。
 	m.tokenMu.Lock()
 	m.token = ""
 	m.tokenMu.Unlock()
 	m.setAuthCookie("")
+	m.bumpSessionGen()
 
 	cmd := exec.Command(bin, "web", "--no-open", "--port", fmt.Sprintf("%d", cfg.DshPort))
 	cmd.Dir = m.renv.TRIMAppDest

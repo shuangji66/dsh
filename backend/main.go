@@ -166,40 +166,53 @@ func main() {
 	}()
 	logger().Printf("admin console on unix socket %s baseurl %q", renv.AdminSock, renv.AdminBaseURL)
 
+	// 反代在 dsh 启动之前就开始监听：控制台启动期间访问反代端口不再是“无响应”，
+	// 而是先走登录鉴权、再看带阶段的等待页，dsh 完成启动（含换取凭据、安装依赖）
+	// 后等待页自动跳转。放行门禁见 reverseProxy.state()。
+	boot := newBootState()
+	startProxy(renv.ProxyPort, auth, dsh, boot)
+
 	// 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
 	if os.Getenv("HARNESS_AUTOSTART") != "0" {
+		boot.set(phaseStarting, "")
 		if err := dsh.Start(); err != nil {
+			boot.set(phaseFailed, err.Error())
 			logger().Printf("autostart dsh: %v", err)
 		} else {
 			// dsh 启动成功，等待并捕获其一次性访问 token（新版 dsh 会打印
 			// "dsh web: http://127.0.0.1:<port>/?token=XXX"），并从 Set-Cookie
 			// 换取 dsh 会话 cookie，供反代转发时携带。
+			boot.set(phaseAuth, "")
 			captureDshSession(dsh)
 			// 执行 node-pty 固定版本与清理（会等待目录生成）。传入空 home 由函数内部
 			// 优先从 config.json 的 homeDir 解析 dsh 实际使用的 HOME。若返回需要重启，
 			// 则在 pnpm install 完成后重启 dsh 使 node-pty 1.2.0-beta.15 生效。
+			boot.set(phaseDeps, "")
 			restartNeeded, err := ensureNodePty(&renv, "")
 			if err != nil {
 				logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
 			}
 			if restartNeeded {
 				logger().Printf("node-pty setup changed workspace, restarting dsh")
+				boot.set(phaseDeps, "依赖已更新，正在重启 dsh")
 				if serr := dsh.Stop(); serr != nil {
 					logger().Printf("restart dsh (stop) after node-pty setup failed: %v", serr)
 				} else if serr := dsh.Start(); serr != nil {
 					logger().Printf("restart dsh (start) after node-pty setup failed: %v", serr)
 				} else {
 					// 重启后 dsh 会生成新的访问 token，需重新捕获会话。
+					boot.set(phaseAuth, "")
 					captureDshSession(dsh)
 				}
 			}
+			// 启动流水线收尾：之后能否放行只取决于 dsh 端口与凭据（dsh 运行期的
+			// 重启窗口由 reverseProxy.state() 自行推导成“启动中/已停止”）。
+			boot.set(phaseReady, "")
 		}
 	} else {
+		boot.set(phaseDisabled, "")
 		logger().Printf("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
 	}
-
-	// 先启动 dsh 并换取会话 cookie，再启动反向代理，使反代能携带 cookie 反代 dsh。
-	startProxy(renv.ProxyPort, auth, dsh)
 
 	// 等待退出信号
 	sig := make(chan os.Signal, 1)
@@ -224,7 +237,12 @@ func main() {
 // captureDshSession 等待并捕获 dsh 的一次性访问 token，并用 token 换取 dsh
 // 会话 cookie，供反向代理转发时携带。每次 dsh 启动都会生成新的 token，因此
 // dsh 重启后需重新调用本函数。
+//
+// 无论是否拿到 token 都要标记本代凭据「已落定」（SessionSettled）：反代据此
+// 决定放行还是继续显示等待页，漏标会让反代一直停在等待页。旧版 dsh 不打印
+// token 时等待会超时返回空串，同样算落定，避免永久卡住。
 func captureDshSession(dsh *DshManager) {
+	defer dsh.markSessionSettled()
 	if tok := dsh.WaitToken(15 * time.Second); tok != "" {
 		// 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
 		// 供反代转发时携带（访问不带 token 的 dsh 地址）。成功时不输出日志。
@@ -248,7 +266,7 @@ func netListen(network, addr string) (net.Listener, error) {
 
 var proxyServer *http.Server
 
-func startProxy(port int, auth *Auth, dsh *DshManager) {
+func startProxy(port int, auth *Auth, dsh *DshManager, boot *bootState) {
 	if proxyServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -257,7 +275,7 @@ func startProxy(port int, auth *Auth, dsh *DshManager) {
 	addr := ":" + strconv.Itoa(port)
 	proxyServer = &http.Server{
 		Addr:    addr,
-		Handler: newReverseProxy(auth, dsh),
+		Handler: newReverseProxy(auth, dsh, boot),
 	}
 	go func() {
 		logger().Printf("reverse proxy listening on %s", addr)

@@ -362,16 +362,10 @@ func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "启动失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// 启动后等待并捕获一次性访问 token（新版 dsh 打印在启动日志里），
-	// 并用 token 换取 dsh 会话 cookie（反代转发时携带该 cookie）。
-	go func() {
-		if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
-			// 成功捕获 token 并换取 cookie 时不输出日志，仅在交换失败时记录错误。
-			if err := m.dsh.ExchangeToken(); err != nil {
-				logger().Printf("dsh token exchange failed: %v", err)
-			}
-		}
-	}()
+	// 启动后等待并捕获一次性访问 token（新版 dsh 打印在启动日志里），用 token
+	// 换取 dsh 会话 cookie（反代转发时携带该 cookie），并标记本代凭据已落定，
+	// 否则反代会一直停在等待页（见 DshManager.SessionSettled）。
+	go captureDshSession(m.dsh)
 	writeJSON(w, m.dsh.Status())
 }
 
@@ -392,16 +386,9 @@ func (m *AdminMux) restartDsh() error {
 	if err := m.dsh.Start(); err != nil {
 		return fmt.Errorf("启动失败: %w", err)
 	}
-	// 重启后等待并捕获新的访问 token（每次启动 dsh 都会生成新的 token），
-	// 并用 token 换取 dsh 会话 cookie。
-	go func() {
-		if tok := m.dsh.WaitToken(15 * time.Second); tok != "" {
-			// 成功捕获 token 并换取 cookie 时不输出日志，仅在交换失败时记录错误。
-			if err := m.dsh.ExchangeToken(); err != nil {
-				logger().Printf("dsh token exchange failed: %v", err)
-			}
-		}
-	}()
+	// 重启后等待并捕获新的访问 token（每次启动 dsh 都会生成新的 token），用 token
+	// 换取 dsh 会话 cookie，并标记本代凭据已落定（反代据此放行等待页）。
+	go captureDshSession(m.dsh)
 	return nil
 }
 

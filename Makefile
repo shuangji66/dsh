@@ -27,6 +27,7 @@ GOCACHE   ?= $(ROOT)/.gocache
 GOPATH    ?= $(ROOT)/.gopath
 export GOCACHE GOPATH
 export GOFLAGS="-buildvcs=false"
+export PATH := /var/apps/nodejs_v24/target/bin:$(PATH)
 
 .PHONY: all dev release clean
 

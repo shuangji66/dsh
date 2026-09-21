@@ -69,7 +69,7 @@ function moveDown(idx: number) {
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
         <div class="g-modal-mask" @click="close"></div>
         <div
-          class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card flex flex-col"
+          class="relative w-full max-w-lg h-[90dvh] max-h-full bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card flex flex-col"
         >
           <div class="flex items-center justify-between px-5 py-4 border-b border-line dark:border-[#2A2A32]">
             <h3 class="font-display text-lg font-semibold text-ink dark:text-white">{{ t('qc_title') }}</h3>
@@ -79,8 +79,8 @@ function moveDown(idx: number) {
             </div>
           </div>
 
-          <!-- 命令卡片列表 -->
-          <div class="flex-1 overflow-y-auto px-5 py-4 space-y-3 max-h-[50vh]">
+          <!-- 命令卡片列表：弹窗整体高度固定为终端页的 90%，列表占满剩余空间并滚动 -->
+          <div class="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
             <div v-if="props.loading" class="text-sm text-ink-soft dark:text-[#8A8A92] text-center py-8">
               {{ t('loading') }}
             </div>

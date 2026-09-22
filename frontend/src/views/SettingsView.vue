@@ -71,6 +71,17 @@ function submit() {
       return
     }
   }
+  // 反代端口校验（后端同样校验，这里先拦一道给出可读提示）：
+  // 必须落在 1-65535，且不能与 dsh 端口相同 —— 两者会争抢同一个 TCP 端口。
+  const pp = config.value.proxyPort
+  if (!Number.isInteger(pp) || pp < 1 || pp > 65535) {
+    toast.show(t('settings_proxy_port_invalid'), 'error')
+    return
+  }
+  if (pp === config.value.dshPort) {
+    toast.show(t('settings_proxy_port_same'), 'error')
+    return
+  }
   store.save()
 }
 
@@ -186,6 +197,19 @@ async function onAuthToggle() {
             class="g-input disabled:cursor-not-allowed"
           />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_dsh_port_hint') }}</p>
+        </div>
+
+        <!-- 反向代理监听端口（外部端口访问）：由 harness 自己监听，保存后即时重绑生效 -->
+        <div class="py-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_port') }}</label>
+          <input
+            v-model.number="config.proxyPort"
+            type="number"
+            min="1"
+            max="65535"
+            class="g-input"
+          />
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_port_hint') }}</p>
         </div>
 
         <!-- node 版本切换 -->

@@ -17,7 +17,7 @@
   dsh 装插件自重启后通过 `/proc` 重新发现实时 PID。
 - **访问 Token / Cookie 交换** — 从 dsh 启动日志捕获一次性访问 token，换取 dsh 会话
   Cookie，供反向代理转发时携带，实现免 token 访问。
-- **反向代理** — 把 dsh 的 Web 界面经统一端口（默认 `13079`）对外暴露，并叠加登录鉴权。
+- **反向代理** — 把 dsh 的 Web 界面经配置的端口（默认 `3079`，设置页可改）对外暴露，并叠加登录鉴权。
   **控制台启动的第一刻就监听**：dsh 还没起来时不再“无响应”，而是先给登录页、再给
   带阶段的等待页，dsh 完成启动（含换取凭据、安装依赖）后等待页自动跳转。
   （见下文「启动期间的等待页与放行门禁」一节）
@@ -125,9 +125,9 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 
 二进制经 fnOS 平台以 `/var/apps/Harness` 部署，监听 **Admin Unix Socket**
 （默认 `<appDest>/app.sock`），前端由 nginx 反代到该 socket 的 baseurl 前缀。
-反向代理本身有**两条监听**：TCP 端口（`PROXY_PORT`，占据站点根）与可选的
-**Unix Socket 子路径挂载**（`HARNESS_PROXY_SOCK` + `HARNESS_PROXY_BASEURL`，
-见下文「子路径部署」）。
+反向代理本身有**两条监听**：TCP 端口（配置项 `proxyPort`，默认 `3079`，占据站点根）
+与可选的 **Unix Socket 子路径挂载**（`HARNESS_PROXY_SOCK` +
+`HARNESS_PROXY_BASEURL`，见下文「子路径部署」）。
 
 | 环境变量 | 说明 | 默认 |
 | --- | --- | --- |
@@ -139,9 +139,9 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_DSH_PID_FILE` | dsh 服务 PID 文件路径（随 dsh 启动/自重启刷新为实时 PID，dsh 停止时移除） | 空 |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
 | `HARNESS_QUICK_CMDS_FILE` | 终端快捷指令持久化文件 | `$TRIM_PKGVAR/quickcmds.json` |
-| `PROXY_PORT` | 反向代理监听端口（根挂载） | `13079` |
 | `HARNESS_PROXY_SOCK` | 反向代理的子路径挂载 Unix socket（空或 `off` 关闭） | `$TRIM_APPDEST/dsh.sock` |
 | `HARNESS_PROXY_BASEURL` | 该 socket 对外占据的子路径（反代剥掉后再转发给 dsh） | `/app/Harness/dsh` |
+| `PROXY_PORT` | **已废弃**：反代监听端口改为设置页配置项（`config.json` 的 `proxyPort`，默认 `3079`），此环境变量不再生效 | — |
 | `dsh_port` / `TARGET_PORT` | dsh web 端口 | `13080` |
 | `proxy_mode` | 设为 `1` 启用代理 | `0` |
 | `proxy_addr` | 代理地址 | `http://127.0.0.1:7890` |
@@ -150,15 +150,20 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `auth_ttl_hours` | 登录鉴权有效期（小时） | `4` |
 | `TRIM_API_TOKEN` / `TRIM_APPNAME` | fnOS gateway 凭据 | — |
 
-运行时配置（`config.json`）字段：`dshPort`、`proxyEnabled`、`proxyAddr`、
+运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、`proxyAddr`、
 `authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
 `homeDir`、`accessUrls`、`browserCompat`。可通过设置页修改并保存。
+
+其中 `proxyPort`（反代本身对外监听的 TCP 端口，设置页「反代监听端口」）与 `dshPort`
+语义不同：`dshPort` 由 dsh 进程绑定、必须停 dsh 才能改；`proxyPort` 是 harness 自己的
+监听，保存时先绑定新端口、成功后才关闭旧监听并落盘，因此改完立即生效，端口被占用则
+整次保存被拒绝（旧监听继续服务）。
 
 ---
 
 ## 子路径部署：反代挂载点与 Unix Socket 前置
 
-除了 TCP 端口（根挂载，历史行为不变），反代还会在
+除了 TCP 端口（根挂载，端口见配置项 `proxyPort`），反代还会在
 **`HARNESS_PROXY_SOCK`（默认 `$TRIM_APPDEST/dsh.sock`）** 上再监听一个 Unix
 Socket，并把它挂在 **`HARNESS_PROXY_BASEURL`（默认 `/app/Harness/dsh`）** 子路径下：
 
@@ -373,8 +378,8 @@ Cache-Control: public, max-age=31536000, immutable
 
 ## 启动期间的等待页与放行门禁
 
-反代**在 dsh 启动之前**就已经监听 `PROXY_PORT`（见 `main.go`：`startProxy` 紧跟在
-Admin socket 之后）。旧实现把反代放在“dsh 启动 → 换取 Cookie → 安装 node-pty”之后，
+反代**在 dsh 启动之前**就已经监听配置的反代端口（`proxyPort`，见 `main.go`：`startProxy`
+紧跟在 Admin socket 之后）。旧实现把反代放在“dsh 启动 → 换取 Cookie → 安装 node-pty”之后，
 这期间访问反代端口既没有页面也没有响应，只能干等（首次启动装依赖时可能是几分钟）。
 
 现在的顺序与门禁：
@@ -395,7 +400,7 @@ Admin socket 之后）。旧实现把反代放在“dsh 启动 → 换取 Cookie
 | 条件 | 含义 | 不满足时的阶段 |
 | --- | --- | --- |
 | 启动流水线已收尾 | 不在 `starting / auth / deps` 阶段（收尾可能重启 dsh，提前放行会让界面随即失效） | `starting` / `auth` / `deps`（页面统一显示「等待服务就绪」） |
-| dsh 端口已监听 | `PROXY_PORT` 后端可连 | 进程在 → `starting`；进程不在 → `stopped` |
+| dsh 端口已监听 | 配置的 `dshPort` 可连（反代的上游） | 进程在 → `starting`；进程不在 → `stopped` |
 | 本代凭据已落定 | `DshManager.SessionSettled()`：本代 dsh 的 `dsh-auth-*` Cookie 已换取（或确认无需凭据） | `auth` |
 
 `phase` 取值（`/_ready` 原样返回，便于排查；页面只区分「等待中」与「需要动手」两类）：
@@ -430,7 +435,7 @@ Admin socket 之后）。旧实现把反代放在“dsh 启动 → 换取 Cookie
    dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie，并标记本代凭据已落定
    （`markSessionSettled`，反代据此放行）。
 3. **放行** — 三条件齐备（流水线收尾 + 端口就绪 + 凭据落定）后，反代携带该 Cookie
-   把 dsh 反代到 `PROXY_PORT`；等待页轮询到 `ready` 即自动跳转。详见上文
+   把 dsh 反代到配置的反代端口；等待页轮询到 `ready` 即自动跳转。详见上文
    「启动期间的等待页与放行门禁」。
 4. **node-pty** — 等待 `$HOME/.dsh/profiles/web` 目录生成后安装并 patch node-pty
    （仍在放行门禁内：此阶段即使端口已通也不放行）。

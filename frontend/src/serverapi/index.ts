@@ -52,6 +52,9 @@ export interface RuntimeInfo {
 
 export interface AppConfig {
   dshPort: number
+  // 反向代理监听端口（外部端口访问），默认 3079，随配置持久化。
+  // 与 dshPort 不同：它由 harness 自己监听，保存后即时重绑生效，无需重启 dsh。
+  proxyPort: number
   proxyEnabled: boolean
   proxyAddr: string
   authEnabled: boolean

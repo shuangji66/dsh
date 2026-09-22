@@ -993,7 +993,7 @@ func (m *DshManager) Status() map[string]interface{} {
 		"pid":        pid,
 		"startedAt":  startedAt.Format(time.RFC3339),
 		"dshPort":    cfg.DshPort,
-		"proxyPort":  m.renv.ProxyPort,
+		"proxyPort":  cfg.ProxyPort,
 		"locked":     running,
 		"cpuPercent": cpu,
 		"memoryMB":   mem,

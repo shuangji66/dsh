@@ -573,7 +573,7 @@ type reverseProxy struct {
 // proxyMount 描述反代对外的挂载点（baseurl）。
 //
 //   - prefix 为空：根挂载。反代直接占据站点根，请求路径原样转发给 dsh（历史行为，
-//     TCP 的 PROXY_PORT 监听即如此）。
+//     TCP 端口监听即如此，端口见 AppConfig.ProxyPort）。
 //   - prefix 非空（如 "/app/Harness/dsh"）：反代挂在子路径下。这类部署来自平台网关
 //     ——它把 http://<fnip>:<port>/app/Harness/dsh 整段转发到本进程的 unix socket，
 //     反代必须把前缀剥干净再转发给 dsh（dsh 只认 /、/api、/plugins 等根路径），

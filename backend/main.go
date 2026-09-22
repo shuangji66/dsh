@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -145,7 +147,9 @@ func main() {
 	// 巡检并清理陈旧的 dsh 写锁（持有者已死）：这类锁会让插件列表/安装白等 120 秒
 	// 再失败，见 cleanStaleProfileLocks。
 	dsh.startStaleLockWatch()
-	admin := newAdminMux(&renv, dsh, auth, upd)
+	// 启动阶段状态机在此创建：反代（两条监听）与设置页的端口切换都要用它。
+	boot := newBootState()
+	admin := newAdminMux(&renv, dsh, auth, upd, boot)
 	admin.SetSPA(embeddedFrontend())
 
 	// 准备终端会话临时镜像目录（进程停止时整目录清除）
@@ -169,8 +173,11 @@ func main() {
 	// 反代在 dsh 启动之前就开始监听：控制台启动期间访问反代端口不再是“无响应”，
 	// 而是先走登录鉴权、再看带阶段的等待页，dsh 完成启动（含换取凭据、安装依赖）
 	// 后等待页自动跳转。放行门禁见 reverseProxy.state()。
-	boot := newBootState()
-	startProxy(renv.ProxyPort, auth, dsh, boot)
+	// 监听端口取自持久化配置（AppConfig.ProxyPort，默认 3079），绑定失败不致命：
+	// 控制台（admin socket）与 Unix Socket 挂载照常提供，仅这条 TCP 监听缺席。
+	if err := startProxy(cfg.ProxyPort, auth, dsh, boot); err != nil {
+		logger().Printf("reverse proxy listen on :%d failed: %v", cfg.ProxyPort, err)
+	}
 	// 第二条监听：unix socket + 子路径挂载（fnOS 网关把 /app/Harness/dsh 转发到这里）。
 	startProxySocket(renv.ProxySock, renv.ProxyBaseURL, auth, dsh, boot)
 
@@ -267,25 +274,62 @@ func netListen(network, addr string) (net.Listener, error) {
 	return net.Listen(network, addr)
 }
 
-var proxyServer *http.Server
+var (
+	proxyServer *http.Server
+	proxyLn     net.Listener
+	proxyMu     sync.Mutex
+)
 
-func startProxy(port int, auth *Auth, dsh *DshManager, boot *bootState) {
-	if proxyServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		proxyServer.Shutdown(ctx)
-	}
+// startProxy 绑定并启动反代的 TCP 监听（根挂载，端口见 AppConfig.ProxyPort）。
+//
+// 与旧实现的区别：监听在这里**同步绑定**，绑定失败（端口被占用、无权限）直接返回
+// 错误而不是只在 goroutine 里记日志 —— 设置页切换端口时需要先确认新端口可用，
+// 失败就必须保持旧监听不动（见 admin.go 的 applyProxyPortChange）。
+// 切换成功后旧监听随即关闭，端口改动无需重启控制台（进程退出时由操作系统回收）。
+func startProxy(port int, auth *Auth, dsh *DshManager, boot *bootState) error {
 	addr := ":" + strconv.Itoa(port)
-	proxyServer = &http.Server{
-		Addr:    addr,
-		Handler: newReverseProxy(auth, dsh, boot),
+	ln, err := netListen("tcp", addr)
+	if err != nil {
+		return err
 	}
+	srv := &http.Server{Addr: addr, Handler: newReverseProxy(auth, dsh, boot)}
+
+	proxyMu.Lock()
+	oldSrv, oldLn := proxyServer, proxyLn
+	proxyServer, proxyLn = srv, ln
+	proxyMu.Unlock()
+
 	go func() {
 		logger().Printf("reverse proxy listening on %s", addr)
-		if err := proxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// 端口切换（或进程退出）时监听会被主动关闭，Serve 返回的 ErrServerClosed /
+		// net.ErrClosed 属正常收尾，不记为错误。
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			logger().Printf("proxy server error: %v", err)
 		}
 	}()
+	closeProxyListener(oldSrv, oldLn)
+	return nil
+}
+
+// closeProxyListener 关闭一条已被替换下来的反代监听（端口切换时由 startProxy
+// 传入旧值）。
+func closeProxyListener(srv *http.Server, ln net.Listener) {
+	if srv == nil && ln == nil {
+		return
+	}
+	// 先关监听让 Serve 立刻返回，再优雅关闭在途请求（等待页是短连接，不会久留）。
+	if ln != nil {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			logger().Printf("close old proxy listener: %v", err)
+		}
+	}
+	if srv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.DeadlineExceeded) {
+			logger().Printf("shutdown old proxy server: %v", err)
+		}
+	}
 }
 
 var (

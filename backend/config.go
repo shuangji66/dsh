@@ -10,7 +10,12 @@ import (
 
 // AppConfig holds the settings editable from the frontend.
 type AppConfig struct {
-	DshPort      int    `json:"dshPort"`
+	DshPort int `json:"dshPort"`
+	// ProxyPort 是反向代理（TCP 根挂载）的监听端口，默认 3079，随配置持久化。
+	// 它只决定 harness 自身监听哪个端口对外提供 dsh 界面，不再是
+	// 「dsh 端口」的对偶（dsh 只监听本机，由反代转发），因此改端口只影响反代自身：
+	// 保存后立即重新绑定（见 rebindProxyPort），不需要重启 dsh 或控制台。
+	ProxyPort    int    `json:"proxyPort"`
 	ProxyEnabled bool   `json:"proxyEnabled"`
 	ProxyAddr    string `json:"proxyAddr"`
 	AuthEnabled  bool   `json:"authEnabled"`
@@ -54,7 +59,8 @@ type AppConfig struct {
 	BrowserCompat bool `json:"browserCompat"`
 }
 
-// RuntimeEnv 添加 ProxyPort
+// RuntimeEnv 描述进程启动时的环境（环境变量来源，含路径与凭据）。
+// 注意：反向代理端口不在其中 —— 它是可变的用户配置（AppConfig.ProxyPort）。
 type RuntimeEnv struct {
 	ConfigFile   string
 	AdminSock    string
@@ -73,7 +79,6 @@ type RuntimeEnv struct {
 	Home          string
 	PnpmHome      string
 	Lang          string
-	ProxyPort     int    // 新增
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（HARNESS_QUICK_CMDS_FILE）
 	SessionDir    string // 终端会话临时镜像目录（HARNESS_SESSION_DIR，停止时整目录清除）
 	// ProxySock/ProxyBaseURL 是反代的「子路径挂载」监听：平台网关（fnOS
@@ -101,13 +106,6 @@ func envOr(k, def string) string {
 func loadRuntimeEnv() RuntimeEnv {
 	appDest := os.Getenv("TRIM_APPDEST")
 	appName := os.Getenv("TRIM_APPNAME")
-	// 从环境变量获取反代端口，默认 13079
-	proxyPort := 13079
-	if p := os.Getenv("PROXY_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil && v > 0 {
-			proxyPort = v
-		}
-	}
 	// 反代 unix socket 的默认路径：平台应用目录下的 dsh.sock（即
 	// /var/apps/Harness/target/dsh.sock）。非平台环境（TRIM_APPDEST 缺失）沿用
 	// 同一绝对默认值，目录建不出来时 startProxySocket 只记日志并跳过这条监听。
@@ -129,7 +127,6 @@ func loadRuntimeEnv() RuntimeEnv {
 		Home:          os.Getenv("HOME"),
 		PnpmHome:      os.Getenv("PNPM_HOME"),
 		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
-		ProxyPort:     proxyPort,
 		QuickCmdsFile: envOr("HARNESS_QUICK_CMDS_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "quickcmds.json")),
 		SessionDir:    envOr("HARNESS_SESSION_DIR", filepath.Join(os.Getenv("TRIM_PKGVAR"), "terminal-sessions")),
 		ProxySock:     envOr("HARNESS_PROXY_SOCK", proxySock),
@@ -147,6 +144,7 @@ func defaultConfig() AppConfig {
 	proxyEnabled := os.Getenv("proxy_mode") == "1"
 	return AppConfig{
 		DshPort:      dshPort,
+		ProxyPort:    defaultProxyPort,
 		ProxyEnabled: proxyEnabled,
 		ProxyAddr:    envOr("proxy_addr", "http://127.0.0.1:7890"),
 		AuthEnabled:  authEnabled,
@@ -166,6 +164,22 @@ func envOrInt(k string, def int) int {
 		}
 	}
 	return def
+}
+
+// defaultProxyPort 是反代 TCP 监听端口的默认值（设置页可改，见 AppConfig.ProxyPort）。
+// 它刻意不再读 PROXY_PORT 环境变量：端口属于用户配置，随 config.json 持久化，
+// 旧环境变量（以及旧默认 13079）不再生效。
+const defaultProxyPort = 3079
+
+// validProxyPort 校验反代端口是否在可绑定范围内（1..65535）。
+func validProxyPort(p int) bool { return p >= 1 && p <= 65535 }
+
+// normalizeProxyPort 把非法/空值归一化为默认端口。
+func normalizeProxyPort(p int) int {
+	if !validProxyPort(p) {
+		return defaultProxyPort
+	}
+	return p
 }
 
 func atoi(s string) int {
@@ -274,6 +288,9 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	if v.NodeVersion == "" {
 		v.NodeVersion = "node24"
 	}
+	// 旧配置文件（反代端口还来自 PROXY_PORT 环境变量）没有 proxyPort 字段，
+	// 回退到默认 3079 并随下次保存落盘。
+	v.ProxyPort = normalizeProxyPort(v.ProxyPort)
 	return &v
 }
 
@@ -285,11 +302,13 @@ func GetConfig() AppConfig {
 }
 
 // SaveConfig persists the config to disk (atomic write) and updates memory.
-// 注意：反代端口（ProxyPort）不再由配置保存，仅从环境变量读取。
+// 注意：反代端口（ProxyPort）由本配置保存，但它不是 dsh 自己绑定的端口 ——
+// 端口值写完内存后需要调用方重新绑定监听（见 admin.go 的 rebindProxyPort）。
 func SaveConfig(renv *RuntimeEnv, next *AppConfig, lockedPorts bool) error {
 	cfgLock.Lock()
 	if lockedPorts {
-		// 只锁定 dsh 端口，反代端口不可变
+		// 只锁定 dsh 端口：dsh 运行中不可改（端口由 dsh 进程持有）；
+		// 反代端口可随时改，保存后即时重绑。
 		next.DshPort = cfg.DshPort
 	}
 	cfg = *next

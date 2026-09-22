@@ -7,6 +7,7 @@ import { useI18n } from '@/composables/useI18n'
 export const useSettingsStore = defineStore('settings', () => {
   const config = ref<AppConfig>({
     dshPort: 13080,
+    proxyPort: 3079,
     proxyEnabled: false,
     proxyAddr: 'http://127.0.0.1:7890',
     authEnabled: true,

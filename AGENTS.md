@@ -40,8 +40,8 @@
   → 起 dsh（非 `HARNESS_AUTOSTART=0`）→ 换 Cookie → 装 node-pty → 标记就绪 → 等信号退出。
 - `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled`）+ `proxyState`。
   反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
-- `config.go` — `AppConfig`（前端可改）与 `RuntimeEnv`（环境变量）。**反向代理端口
-  （`ProxyPort`）只从环境变量读，不随配置保存。**
+- `config.go` — `AppConfig`（前端可改，含反代端口 `ProxyPort`）与 `RuntimeEnv`（环境变量）。
+  **反代端口是持久化配置项**（`proxyPort`，默认 `3079`），不再读 `PROXY_PORT`。
 - `admin.go` — Admin mux（Unix socket）：`buildHandler()` 里一个大的 `switch` 分发
   所有 `/api/*` 路由；`spaHandler` 提供内嵌前端。
 - `dsh.go` — `DshManager`：进程生命周期；`effectivePID`/`findDshPid` 处理**装插件自重启**
@@ -51,7 +51,7 @@
 - `proxy.go` — 反向代理，转发时**携带 dsh 会话 Cookie**；`ServeHTTP` 里顺序是
   「剥挂载前缀 → 鉴权路由 → 就绪状态 `/_ready` → 鉴权 → 等待页/转发」，放行判定只在
   `reverseProxy.state()` 一处；等待页（`waitingPageHTML`）轮询 `/_ready` 并自动跳转。
-  反代有**两条监听、两种挂载**：TCP `PROXY_PORT` 是根挂载（历史行为），可选的
+  反代有**两条监听、两种挂载**：TCP `proxyPort`（配置项，默认 `3079`）是根挂载（历史行为），可选的
   Unix Socket（`HARNESS_PROXY_SOCK`，默认 `$TRIM_APPDEST/dsh.sock`）挂在
   `HARNESS_PROXY_BASEURL`（默认 `/app/Harness/dsh`，刻意比控制台 baseurl 深一层）下
   ——平台网关把该子路径整段转发到 socket，由反代**剥离前缀**后转发给 dsh（dsh 只认
@@ -88,7 +88,10 @@
 2. **不要硬编码平台路径** —— 用环境变量（`TRIM_APPDEST`、`TRIM_PKGVAR`、
    `HARNESS_*`）而非写死 `/var/apps/Harness`（除非是 `install.go`/`fnos.go` 等
    明确约定平台常量的位置）。
-3. **反向代理端口不可被配置保存覆盖** —— 端口只来自 `PROXY_PORT` 环境变量。
+3. **反代端口改动必须“先绑新、再关旧”** —— 它是可持久化的配置项（`AppConfig.ProxyPort`，
+   默认 `3079`，不再读 `PROXY_PORT`），保存时经 `startProxy` 同步绑定新端口：绑定失败
+   （占用/无权限）必须整次拒绝保存且旧监听不动，成功后由 `startProxy` 关闭旧监听；
+   只有 `startProxy` 能改监听，别另起一个监听函数或只在启动时读一次端口。
 4. **PID 感知** —— 涉及 dsh 进程生命周期/状态时，用 `effectivePID()` 而非直接信任
    `m.cmd.Process.Pid`（dsh 会装插件自重启）。
 5. **前端改动必须重编译验证** —— 修改前端后运行构建并刷新确认，别只改文件。
@@ -133,7 +136,8 @@
      给 dsh 传前缀参数。此机制的前提是 **dsh ≥ 0.1.7-alpha.1**，更早版本在子路径下必然 404。
 - **`PROFILE_TEMPLATES.web.bundles` 注入** —— 只在 `server-build.yaml` 的 CI 中对
   `dsh-app-boot` 做，本地不涉及。
-- **代理端口默认 `13079`、dsh 端口默认 `13080`** —— 冲突排查先看这两个。
+- **反代端口默认 `3079`（设置页可改，持久化在 `config.json` 的 `proxyPort`）、
+  dsh 端口默认 `13080`** —— 冲突排查先看这两个；两者不可相同（设置页与后端都校验）。
 - **dsh 的跨进程写锁会因「持有者被杀」而残留，代价是 120 秒白等** ——
   `@deepseek-ai/dsh-atomic-write` 的 `withFileLock` 用 `<文件>.lock` + `wx` 独占创建、
   只在 `finally` 里删除；持有者被杀死（用户取消安装、进程被重启带走）就永久残留，

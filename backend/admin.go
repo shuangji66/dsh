@@ -26,10 +26,16 @@ type AdminMux struct {
 	update   *UpdateManager
 	sessions *SessionManager
 	spa      http.Handler
+	// boot 是启动阶段状态机：反代用它决定等待页/放行，设置页切换反代端口时
+	// 重建监听也要复用它（见 rebindProxyPort）。
+	boot *bootState
 }
 
 // newAdminMux wires the admin SPA mux onto the unix socket.
-func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManager) *AdminMux {
+func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManager, boot *bootState) *AdminMux {
+	if boot == nil {
+		boot = newBootState()
+	}
 	return &AdminMux{
 		renv:     renv,
 		dsh:      dsh,
@@ -37,6 +43,7 @@ func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManag
 		fnos:     NewFnosClient(renv),
 		update:   upd,
 		sessions: NewSessionManager(renv),
+		boot:     boot,
 	}
 }
 
@@ -240,7 +247,7 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"adminSock":    m.renv.AdminSock,
 			"adminBaseURL": m.renv.AdminBaseURL,
 			"appName":      m.renv.TRIMAppName,
-			"proxyPort":    m.renv.ProxyPort,
+			"proxyPort":    cfg.ProxyPort,
 			// node 版本切换选项：列出可用版本及其标识，前端据此显示下拉选项。
 			// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
 			"nodeVersions": m.nodeVersionsInfo(),
@@ -301,11 +308,56 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		req.Config.NodeVersion = "node24"
 	}
 	locked := m.dsh.Running()
+	// 校验反代端口：1..65535，且不能与 dsh 端口相同（两者会争抢同一个 TCP 端口）。
+	// 字段缺失/为 0（旧版前端缓存提交的配置）按“未修改”处理，沿用已存端口。
+	if req.Config.ProxyPort == 0 {
+		req.Config.ProxyPort = GetConfig().ProxyPort
+	}
+	if !validProxyPort(req.Config.ProxyPort) {
+		writeErr(w, "反代端口必须在 1-65535 之间", http.StatusBadRequest)
+		return
+	}
+	// dsh 运行中时端口被锁定（SaveConfig 会保留旧值），比较基准也要用锁定的旧值。
+	effDshPort := req.Config.DshPort
+	if locked {
+		effDshPort = GetConfig().DshPort
+	}
+	if effDshPort > 0 && req.Config.ProxyPort == effDshPort {
+		writeErr(w, "反代端口不能与 dsh 端口相同", http.StatusBadRequest)
+		return
+	}
+	// 反代端口变动需要即时重绑监听（反代是本进程自己的监听，不像 dsh 端口那样必须
+	// 停 dsh 才能改）。绑定失败直接拒绝保存，此时配置与旧监听都保持原样。
+	if err := m.rebindProxyPort(req.Config.ProxyPort); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := SaveConfig(m.renv, req.Config, locked); err != nil {
 		writeErr(w, "保存失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "locked": locked, "config": GetConfig()})
+}
+
+// rebindProxyPort 把反代的 TCP 监听（根挂载）切换到 port。
+//
+// 端口未变时不做任何事。改动时**先绑定新端口**再关闭旧监听：占用/无权限等问题会在
+// startProxy 里同步暴露，调用方据此拒绝保存，旧监听仍在服务，端口不会出现“配置改了
+// 但没人监听”的空窗。成功切换不需要重启控制台，也不需要动 dsh。
+//
+// 注意：本函数只切监听，不写配置 —— 配置由 handleSaveSettings 在重绑成功后统一保存，
+// 保证失败路径（保存出错）不会留下“监听变了但磁盘没变”的顺序歧义：此时内存与实际
+// 监听一致（SaveConfig 先更新内存再落盘），最坏只是下次启动回退到磁盘上的旧端口。
+func (m *AdminMux) rebindProxyPort(port int) error {
+	old := GetConfig().ProxyPort
+	if port == old {
+		return nil
+	}
+	if err := startProxy(port, m.auth, m.dsh, m.boot); err != nil {
+		return fmt.Errorf("反代端口 %d 监听失败: %v", port, err)
+	}
+	logger().Printf("[proxy] reverse proxy port switched %d -> %d", old, port)
+	return nil
 }
 
 // handleGetLogs 读取日志文件内容并返回给前端。

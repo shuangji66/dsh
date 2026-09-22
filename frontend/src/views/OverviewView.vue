@@ -206,6 +206,13 @@ async function removeVisitor(id: string) {
   }
 }
 
+// 网关访问（飞牛入口）没有 harness 会话 cookie：列表里标记来源为「网关访问」、
+// 显示飞牛用户名与来源 IP（同一个人从不同环境访问飞牛时 IP 不同，各占一条），
+// 不显示登录有效期，也没有注销按钮。
+function isGateway(v: Visitor): boolean {
+  return v.source === 'gateway'
+}
+
 onMounted(() => {
   store.load()
   initialLoad()
@@ -269,14 +276,25 @@ onMounted(() => {
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
               <div class="flex items-center gap-2 mb-1">
-                <span class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
+                <!-- 网关访问：标注来源（与端口访问区分：没有 cookie、不支持注销）并附飞牛用户名 -->
+                <template v-if="isGateway(v)">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand">
+                    {{ t('visitor_gateway') }}
+                  </span>
+                  <span v-if="v.username" class="text-sm font-medium text-ink dark:text-white truncate">{{ v.username }}</span>
+                </template>
+                <span v-else class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
               </div>
               <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-ink-soft dark:text-[#A6A6AD]">
+                <!-- 网关访问的 IP 单列展示（与端口访问一致，用于区分不同访问环境），
+                     登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。 -->
+                <span v-if="isGateway(v) && v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
                 <span>{{ t('last_access') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.lastAccess) }}</span></span>
-                <span>{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
+                <span v-if="!isGateway(v)">{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
               </div>
             </div>
             <button
+              v-if="!isGateway(v)"
               class="g-btn-danger !h-8 !px-3 !text-xs flex-shrink-0"
               :disabled="deleting === v.id"
               @click="removeVisitor(v.id)"

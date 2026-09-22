@@ -148,6 +148,78 @@ func (a *Auth) recordVisitor(r *http.Request) {
 	a.visitors.record(token, realIP(r), et)
 }
 
+// --- 飞牛网关访问（网关注入的身份头） ---
+//
+// 平台网关（fnOS open-gateway）转发应用请求时会注入这三个头，代表请求已经过飞牛
+// OS 的登录认证。反代只在「网关那条线」（Unix Socket 监听，见 startProxySocket 与
+// reverseProxy.gatewayLine）上认可它们：那条 socket 不在网络上暴露，只有本机网关
+// 进程能连。TCP 端口在局域网内可达，认这三个头等于把端口鉴权交给客户端自己声明
+// （任何客户端加三个头就能绕过），故端口线一概不认。
+const (
+	headerTrimUsername = "X-Trim-Username"
+	headerTrimIsAdmin  = "X-Trim-Isadmin"
+	headerTrimUserID   = "X-Trim-Userid"
+)
+
+// gatewayVisitor 是从网关请求头解析出的访问者身份。网关请求没有 harness 会话
+// cookie，登录列表因此按「飞牛用户 + 客户端 IP」标识：同一个人从不同环境（网络）
+// 访问飞牛时 IP 不同，各占一条记录，而不是反复刷新同一条。
+type gatewayVisitor struct {
+	ID       string // gatewayVisitorID(UserID, IP)，登录列表里的稳定键
+	UserID   int
+	Username string
+	Admin    bool
+	IP       string // 客户端 IP，取不到时为空
+}
+
+// parseGatewayVisitor 解析网关注入的身份头。判定门槛取「X-Trim-Userid 是有效正
+// 整数 + X-Trim-Username 非空」：这两项才构成可标识的身份；X-Trim-Isadmin 只作为
+// 附加标记（取值可能是 1/true/yes），不参与判定，以免网关版本差异让请求退回登录页。
+func parseGatewayVisitor(r *http.Request) (gatewayVisitor, bool) {
+	uid, err := strconv.Atoi(strings.TrimSpace(r.Header.Get(headerTrimUserID)))
+	if err != nil || uid <= 0 {
+		return gatewayVisitor{}, false
+	}
+	username := strings.TrimSpace(r.Header.Get(headerTrimUsername))
+	if username == "" {
+		return gatewayVisitor{}, false
+	}
+	ip := gatewayClientIP(r)
+	return gatewayVisitor{
+		ID:       gatewayVisitorID(uid, ip),
+		UserID:   uid,
+		Username: username,
+		Admin:    truthyHeader(r.Header.Get(headerTrimIsAdmin)),
+		IP:       ip,
+	}, true
+}
+
+// gatewayClientIP 取网关请求的客户端 IP，用于在登录列表里区分不同访问环境。
+// 平台网关（nginx 风格）通常带 X-Forwarded-For / X-Real-Ip，realIP 优先取它们；
+// 请求经 Unix Socket 到达时 RemoteAddr 不是可用地址（"@" 或 socket 路径），此时
+// 返回空串，记录退化为只按飞牛用户标识。
+func gatewayClientIP(r *http.Request) string {
+	raw := strings.TrimSpace(realIP(r))
+	if raw == "" || strings.HasPrefix(raw, "@") || strings.HasPrefix(raw, "/") {
+		return ""
+	}
+	return raw
+}
+
+// truthyHeader 判断网关注入的布尔标记头是否为真。
+func truthyHeader(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// recordGatewayVisitor 记录一次网关访问（登录列表里的「网关访问」条目）。
+func (a *Auth) recordGatewayVisitor(gv gatewayVisitor) {
+	a.visitors.recordGateway(gv.ID, gv.IP, gv.Username, gv.Admin)
+}
+
 // Visitors returns a snapshot of the reverse-proxy visitors.
 func (a *Auth) Visitors() []Visitor {
 	return a.visitors.List()

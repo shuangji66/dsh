@@ -568,6 +568,12 @@ type reverseProxy struct {
 	// （prefix 为空，路径原样转发）；平台网关转发的 unix socket 挂在子路径下
 	// （默认 /app/Harness/dsh），进站请求剥掉前缀、自留路径与跳转目标补回前缀。
 	mount proxyMount
+	// gatewayLine 标记这条监听是否为「平台网关那条线」（Unix Socket，见
+	// startProxySocket）。只有它认网关注入的身份头（X-Trim-Username /
+	// X-Trim-Isadmin / X-Trim-Userid）并据此跳过登录鉴权：该 socket 不在网络上
+	// 暴露，只有本机网关进程能连；TCP 端口线在局域网内可达，认这三个头等于把
+	// 端口鉴权交给客户端自己声明。
+	gatewayLine bool
 }
 
 // proxyMount 描述反代对外的挂载点（baseurl）。
@@ -633,15 +639,23 @@ func (m proxyMount) strip(path string) (string, bool) {
 }
 
 func newReverseProxy(a *Auth, dsh *DshManager, boot *bootState) *reverseProxy {
-	return newReverseProxyAt(a, dsh, boot, "")
+	// TCP 端口监听（根挂载）：不认网关注入的身份头，见 gatewayLine。
+	return newReverseProxyMount(a, dsh, boot, "", false)
 }
 
 // newReverseProxyAt 构造挂在 baseURL 下的反代（空串 = 根挂载，历史行为）。
+//
+// 该构造只用于 Unix Socket 监听（平台网关那条线，见 startProxySocket），因此信任
+// 网关注入的身份头：飞牛 OS 已完成登录认证，这条线上的请求跳过 harness 登录鉴权。
 func newReverseProxyAt(a *Auth, dsh *DshManager, boot *bootState, baseURL string) *reverseProxy {
+	return newReverseProxyMount(a, dsh, boot, baseURL, true)
+}
+
+func newReverseProxyMount(a *Auth, dsh *DshManager, boot *bootState, baseURL string, gatewayLine bool) *reverseProxy {
 	if boot == nil {
 		boot = newBootState()
 	}
-	return &reverseProxy{auth: a, dsh: dsh, boot: boot, mount: newProxyMount(baseURL)}
+	return &reverseProxy{auth: a, dsh: dsh, boot: boot, mount: newProxyMount(baseURL), gatewayLine: gatewayLine}
 }
 
 // stripMount 在进入任何业务分支之前把挂载前缀剥掉：
@@ -761,12 +775,19 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = stripped
+	// 飞牛网关访问：网关那条线（gatewayLine）上的请求带网关注入的身份头，说明飞牛
+	// OS 已完成登录认证，因此跳过 harness 登录鉴权。端口线不认这些头。
+	// 注意跳过鉴权不等于跳过就绪门禁：等待页、/_ready 轮询与 dsh 会话凭据判定都照旧。
+	gw, viaGateway := gatewayVisitor{}, false
+	if p.gatewayLine {
+		gw, viaGateway = parseGatewayVisitor(r)
+	}
 	if p.auth.handleAuthRoutes(w, r, p.mount) {
 		return
 	}
 	// WebSocket upgrade: forward the raw connection to dsh after the auth gate.
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		p.handleUpgrade(w, r)
+		p.handleUpgrade(w, r, viaGateway)
 		return
 	}
 	st, checker := p.state()
@@ -776,7 +797,7 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 仅面板后端的内部探测路径（如 /dsh-market/）视为可信、跳过鉴权；
 	// 普通浏览器流量（含经 nginx 嵌套反代到达的）必须通过面板登录鉴权。
 	if !p.isInternalRequest(r) {
-		if !p.auth.isAuthed(r) {
+		if !viaGateway && !p.auth.isAuthed(r) {
 			// next 记的是挂载内路径（如 "/api/x"），登录成功后由 handleAuthRoutes
 			// 用 mount.join 补回前缀，浏览器因此留在子路径下。
 			next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
@@ -792,8 +813,13 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serveWaitingPage(w, r, st, p.mount)
 		return
 	}
-	// 记录访客（IP、最近访问时间、登录有效期）
-	p.auth.recordVisitor(r)
+	// 记录访问：端口访问按 harness 会话令牌记（IP、最近访问时间、登录有效期），
+	// 网关访问按飞牛用户记（网关不签会话 cookie，列表里只标记「网关访问」）。
+	if viaGateway {
+		p.auth.recordGatewayVisitor(gw)
+	} else {
+		p.auth.recordVisitor(r)
+	}
 	p.forward(w, r, checker)
 }
 
@@ -839,11 +865,13 @@ func (p *reverseProxy) isInternalRequest(r *http.Request) bool {
 
 // handleUpgrade proxies a WebSocket upgrade by hijacking the client connection
 // and piping raw bytes to the dsh upstream, mirroring proxy.js upgradeHandler.
-func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request) {
+// viaGateway 表示该请求来自飞牛网关那条线且带网关身份头：飞牛 OS 已认证，跳过
+// 面板登录鉴权（与 HTTP 分支同一份判定）。
+func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request, viaGateway bool) {
 	// Auth guard: browsers can't follow a 302 on an upgrade, so reject with 401.
 	// 与 HTTP 请求一致，WebSocket 连接也必须通过面板登录鉴权（harness_session），
 	// 不得仅凭 dsh 的会话 cookie 放行，以免绕过控制台登录鉴权。
-	if !p.auth.isAuthed(r) {
+	if !viaGateway && !p.auth.isAuthed(r) {
 		hj, ok := w.(http.Hijacker)
 		if ok {
 			conn, _, _ := hj.Hijack()

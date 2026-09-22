@@ -90,7 +90,15 @@ export interface DshStatus {
 export interface Visitor {
   id: string
   ip: string
+  // 访问来源：port = 端口访问（带 harness 会话 cookie，可在列表里注销）；
+  // gateway = 飞牛网关访问（飞牛 OS 已完成登录认证，没有 cookie、不支持注销）。
+  // 后端总是下发该字段；旧版后端不带时按 port 处理。
+  source?: 'port' | 'gateway'
+  // 仅网关访问：飞牛 OS 用户名 / 是否管理员（X-Trim-Username、X-Trim-Isadmin）
+  username?: string
+  admin?: boolean
   lastAccess: string
+  // 登录有效期至；网关访问没有登录有效期，后端下发零值时间。
   expiresAt: string
 }
 

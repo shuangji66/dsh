@@ -985,6 +985,12 @@ func (m *AdminMux) handleDeleteVisitor(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "缺少 id", http.StatusBadRequest)
 		return
 	}
+	// 网关访问没有 harness 会话可吊销（每次请求都由网关注入身份头，注销也拦不住），
+	// 明确拒绝而不是假装成功，免得前端以为已经把这台设备踢下线。
+	if isGatewayVisitorID(body.ID) {
+		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "网关访问由飞牛 OS 认证，无需注销"})
+		return
+	}
 	if !m.auth.RevokeVisitor(body.ID) {
 		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "该访客不存在"})
 		return

@@ -254,8 +254,9 @@ dsh 服务的地址，无需用户配置：控制台的当前访问地址（由�
   「网关访问」（端口访问一侧在 IP 前标注「端口访问」，两类来源一眼可分）、显示飞牛
   用户名与来源 IP（`X-Forwarded-For` / `X-Real-Ip`，都取不到时为空），不显示登录
   有效期，**不提供注销**（没有凭据可吊销，`DELETE /api/visitors`
-  对这类条目直接拒绝）。这类条目闲置 **24 小时**（`gatewayVisitorIdleTTL`）后自动
-  清除，避免列表长期堆积早已离开的用户。
+  对这类条目直接拒绝）。这类条目**闲置**达到登录有效期（复用 `authTTLHours`，未配置
+  时回退 4 小时，见 `gatewayVisitorIdleTTL`）后自动清除，避免列表长期堆积早已离开的
+  用户。
 
 **只有网关那条线认这三个头**（`reverseProxy.gatewayLine`，由 `newReverseProxyAt`
 构造、`startProxySocket` 使用）。TCP 端口线（`proxyPort`，局域网可达）与回环地址

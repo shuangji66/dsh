@@ -25,6 +25,8 @@ const readyPath = "/_ready"
 //   - open-in-app block: 服务器部署没有本地 GUI 应用，"在本地编辑器打开工作区"
 //     （/open-in-app/apps、/open-in-app/icon/<app>、/open-in-app/open）无效，
 //     注入脚本拦截整个 /open-in-app/ 前缀，apps 探测失败即隐藏头部按钮。
+//     匹配前先剥掉 document.baseURI 给出的挂载前缀：dsh 客户端用的是相对路径，
+//     子路径部署（平台网关）下真实 pathname 是 "<前缀>/open-in-app/…"。
 //
 // 历史：第 3 项曾同时 patch ui-settings 的 SettingsScopeController.enqueue
 // （用于兜住设置写入），但新版 ui-settings 只导出 apply/inject、不再导出该类，
@@ -113,6 +115,21 @@ const bootstrapScript = `(function () {
   //    列表、不渲染按钮（open-in-app 的 controller.run() 与 OpenInAppAction
   //    均按“无可用应用”处理），因此拦截整个 /open-in-app/ 前缀即可让该功能
   //    整体消失，也不会再产生 /open-in-app/icon/zed 之类的图标请求。
+  //
+  //    路径比较必须“先剥挂载前缀”：dsh 客户端发的是相对路径（"open-in-app/apps"，
+  //    见 dsh-client-ui-open-in-app 里的 *_ROUTE 常量 = 宿主路由去首斜杠），浏览器
+  //    按 <base href="./"> 解析，所以经平台网关访问（子路径挂载 /app/Harness/dsh）时
+  //    实际 pathname 是 "<前缀>/open-in-app/apps"；只按根路径比较会漏拦，宿主照常
+  //    返回应用列表（含 zed），按钮又冒出来。
+  //    前缀取 document.baseURI 去掉结尾斜杠 —— 与浏览器解析这些相对路径用的是同一
+  //    份基准，既不硬编码挂载点，也不影响根挂载（HARNESS_PROXY_BASEURL 未启用时
+  //    baseURI 就是站点根，前缀为空，行为与原来完全一致）。
+  var mountPath = function () {
+    try {
+      var base = new URL(document.baseURI || location.href, location.href).pathname;
+      return base.replace(/\/+$/, "");
+    } catch (_e) { return ""; }
+  };
   var isOpenInAppUrl = function (input) {
     var raw;
     if (typeof input === "string") raw = input;
@@ -120,8 +137,10 @@ const bootstrapScript = `(function () {
     else if (input && typeof input === "object" && typeof input.url === "string") raw = input.url; // Request
     else return false;
     try {
-      var u = new URL(raw, location.href);
-      var p = u.pathname;
+      // 解析基准同样取 baseURI：与浏览器把相对路径变成真实请求 URL 的结果一致。
+      var p = new URL(raw, document.baseURI || location.href).pathname;
+      var prefix = mountPath();
+      if (prefix && p.indexOf(prefix + "/") === 0) p = p.slice(prefix.length);
       return p === "/open-in-app" || p.indexOf("/open-in-app/") === 0;
     } catch (_e) { return false; }
   };

@@ -13,7 +13,8 @@ import (
 //   - gateway：飞牛网关访问（平台网关注入身份头，见 proxy.go 的 gatewayLine）。
 //     网关请求没有 harness 会话 cookie，`ID` 按「飞牛用户 + 客户端 IP」构造：同一个人
 //     从不同环境（网络）访问飞牛时 IP 不同，各占一条记录，不会被合并刷新成同一条；
-//     没有登录有效期，也不支持注销。
+//     没有登录有效期（记录里 `ExpiresAt` 恒为零值），也不支持注销；改为按闲置
+//     清除：超过登录有效期没有新访问就自动消失（见 gatewayVisitorIdleTTL）。
 const (
 	visitorSourcePort    = "port"
 	visitorSourceGateway = "gateway"
@@ -22,10 +23,14 @@ const (
 	gatewayVisitorIDPrefix = "gateway:uid:"
 )
 
-// gatewayVisitorIdleTTL 是网关访问条目的闲置清除时长。网关请求没有 harness 会话，
-// 也就没有「登录有效期」可以清理（ExpiresAt 恒为零值），若不设闲置上限，登录列表
-// 会长期堆积早已离开的用户。超时只删记录、不涉及任何凭据（网关访问本就没有凭据）。
-const gatewayVisitorIdleTTL = 24 * time.Hour
+// gatewayVisitorIdleTTL 是网关访问条目的闲置清除时长，直接复用登录有效期
+// （配置 AuthTTLHours，未配置或非法时回退 4 小时，见 authTTLSeconds）：网关请求
+// 没有 harness 会话，也就没有「登录有效期」可清理（ExpiresAt 恒为零值），若不设
+// 闲置上限，登录列表会长期堆积早已离开的用户。超时只删记录、不涉及任何凭据
+// （网关访问本就没有凭据）。
+func gatewayVisitorIdleTTL() time.Duration {
+	return time.Duration(authTTLSeconds(GetConfig())) * time.Second
+}
 
 // Visitor represents one identity against the reverse proxy. It is keyed by the
 // session token (port access) or the fnOS user + client IP (gateway access) so
@@ -181,17 +186,19 @@ func (t *VisitorTracker) recordGateway(id, ip, username string, admin bool) {
 
 // PurgeExpired removes visitor records that are no longer meaningful, revoking
 // the tokens of expired port visitors so they must log in again. Gateway
-// entries have no expiry and are dropped once idle beyond gatewayVisitorIdleTTL.
+// entries have no expiry and are dropped once idle beyond the login validity
+// window (gatewayVisitorIdleTTL).
 // Returns the number of records removed.
 func (t *VisitorTracker) PurgeExpired(now time.Time) int {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	idleTTL := gatewayVisitorIdleTTL()
 	t.mu.Lock()
 	removed := 0
 	for tok, v := range t.byToken {
 		if v.Source == visitorSourceGateway {
-			if now.Sub(v.LastAccess) > gatewayVisitorIdleTTL {
+			if now.Sub(v.LastAccess) > idleTTL {
 				delete(t.byToken, tok)
 				removed++
 			}

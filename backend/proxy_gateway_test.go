@@ -358,7 +358,7 @@ func TestGatewayVisitorCannotBeRevoked(t *testing.T) {
 	}
 }
 
-// 网关条目没有登录有效期，靠闲置时长清理，避免列表长期堆积早已离开的用户。
+// 网关条目没有登录有效期，靠闲置时长清理（复用登录有效期），避免列表长期堆积早已离开的用户。
 func TestGatewayVisitorPurgedWhenIdle(t *testing.T) {
 	auth := NewAuth()
 	auth.recordGatewayVisitor(gatewayVisitor{
@@ -368,11 +368,52 @@ func TestGatewayVisitorPurgedWhenIdle(t *testing.T) {
 	auth.visitors.record("tok", "10.0.0.9", time.Now().Add(time.Hour).Unix())
 
 	auth.visitors.mu.Lock()
-	auth.visitors.byToken[gatewayVisitorID(1000, gatewayTestIP)].LastAccess = time.Now().Add(-gatewayVisitorIdleTTL - time.Minute)
+	auth.visitors.byToken[gatewayVisitorID(1000, gatewayTestIP)].LastAccess = time.Now().Add(-gatewayVisitorIdleTTL() - time.Minute)
 	auth.visitors.mu.Unlock()
 
 	visitors := auth.Visitors()
 	if len(visitors) != 1 || visitors[0].Source != visitorSourcePort {
 		t.Fatalf("闲置超时的网关条目应被清理、端口条目应保留, 实际 %+v", visitors)
+	}
+}
+
+// withAuthTTLHours 临时把配置里的登录有效期改成 hours，测试结束还原。
+func withAuthTTLHours(t *testing.T, hours int) {
+	t.Helper()
+	cfgLock.Lock()
+	old := cfg.AuthTTLHours
+	cfg.AuthTTLHours = hours
+	cfgLock.Unlock()
+	t.Cleanup(func() {
+		cfgLock.Lock()
+		cfg.AuthTTLHours = old
+		cfgLock.Unlock()
+	})
+}
+
+// 网关条目的闲置清除时长复用登录有效期（authTTLHours），不另设固定值。
+func TestGatewayVisitorIdleTTLUsesAuthTTL(t *testing.T) {
+	const id = "gateway-ttl-test"
+	auth := NewAuth()
+	auth.visitors.recordGateway(id, gatewayTestIP, "alice", false)
+	// 闲置 90 分钟：登录有效期 2 小时时仍在窗口内，1 小时时应被清除。
+	auth.visitors.mu.Lock()
+	auth.visitors.byToken[id].LastAccess = time.Now().Add(-90 * time.Minute)
+	auth.visitors.mu.Unlock()
+
+	withAuthTTLHours(t, 2)
+	if got := auth.Visitors(); len(got) != 1 {
+		t.Fatalf("闲置 90 分钟未达登录有效期（2 小时），条目应保留, 实际 %+v", got)
+	}
+
+	withAuthTTLHours(t, 1)
+	if got := auth.Visitors(); len(got) != 0 {
+		t.Fatalf("闲置 90 分钟超过登录有效期（1 小时），条目应被清除, 实际 %+v", got)
+	}
+
+	// 未配置（<=0）时与登录一致地回退到 4 小时。
+	withAuthTTLHours(t, 0)
+	if got := gatewayVisitorIdleTTL(); got != 4*time.Hour {
+		t.Fatalf("未配置登录有效期时应回退 4 小时, 实际 %v", got)
 	}
 }

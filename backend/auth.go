@@ -73,6 +73,16 @@ func validatePassword(pwd string) string {
 	return ""
 }
 
+// authTTLSeconds 返回登录有效期（秒）：取配置中的 AuthTTLHours，未配置或非法
+// （<=0）时回退 4 小时。登录 Cookie 的 Max-Age 与网关访问条目的闲置清除时长
+// （见 visitors.go 的 gatewayVisitorIdleTTL）共用这一份取值。
+func authTTLSeconds(c AppConfig) int {
+	if c.AuthTTLHours <= 0 {
+		return 4 * 60 * 60
+	}
+	return c.AuthTTLHours * 3600
+}
+
 func hmacToken(pwd string, expireTs int64) string {
 	m := hmac.New(sha256.New, []byte(pwd))
 	m.Write([]byte(strconv.FormatInt(expireTs, 10)))
@@ -395,10 +405,7 @@ func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request, mount pr
 				return true
 			}
 			// 登录有效期取配置中的 AuthTTLHours（小时）；未配置或非法时回退到 4 小时
-			ttlSeconds := c.AuthTTLHours * 3600
-			if ttlSeconds <= 0 {
-				ttlSeconds = 4 * 60 * 60
-			}
+			ttlSeconds := authTTLSeconds(c)
 			expire := time.Now().Unix() + int64(ttlSeconds)
 			token := hmacToken(c.Password, expire)
 			// next 是挂载内路径（反代门禁按剥前缀后的路径记录），补回前缀才是

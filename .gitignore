@@ -8,3 +8,5 @@ dsh-market
 .gocache*
 .gopath*
 .tools
+# 前端产物经 //go:embed 打入二进制的暂存目录：由构建脚本创建/清空，master 里不该有。
+backend/embed

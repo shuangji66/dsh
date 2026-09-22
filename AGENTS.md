@@ -49,8 +49,15 @@
   `tokenScanner` 从 dsh 日志捕获 `?token=`；`ExchangeToken` 换 `dsh-auth-*` Cookie；
   `SessionSettled`/`markSessionSettled` 记录「本代凭据是否已换取完成」（反代放行门禁）。
 - `proxy.go` — 反向代理，转发时**携带 dsh 会话 Cookie**；`ServeHTTP` 里顺序是
-  「鉴权路由 → 就绪状态 `/_ready` → 鉴权 → 等待页/转发」，放行判定只在
+  「剥挂载前缀 → 鉴权路由 → 就绪状态 `/_ready` → 鉴权 → 等待页/转发」，放行判定只在
   `reverseProxy.state()` 一处；等待页（`waitingPageHTML`）轮询 `/_ready` 并自动跳转。
+  反代有**两条监听、两种挂载**：TCP `PROXY_PORT` 是根挂载（历史行为），可选的
+  Unix Socket（`HARNESS_PROXY_SOCK`，默认 `$TRIM_APPDEST/dsh.sock`）挂在
+  `HARNESS_PROXY_BASEURL`（默认 `/app/Harness/dsh`，刻意比控制台 baseurl 深一层）下
+  ——平台网关把该子路径整段转发到 socket，由反代**剥离前缀**后转发给 dsh（dsh 只认
+  `/`、`/api`、`/plugins`；其 0.1.7-alpha.1 起前端全走文档相对路径，靠
+  `<base href="./">` 自动拼出 `<prefix>/api`）。挂载换算集中在 `proxyMount`
+  （`strip`/`join`/`dir`/`joinURI`）。
 - `terminal.go` — WebSocket + `creack/pty` 的交互式 bash。
 - `update.go` — 更新 harness / dsh 服务与插件市场：版本检测、下载、备份与回滚；
   `harnessVersion` 由 `-ldflags -X` 注入。下载策略按类型分开（`downloadPlanFor`）：
@@ -110,6 +117,20 @@
   2. **不要为了“更快看到界面”放宽门禁**（例如只留 `checker.quick()`）：端口通了但凭据
      没换到就放行，只会把用户送进 dsh 的未授权响应；而把 `deps` 阶段的放行提前，会让
      流水线收尾重启 dsh 时界面随即失效。
+- **反代有「根挂载」与「子路径挂载」两种形态，自留路径一律经 `proxyMount`** ——
+  子路径挂载来自平台网关把 `<prefix>/…` 整段转发到 `HARNESS_PROXY_SOCK`，反代在
+  `stripMount` 里剥掉前缀（此后 `r.URL` 是挂载内路径），因此：
+  1. **新增/修改反代自留路径（`/_login`、`/_logout`、`/_ready`）或任何 302 目标时，
+     必须用 `p.mount.join(...)` / `joinURI(...)` 补回前缀** —— 直接写绝对路径在子路径
+     部署下会把浏览器送出挂载目录（登录、登出、等待页轮询与 Refresh 兜底都会失效）。
+     `auth.go` 的登录页表单 action 用 `__LOGIN_ACTION__` 占位符注入同一个换算结果。
+  2. **不要把挂载前缀硬编码进代码**：它来自 `HARNESS_PROXY_BASEURL`（默认
+     `/app/Harness/dsh`，位于控制台 baseurl 之下一层，避免与 admin socket 抢路径），
+     `HARNESS_PROXY_SOCK`（默认 `$TRIM_APPDEST/dsh.sock`）为空或 `off` 时这条监听
+     整体关闭。网关侧必须**按更长前缀优先匹配**，否则控制台那条规则会把 dsh 流量截走。
+  3. **dsh 侧不需要 baseurl**：0.1.7-alpha.1 起其前端全走文档相对路径（`<base href="./">`），
+     浏览器自己拼出 `<prefix>/api`；不要试图去改写 dsh 的产物，也不要为了“兼容子路径”
+     给 dsh 传前缀参数。此机制的前提是 **dsh ≥ 0.1.7-alpha.1**，更早版本在子路径下必然 404。
 - **`PROFILE_TEMPLATES.web.bundles` 注入** —— 只在 `server-build.yaml` 的 CI 中对
   `dsh-app-boot` 做，本地不涉及。
 - **代理端口默认 `13079`、dsh 端口默认 `13080`** —— 冲突排查先看这两个。

@@ -76,6 +76,14 @@ type RuntimeEnv struct {
 	ProxyPort     int    // 新增
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（HARNESS_QUICK_CMDS_FILE）
 	SessionDir    string // 终端会话临时镜像目录（HARNESS_SESSION_DIR，停止时整目录清除）
+	// ProxySock/ProxyBaseURL 是反代的「子路径挂载」监听：平台网关（fnOS
+	// open-gateway）把 http://<fnip>:<port>/app/Harness/dsh 整段转发到该 unix
+	// socket，反代剥掉前缀后再转发给 dsh，于是 dsh 前端按文档相对路径发起的
+	// "<prefix>/api"、"<prefix>/plugins/..." 都能正确落回挂载目录
+	// （dsh 0.1.7-alpha.1 起其前端产物全部使用文档相对路径，无需 baseurl 配置）。
+	// ProxySock 取值为空或 "off" 时不开这条监听，见 startProxySocket。
+	ProxySock    string
+	ProxyBaseURL string
 }
 
 var (
@@ -100,6 +108,13 @@ func loadRuntimeEnv() RuntimeEnv {
 			proxyPort = v
 		}
 	}
+	// 反代 unix socket 的默认路径：平台应用目录下的 dsh.sock（即
+	// /var/apps/Harness/target/dsh.sock）。非平台环境（TRIM_APPDEST 缺失）沿用
+	// 同一绝对默认值，目录建不出来时 startProxySocket 只记日志并跳过这条监听。
+	proxySock := "/var/apps/Harness/target/dsh.sock"
+	if appDest != "" {
+		proxySock = filepath.Join(appDest, "dsh.sock")
+	}
 	return RuntimeEnv{
 		ConfigFile:    envOr("HARNESS_CONFIG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "config.json")),
 		AdminSock:     envOr("HARNESS_ADMIN_SOCK", filepath.Join(os.Getenv("TRIM_APPDEST"), "app.sock")),
@@ -117,6 +132,12 @@ func loadRuntimeEnv() RuntimeEnv {
 		ProxyPort:     proxyPort,
 		QuickCmdsFile: envOr("HARNESS_QUICK_CMDS_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "quickcmds.json")),
 		SessionDir:    envOr("HARNESS_SESSION_DIR", filepath.Join(os.Getenv("TRIM_PKGVAR"), "terminal-sessions")),
+		ProxySock:     envOr("HARNESS_PROXY_SOCK", proxySock),
+		// 默认挂在控制台 baseurl（/app/Harness）之下的一层：控制台 SPA 走 admin
+		// socket 占据 /app/Harness，dsh GUI 走 dsh.sock 占据 /app/Harness/dsh，
+		// 两者互不抢路径。网关需按更长的前缀优先匹配，否则 dsh 的流量会被控制台
+		// 那条规则截走。
+		ProxyBaseURL: envOr("HARNESS_PROXY_BASEURL", "/app/Harness/dsh"),
 	}
 }
 

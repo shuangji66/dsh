@@ -29,7 +29,7 @@ export GOCACHE GOPATH
 export GOFLAGS="-buildvcs=false"
 export PATH := /var/apps/nodejs_v24/target/bin:$(PATH)
 
-.PHONY: all dev release clean
+.PHONY: all dev release test clean
 
 all: dev
 
@@ -41,6 +41,13 @@ dev: ## Dev build (default, non-stripped)
 
 release: ## Release build (strip + external linking)
 	$(MAKE) build LDFLAGS="-s -w -linkmode=external -X main.harnessVersion=$(V)"
+
+# 后端单元测试。main.go 用 //go:embed all:embed 打包前端产物，而该目录在构建后被
+# 清空，因此测试前先补一个占位文件（否则包无法编译）。占位内容不影响测试。
+test: ## Run backend unit tests
+	mkdir -p "$(EMBED)"
+	@test -e "$(EMBED)/index.html" || echo "placeholder for //go:embed (see Makefile test target)" > "$(EMBED)/index.html"
+	cd "$(BACKEND)" && go test ./...
 
 # Common build steps. LDFLAGS is passed in from dev/release.
 build:

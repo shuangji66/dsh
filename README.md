@@ -125,6 +125,9 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 
 二进制经 fnOS 平台以 `/var/apps/Harness` 部署，监听 **Admin Unix Socket**
 （默认 `<appDest>/app.sock`），前端由 nginx 反代到该 socket 的 baseurl 前缀。
+反向代理本身有**两条监听**：TCP 端口（`PROXY_PORT`，占据站点根）与可选的
+**Unix Socket 子路径挂载**（`HARNESS_PROXY_SOCK` + `HARNESS_PROXY_BASEURL`，
+见下文「子路径部署」）。
 
 | 环境变量 | 说明 | 默认 |
 | --- | --- | --- |
@@ -136,7 +139,9 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_DSH_PID_FILE` | dsh 服务 PID 文件路径（随 dsh 启动/自重启刷新为实时 PID，dsh 停止时移除） | 空 |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
 | `HARNESS_QUICK_CMDS_FILE` | 终端快捷指令持久化文件 | `$TRIM_PKGVAR/quickcmds.json` |
-| `PROXY_PORT` | 反向代理监听端口 | `13079` |
+| `PROXY_PORT` | 反向代理监听端口（根挂载） | `13079` |
+| `HARNESS_PROXY_SOCK` | 反向代理的子路径挂载 Unix socket（空或 `off` 关闭） | `$TRIM_APPDEST/dsh.sock` |
+| `HARNESS_PROXY_BASEURL` | 该 socket 对外占据的子路径（反代剥掉后再转发给 dsh） | `/app/Harness/dsh` |
 | `dsh_port` / `TARGET_PORT` | dsh web 端口 | `13080` |
 | `proxy_mode` | 设为 `1` 启用代理 | `0` |
 | `proxy_addr` | 代理地址 | `http://127.0.0.1:7890` |
@@ -148,6 +153,54 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 运行时配置（`config.json`）字段：`dshPort`、`proxyEnabled`、`proxyAddr`、
 `authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
 `homeDir`、`accessUrls`、`browserCompat`。可通过设置页修改并保存。
+
+---
+
+## 子路径部署：反代挂载点与 Unix Socket 前置
+
+除了 TCP 端口（根挂载，历史行为不变），反代还会在
+**`HARNESS_PROXY_SOCK`（默认 `$TRIM_APPDEST/dsh.sock`）** 上再监听一个 Unix
+Socket，并把它挂在 **`HARNESS_PROXY_BASEURL`（默认 `/app/Harness/dsh`）** 子路径下：
+
+```text
+浏览器 https://<fnip>:<port>/app/Harness/dsh/…
+      ↓ 平台网关（fnOS open-gateway）原样转发（路径带前缀）
+Harness 反代 @ unix socket
+      ↓ 剥掉 /app/Harness/dsh，补上 dsh 会话 Cookie
+dsh web @ 127.0.0.1:13080   ← 只认 /、/api、/plugins
+```
+
+默认值刻意比控制台 baseurl（`/app/Harness`，走 admin socket）**深一层**，这样同
+一台设备上两条线各占一段路径、互不抢：控制台在 `/app/Harness/…`，dsh GUI 在
+`/app/Harness/dsh/…`。
+
+**为什么这样就成立**：dsh 0.1.7-alpha.1 起其前端产物全部使用**文档相对路径**
+（`dsh-host-frontend-static` 注入 `<base href="./">`，插件 bundle 引用、`/api`
+RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式）。页面在
+`/app/Harness/dsh/` 下加载时，浏览器自动把请求拼成 `/app/Harness/dsh/api/...`；
+反代剥掉前缀后 dsh 收到的仍是它认识的 `/api/...`。**dsh 侧不需要任何 baseurl
+配置**，配对成立的唯一条件是反代把前缀剥干净。
+
+反代的实现要点（`proxyMount`，见 `proxy.go`）：
+
+- 进站路径先剥前缀，后续鉴权、握手、就绪门禁、等待页、转发全部工作在挂载内路径上；
+- 反代自留路径与跳转目标补回前缀：`/_login`、`/_logout`、`/_ready`、未登录时的
+  302、登录成功后的 `next`、等待页的轮询地址与 `Refresh` 兜底 URL；
+- 裸挂载点（`/app/Harness/dsh` 无尾斜杠）301 到 `/app/Harness/dsh/`：dsh 前端的
+  `<base href="./">` 以**目录**为基准，缺尾斜杠会让相对路径解析到站点根；
+- 不属于该挂载的路径直接 404（网关配置错误时不会把流量悄悄转给 dsh）。
+
+部署时注意：
+
+- **dsh 需 ≥ 0.1.7-alpha.1**。更早版本注入的是 `<base href="/">` 且 API/SSE/WS
+  用绝对根路径，在子路径下必然 404（正是该版本的修复项）。
+- 网关若**不**剥离前缀（原样把 `/app/Harness/dsh/...` 交给本 socket），反代也能
+  正确剥离——前缀本来就由反代处理，网关只需保证路径原样透传、不额外改写。
+- **网关/nginx 必须按更长的前缀优先匹配**：控制台那条规则（admin socket，
+  `/app/Harness`）在前缀上包含 dsh 这条（`/app/Harness/dsh`），先匹配到控制台就
+  会把 dsh 的流量截走。nginx 天然按最长前缀匹配，自建规则时注意这一点。
+- 该监听是可选的：目录不可创建 / socket 被占用 / 监听失败时只记日志并跳过，
+  不影响控制台与 TCP 反代启动。`HARNESS_PROXY_SOCK=off` 可显式关闭。
 
 ---
 
@@ -370,8 +423,9 @@ Admin socket 之后）。旧实现把反代放在“dsh 启动 → 换取 Cookie
 ## 主要流程
 
 1. **启动** — 解析环境变量 → 读取配置 → 校验密码 → 启动 Admin socket →
-   **启动反向代理**（先监听、先鉴权，dsh 未就绪时给等待页）→ 自动启动
-   `dsh web --no-open --port <port>`（除非 `HARNESS_AUTOSTART=0`）。
+   **启动反向代理**（TCP 根挂载 + 可选的 Unix Socket 子路径挂载；先监听、先鉴权，
+   dsh 未就绪时给等待页）→ 自动启动 `dsh web --no-open --port <port>`
+   （除非 `HARNESS_AUTOSTART=0`）。
 2. **凭据交换** — 从 dsh 日志扫描一次性访问 token（`?token=`），用它访问一次
    dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie，并标记本代凭据已落定
    （`markSessionSettled`，反代据此放行）。

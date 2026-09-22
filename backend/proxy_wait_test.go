@@ -202,8 +202,8 @@ func TestProxyWaitingPageCarriesPhase(t *testing.T) {
 	if !strings.Contains(body, `window.__DSH_WAIT__={"phase":"deps","ready":false}`) {
 		t.Fatal("等待页未注入当前启动阶段")
 	}
-	if !strings.Contains(body, "READY='/_ready'") {
-		t.Fatal("等待页脚本未指向 /_ready 轮询端点")
+	if !strings.Contains(body, `var READY="/_ready"`) {
+		t.Fatal("等待页脚本未指向 /_ready 轮询端点（根挂载不带前缀）")
 	}
 }
 
@@ -241,10 +241,13 @@ func TestProxyWaitingPageEscapesFailureDetail(t *testing.T) {
 	}
 }
 
-// 等待页的注入点必须唯一：模板里只应有一处 __WAIT_STATE__ 占位符。
+// 等待页的注入点必须唯一：模板里每个占位符都只应出现一次（__WAIT_STATE__ 注入
+// 阶段、__READY_URL__ 注入带挂载前缀的轮询地址）。
 func TestWaitingPageHasSinglePlaceholder(t *testing.T) {
-	if n := strings.Count(waitingPageHTML, "__WAIT_STATE__"); n != 1 {
-		t.Fatalf("__WAIT_STATE__ 出现 %d 次, want 1", n)
+	for _, ph := range []string{"__WAIT_STATE__", "__READY_URL__"} {
+		if n := strings.Count(waitingPageHTML, ph); n != 1 {
+			t.Fatalf("%s 出现 %d 次, want 1", ph, n)
+		}
 	}
 }
 

@@ -266,7 +266,7 @@ const loginPageHTML = `<!DOCTYPE html>
   <div class="card">
     <div class="logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
     <h1>欢迎回来</h1><p class="sub">访问受密码保护，请输入登录密码</p>
-    <form method="POST" action="/_login">
+    <form method="POST" action="__LOGIN_ACTION__">
       <label for="pw">密码</label>
       <input id="pw" name="password" type="password" autofocus required
              autocomplete="current-password" placeholder="请输入访问密码">
@@ -277,20 +277,29 @@ const loginPageHTML = `<!DOCTYPE html>
   <div class="foot">DeepSeek Harness</div>
 </div></body></html>`
 
-func serveLoginPage(w http.ResponseWriter, errMsg string) {
+// htmlEscape 转义要嵌入 HTML 属性的文本（与错误提示槽用同一套替换规则）。
+func htmlEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;").Replace(s)
+}
+
+// serveLoginPage 输出登录页。表单 action 必须带挂载前缀（子路径部署下 POST 要
+// 回到 "<prefix>/_login"，否则会落到站点根）。
+func serveLoginPage(w http.ResponseWriter, errMsg string, mount proxyMount) {
 	slot := ""
 	if errMsg != "" {
-		esc := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;").Replace(errMsg)
-		slot = `<div class="err">` + esc + `</div>`
+		slot = `<div class="err">` + htmlEscape(errMsg) + `</div>`
 	}
 	body := strings.Replace(loginPageHTML, "__ERROR_SLOT__", slot, 1)
+	body = strings.Replace(body, "__LOGIN_ACTION__", htmlEscape(mount.join(authLogin)), 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(200)
 	w.Write([]byte(body))
 }
 
-// handleAuthRoutes returns true if it consumed the request.
-func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request) bool {
+// handleAuthRoutes returns true if it consumed the request. mount 是这条监听的
+// 挂载点：登录页表单 action、登录成功后的跳转目标与登出跳转都要带上它的前缀，
+// 否则子路径部署下浏览器会被送出挂载目录（r.URL 已由反代剥掉前缀，见 stripMount）。
+func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request, mount proxyMount) bool {
 	c := GetConfig()
 	if !c.AuthEnabled {
 		return false
@@ -299,18 +308,18 @@ func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request) bool {
 	switch u.Path {
 	case authLogin:
 		if r.Method == http.MethodGet {
-			serveLoginPage(w, "")
+			serveLoginPage(w, "", mount)
 			return true
 		}
 		if r.Method == http.MethodPost {
 			r.ParseForm()
 			pwd := r.FormValue("password")
 			if c.Password == "" {
-				serveLoginPage(w, "鉴权未启用（未设置密码），无需登录。")
+				serveLoginPage(w, "鉴权未启用（未设置密码），无需登录。", mount)
 				return true
 			}
 			if pwd != c.Password {
-				serveLoginPage(w, "密码错误")
+				serveLoginPage(w, "密码错误", mount)
 				return true
 			}
 			// 登录有效期取配置中的 AuthTTLHours（小时）；未配置或非法时回退到 4 小时
@@ -320,7 +329,9 @@ func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request) bool {
 			}
 			expire := time.Now().Unix() + int64(ttlSeconds)
 			token := hmacToken(c.Password, expire)
-			next := safeNext(r.URL.Query().Get("next"))
+			// next 是挂载内路径（反代门禁按剥前缀后的路径记录），补回前缀才是
+			// 浏览器可用的地址；safeNext 已挡掉 // 开头的协议相对地址。
+			next := mount.join(safeNext(r.URL.Query().Get("next")))
 			w.Header().Set("Set-Cookie", fmt.Sprintf("%s=%d.%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d", authCookie, expire, token, ttlSeconds))
 			http.Redirect(w, r, next, http.StatusFound)
 			return true
@@ -329,7 +340,7 @@ func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case authLogout:
 		http.SetCookie(w, &http.Cookie{Name: authCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1})
-		http.Redirect(w, r, authLogin, http.StatusFound)
+		http.Redirect(w, r, mount.join(authLogin), http.StatusFound)
 		return true
 	}
 	return false

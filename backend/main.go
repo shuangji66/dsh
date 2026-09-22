@@ -171,6 +171,8 @@ func main() {
 	// 后等待页自动跳转。放行门禁见 reverseProxy.state()。
 	boot := newBootState()
 	startProxy(renv.ProxyPort, auth, dsh, boot)
+	// 第二条监听：unix socket + 子路径挂载（fnOS 网关把 /app/Harness/dsh 转发到这里）。
+	startProxySocket(renv.ProxySock, renv.ProxyBaseURL, auth, dsh, boot)
 
 	// 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
 	if os.Getenv("HARNESS_AUTOSTART") != "0" {
@@ -231,6 +233,7 @@ func main() {
 		os.RemoveAll(renv.SessionDir)
 	}
 	os.Remove(renv.AdminSock)
+	stopProxySocket()
 	logger().Printf("backend stopped")
 }
 
@@ -283,4 +286,69 @@ func startProxy(port int, auth *Auth, dsh *DshManager, boot *bootState) {
 			logger().Printf("proxy server error: %v", err)
 		}
 	}()
+}
+
+var (
+	proxySockServer *http.Server
+	proxySockPath   string
+)
+
+// startProxySocket 在 unix socket 上再开一条反代监听，并把它挂在 baseURL 前缀下
+// （见 proxyMount）。这是 fnOS 部署形态：平台网关把
+// http://<fnip>:<port>/app/Harness/dsh 整段转发到本 socket，反代剥掉该前缀
+// 再转发给 dsh，于是 dsh 前端（0.1.7-alpha.1 起全部使用文档相对路径）自动发起的
+// "<prefix>/api"、"<prefix>/plugins/..." 都落回这里。
+//
+// socket 路径取自 HARNESS_PROXY_SOCK（默认 $TRIM_APPDEST/dsh.sock，即
+// /var/apps/Harness/target/dsh.sock）；取值为空或 "off"、目录不可创建、监听失败
+// 时只记日志并跳过——这条监听是可选的部署形态，不能因此让控制台起不来。
+func startProxySocket(sockPath, baseURL string, auth *Auth, dsh *DshManager, boot *bootState) {
+	if sockPath == "" || sockPath == "off" {
+		logger().Printf("proxy unix socket disabled (HARNESS_PROXY_SOCK=%q)", sockPath)
+		return
+	}
+	if dir := filepath.Dir(sockPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			logger().Printf("proxy unix socket dir %s unavailable: %v — skipping", dir, err)
+			return
+		}
+	}
+	// socket 存在且能连上，说明已有活着的持有者（正常路径下 main 的 admin socket
+	// 占用检查会先退出，这里只是兜底）：让它继续服务，自己不再抢。
+	if _, err := net.Dial("unix", sockPath); err == nil {
+		logger().Printf("proxy unix socket %s already in use, skipping", sockPath)
+		return
+	}
+	os.Remove(sockPath)
+	ln, err := netListen("unix", sockPath)
+	if err != nil {
+		logger().Printf("proxy unix socket listen %s failed: %v", sockPath, err)
+		return
+	}
+	if err := os.Chmod(sockPath, 0o660); err != nil {
+		logger().Printf("chmod proxy unix socket %s: %v", sockPath, err)
+	}
+	proxySockServer = &http.Server{Handler: newReverseProxyAt(auth, dsh, boot, baseURL)}
+	proxySockPath = sockPath
+	go func() {
+		logger().Printf("reverse proxy listening on unix socket %s (baseurl %q)", sockPath, newProxyMount(baseURL).dir())
+		if err := proxySockServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+			logger().Printf("proxy unix socket server error: %v", err)
+		}
+	}()
+}
+
+// stopProxySocket 关闭子路径挂载的监听并删除 socket 文件（退出时清理，避免留下
+// 只能靠 dial 失败才发现的陈旧 socket）。
+func stopProxySocket() {
+	if proxySockServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = proxySockServer.Shutdown(ctx)
+		cancel()
+		proxySockServer = nil
+	}
+	if proxySockPath != "" {
+		os.Remove(proxySockPath)
+		proxySockPath = ""
+	}
 }

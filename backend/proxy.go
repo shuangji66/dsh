@@ -398,7 +398,10 @@ window.__DSH_WAIT__=__WAIT_STATE__;
 (function(){
   // HINT_AFTER：等待超过这个时长才给出「可能需要排查」的黄色提示（旧版固定在
   // 10 秒后就报「启动失败」，属于误报）。
-  var READY='/_ready', POLL=1500, HINT_AFTER=30000;
+  // READY 由服务端按挂载前缀注入（根挂载为 "/_ready"，子路径挂载为
+  // "/app/Harness/dsh/_ready"）。这里必须是绝对路径：相对路径会随当前 URL 的
+  // 目录层级漂移（如 /app/Harness/dsh/a/b 下会解析成 /app/Harness/dsh/a/_ready）。
+  var READY=__READY_URL__, POLL=1500, HINT_AFTER=30000;
   // 启动过程（starting/auth/deps）对用户是同一件事——等服务就绪，内部细节
   // （依赖准备、凭据落定之类）不对外展示；下面几个阶段是「需要用户动手」的状态，
   // 才分别给出指引。
@@ -488,25 +491,31 @@ window.__DSH_WAIT__=__WAIT_STATE__;
 </script>
 </body></html>`
 
-// waitingPageHTMLFor 把当前阶段注入页面脚本。detail 是任意错误文本，用 JSON
-// 编码注入（encoding/json 默认转义 < > & 为 \u003c 等），既不会截断脚本，
-// 也不会让错误文本变成可执行标记。
-func waitingPageHTMLFor(st proxyState) string {
+// waitingPageHTMLFor 把当前阶段与就绪轮询地址注入页面脚本。detail 是任意错误
+// 文本、mount 前缀来自环境变量，二者都用 JSON 编码注入（encoding/json 默认转义
+// < > & 为 \u003c 等），既不会截断脚本，也不会让它们变成可执行标记。
+func waitingPageHTMLFor(st proxyState, mount proxyMount) string {
 	raw, err := json.Marshal(st)
 	if err != nil {
 		raw = []byte(`{"phase":"starting"}`)
 	}
-	return strings.Replace(waitingPageHTML, "__WAIT_STATE__", string(raw), 1)
+	ready, err := json.Marshal(mount.join(readyPath))
+	if err != nil {
+		ready = []byte(`"/_ready"`)
+	}
+	page := strings.Replace(waitingPageHTML, "__WAIT_STATE__", string(raw), 1)
+	return strings.Replace(page, "__READY_URL__", string(ready), 1)
 }
 
 // serveWaitingPage 在 dsh 尚未就绪（或正在重启）时输出等待页。页面脚本会轮询
 // /_ready，并在就绪后立即跳转；Refresh 头是无 JS 客户端的兜底路径。
-func serveWaitingPage(w http.ResponseWriter, r *http.Request, st proxyState) {
+// 传入的 r 已经剥掉挂载前缀（见 stripMount），因此两处对外地址都要用 mount 补回。
+func serveWaitingPage(w http.ResponseWriter, r *http.Request, st proxyState, mount proxyMount) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Refresh", "10; url="+r.URL.RequestURI())
+	w.Header().Set("Refresh", "10; url="+mount.joinURI(r.URL.RequestURI()))
 	w.WriteHeader(200)
-	io.WriteString(w, waitingPageHTMLFor(st))
+	io.WriteString(w, waitingPageHTMLFor(st, mount))
 }
 
 // BackendChecker performs reachability checks on the upstream dsh port.
@@ -555,13 +564,127 @@ type reverseProxy struct {
 	runMu    sync.Mutex
 	runAt    time.Time
 	runAlive bool
+	// mount 是这条监听对外占据的路径（见 proxyMount）：历史 TCP 端口是根挂载
+	// （prefix 为空，路径原样转发）；平台网关转发的 unix socket 挂在子路径下
+	// （默认 /app/Harness/dsh），进站请求剥掉前缀、自留路径与跳转目标补回前缀。
+	mount proxyMount
+}
+
+// proxyMount 描述反代对外的挂载点（baseurl）。
+//
+//   - prefix 为空：根挂载。反代直接占据站点根，请求路径原样转发给 dsh（历史行为，
+//     TCP 的 PROXY_PORT 监听即如此）。
+//   - prefix 非空（如 "/app/Harness/dsh"）：反代挂在子路径下。这类部署来自平台网关
+//     ——它把 http://<fnip>:<port>/app/Harness/dsh 整段转发到本进程的 unix socket，
+//     反代必须把前缀剥干净再转发给 dsh（dsh 只认 /、/api、/plugins 等根路径），
+//     并把自留路径（/_login、/_logout、/_ready）与 302 目标重新加上前缀，使
+//     浏览器始终留在子路径下。
+//
+// dsh 0.1.7-alpha.1 起其前端产物完全按文档相对路径生成（index 由
+// dsh-host-frontend-static 注入 <base href="./">，插件 bundle / API / SSE / 流
+// mux 都用去前导斜杠的相对形式），因此浏览器会自动把地址拼成
+// "<prefix>/api/..."，dsh 侧不需要任何 baseurl 配置——配对成立的唯一条件就是
+// 反代把前缀剥离干净（并保持 URL 以 "/" 结尾，相对路径的基准才是挂载目录）。
+type proxyMount struct {
+	prefix string // 形如 "/app/Harness/dsh"，无尾斜杠；空串表示根挂载
+}
+
+// newProxyMount 归一化挂载前缀：空串或 "/" 表示根挂载；其余去掉尾斜杠并补前导斜杠。
+func newProxyMount(baseURL string) proxyMount {
+	p := strings.TrimSpace(baseURL)
+	if p == "" || p == "/" {
+		return proxyMount{}
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return proxyMount{prefix: strings.TrimRight(p, "/")}
+}
+
+func (m proxyMount) root() bool { return m.prefix == "" }
+
+// dir 返回浏览器可见的挂载目录（根挂载即 "/"）。
+func (m proxyMount) dir() string { return m.prefix + "/" }
+
+// join 把反代自留的绝对路径（/_login、/_logout、/_ready）拼成浏览器可见路径。
+func (m proxyMount) join(path string) string { return m.prefix + path }
+
+// joinURI 把挂载内的请求 URI（以 "/" 开头，可带 query）拼成浏览器可见地址。
+func (m proxyMount) joinURI(uri string) string {
+	if !strings.HasPrefix(uri, "/") {
+		return m.dir()
+	}
+	return m.prefix + uri
+}
+
+// strip 把请求路径换算成挂载内路径。返回的 path 以 "/" 开头（挂载根为 "/"），
+// 空串表示「挂载点本身但缺尾斜杠」；第二个返回值表示该路径是否属于本挂载。
+func (m proxyMount) strip(path string) (string, bool) {
+	if m.root() {
+		return path, true
+	}
+	if path == m.prefix {
+		return "", true
+	}
+	if strings.HasPrefix(path, m.prefix+"/") {
+		return path[len(m.prefix):], true
+	}
+	return "", false
 }
 
 func newReverseProxy(a *Auth, dsh *DshManager, boot *bootState) *reverseProxy {
+	return newReverseProxyAt(a, dsh, boot, "")
+}
+
+// newReverseProxyAt 构造挂在 baseURL 下的反代（空串 = 根挂载，历史行为）。
+func newReverseProxyAt(a *Auth, dsh *DshManager, boot *bootState, baseURL string) *reverseProxy {
 	if boot == nil {
 		boot = newBootState()
 	}
-	return &reverseProxy{auth: a, dsh: dsh, boot: boot}
+	return &reverseProxy{auth: a, dsh: dsh, boot: boot, mount: newProxyMount(baseURL)}
+}
+
+// stripMount 在进入任何业务分支之前把挂载前缀剥掉：
+//   - 根挂载原样返回；
+//   - 挂载点本身（"<prefix>" 无尾斜杠）重定向到目录 "<prefix>/"。dsh 前端的
+//     <base href="./"> 以「目录」为基准，缺尾斜杠会让相对路径解析到站点根，
+//     资源与 API 全部跑出子路径；
+//   - "<prefix>/..." 返回剥掉前缀的请求副本（原始 r 保持不变，等待页的 Refresh
+//     与登录跳转需要浏览器可见的带前缀地址）；
+//   - 其余路径不属于本挂载（网关配置错误），直接 404 并说明本监听服务的挂载点。
+func (p *reverseProxy) stripMount(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
+	if p.mount.root() {
+		return r, true
+	}
+	path, ok := p.mount.strip(r.URL.Path)
+	if !ok {
+		http.Error(w, "not found: this listener serves "+p.mount.dir(), http.StatusNotFound)
+		return nil, false
+	}
+	if path == "" {
+		target := p.mount.dir()
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		// 301 会把非 GET 请求降级成 GET；POST 等用 308 保持方法与请求体。
+		code := http.StatusMovedPermanently
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			code = http.StatusPermanentRedirect
+		}
+		http.Redirect(w, r, target, code)
+		return nil, false
+	}
+	stripped := r.Clone(r.Context())
+	stripped.URL.Path = path
+	if stripped.URL.RawPath != "" {
+		// 保留转义形态（dsh 的插件 bundle 路径里带 ?? 与逗号，转义与否必须原样透传）。
+		if raw, ok := p.mount.strip(stripped.URL.RawPath); ok && raw != "" {
+			stripped.URL.RawPath = raw
+		} else {
+			stripped.URL.RawPath = ""
+		}
+	}
+	return stripped, true
 }
 
 // getChecker returns a BackendChecker using the current DshPort from config.
@@ -630,7 +753,15 @@ func (p *reverseProxy) serveReadyState(w http.ResponseWriter, st proxyState) {
 }
 
 func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if p.auth.handleAuthRoutes(w, r) {
+	// 子路径挂载：先剥离挂载前缀，后续所有分支（鉴权、握手、就绪门禁、等待页、
+	// 转发）都工作在「挂载内路径」上——dsh 只认根路径，剥干净才能命中它的
+	// /、/api、/plugins 路由。
+	stripped, ok := p.stripMount(w, r)
+	if !ok {
+		return
+	}
+	r = stripped
+	if p.auth.handleAuthRoutes(w, r, p.mount) {
 		return
 	}
 	// WebSocket upgrade: forward the raw connection to dsh after the auth gate.
@@ -646,8 +777,10 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 普通浏览器流量（含经 nginx 嵌套反代到达的）必须通过面板登录鉴权。
 	if !p.isInternalRequest(r) {
 		if !p.auth.isAuthed(r) {
+			// next 记的是挂载内路径（如 "/api/x"），登录成功后由 handleAuthRoutes
+			// 用 mount.join 补回前缀，浏览器因此留在子路径下。
 			next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
-			http.Redirect(w, r, authLogin+"?next="+url.QueryEscape(next), http.StatusFound)
+			http.Redirect(w, r, p.mount.join(authLogin)+"?next="+url.QueryEscape(next), http.StatusFound)
 			return
 		}
 		if r.URL.Path == readyPath {
@@ -656,7 +789,7 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !st.Ready {
-		serveWaitingPage(w, r, st)
+		serveWaitingPage(w, r, st, p.mount)
 		return
 	}
 	// 记录访客（IP、最近访问时间、登录有效期）

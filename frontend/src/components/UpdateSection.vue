@@ -8,7 +8,9 @@ import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import MarkdownText from '@/components/MarkdownText.vue'
 
 // 概览页传入：dsh 访问地址列表（显示在版本号下方）
-const props = defineProps<{ accessUrls?: string[] }>()
+// fnosEntry 是固定在第一行的「飞牛入口」（当前访问环境下经网关访问 dsh 的地址），
+// 由概览页换算后传入，不参与用户配置。
+const props = defineProps<{ accessUrls?: string[]; fnosEntry?: string }>()
 
 const toast = useToastStore()
 const { t } = useI18n()
@@ -771,10 +773,20 @@ watch(
       </div>
     </div>
 
-    <!-- dsh 快捷访问地址列表（显示在版本号下方，带分隔线）：整行是描边按钮，点击即打开 -->
-    <div v-if="accessUrls && accessUrls.length" class="mt-3 border-t border-line dark:border-[#2A2A32] pt-3">
+    <!-- dsh 快捷访问地址列表（显示在版本号下方，带分隔线）：整行是描边按钮，点击即打开。
+         第一行固定为「飞牛入口」（当前访问环境下经飞牛网关访问 dsh 的地址），其后是用户配置的地址。 -->
+    <div v-if="fnosEntry || (accessUrls && accessUrls.length)" class="mt-3 border-t border-line dark:border-[#2A2A32] pt-3">
       <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mb-2">{{ t('access_urls_overview_title') }}</div>
       <div class="flex flex-col gap-1.5">
+        <!-- 固定项：只显示「飞牛入口」名称，不展示具体地址（地址在 title 里可悬停查看） -->
+        <button
+          v-if="fnosEntry"
+          class="w-full text-left px-3 py-2 rounded-lg bg-transparent border border-ink/15 dark:border-white/40
+            text-xs font-medium text-ink dark:text-white
+            hover:bg-black/5 dark:hover:bg-white/10 transition-colors duration-150"
+          :title="fnosEntry"
+          @click="openAccessUrl(fnosEntry)"
+        >{{ t('access_urls_fnos_entry') }}</button>
         <button
           v-for="(url, i) in accessUrls"
           :key="i"

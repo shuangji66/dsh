@@ -207,6 +207,25 @@ RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式�
 - 该监听是可选的：目录不可创建 / socket 被占用 / 监听失败时只记日志并跳过，
   不影响控制台与 TCP 反代启动。`HARNESS_PROXY_SOCK=off` 可显式关闭。
 
+### 概览页的「飞牛入口」
+
+概览页「快捷访问」的第一行固定显示**飞牛入口**——当前访问环境下经平台网关访问
+dsh 服务的地址，无需用户配置：控制台的当前访问地址（由请求的 `Origin` / `Referer`
+推断，缺失时退回 `Host` + `X-Forwarded-Proto`）**剥离控制台 baseurl**
+（`HARNESS_ADMIN_BASEURL`）得到飞牛 OS 的访问源，再拼接 dsh 服务挂载的 baseurl
+（`HARNESS_PROXY_BASEURL`）：
+
+```text
+控制台 http://192.168.1.111:5666/app/Harness
+  ├─ 剥离 /app/Harness      → 飞牛 OS 访问源 http://192.168.1.111:5666
+  └─ 拼接 /app/Harness/dsh  → http://192.168.1.111:5666/app/Harness/dsh
+```
+
+换算在 `backend/admin.go` 的 `fnosEntryURL` 完成，随 `GET /api/settings` 的
+`runtime.fnosEntryURL` 下发；后端拿不到访问地址时前端退回浏览器自身地址
+（`document.baseURI` 同样剥掉 baseurl）自行换算。未启用网关子路径挂载
+（`HARNESS_PROXY_BASEURL` 为空或 `/`）时该行不显示，避免给出指向站点根的错地址。
+
 ---
 
 ## 浏览器兼容模式（`browserCompat`）

@@ -41,6 +41,12 @@ export interface RuntimeInfo {
   adminBaseURL: string
   appName: string
   fnosAvailable: boolean
+  // dsh 服务在 fnOS 网关下占据的挂载 baseurl（HARNESS_PROXY_BASEURL），
+  // 前端换算「飞牛入口」时使用。
+  proxyBaseURL?: string
+  // 当前访问环境下的飞牛入口地址（控制台访问源 + dsh 挂载 baseurl），
+  // 后端拿不到访问地址时为空，前端退回浏览器自身地址自行换算。
+  fnosEntryURL?: string
   proxyPort: number
   // node 版本切换选项（node24 始终可用；node26 仅在宿主机存在时可用）
   nodeVersions?: NodeVersionInfo[]

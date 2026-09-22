@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -230,6 +231,77 @@ func (m *AdminMux) SetSPA(fsys fs.FS) {
 	m.spa = spaHandler(fsys, m.renv.AdminBaseURL)
 }
 
+// --- 飞牛入口（当前访问环境下经网关访问 dsh 的地址） ---
+
+// browserOrigin 推断浏览器实际使用的访问源（scheme://host[:port]）。
+//
+// 控制台经 fnOS 网关（nginx → admin unix socket）提供，请求本身不带浏览器地址，
+// 但浏览器发出的同源请求会带上 Origin / Referer —— 其值就是控制台当前访问地址
+// （形如 http://192.168.1.111:5666/app/Harness/）。两者都拿不到时退回请求的
+// Host（网关通常原样透传），scheme 由 X-Forwarded-Proto 或连接本身推断。
+func browserOrigin(r *http.Request) string {
+	for _, h := range []string{r.Header.Get("Origin"), r.Header.Get("Referer")} {
+		if u, err := url.Parse(strings.TrimSpace(h)); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+			return u.Scheme + "://" + u.Host
+		}
+	}
+	host := firstHeaderValue(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = firstHeaderValue(r.Host)
+	}
+	if host == "" {
+		return ""
+	}
+	scheme := firstHeaderValue(r.Header.Get("X-Forwarded-Proto"))
+	if scheme != "http" && scheme != "https" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	return scheme + "://" + host
+}
+
+// firstHeaderValue 取头部里最靠左（最原始）的那个值并小写化，兼容转发头
+// 形如 "http, https" 的逗号串。
+func firstHeaderValue(v string) string {
+	if i := strings.Index(v, ","); i >= 0 {
+		v = v[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
+// fnosEntryURL 计算当前访问环境下的「飞牛入口」：控制台的当前访问地址剥离控制台
+// baseurl（HARNESS_ADMIN_BASEURL）后得到飞牛 OS 的访问源，再拼接 dsh 服务挂载的
+// baseurl（HARNESS_PROXY_BASEURL，反代在 fnOS 网关下的子路径挂载点）。
+//
+// 例：控制台 http://192.168.1.111:5666/app/Harness + baseurl /app/Harness
+// → 飞牛 OS 访问源 http://192.168.1.111:5666 + /app/Harness/dsh
+// → http://192.168.1.111:5666/app/Harness/dsh
+//
+// 拿不到访问地址（无 Origin/Referer/Host）时返回空串，由前端退回浏览器自身地址。
+func (m *AdminMux) fnosEntryURL(r *http.Request) string {
+	mount := newProxyMount(m.renv.ProxyBaseURL)
+	if mount.root() {
+		// 未启用网关子路径挂载（HARNESS_PROXY_BASEURL 为空或 "/"）：
+		// 没有可供浏览器访问的飞牛入口，不要给出一个指向站点根的错地址。
+		return ""
+	}
+	origin := browserOrigin(r)
+	if origin == "" {
+		return ""
+	}
+	// 控制台在当前访问环境下的完整地址，剥离控制台 baseurl 后剩下的就是飞牛 OS 访问源。
+	base := strings.TrimRight(m.renv.AdminBaseURL, "/")
+	consoleURL := strings.TrimRight(origin, "/") + base
+	fnosOrigin := strings.TrimSuffix(consoleURL, base)
+	if fnosOrigin == "" {
+		return ""
+	}
+	return fnosOrigin + mount.prefix
+}
+
 // --- Settings API ---
 func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	// 每次拉取设置前自愈：若配置为 node26 但 node v26 已被卸载/不存在，
@@ -248,6 +320,11 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"adminBaseURL": m.renv.AdminBaseURL,
 			"appName":      m.renv.TRIMAppName,
 			"proxyPort":    cfg.ProxyPort,
+			// dsh 服务在平台网关（fnOS）下占据的挂载 baseurl，前端据此自行换算
+			// 「飞牛入口」（后端换算不出来时兜底用）。
+			"proxyBaseURL": m.renv.ProxyBaseURL,
+			// 当前访问环境下的「飞牛入口」地址；推不出（拿不到访问地址）时为空。
+			"fnosEntryURL": m.fnosEntryURL(r),
 			// node 版本切换选项：列出可用版本及其标识，前端据此显示下拉选项。
 			// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
 			"nodeVersions": m.nodeVersionsInfo(),

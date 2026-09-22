@@ -373,6 +373,7 @@ const zh: Record<string, string> = {
   // dsh 访问地址
   access_urls_hint: '概览页快捷访问',
   access_urls_overview_title: '快捷访问',
+  access_urls_fnos_entry: '飞牛入口',
   access_urls_add: '添加',
   access_urls_placeholder: '输入 dsh 访问地址',
   access_urls_empty: '暂无访问地址',
@@ -724,6 +725,7 @@ const en: Record<string, string> = {
   // dsh Access URLs
   access_urls_hint: 'Overview quick access',
   access_urls_overview_title: 'Quick access',
+  access_urls_fnos_entry: 'fnOS entry',
   access_urls_add: 'Add',
   access_urls_placeholder: 'Enter dsh access URL',
   access_urls_empty: 'No access URLs configured',

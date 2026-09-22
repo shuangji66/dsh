@@ -246,6 +246,20 @@ html, body {
     opacity: 0.5;
     cursor: not-allowed;
   }
+  /* 数字输入框：隐藏浏览器原生步进器（设置页的 dsh 端口 / 反代端口 / 内存上限 /
+     登录有效期）。只去掉上下箭头控件，保留 type="number" 的语义 —— 移动端数字键盘、
+     min/max 校验与键盘 ↑/↓ 调整照常生效，避免鼠标误点箭头改掉端口这类关键值。
+     Firefox 用 appearance: textfield 去除步进器，WebKit/Blink 走 ::-webkit-*-spin-button。 */
+  .g-input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  .g-input[type='number']::-webkit-outer-spin-button,
+  .g-input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
+  }
 
   /* 标签 chip：胶囊形状 */
   .g-chip {

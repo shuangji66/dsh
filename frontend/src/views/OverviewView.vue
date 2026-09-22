@@ -13,9 +13,25 @@ import UpdateSection from '@/components/UpdateSection.vue'
 defineOptions({ name: 'OverviewView' })
 
 const store = useSettingsStore()
-const { status, loading } = storeToRefs(store)
+const { status, loading, runtime } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
+
+// 快捷访问第一行固定的「飞牛入口」：当前访问环境下经飞牛网关访问 dsh 服务的地址。
+// 优先用后端按请求头换算的结果（控制台当前访问地址剥离控制台 baseurl 得到飞牛 OS
+// 访问源，再拼上 dsh 服务挂载的 baseurl）；后端推不出时退回浏览器自身地址 ——
+// document.baseURI 就是控制台当前地址，剥掉它的 baseurl 路径后同样是飞牛 OS 访问源。
+const fnosEntry = computed(() => {
+  const fromServer = runtime.value?.fnosEntryURL || ''
+  if (fromServer) return fromServer
+  const mount = (runtime.value?.proxyBaseURL || '').replace(/\/+$/, '')
+  if (!mount || !document.baseURI) return ''
+  try {
+    return new URL(document.baseURI).origin + mount
+  } catch {
+    return ''
+  }
+})
 
 const visitors = ref<Visitor[]>([])
 const visitorsLoading = ref(false)
@@ -232,7 +248,7 @@ onMounted(() => {
       </div>
 
       <!-- 自我更新：harness 控制台版本 + dsh 服务版本 -->
-      <UpdateSection :access-urls="store.config.accessUrls || []" />
+      <UpdateSection :access-urls="store.config.accessUrls || []" :fnos-entry="fnosEntry" />
     </section>
 
     <!-- 登录列表 -->

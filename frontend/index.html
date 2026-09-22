@@ -2,7 +2,9 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover：让 env(safe-area-inset-*) 在 iPhone 上返回真实安全区，
+         底部导航据此避开 Home Indicator（见 App.vue 与 style.css 的 --bottom-nav-h）。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>DeepSeek Harness 控制台</title>
     <meta name="theme-color" content="#FAFAFA" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />

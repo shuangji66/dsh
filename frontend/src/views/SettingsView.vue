@@ -279,8 +279,7 @@ async function onAuthToggle() {
               <div class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
             </div>
           </label>
-          <!-- 开关说明：网关访问由飞牛 OS 认证、本就跳过鉴权；端口访问在局域网内可达，
-               建议保持开启，否则同一网络内可直接访问 dsh 服务。 -->
+          <!-- 开关说明：网关访问本就跳过鉴权；端口访问在局域网内可达，建议保持开启。 -->
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] -mt-2 pb-4 leading-relaxed">
             {{ t('settings_auth_gateway_hint') }}
           </p>

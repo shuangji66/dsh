@@ -44,6 +44,34 @@
   --max-width-content: 1280px;
 }
 
+/* 移动端底部导航的占用高度 = 内容高度 3.5rem + iOS 底部安全区（Home Indicator）。
+   App.vue 的导航条按同一式子增高、主内容区按它预留底部空间，终端页高度也按它扣减，
+   几处必须保持一致。
+   注意 env(safe-area-inset-*) 需要 index.html 里 viewport-fit=cover 才返回非零值。
+   --kb-inset / --vv-h 由 useKeyboardInset 在键盘弹起时写入（分别是键盘遮挡高度与可视
+   视口高度）；键盘收起时前者为 0px、后者被移除。滚动过程不会改动它们，底栏因此始终
+   贴底不动。 */
+:root {
+  --bottom-nav-h: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+  --kb-inset: 0px;
+  --vv-h: 100dvh;
+}
+
+/* 软键盘弹起（html[data-kb] 由 useKeyboardInset 写入）：键盘已经占掉屏幕下半部分，
+   这时把移动端底栏整体隐去、底部预留归零，并把终端页高度直接切成可视视口高度
+   （--vv-h）—— 功能键栏因此紧贴键盘顶边，终端区域也随之缩到键盘上方。
+   不写「100dvh - 键盘量」是因为 dvh 与布局视口的换算关系各浏览器不一致（iOS 的工具栏
+   高度会被多减/少减一截）。键盘收起后属性被移除，底栏与预留自动恢复。 */
+html[data-kb] {
+  --bottom-nav-h: 0px;
+}
+html[data-kb] .mobile-bottom-nav {
+  display: none;
+}
+html[data-kb] .terminal-page {
+  height: var(--vv-h);
+}
+
 html, body, #app {
   height: 100%;
   margin: 0;
@@ -69,6 +97,23 @@ h1, h2, h3, h4 {
   font-family: 'General Sans', 'DM Sans', ui-sans-serif, system-ui, sans-serif;
   font-weight: 600;
   letter-spacing: -0.03em;
+}
+
+/* 触屏设备（含 iPad）上把可聚焦控件的字号钉在 16px 下限：iOS Safari 聚焦 font-size
+   < 16px 的输入框时会自动放大整页（聚焦后页面被放大、可视区跑偏），而本项目 body 是
+   15px、.g-input 用的是 text-sm（14px），都落在触发区间内。桌面端（pointer: fine）
+   不受影响，观感不变；用 !important 是因为 Tailwind 的 text-sm 等工具类优先级更高，
+   这里必须压过它们。选择器覆盖 textarea 是刻意的：终端里 xterm 的隐藏 textarea 与
+   粘贴用的临时 textarea 同样会触发缩放。
+   这里只按 pointer 判定、不叠加宽度条件：Tailwind v4 会把 max-width 这类连续特性改写成
+   `width<=1024px` 区间语法（Safari 16.4+ 才支持），老机型（如 iOS 15/16.0 的 iPad）会
+   整块丢弃该规则，而这恰恰是最需要这条修复的设备。 */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }
 
 /* 代码/路径/键值：JetBrains Mono */

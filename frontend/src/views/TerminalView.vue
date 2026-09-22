@@ -796,7 +796,13 @@ function showToast(msg: string) {
 </script>
 
 <template>
-  <div class="flex flex-col h-[calc(100dvh-56px)] md:h-[100dvh]">
+  <!-- 移动端高度 = 100dvh - 底部导航占用高度：
+       底栏（App.vue 的底部导航）高度含 iPhone 底部安全区，写死 56px 会让本页比可用
+       空间高一截，最下面的功能键栏被底栏盖住（键盘弹起时就表现为“底栏没跟着抬升”）。
+       键盘弹起时由 style.css 的 html[data-kb] .terminal-page 规则把本页高度切成可视
+       视口高度（--vv-h）—— 功能键栏紧贴键盘顶边，终端区域随之适配大小；xterm 的
+       ResizeObserver 会自动 refit，无需额外处理。 -->
+  <div class="terminal-page flex flex-col h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
     <!-- 工具栏 -->
     <div
       class="flex items-center justify-between px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
@@ -830,10 +836,11 @@ function showToast(msg: string) {
       </div>
     </div>
 
-    <!-- 移动端功能键（两行） -->
+    <!-- 移动端功能键（两行）。底部留白只给 10px：iPhone 的底部安全区由它下面的
+         底部导航（App.vue，高度含安全区、键盘弹起时整体抬起）负责，这里再加一次
+         env(safe-area-inset-bottom) 会把本栏顶出可视区，键盘弹起时更明显。 -->
     <div
-      class="flex md:hidden flex-col gap-1 px-3 py-2.5 pb-4 bg-bg dark:bg-[#0B0B0F] border-t border-line dark:border-[#2A2A32]"
-      style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);">
+      class="flex md:hidden flex-col gap-1 px-3 py-2.5 bg-bg dark:bg-[#0B0B0F] border-t border-line dark:border-[#2A2A32]">
       <!-- 第一行 -->
       <div class="flex items-center justify-around gap-1 flex-wrap">
         <!-- ESC -->

@@ -273,25 +273,31 @@ onMounted(() => {
 
       <ul v-else class="divide-y divide-line dark:divide-[#2A2A32]">
         <li v-for="v in visitors" :key="v.id" class="py-4">
-          <div class="flex items-center justify-between gap-3">
-            <div class="min-w-0">
-              <div class="flex items-center gap-2 mb-1">
-                <!-- 网关访问：标注来源（与端口访问区分：没有 cookie、不支持注销）并附飞牛用户名 -->
-                <template v-if="isGateway(v)">
-                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand">
-                    {{ t('visitor_gateway') }}
-                  </span>
-                  <span v-if="v.username" class="text-sm font-medium text-ink dark:text-white truncate">{{ v.username }}</span>
-                </template>
-                <span v-else class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
-              </div>
-              <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-ink-soft dark:text-[#A6A6AD]">
-                <!-- 网关访问的 IP 单列展示（与端口访问一致，用于区分不同访问环境），
-                     登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。 -->
-                <span v-if="isGateway(v) && v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
-                <span>{{ t('last_access') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.lastAccess) }}</span></span>
-                <span v-if="!isGateway(v)">{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
-              </div>
+          <!-- 第一行：来源标记 + 身份（端口访问显示来源 IP、网关访问显示飞牛用户名） -->
+          <div class="flex items-center gap-2 mb-1">
+            <!-- 来源标记：端口访问（带 harness 会话 cookie，可注销）/ 飞牛网关访问
+                 （飞牛 OS 已认证，没有 cookie，不可注销）。 -->
+            <span
+              class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0"
+              :class="isGateway(v)
+                ? 'bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand'
+                : 'bg-[#E8E8EC] text-ink-soft dark:bg-[#2A2A32] dark:text-[#A6A6AD]'"
+            >
+              {{ isGateway(v) ? t('visitor_gateway') : t('visitor_port') }}
+            </span>
+            <!-- 网关访问：附飞牛 OS 用户名；端口访问：紧跟来源 IP -->
+            <span v-if="isGateway(v) && v.username" class="text-sm font-medium text-ink dark:text-white truncate">{{ v.username }}</span>
+            <span v-if="!isGateway(v)" class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
+          </div>
+          <!-- 第二行：信息字段（窄屏每项独立一行）+ 注销按钮。按钮与字段区同行并垂直居中，
+               因此在窄屏下也跟「最近访问 / 登录有效期」处在一个水平线上，不单独占一行。 -->
+          <div class="flex items-center gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-y-1 sm:gap-x-4 text-xs text-ink-soft dark:text-[#A6A6AD] flex-1 min-w-0">
+              <!-- 网关访问的 IP 单列展示（与端口访问一致，用于区分不同访问环境），
+                   登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。 -->
+              <span v-if="isGateway(v) && v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
+              <span>{{ t('last_access') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.lastAccess) }}</span></span>
+              <span v-if="!isGateway(v)">{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
             </div>
             <button
               v-if="!isGateway(v)"

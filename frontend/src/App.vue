@@ -4,6 +4,7 @@ import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useTheme } from '@/composables/useTheme'
 import { useI18n } from '@/composables/useI18n'
 import { useConsolePrefs } from '@/composables/useConsolePrefs'
+import { useKeyboardInset } from '@/composables/useKeyboardInset'
 import { useSettingsStore } from '@/stores/settings'
 import Toast from '@/components/Toast.vue'
 import router from './router'
@@ -13,6 +14,10 @@ const { t, locale, setLocale } = useI18n()
 const settings = useSettingsStore()
 const { defaultPage } = useConsolePrefs()
 const { themeMode, cycleTheme } = useTheme() // 初始化/跟随系统主题 + 侧边栏主题切换
+
+// 软键盘遮挡量（--kb-inset）：底部导航栏与终端页据此抬到键盘之上，
+// 否则固定底栏会停在键盘背后（见 composable 内的说明）。
+useKeyboardInset()
 
 // 侧边栏折叠状态
 const collapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
@@ -179,10 +184,16 @@ onMounted(() => {
       </button>
     </aside>
 
-    <!-- ===== 移动端：底部导航栏 (小于 md) ===== -->
+    <!-- ===== 移动端：底部导航栏 (小于 md) =====
+         高度 = 3.5rem 内容高度 + 底部安全区（--bottom-nav-h，与 main / 终端页一致）：
+         box-sizing: border-box 下 padding-bottom 由安全区吃掉，图标仍居中在安全区之上；
+         左右安全区（横屏刘海）一并留出，避免图标贴边或被遮挡。
+         bottom 恒为 0：底栏必须稳稳贴底 —— 拖动页面时地址栏伸缩会让视口高度变化，
+         一旦拿视口量当偏移量，底栏就会上下乱窜。键盘弹起时整条底栏由 style.css 的
+         html[data-kb] 规则隐去，终端页改为贴合键盘（功能键栏落在键盘顶边）。 -->
     <nav
-      class="flex md:hidden fixed bottom-0 left-0 right-0 h-14 bg-surface dark:bg-[#111115] border-t border-line dark:border-[#2A2A32] items-center justify-center z-10 gap-[18px]"
-      style="padding-left: calc(env(safe-area-inset-left) + 1rem); padding-right: calc(env(safe-area-inset-right) + 1rem); padding-bottom: env(safe-area-inset-bottom);">
+      class="mobile-bottom-nav flex md:hidden fixed bottom-0 left-0 right-0 bg-surface dark:bg-[#111115] border-t border-line dark:border-[#2A2A32] items-center justify-center z-10 gap-[18px]"
+      style="height: var(--bottom-nav-h); padding-left: calc(env(safe-area-inset-left) + 1rem); padding-right: calc(env(safe-area-inset-right) + 1rem); padding-bottom: env(safe-area-inset-bottom);">
       <button v-for="item in nav" :key="item.name" @click="navigate(item.name)"
         class="flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xl transition hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
         :class="current === item.name ? 'text-brand' : 'text-ink-soft dark:text-[#A6A6AD]'"
@@ -191,8 +202,10 @@ onMounted(() => {
       </button>
     </nav>
 
-    <!-- ===== 主内容区域（使用 KeepAlive 缓存终端组件） ===== -->
-    <main class="pl-0 pb-14 md:pb-0 transition-all duration-300" :class="collapsed ? 'md:pl-16' : 'md:pl-44'">
+    <!-- ===== 主内容区域（使用 KeepAlive 缓存终端组件） =====
+         底部预留 = 底部导航高度（含安全区）+ 键盘遮挡高度。键盘弹起时 --bottom-nav-h
+         被归零（底栏同时隐藏），这里就只剩键盘遮挡高度，尾部内容不会被键盘盖住。 -->
+    <main class="pl-0 pb-[calc(var(--bottom-nav-h)_+_var(--kb-inset,0px))] md:pb-0 transition-all duration-300" :class="collapsed ? 'md:pl-16' : 'md:pl-44'">
       <KeepAlive>
         <RouterView />
       </KeepAlive>

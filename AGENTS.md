@@ -167,6 +167,57 @@
   3. **「server 目录在哪」只有一个入口**：`serverDirFn` —— 更新 dsh 服务、回滚备份、
      市场定位 dshmarket 都用它，测试也因此能注入临时目录（否则会碰到真实的
      `/var/apps/Harness/target/server`）。
+- **iOS 上「菜单内焦点搬家」的 `relatedTarget` 是 null** —— dsh 0.1.7 的模型座位
+  （`conversation.input.model`）自己实现两级菜单，并在根节点用 `onBlur` 关菜单，守卫写成
+  `event.relatedTarget instanceof Node && (rootRef/menuRef 包含它)`：桌面上点选项时焦点落在该
+  选项、守卫放行；**iOS WebKit 在菜单内按钮之间搬家时 `relatedTarget === null`**，守卫直接
+  `close()`，菜单在 `mousedown` 与 `click` 之间被卸载 —— 选项的 `click` 没有目标、React 的
+  `onClick` 不跑，也就永远没有 `session/selectModel`（现象：菜单能开、根面板两行点得动、进
+  二级面板点选项毫无反应；桌面正常）。反代因此在 `bootstrapScript` 第 6 段按「触屏 + 「浏览器兼容模式」开关 + 模型
+  座位自己的菜单（`aria-expanded` + `aria-controls`）」把它内部的 `focusout` 拦在捕获阶段，
+  桌面不武装，见 README「移动端模型 / 推理等级菜单（iOS）」。
+  排查同类「点了没反应」时的两条经验：**先看 `window.__DSH_MODEL_MENU_FOCUS_GUARD__` 是否
+  武装**；诊断打点必须能区分「事件没到元素」与「事件到了但元素随即被卸载」——只看服务端有没有
+  收到请求，会把后者误判成前者（本次就是因此先误修了一轮）。
+- **真机诊断打点（默认关闭，`HARNESS_DSH_DIAG=1` 或页面 URL 带 `?dsh-diag=1`）** ——
+  只在真机上出现的问题（事件被吞、元素在两次事件之间被卸载、focus 语义与桌面不同）用「服务端
+  有没有收到请求」是查不出来的：本次「iPhone 点模型选项没反应」一开始就是因此误判成「事件没到
+  元素」，白改了一版。内置打点在 `proxy.go` 的 `dshDiagScript`（默认不注入，见 `dshDiagEnabled`），
+  它把模型座位与菜单相关的现场以 **URL path** 形式打回本站
+  （`<prefix>/dsh-diag/<事件>/<分片>/<数据>`，dsh 回 404、无副作用，但会落进
+  `/usr/trim/nginx/logs/access.log`）—— 不需要新开后端接口、不需要真机调试器。
+  事件：`s` 状态快照与 10s 心跳（视口 / 座位 `disabled` / 座位中心 `elementFromPoint` 命中谁 /
+  编辑面是否可编辑 / 菜单矩形 / 滚动位置）；`e` 命中模型座位或菜单的指针事件；`d` 菜单打开期间的
+  `mousedown` / `click` 明细（命中链 / 命中点元素 / **被按节点是否仍连接**）；`m` 菜单出现与消失
+  （消失时带最近 10 条事件尾巴 —— 判断「谁把菜单关掉的」）；`o` 菜单 portal 节点被新建/移除；
+  `f` 焦点变化（含 trigger 与 `relatedTarget` —— iOS 的关键）；`n` 座位节点是否被替换；
+  `x`/`r` JS 报错与未处理拒绝。解读（把 URL path 还原成 JSON）：
+
+  ```python
+  # python3 read-diag.py [since HH:MM:SS] —— 按到达顺序合并分片，逐条打印
+  import re, json, urllib.parse, sys
+  since = sys.argv[1] if len(sys.argv) > 1 else "00:00:00"
+  cur = None
+  for line in open("/usr/trim/nginx/logs/access.log", encoding="utf-8", errors="ignore"):
+      if "dsh-diag/" not in line:
+          continue
+      t = re.search(r"\[(\d{2}/\w{3}/\d{4}:(\d{2}:\d{2}:\d{2}))", line).group(2)
+      m = re.search(r"dsh-diag/(\w+)/(\d+)-(\d+)/(\S+?)\s", line)
+      if not m or t < since:
+          continue
+      kind, idx, total, data = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+      if idx == 1 or cur is None:                      # 每个分片组的第一个分片起一条新打点
+          cur = {"t": t, "kind": kind, "n": total, "c": {}}
+      cur["c"][idx] = data
+      if len(cur["c"]) == cur["n"]:                    # 分片齐了再解码
+          payload = "".join(cur["c"][i] for i in sorted(cur["c"]))
+          print(cur["t"], cur["kind"], json.loads(urllib.parse.unquote(payload)))
+          cur = None
+  ```
+
+  （上面这段是最小可用版本：分片没齐时解码会抛错，跳过即可；需要严格版本时按「idx==1 起新组、
+  后续 idx 递增补齐」重组。）**排查结论要落在「事件是否到达目标」与「目标是否还在文档里」两问上**，
+  不要只看有没有发出请求。
 - **dsh 的插件 bundle 带一年期 `immutable` 强缓存且无 `ETag`/`Last-Modified`** ——
   响应头为 `Cache-Control: public, max-age=31536000, immutable`；`rev` 由 dsh 自身生成、
   不随 harness 升级变化，且该路由严格校验 `rev`（改写/省略一律 404），故 URL 无法被

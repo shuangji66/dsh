@@ -254,7 +254,7 @@ async function onAuthToggle() {
           </p>
         </div>
 
-        <!-- 浏览器兼容模式（开关）：修复 Firefox/Safari 会话历史无法加载 -->
+        <!-- 浏览器兼容模式（开关）：修复 Firefox/Safari 会话历史无法加载 + iPhone 上模型/推理等级菜单点选项没反应 -->
         <div class="py-4">
           <div class="flex items-center justify-between gap-3">
             <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_browser_compat') }}</span>

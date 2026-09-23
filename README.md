@@ -24,6 +24,9 @@
 - **浏览器兼容模式** — 可开关的反代注入，修复 Firefox / Zen / Safari 等非 V8 引擎上
   「会话历史无法加载」的问题；默认关闭，Chromium 开启无副作用。
   （见上文「浏览器兼容模式」一节）
+- **移动端模型 / 推理等级菜单** — 反代注入：修复 iPhone（WKWebView）上「模型 / 推理等级
+  菜单能打开、点选项却毫无反应」；随「浏览器兼容模式」开关、只对触屏设备生效，桌面行为不变。
+  （见下文「移动端模型 / 推理等级菜单（iOS）」一节）
 - **登录鉴权** — 密码校验（≥8 位、大小写字母/数字/符号组合）、会话 Cookie、TTL
   有效期，以及访客管理（在线访客列表 / 踢出，SSE 实时推送）。**飞牛网关访问**
   （平台网关注入 `X-Trim-*` 身份头）跳过鉴权，端口访问照旧需要登录
@@ -143,6 +146,7 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_QUICK_CMDS_FILE` | 终端快捷指令持久化文件 | `$TRIM_PKGVAR/quickcmds.json` |
 | `HARNESS_PROXY_SOCK` | 反向代理的子路径挂载 Unix socket（空或 `off` 关闭） | `$TRIM_APPDEST/dsh.sock` |
 | `HARNESS_PROXY_BASEURL` | 该 socket 对外占据的子路径（反代剥掉后再转发给 dsh） | `/app/Harness/dsh` |
+| `HARNESS_DSH_DIAG` | 非空时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
 | `PROXY_PORT` | **已废弃**：反代监听端口改为设置页配置项（`config.json` 的 `proxyPort`，默认 `3079`），此环境变量不再生效 | — |
 | `dsh_port` / `TARGET_PORT` | dsh web 端口 | `13080` |
 | `proxy_mode` | 设为 `1` 启用代理 | `0` |
@@ -270,10 +274,17 @@ dsh 服务的地址，无需用户配置：控制台的当前访问地址（由�
 
 ## 浏览器兼容模式（`browserCompat`）
 
-**用途** — 修复 **Firefox / Zen（SpiderMonkey）** 与 **Safari / 苹果设备（JavaScriptCore）**
-上「会话历史一直显示『载入历史…』、且 AI 输出后无法恢复实时对话」的问题。默认**关闭**，
-在设置页「node 栈内存限制」与「启用登录鉴权」之间切换；Chromium 内核（Chrome / Edge）
-开启无副作用。
+**用途** — 一处开关、两处**只影响特定引擎**的兼容修复，默认**关闭**，在设置页
+「node 栈内存限制」与「启用登录鉴权」之间切换；Chromium 内核（Chrome / Edge）开启无副作用：
+
+1. **会话历史无法加载** —— **Firefox / Zen（SpiderMonkey）** 与 **Safari / 苹果设备
+   （JavaScriptCore）** 上「会话历史一直显示『载入历史…』、且 AI 输出后无法恢复实时对话」；
+2. **iPhone 上模型 / 推理等级菜单点选项没反应** —— WKWebView 在菜单内搬家焦点时
+   `focusout` 的 `relatedTarget` 为 null 触发上游守卫误关菜单（见下文
+   「移动端模型 / 推理等级菜单（iOS）」一节，该注入同样只在触屏设备上武装）。
+
+下面第 1 项的成因与生效时机（含缓存）说明对两项都适用：第 1 项改写的是 bundle 字节，
+升级 harness 后若浏览器仍缓存着旧字节，需要清缓存/强制刷新；第 2 项是 HTML 注入，普通刷新即生效。
 
 ### 问题成因
 
@@ -334,6 +345,93 @@ Cache-Control: public, max-age=31536000, immutable
 已被删除，改由视图层显式 `sessions.retain(target, { source: "mainView" })` 打开窗口。
 探针的入口条件（`snapshot.current`）因此恒不成立，只剩一个空转定时器，故**已移除**。
 详见 `backend/proxy.go` 的 `rewriteJSBundle` 注释。
+
+---
+
+## 移动端模型 / 推理等级菜单（iOS）
+
+**症状** — iPhone（实测：飞牛 App 的 WKWebView，iOS 18.7，网关子路径访问）上点 composer 的
+模型名：**菜单能打开**、菜单根面板的两行（「模型」「推理等级」）**也点得动**，但一进二级面板
+点具体选项就**毫无反应**：菜单随即消失、模型名不变、网络里也没有任何 `session/selectModel`。
+桌面（Firefox/Windows，同一个子路径 URL）鼠标点击一切正常——包括同一会话、同一时刻。
+
+### 问题成因
+
+dsh 0.1.7 的模型座位（`dsh-client-ui-model-selection` 的 `ModelSelect`）自己实现了两级菜单，
+并在根节点上用 `onBlur` 关菜单：
+
+```js
+const onBlur = (event) => {
+  if (event.relatedTarget instanceof Node &&
+      (rootRef.current?.contains(event.relatedTarget) === true ||
+       menuRef.current?.contains(event.relatedTarget) === true)) return;
+  close();
+};
+```
+
+它假定「失焦目标一定是个 Node」。**桌面成立**：点选项时焦点落到那个选项上，`relatedTarget`
+就是它、且在 `menuRef` 里 → 守卫放行 → 菜单留着 → `click` 派发给选项 → 选择生效。
+
+**iOS WebKit 不成立**：菜单内按钮之间的焦点搬家，`focusout` 的 `relatedTarget` 是 **null**
+（真机打点实测：菜单里已聚焦的选项 `focusout` 事件 `relatedTarget === null`）。守卫于是越过
+`return` 直接 `close()`，**菜单在 `mousedown` 之后、`click` 之前被卸载** → 选项的 `click`
+没有目标、React 的 `onClick` 不跑，也就永远不会发出 `session/selectModel`。
+
+真机数据（诊断打点，模型座位内事件）可直接对上：
+
+| 观察 | 数据 |
+| --- | --- |
+| 二级面板选项上的事件 | `pointerdown → touchstart → pointerup → mousedown`（齐全）→ **没有 `click`** |
+| 紧跟着的 focusout | `target = BUTTON._7KE1Ra_option _7KE1Ra_selected, relatedTarget = null` |
+| 同一时刻 | `[role=menu]` 消失（菜单被卸载）；座位本身 `disabled=false`、座位中心命中就是它、`defaultPrevented=false` |
+| 根面板两行 | `click` 正常派发（那两行是进入二级面板的唯一入口，所以"能钻进去但点不动"） |
+
+复现与回归（无需真机）：在 Chromium/WebKit 里把「菜单内 focus 搬家」按 iOS 的方式模拟
+（在菜单内 `mousedown` 时对手上已聚焦的菜单按钮调用 `blur()` —— 程序化 blur 的
+`relatedTarget` 同样是 null），未修复时选项点击 0 次选择、修复后 1 次。
+
+### 修复方式
+
+`bootstrapScript` 第 6 段（随设置页的**「浏览器兼容模式」**开关 + 触屏判定一起武装）：触屏上把**模型座位自己那个菜单内部**的 `focusout` 在捕获阶段
+拦掉传播——React 的委托监听挂在更低的容器上，拦在最外层就让它收不到这次失焦，菜单不会被
+误关，随后的 `click` 正常落到选项上。边界刻意收窄：
+
+- 只认模型座位（`[data-slot="conversation.input.model"]`）且菜单确实开着（`aria-expanded="true"`）；
+- 菜单用触发器的 `aria-controls` 定位（规范属性，不依赖 dsh 的样式哈希），命令 / 权限 /
+  会话行等**其他菜单一律不碰**；
+- 只拦 `target` 在该菜单内的 `focusout`：编辑面与菜单以外的失焦照旧（「点菜单外关菜单」走的是
+  `mousedown`，不受影响，实测仍能关闭）；
+- 只在触屏设备上武装（`navigator.maxTouchPoints` / `ontouchstart`），桌面行为与官方 dsh 完全一致。
+
+生效方式是 **HTML 注入**（不是改写 bundle 字节），HTML 每次刷新都回源，因此**普通刷新即生效**，
+不受 dsh 插件 bundle 的 `immutable` 强缓存影响（这点与开关里第 1 项不同）。页面可用
+`window.__DSH_MODEL_MENU_FOCUS_GUARD__ === true` 确认守卫已武装（开关关闭时该标记不会出现）。
+
+### 真机诊断（默认关闭）
+
+这类只在真机上出现的问题（事件被吞、元素在两次事件之间被卸载）靠"看有没有发出请求"是查不出来的。
+反代内置了一套默认关闭的打点：环境变量 `HARNESS_DSH_DIAG=1`（进程级）或页面 URL 带
+`?dsh-diag=1`（访问级，例如手机上打开 `https://<网关>/app/Harness/dsh/?dsh-diag=1`）即注入。
+它把「模型座位与菜单」相关的指针/焦点/菜单出现消失/座位节点替换/JS 报错，以
+`<prefix>/dsh-diag/<事件>/<分片>/<数据>` 的 **URL path** 形式打回本站（dsh 回 404，无副作用），
+落进平台网关 / nginx 的 `access.log`——不需要新开后端接口就能取回一个真机客户端的现场。
+解读方式与判定要点见 `AGENTS.md`「真机诊断打点」一节。
+
+### 与移动端页面插件的关系
+
+**不是** `dsh-web-mobile-fix` / `dsh-web-mobile` 之类插件造成的，证据：
+
+- `dsh-web-mobile-fix` 的捕获期 `click` 处理只作用于「侧边栏展开时落在中栏」的点击，而且它的
+  第一条豁免就是 `[role="menu"]` 子树；模型菜单是 **portal 到 `document.body`** 的，既不在中栏
+  也不在侧边栏列里——代码路径根本到不了。
+- 真机上模型菜单里的事件 `defaultPrevented` 全是 `false`，且钩子注册在 `<head>`（比任何插件都
+  早），没有任何插件拦掉这些事件；根面板两行的 `click` 也正常派发。
+- 另一台设备（桌面 Firefox）、同一个子路径 URL、同一会话正常工作。
+- 该实例上 `dsh-web-mobile` 本来就是被 `cordis.patch.yml` 停用的（其 client bundle 根本没加载）。
+
+顺带记录一个**独立**的移动端小坑（与本缺陷无关、属插件设计）：`dsh-web-mobile-fix` 在 ≤700px
+把展开的侧边栏做成浮层，并在捕获期吃掉「侧边栏展开时落在中栏的点击」用于收起侧边栏——因此
+侧边栏展开时点模型名只会收起侧边栏，需要再点一次。
 
 ---
 

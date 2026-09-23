@@ -37,6 +37,15 @@ type AppConfig struct {
 	AccessURLs []string `json:"accessUrls,omitempty"`
 	// BrowserCompat 为浏览器兼容模式开关，默认关闭。
 	//
+	// 一套开关，两处引擎兼容修复（都只影响受影响的引擎，Chromium 开启无副作用）：
+	//  1. dsh 客户端 bundle 里只适配 V8 的原生函数格式判断（Firefox / Zen / Safari
+	//     上「会话历史无法加载」）—— 改写 bundle 字节，运行时由 window.__DSH_BROWSER_COMPAT__
+	//     决定是否归一化空白；
+	//  2. iPhone（WKWebView）上「模型 / 推理等级菜单能打开、点选项却毫无反应」—— 见
+	//     proxy.go 注入脚本第 6 段：iOS 在菜单内按钮之间搬家焦点时 focusout 的
+	//     relatedTarget 为 null，而模型座位的 onBlur 守卫只接受 Node，会把菜单在
+	//     mousedown 与 click 之间关掉。该段注入读同一个开关，且只在触屏设备上武装。
+	//
 	// 开启时反代会修正 dsh 客户端 bundle 中一处只适配 V8 的原生函数格式判断
 	// （`Function.prototype.toString.call(c) === "function X() { [native code] }"`）。
 	// SpiderMonkey（Firefox/Zen）与 JavaScriptCore（Safari/WebKit）把原生函数源码

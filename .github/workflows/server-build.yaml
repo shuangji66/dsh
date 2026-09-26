@@ -215,19 +215,26 @@ jobs:
           node /tmp/patch-attachment-fsync.cjs \
             "/var/apps/Harness/target/server/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js"
 
-      - name: 压缩 server 目录，以版本号+平台命名
+      - name: 压缩 server 目录，以版本号+平台命名（并生成 sha256 校验文件）
         run: |
           VERSION="${{ needs.fetch-version.outputs.dsh_version }}"
           PLATFORM="${{ matrix.platform }}"
           ARCHIVE_NAME="server-${PLATFORM}-${VERSION}.tar.gz"
           tar czf "$GITHUB_WORKSPACE/$ARCHIVE_NAME" -C /var/apps/Harness/target server
+          # 校验文件与包同名 + .sha256 后缀（控制台更新 dsh 服务时按同一规则取回，
+          # 见 backend/update.go 的 checksumURL）。内容为 sha256sum 的标准输出：
+          # `<64 位十六进制>  <文件名>`。在 $GITHUB_WORKSPACE 下生成，记录的是文件名本身。
+          sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+          cat "$ARCHIVE_NAME.sha256"
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
 
-      - name: 上传 server.tar.gz 作为 Artifact（供发布用）
+      - name: 上传 server.tar.gz 与校验文件作为 Artifact（供发布用）
         uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.platform }}
-          path: ${{ env.ARCHIVE_NAME }}
+          path: |
+            ${{ env.ARCHIVE_NAME }}
+            ${{ env.ARCHIVE_NAME }}.sha256
           if-no-files-found: error
 
   # ========== 第三步：发布到当前仓库的 Release ==========
@@ -286,7 +293,7 @@ jobs:
               --notes-file /tmp/release_notes.txt
           fi
 
-          for file in artifacts/*.tar.gz; do
+          for file in artifacts/*.tar.gz artifacts/*.tar.gz.sha256; do
             echo "上传 $file"
             gh release upload "$TAG" "$file" --repo "$REPO" --clobber
           done

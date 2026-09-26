@@ -86,6 +86,9 @@
   **备份包留不留只看有没有回滚入口**：只有 `server-*`（概览页有「dsh 服务回滚」）与
   用户主动的 `dsh-data-*` 需要留存；harness 与插件市场的备份包收尾即删
   （`removeUnusedBackup`）—— 新增更新分支时没有回滚入口就别把包留在盘上。
+  发布资产还要过 **sha256 校验**（`releaseChecksum` / `verifyFileSHA256`）：校验文件是
+  Release 里与包同名的 `.sha256`（由两个 workflow 生成），**静默校验**（不写更新状态、
+  不记成功日志），失败才进更新弹窗并删掉坏包；**缺失/取不到只记 WARN、不阻塞更新**。
 - `market.go` — 插件市场（dshmarket）就地更新：解析实际生效的安装位置（server 包内置
   vs profile 自带）、npm registry 取版本、完整性校验、原子替换与失败回滚。
 - `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
@@ -159,6 +162,11 @@
    宽度是 768/834/1024px，会被判成桌面而丢掉整条辅助键（触屏上再没有 ESC/Tab/Ctrl/Alt/
    方向键）。一律走 `composables/useMobileLayout.ts`（触屏 **或** 窄视口），**不要写回
    `md:hidden`**；「平板档（两页并排）」用同文件的 `useWideLayout()`（就是 md 断点，别另发明数值）。
+11. **发布资产的名字不能随便改，`.sha256` 必须与包同名** —— harness / dsh 的更新链路按
+   「资产地址 + `.sha256`」拼校验文件地址（`backend/update.go` 的 `checksumURL`），
+   两个 workflow 也按同一规则生成并上传。改资产命名（`assetURL`）却漏改一侧，**不会报错**，
+   只会让校验静默退化成「不校验」（缺文件按策略只记 WARN）。新增发布资产时：
+   ①`assetURL` 的命名 ②workflow 的 `sha256sum` ③artifact/Release 上传的路径清单，三处一起改。
 
 ---
 

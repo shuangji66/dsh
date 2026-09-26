@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,6 +156,10 @@ type PendingUpdate struct {
 	// 仅市场使用：npm registry 给出的完整性值，安装前再复核一次（见 market.go）。
 	Integrity string
 	Shasum    string
+	// 仅 harness / dsh 发布资产使用：下载阶段校验通过过的 sha256（64 位小写十六进制）。
+	// 空表示该版本没有校验文件（退化为不校验，见 releaseChecksum）。安装前再复核一次，
+	// 防止「下载 → 安装」两步之间文件被截断或替换（与市场那两个字段同理）。
+	SHA256 string
 }
 
 // UpdateManager 管理控制台与 dsh 的版本检测、SSE 推送与自我更新。
@@ -872,6 +877,159 @@ func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
 		asset = fmt.Sprintf("server-%s-%s.tar.gz", arch, version)
 	}
 	return fmt.Sprintf("%s/releases/download/%s/%s", updateRepoURL, tag, asset)
+}
+
+// assetURLFn 便于测试注入发布资产地址（生产实现见 assetURL）。
+var assetURLFn = func(m *UpdateManager, k updateKind, version, arch string) string {
+	return m.assetURL(k, version, arch)
+}
+
+// --- 发布资产的 sha256 校验 ---
+//
+// 构建流程（.github/workflows/harness-build.yaml / server-build.yaml）打包后额外生成同名
+// `.sha256` 文件（`sha256sum` 的输出：`<64 位十六进制>  <文件名>`），与压缩包一并上传到
+// Release。harness 控制台与 dsh 服务自我更新时一并取回它，用**实际下载到的字节**复核摘要：
+// 下载链路上的代理 / CDN 缓存损坏或替换了字节时当场失败（错误在更新弹窗里提示），
+// 而不是把坏包装上去。
+//
+// 两条刻意保留的性质：
+//   - **静默**：取校验文件、算摘要都不写更新状态、不进弹窗（状态里只有下载进度），
+//     只有失败才由下载 / 安装流程把错误推给前端（见 UpdateSection.vue 的失败提示）。
+//     校验成功不记日志 —— 那是正常路径，不是状态变化。
+//   - **不阻塞**：校验文件不存在（老版本发布资产没带）或取不到时只记一行 WARN，
+//     退化为不校验，更新照常进行。
+
+// sha256HexLen 是 sha256 十六进制摘要的字符数。
+const sha256HexLen = 64
+
+// maxChecksumBytes 是校验文件正文的读取上限（正常只有一行、几十字节）。
+const maxChecksumBytes = 4 << 10
+
+// errChecksumNotFound 表示发布资产里没有 `.sha256` 文件（HTTP 404）——多半是该版本发布在
+// 「一并上传校验文件」之前。只用来说清日志，不改变「跳过校验」的行为。
+var errChecksumNotFound = errors.New("发布资产中没有 sha256 校验文件")
+
+// checksumURL 返回发布资产对应的 sha256 校验文件地址（同目录、文件名加 `.sha256` 后缀）。
+func checksumURL(pkgURL string) string { return pkgURL + ".sha256" }
+
+// releaseChecksum 取回并解析发布资产的期望 sha256（64 位小写十六进制）。
+//
+// 返回空串表示「这次不校验」，只可能是：资产里没有 `.sha256`、请求全部失败、内容无法解析
+// —— 三种情况都只记一行 WARN 并让更新继续（见上面的策略说明）。
+// 用户取消 / 暂停导致的中断不在这里报错也不记日志：中断本身由随后的下载流程收尾。
+func (m *UpdateManager) releaseChecksum(k updateKind, pkgURL string, plan downloadPlan, ctrl *downloadControl) string {
+	raw := checksumURL(pkgURL)
+	text, err := m.fetchChecksumText(raw, plan, ctrl)
+	if err != nil {
+		if errors.Is(err, errUpdateCancelled) || errors.Is(err, errUpdatePaused) {
+			return ""
+		}
+		if errors.Is(err, errChecksumNotFound) {
+			logWarn("%s release has no .sha256 asset (%s), updating without integrity check", updateLogTag(k), raw)
+		} else {
+			logWarn("%s checksum file unavailable (%v), updating without integrity check", updateLogTag(k), err)
+		}
+		return ""
+	}
+	want, perr := parseChecksumFile(text)
+	if perr != nil {
+		logWarn("%s checksum file unreadable (%v): %s", updateLogTag(k), perr, raw)
+		return ""
+	}
+	return want
+}
+
+// fetchChecksumText 用与更新包相同的通路序列（代理 → 直连，各 2 次机会）取回校验文件正文。
+//
+// 刻意不复用 downloadToFile：那一套（Range 续传、进度、空闲看门狗、半成品落盘）是为几十 MB
+// 的包准备的，而校验文件只有几十字节 —— 这里只要「两条通路各 2 次 + 单次请求整体限时」。
+// ctrl 仍会检查：用户取消 / 暂停后不再继续重试。
+func (m *UpdateManager) fetchChecksumText(rawURL string, plan downloadPlan, ctrl *downloadControl) (string, error) {
+	const attemptsPerRoute = 2
+	var lastErr error
+	for _, route := range plan.routes {
+		for try := 1; try <= attemptsPerRoute; try++ {
+			if stop, reason := ctrlState(ctrl); stop {
+				return "", interruptedError(reason)
+			}
+			text, err := fetchTextOnce(route, rawURL)
+			if err == nil {
+				return text, nil
+			}
+			lastErr = fmt.Errorf("%s 第 %d 次: %w", route.label, try, err)
+			if try < attemptsPerRoute {
+				time.Sleep(updateRetryBackoff)
+			}
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("没有可用的下载通路")
+	}
+	return "", lastErr
+}
+
+// fetchTextOnce 单次拉取一个小文本文件。
+// 单次请求整体限时 updateHeaderTimeout（30 秒取几十字节足够），正文用 io.LimitReader 截断，
+// 避免异常响应把内存吃满。
+func fetchTextOnce(route updateRoute, rawURL string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), updateHeaderTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "harness-console")
+	resp, err := route.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", errChecksumNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumBytes))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// parseChecksumFile 从 `.sha256` 文件正文里取出摘要（64 位小写十六进制）。
+// 构建流程每个资产一个 `.sha256`（`sha256sum <资产>` 的输出，只有一行且带文件名），
+// 这里取第一个可识别的字段，不强求文件名与资产一致。
+func parseChecksumFile(text string) (string, error) {
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		sum := strings.ToLower(fields[0])
+		if len(sum) != sha256HexLen {
+			return "", fmt.Errorf("无法识别的摘要 %q", fields[0])
+		}
+		if _, err := hex.DecodeString(sum); err != nil {
+			return "", fmt.Errorf("摘要不是十六进制: %q", fields[0])
+		}
+		return sum, nil
+	}
+	return "", errors.New("校验文件为空")
+}
+
+// verifyFileSHA256 校验文件的实际 sha256 是否等于期望值（都是小写十六进制）。
+// 复用 fileHash（与插件市场的完整性校验同一份实现）。
+func verifyFileSHA256(path, want string) error {
+	sum, err := fileHash(path, "sha256")
+	if err != nil {
+		return err
+	}
+	got := hex.EncodeToString(sum)
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("摘要不匹配：期望 %s，实际 %s", want, got)
+	}
+	return nil
 }
 
 // extractTarGz 解压 .tar.gz 到目标目录。保持 tar 内的相对路径不变（不剥离顶层目录）。
@@ -1893,6 +2051,9 @@ func drrLastN(dr *downloadReader) int64 {
 // 关闭 cancelCh 中断），下载成功后把 .tar.gz 放到持久的“待安装”目录并记入 pending，
 // 推送 phase=downloaded / readyToInstall=true，等待用户在弹窗里点“安装”。
 // 返回错误表示下载失败或被用户取消。
+//
+// harness / dsh 的发布资产在这一步还会做 sha256 校验（见本文件「发布资产的 sha256 校验」
+// 一节）：校验文件与包一并取回、用实际字节复核，全程静默；失败（摘要不符）即报错。
 func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	m.applying.Lock()
 	defer m.applying.Unlock()
@@ -1904,6 +2065,8 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		version string
 		rawURL  string
 		rel     *marketRelease
+		// wantSHA 是发布资产期望的 sha256（空表示这次不校验，见 releaseChecksum）。
+		wantSHA string
 	)
 	if k == updateKindMarket {
 		// 先确认这份市场确实归控制台管：由 profile 提供的那份改了也不生效
@@ -1923,7 +2086,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 			return fmt.Errorf("尚未获取到最新版本号，请先执行检查更新")
 		}
 		version = st.LatestVersion
-		rawURL = m.assetURL(k, version, m.updateArch())
+		rawURL = assetURLFn(m, k, version, m.updateArch())
 	}
 	arch := m.updateArch()
 	logInfo("%s downloading %s (arch=%s)", updateLogTag(k), version, arch)
@@ -1988,8 +2151,19 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		// 安装阶段会再复核一次。
 		n, err = m.downloadMarketTarball(rel, pkgPath, progress, ctrl, plan)
 	} else {
+		// 发布资产：先把 sha256 校验文件一并取回（取不到即退化为不校验，只记 WARN），
+		// 包下载完成后用实际字节复核摘要。校验全程静默，只有失败才进弹窗。
+		wantSHA = m.releaseChecksum(k, rawURL, plan, ctrl)
 		// GitHub release 资产：代理 / 直连各 2 次机会，支持 Range 续传。
 		n, err = m.downloadToFile(rawURL, pkgPath, progress, ctrl, plan)
+		if err == nil && wantSHA != "" {
+			if verr := verifyFileSHA256(pkgPath, wantSHA); verr != nil {
+				// 摘要不符：这份字节既不可信、也不该留着续传（会从错误位置接，或直接撞
+				// 416 白跑一轮），删掉让用户“重新下载”时从零开始。
+				os.Remove(pkgPath)
+				err = fmt.Errorf("更新包 sha256 校验失败（%v）：下载到的字节与校验文件不一致，可能被中间代理或缓存损坏，请重新下载", verr)
+			}
+		}
 	}
 
 	switch {
@@ -2042,6 +2216,8 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	if rel != nil {
 		pending.Integrity = rel.Integrity
 		pending.Shasum = rel.Shasum
+	} else {
+		pending.SHA256 = wantSHA
 	}
 	m.setPending(pending)
 	m.updateStatus(k, func(s *UpdateStatus) {
@@ -2085,6 +2261,15 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 	if _, err := os.Stat(p.PkgPath); err != nil {
 		m.clearPending(k)
 		return fmt.Errorf("待安装更新包已不存在（可能被清理），请重新下载: %w", err)
+	}
+	// 下载阶段校验过摘要的（harness / dsh 发布资产）在安装前再复核一次：这份文件要跨
+	// 「下载 → 安装」两步留在盘上，期间可能被截断或替换（同理见市场的 Integrity 复核）。
+	// 校验静默执行，不通过才把错误推给弹窗；文件保留，用户可删除后重新下载。
+	if p.SHA256 != "" {
+		if err := verifyFileSHA256(p.PkgPath, p.SHA256); err != nil {
+			m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
+			return fmt.Errorf("待安装的更新包 sha256 校验失败（文件可能已损坏或被替换），请删除更新包后重新下载: %v", err)
+		}
 	}
 	logInfo("%s installing %s", updateLogTag(k), p.Version)
 

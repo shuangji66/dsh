@@ -55,7 +55,7 @@ jobs:
           GOOS=linux GOARCH=${{ matrix.arch }} CGO_ENABLED=0 \
             go build -trimpath -ldflags="-s -w -X main.harnessVersion=$VERSION" -o harness .
 
-      - name: 压缩二进制为 tar.gz
+      - name: 压缩二进制为 tar.gz 并生成 sha256 校验文件
         working-directory: ./dsh-src/backend
         run: |
           if [ "${{ matrix.arch }}" = "amd64" ]; then
@@ -63,14 +63,23 @@ jobs:
           else
             PLATFORM="arm"
           fi
-          tar czf "harness-${VERSION}-${PLATFORM}.tar.gz" harness
+          ARCHIVE="harness-${VERSION}-${PLATFORM}.tar.gz"
+          tar czf "$ARCHIVE" harness
+          # 校验文件与包同名 + .sha256 后缀（控制台自更新时按同一规则取回，
+          # 见 backend/update.go 的 checksumURL）。内容为 sha256sum 的标准输出：
+          # `<64 位十六进制>  <文件名>`。
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          cat "$ARCHIVE.sha256"
           echo "PLATFORM=${PLATFORM}" >> $GITHUB_ENV   # 供后续上传使用
 
-      - name: 上传压缩包作为 Artifact
+      - name: 上传压缩包与校验文件作为 Artifact
         uses: actions/upload-artifact@v7
         with:
           name: harness-${{ env.PLATFORM }}
-          path: ./dsh-src/backend/harness-*.tar.gz
+          path: |
+            ./dsh-src/backend/harness-*.tar.gz
+            ./dsh-src/backend/harness-*.tar.gz.sha256
+          if-no-files-found: error
 
   # ========== 创建 Release 并上传 tar.gz 压缩包 ==========
   publish:
@@ -108,8 +117,8 @@ jobs:
             gh release create "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES"
           fi
 
-          # 直接上传所有 tar.gz 文件（已按版本和平台命名）
-          for file in artifacts/harness-*.tar.gz; do
+          # 直接上传所有 tar.gz 与其 .sha256 校验文件（已按版本和平台命名）
+          for file in artifacts/harness-*; do
             echo "上传 $file"
             gh release upload "$TAG" "$file" --repo "$REPO" --clobber
           done

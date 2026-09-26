@@ -136,9 +136,16 @@ make clean
 GitHub Actions（`.github/workflows/`）提供 CI 构建：
 
 - `build.yml` — 手动触发，交叉编译 `amd64` / `arm64` 的 harness 二进制。
-- `harness-build.yaml` — 手动触发，构建 harness 并发布到 GitHub Release。
+- `harness-build.yaml` — 手动触发，构建 harness 并发布到 GitHub Release
+  （压缩包 + 同名 `.sha256` 校验文件）。
 - `server-build.yaml` — 每 8 小时自动从 `@deepseek-ai/dsh` 打包 server（含
-  `dshmarket` 依赖并注入 `PROFILE_TEMPLATES.web.bundles`），发布 Release。
+  `dshmarket` 依赖并注入 `PROFILE_TEMPLATES.web.bundles`），发布 Release
+  （压缩包 + 同名 `.sha256` 校验文件）。
+
+> 校验文件的命名就是「Release 资产名 + `.sha256` 后缀」
+> （`harness-<版本>-<x86|arm>.tar.gz.sha256`、`server-<x86|arm>-<版本>.tar.gz.sha256`）：
+> 控制台的更新链路按同一规则拼地址（`backend/update.go` 的 `checksumURL`），
+> 改名会让校验静默退化成「不校验」。校验内容与失败处理见「更新包的 sha256 校验」一节。
 
 ---
 
@@ -582,6 +589,33 @@ const onBlur = (event) => {
 - **超时策略**：下载客户端不设总超时（旧的 60 秒总超时会掐断大包/慢网），改为
   建连 30s、响应头 30s、**传输空闲 60s**（空闲看门狗，一有字节就重置）。
 - 进度经 SSE 节流上报（每 500ms 或每 256KB），暂停/续传时字节数连续、不回跳。
+
+---
+
+## 更新包的 sha256 校验
+
+`harness-build.yaml` / `server-build.yaml` 打包后额外生成**同名 `.sha256` 文件**
+（`sha256sum` 的标准输出：`<64 位十六进制>  <文件名>`），与包一并上传到 Release 资产。
+
+harness 控制台与 dsh 服务的自我更新会一并取回它并用**实际下载到的字节**复核摘要
+（`backend/update.go` 的 `releaseChecksum` / `verifyFileSHA256`）：
+
+- **取回方式**：与包相同的通路序列（代理 → 直连，各 2 次机会）；校验文件只有几十字节，
+  不复用 `downloadToFile` 那套续传/进度/空闲看门狗，单次请求整体限时 30 秒、正文限长截断。
+  用户取消/暂停后不再继续重试。
+- **校验过程静默**：取校验文件、算摘要都**不写更新状态、不进弹窗**（弹窗只显示下载进度），
+  校验成功也不记日志 —— 只有失败才被推给弹窗（`UpdateSection.vue` 的失败提示区）。
+- **摘要不符即失败**：错误为「更新包 sha256 校验失败：…请重新下载」，并把那份包**删掉**
+  （留着会让下次续传从错误位置接、或直接撞 416 白跑一轮），不进入「已下载待安装」。
+- **安装前再复核一次**：摘要随「待安装包」记下（`PendingUpdate.SHA256`），安装阶段解压之前
+  重算一次 —— 这份文件要跨「下载 → 安装」两步留在盘上，期间可能被截断或替换
+  （与插件市场的 `dist.integrity` 复核同理）。不通过则拒绝安装，包保留由用户决定是否删除重下。
+- **校验文件缺失时不阻塞更新**：本次改动之前发布的那批资产没有 `.sha256`，取不到、
+  404、内容无法解析都只记一行 WARN，退化为不校验并继续更新 —— 不让用户卡在「无法更新」。
+  这也是为什么**校验成功路径必须保持安静**：否则老资产的每次更新都会多出一串噪音日志。
+
+> 插件市场（dshmarket）走的是 npm registry 的 `dist.integrity` / `dist.shasum`（元数据自带摘要，
+> 两个都没有则拒绝安装），见「插件市场（dshmarket）的更新」一节。
 
 ---
 

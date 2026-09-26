@@ -861,8 +861,12 @@ function showToast(msg: string) {
        键条自身仍写 select-none（长按连发不能被选择菜单打断），其子树保持不可选中。 -->
   <div class="terminal-page select-text flex flex-col h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
     <!-- 内缩只给「标题栏 + 终端卡片」这一层：移动端辅助键条保持通栏（它自带 px-2 与顶部分隔线，
-         再套一层页面内边距会把它挤窄、分隔线也缩进，窄屏上键位会被挤压）。 -->
-    <div class="flex flex-col gap-3 p-3 sm:p-4 flex-1 min-h-0">
+         再套一层页面内边距会把它挤窄、分隔线也缩进，窄屏上键位会被挤压）。
+         横向内缩与宽度上限**照抄其他子页面**（Overview / Settings / Plugins / Directories /
+         Logs 的外壳都是 `px-4 sm:px-8 max-w-6xl mx-auto`）—— 标题栏与终端卡片因此与它们
+         左右边缘对齐、宽屏下同样居中限宽；纵向留白仍是「顶部 12px（sm 16px）+ gap-3」，
+         各页标题栏因此贴在同一高度上。 -->
+    <div class="flex flex-col gap-3 px-4 sm:px-8 pt-3 sm:pt-4 pb-3 sm:pb-4 max-w-6xl mx-auto w-full flex-1 min-h-0">
       <!-- 工具栏（与其他子页面一致的卡片式标题栏；标题栏按钮统一样式：
            小一号字号 + 细边框 + 不填充底色） -->
       <PageHeader :title="t('terminal_title')" :icon="icons.terminal">

@@ -175,10 +175,10 @@ async function onAuthToggle() {
 </script>
 
 <template>
-  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-6xl mx-auto">
-    <!-- 页头（图标 + 标题 + 保存按钮） -->
-    <PageHeader class="mb-6" :title="t('settings_title')" :icon="icons.settings">
-      <button class="g-btn-primary" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
+  <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
+    <!-- 页头（图标 + 标题 + 保存按钮；标题栏按钮统一样式：小一号字号 + 细边框 + 不填充底色） -->
+    <PageHeader class="mb-3" :title="t('settings_title')" :icon="icons.settings">
+      <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
     <!-- 六个卡片自适应分栏：代理 / 端口与兼容 / node 版本与内存 / 登录鉴权 / 快捷访问 / 控制台设置。
@@ -275,22 +275,19 @@ async function onAuthToggle() {
             </p>
           </div>
 
-          <!-- node栈内存限制（MB） -->
+          <!-- node栈内存限制（MB，单位已在标签里说明，输入框内不再重复） -->
           <div>
             <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
               {{ t('settings_dsh_mem_limit') }} <span class="text-ink-faint">{{ t('settings_dsh_mem_mb') }}</span>
             </label>
-            <div class="flex items-center gap-2">
-              <input
-                v-model.number="memLimit"
-                type="number"
-                min="1"
-                max="65536"
-                :disabled="config.dshMemAuto"
-                class="g-input max-w-40 disabled:cursor-not-allowed"
-              />
-              <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">MB</span>
-            </div>
+            <input
+              v-model.number="memLimit"
+              type="number"
+              min="1"
+              max="65536"
+              :disabled="config.dshMemAuto"
+              class="g-input disabled:cursor-not-allowed"
+            />
             <!-- 自动设置开关：关闭时传 NODE_OPTIONS，由系统 node 自动分配内存 -->
             <div class="flex items-center justify-between gap-3 mt-3">
               <span class="text-sm text-ink dark:text-[#EDEDF0]">{{ t('settings_dsh_mem_auto') }}</span>
@@ -347,22 +344,19 @@ async function onAuthToggle() {
           </div>
         </div>
 
-        <!-- 登录有效期（小时） -->
+        <!-- 登录有效期（小时，单位已在标签里说明，输入框内不再重复） -->
         <div class="mt-4">
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
             {{ t('settings_auth_ttl') }} <span class="text-ink-faint">{{ t('settings_auth_ttl_hour') }}</span>
           </label>
-          <div class="flex items-center gap-2">
-            <input
-              v-model.number="config.authTTLHours"
-              type="number"
-              min="1"
-              max="720"
-              step="1"
-              class="g-input max-w-40"
-            />
-            <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">h</span>
-          </div>
+          <input
+            v-model.number="config.authTTLHours"
+            type="number"
+            min="1"
+            max="720"
+            step="1"
+            class="g-input"
+          />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
             {{ t('settings_auth_ttl_hint') }}
           </p>
@@ -382,7 +376,8 @@ async function onAuthToggle() {
             class="g-input flex-1"
             @keydown.enter="addAccessUrl"
           />
-          <button class="g-btn-primary !h-10 shrink-0" @click="addAccessUrl">{{ t('access_urls_add') }}</button>
+          <!-- 添加按钮与标题栏按钮同一风格：不填充底色 + 细边框（高度与输入框对齐） -->
+          <button class="g-btn-secondary !h-10 shrink-0" @click="addAccessUrl">{{ t('access_urls_add') }}</button>
         </div>
         <div v-if="config.accessUrls && config.accessUrls.length" class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32]">
           <div v-for="(url, i) in config.accessUrls" :key="i" class="flex items-center justify-between gap-2 px-3 py-2">

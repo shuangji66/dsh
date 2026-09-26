@@ -142,9 +142,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-6xl mx-auto">
+  <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
     <!-- 页头（图标 + 标题 + 刷新/重置按钮） -->
-    <PageHeader class="mb-6" :title="t('nav_plugins')" :icon="icons.plugin">
+    <PageHeader class="mb-3" :title="t('nav_plugins')" :icon="icons.plugin">
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="store.loadPlugins(true)">
         {{ t('plugin_refresh') }}
       </button>

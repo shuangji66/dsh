@@ -114,11 +114,15 @@ onMounted(() => {
 <template>
   <!-- 整页铺满：标题栏与日志卡片各占一段，日志卡片 flex-1 撑满剩余高度（内部 pre 自己滚动）。
        高度式子与终端页一致：移动端扣掉底部导航占用高度（含 iPhone 安全区），桌面端占满视口；
-       与 main 的 padding-bottom 相加正好等于一个视口，因此本页自身不产生滚动条。 -->
-  <div class="log-page flex flex-col gap-4 px-4 sm:px-8 py-4 sm:py-6 max-w-6xl mx-auto w-full h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
-    <!-- 页头（图标 + 标题 + 导出日志） -->
+       与 main 的 padding-bottom 相加正好等于一个视口，因此本页自身不产生滚动条。
+       标题栏的上下留白与终端页保持一致（各子页面的标题栏因此贴在同一高度上）：
+       顶部 pt-3/sm:pt-4（12/16px，同终端页外壳的 p-3/sm:p-4）、标题栏下方 gap-3（12px，
+       同终端页的 gap-3；标题栏本身各页都是同一张 min-h-14 卡片）；底部维持紧凑的
+       pb-4/sm:pb-6，把高度尽量留给日志。 -->
+  <div class="log-page flex flex-col gap-3 px-4 sm:px-8 pt-3 sm:pt-4 pb-4 sm:pb-6 max-w-6xl mx-auto w-full h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
+    <!-- 页头（图标 + 标题 + 导出日志；标题栏按钮统一样式：小一号字号 + 细边框 + 不填充底色） -->
     <PageHeader :title="t('logs_title')" :icon="icons.logs">
-      <button class="g-btn-secondary !h-9" @click="exportLog">{{ t('log_export') }}</button>
+      <button class="g-btn-secondary h-8 px-3 text-xs" @click="exportLog">{{ t('log_export') }}</button>
     </PageHeader>
 
     <div v-if="error && !logContent" class="g-card p-8 text-center text-ink-soft dark:text-[#A6A6AD] text-sm">

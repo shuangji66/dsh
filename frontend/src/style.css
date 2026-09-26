@@ -71,6 +71,19 @@ html[data-kb] .mobile-bottom-nav {
 html[data-kb] .terminal-page {
   height: var(--vv-h);
 }
+/* 键盘弹起 + 终端页在场时，连文档的滚动一起锁死。
+   终端页自身高度已经是可视视口高度（--vv-h），但 App 根节点的 min-h-screen 与 main 给
+   键盘预留的 padding-bottom（--kb-inset）仍让文档比可视视口高出一大截 —— 手指在终端上
+   拖拽时浏览器会顺着祖先链滚到文档上，整个终端页（含底部辅助键栏）被拖着上移，键栏就
+   不再贴着键盘顶边。html/body 一起设 overflow:hidden，超出的那截直接裁掉、不参与滚动。
+   用 :has(.terminal-page) 限定范围：终端页被 KeepAlive 切走后其 DOM 不在文档里，选择器
+   自然不匹配；其它页面键盘弹起时仍需正常滚动（要能滚到被键盘挡住的输入框）。
+   overscroll-behavior 阻断「滚到边界继续传给上层容器」的链式滚动。 */
+html[data-kb]:has(.terminal-page),
+html[data-kb]:has(.terminal-page) body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 
 html, body, #app {
   height: 100%;
@@ -134,10 +147,15 @@ h1, h2, h3, h4 {
   border-radius: 6px;
 }
 
-/* 终端容器（xterm 挂载点）：只负责铺满外框，尺寸全部交给 xterm 自己管理。 */
+/* 终端容器（xterm 挂载点）：只负责铺满外框，尺寸全部交给 xterm 自己管理。
+   touch-action: none —— 触摸滚动由 TerminalView 自己实现（xterm 不处理触摸，那个
+   可滚动的 .xterm-viewport 又是屏幕层的兄弟节点，浏览器会把拖拽升级成「滚文档」）。
+   这里在触摸起始就把浏览器的平移/缩放手势关掉，滚动本身交给 scrollLines()；
+   配合 onTouchMove 里的 preventDefault 双保险，避免手指一拖整页跟着上滚。 */
 .term-container {
   height: 100%;
   width: 100%;
+  touch-action: none;
 }
 /* 终端复制/粘贴反馈气泡 */
 .term-copy-toast {
@@ -247,6 +265,15 @@ html, body {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
     gap: 1rem;
+  }
+
+  /* 概览页专用：桌面固定两列，让四个卡片按 2×2 排列（dsh 信息 / 快捷访问 / 版本 / 登录列表）。
+     覆盖写在 md（768px）以上，窄屏依旧沿用 .g-card-grid 的自适应列数 —— 手机上就是单列，
+     因此不需要另写一套 1 列规则。选择器带上 .g-card-grid 提高特异性，避免依赖声明顺序。 */
+  @media (min-width: 768px) {
+    .g-card-grid.g-card-grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
 
   /* 入场动画容器：配合上面的 @keyframes，统一时长与缓动 */

@@ -156,6 +156,11 @@ function fmtMem(v?: number): string {
   if (v === undefined || v === null || isNaN(v)) return '—'
   return v + ' MB'
 }
+// 格式化 dsh 进程 PID：进程未运行时后端返回 0（或字段缺失），统一显示「—」
+function fmtPid(v?: number): string {
+  if (v === undefined || v === null || isNaN(v) || v <= 0) return '—'
+  return String(v)
+}
 
 // CPU 占用阈值颜色：0-20% 绿 / 20-50% 橙 / 50% 以上红；未知用黑色（—）
 function cpuColor(v?: number): string {
@@ -220,6 +225,21 @@ function isGateway(v: Visitor): boolean {
   return v.source === 'gateway'
 }
 
+// 列表条目「名称」：网关访问是飞牛用户名，端口访问是来源 IP（与列表里显示的保持一致）。
+function visitorName(v: Visitor): string {
+  return (isGateway(v) ? v.username : v.ip) || ''
+}
+
+// 按名称排序后再渲染：后端每次快照都是遍历 map（顺序随机），而 SSE 会随用户连接、
+// 注销与过期清理不断重推整份列表 —— 不排序的话同一条记录会不停跳位。名称相同的
+// （同一用户在多个环境/端口访问）再按 id 兜底，保证顺序稳定。
+const sortedVisitors = computed(() =>
+  [...visitors.value].sort((a, b) => {
+    const cmp = visitorName(a).localeCompare(visitorName(b), undefined, { numeric: true, sensitivity: 'base' })
+    return cmp !== 0 ? cmp : a.id.localeCompare(b.id)
+  })
+)
+
 onMounted(() => {
   store.load()
   initialLoad()
@@ -229,15 +249,16 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-6xl mx-auto">
+  <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
     <!-- 页头（图标 + 标题 + 右侧操作，统一卡片式标题栏） -->
-    <PageHeader class="mb-6" :title="t('overview_title')" :icon="icons.overview">
-      <button class="g-btn-secondary !h-9 !px-4 !text-sm" @click="openAbout()">{{ t('about') }}</button>
+    <PageHeader class="mb-3" :title="t('overview_title')" :icon="icons.overview">
+      <button class="g-btn-secondary h-8 px-3 text-xs" @click="openAbout()">{{ t('about') }}</button>
     </PageHeader>
 
-    <!-- 三卡片自适应分栏：dsh 信息与启停 / 三个版本 / 快捷访问。
-         列数由容器宽度自动决定（见 style.css 的 .g-card-grid），窄屏自动降为单列。 -->
-    <div class="g-card-grid g-fade-in">
+    <!-- 四卡片栅格：dsh 信息与启停 / 三个版本 / 快捷访问 / 登录列表。
+         桌面固定两列（2×2，见 style.css 的 .g-card-grid-2），窄屏沿用 .g-card-grid
+         的自适应列数（手机为单列）。 -->
+    <div class="g-card-grid g-card-grid-2 g-fade-in">
       <!-- ① dsh 服务信息与启停 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <div class="flex items-center justify-between gap-2">
@@ -255,7 +276,8 @@ onMounted(() => {
         </div>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('overview_dsh_desc') }}</p>
 
-        <!-- 进程资源占用：CPU / 内存两个等宽小面板 -->
+        <!-- 进程信息：CPU / 内存 一行两个等宽小面板；PID 折到下一行、与 CPU 面板左对齐
+             （两列栅格放三个子项：第三个自然换行并占第一列，宽度也与上面两个一致）。 -->
         <div class="grid grid-cols-2 gap-3 mb-4">
           <div class="rounded-lg bg-black/[0.03] dark:bg-white/[0.05] px-3 py-2.5">
             <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('cpu_usage') }}</div>
@@ -265,13 +287,17 @@ onMounted(() => {
             <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('mem_usage') }}</div>
             <div class="font-mono text-sm font-semibold" :class="memColor(status?.memoryMB)">{{ fmtMem(status?.memoryMB) }}</div>
           </div>
+          <div class="rounded-lg bg-black/[0.03] dark:bg-white/[0.05] px-3 py-2.5">
+            <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('dsh_pid') }}</div>
+            <div class="font-mono text-sm font-semibold text-ink dark:text-[#EDEDF0]">{{ fmtPid(status?.pid) }}</div>
+          </div>
         </div>
 
-        <!-- 启停操作 -->
-        <div class="flex flex-wrap gap-2 mt-auto">
-          <button v-if="!running" class="g-btn-primary !h-9 !px-4 !text-sm bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
-          <button v-else class="g-btn-danger !h-9 !px-4 !text-sm" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
-          <button class="g-btn-warning !h-9 !px-4 !text-sm" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
+        <!-- 启停操作：两列栅格，每个按钮的宽度与小面板一致（整行正好与上面的面板行同宽） -->
+        <div class="grid grid-cols-2 gap-3 mt-auto">
+          <button v-if="!running" class="g-btn-primary !h-9 !text-sm bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
+          <button v-else class="g-btn-danger !h-9 !text-sm" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
+          <button class="g-btn-warning !h-9 !text-sm" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
         </div>
       </section>
 
@@ -280,61 +306,60 @@ onMounted(() => {
 
       <!-- ③ 快捷访问 -->
       <AccessCard :access-urls="store.config.accessUrls || []" :fnos-entry="fnosEntry" />
-    </div>
 
-    <!-- 登录列表：单独占一行（不参与上面的自适应分栏） -->
-    <section class="g-card g-card-hover p-5 sm:p-6 mt-6">
-      <div class="flex items-center justify-between mb-2">
+      <!-- ④ 登录列表：并入上面的栅格（不再单独占一行），
+           卡片宽度只有桌面栅格的一半，因此字段沿用「移动端」的显示方式（逐项独立一行）。 -->
+      <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('login_list') }}</h2>
-      </div>
-      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-5">{{ t('login_list_desc') }}</p>
+        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('login_list_desc') }}</p>
 
-      <div v-if="visitorsLoading" class="text-sm text-ink-soft dark:text-[#A6A6AD] py-6 text-center">{{ t('loading') }}</div>
+        <div v-if="visitorsLoading" class="text-sm text-ink-soft dark:text-[#A6A6AD] py-6 text-center">{{ t('loading') }}</div>
 
-      <div v-else-if="visitors.length === 0" class="text-sm text-ink-faint dark:text-[#8A8A92] py-6 text-center">
-        {{ t('no_visitors') }}
-      </div>
+        <div v-else-if="visitors.length === 0" class="text-sm text-ink-faint dark:text-[#8A8A92] py-6 text-center">
+          {{ t('no_visitors') }}
+        </div>
 
-      <ul v-else class="divide-y divide-line dark:divide-[#2A2A32]">
-        <li v-for="v in visitors" :key="v.id" class="py-4">
-          <!-- 第一行：来源标记 + 身份（端口访问显示来源 IP、网关访问显示飞牛用户名） -->
-          <div class="flex items-center gap-2 mb-1">
-            <!-- 来源标记：端口访问（带 harness 会话 cookie，可注销）/ 飞牛网关访问
-                 （飞牛 OS 已认证，没有 cookie，不可注销）。 -->
-            <span
-              class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0"
-              :class="isGateway(v)
-                ? 'bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand'
-                : 'bg-[#E8E8EC] text-ink-soft dark:bg-[#2A2A32] dark:text-[#A6A6AD]'"
-            >
-              {{ isGateway(v) ? t('visitor_gateway') : t('visitor_port') }}
-            </span>
-            <!-- 网关访问：附飞牛 OS 用户名；端口访问：紧跟来源 IP -->
-            <span v-if="isGateway(v) && v.username" class="text-sm font-medium text-ink dark:text-white truncate">{{ v.username }}</span>
-            <span v-if="!isGateway(v)" class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
-          </div>
-          <!-- 第二行：信息字段（窄屏每项独立一行）+ 注销按钮。按钮与字段区同行并垂直居中，
-               因此在窄屏下也跟「最近访问 / 登录有效期」处在一个水平线上，不单独占一行。 -->
-          <div class="flex items-center gap-3">
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-y-1 sm:gap-x-4 text-xs text-ink-soft dark:text-[#A6A6AD] flex-1 min-w-0">
-              <!-- 网关访问的 IP 单列展示（与端口访问一致，用于区分不同访问环境），
-                   登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。 -->
-              <span v-if="isGateway(v) && v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
-              <span>{{ t('last_access') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.lastAccess) }}</span></span>
-              <span v-if="!isGateway(v)">{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
+        <ul v-else class="divide-y divide-line dark:divide-[#2A2A32]">
+          <li v-for="v in sortedVisitors" :key="v.id" class="py-4">
+            <!-- 第一行：来源标记 + 身份（端口访问显示来源 IP、网关访问显示飞牛用户名） -->
+            <div class="flex items-center gap-2 mb-1">
+              <!-- 来源标记：端口访问（带 harness 会话 cookie，可注销）/ 飞牛网关访问
+                   （飞牛 OS 已认证，没有 cookie，不可注销）。 -->
+              <span
+                class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0"
+                :class="isGateway(v)
+                  ? 'bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand'
+                  : 'bg-[#E8E8EC] text-ink-soft dark:bg-[#2A2A32] dark:text-[#A6A6AD]'"
+              >
+                {{ isGateway(v) ? t('visitor_gateway') : t('visitor_port') }}
+              </span>
+              <!-- 网关访问：附飞牛 OS 用户名；端口访问：紧跟来源 IP -->
+              <span v-if="isGateway(v) && v.username" class="text-sm font-medium text-ink dark:text-white truncate">{{ v.username }}</span>
+              <span v-if="!isGateway(v)" class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
             </div>
-            <button
-              v-if="!isGateway(v)"
-              class="g-btn-danger !h-8 !px-3 !text-xs flex-shrink-0"
-              :disabled="deleting === v.id"
-              @click="removeVisitor(v.id)"
-            >
-              {{ deleting === v.id ? t('logging_out') : t('logout') }}
-            </button>
-          </div>
-        </li>
-      </ul>
-    </section>
+            <!-- 第二行：信息字段（逐项独立一行）+ 注销按钮。按钮与字段区同行并垂直居中，
+                 因此在窄屏下也跟「最近访问 / 登录有效期」处在一个水平线上，不单独占一行。 -->
+            <div class="flex items-center gap-3">
+              <div class="grid grid-cols-1 gap-y-1 text-xs text-ink-soft dark:text-[#A6A6AD] flex-1 min-w-0">
+                <!-- 网关访问的 IP 单列展示（与端口访问一致，用于区分不同访问环境），
+                     登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。 -->
+                <span v-if="isGateway(v) && v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
+                <span>{{ t('last_access') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.lastAccess) }}</span></span>
+                <span v-if="!isGateway(v)">{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
+              </div>
+              <button
+                v-if="!isGateway(v)"
+                class="g-btn-danger !h-8 !px-3 !text-xs flex-shrink-0"
+                :disabled="deleting === v.id"
+                @click="removeVisitor(v.id)"
+              >
+                {{ deleting === v.id ? t('logging_out') : t('logout') }}
+              </button>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </div>
 
     <!-- 停止/重启确认弹窗 -->
     <ConfirmDialog

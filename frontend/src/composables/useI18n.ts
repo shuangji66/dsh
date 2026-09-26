@@ -130,6 +130,7 @@ const zh: Record<string, string> = {
   status_stopped: '已停止',
   cpu_usage: 'CPU 使用率',
   mem_usage: '内存占用',
+  dsh_pid: '进程 PID',
   // 概览页卡片标题（dsh 信息与启停 / 三个版本 / 快捷访问）
   overview_dsh_desc: '进程状态与资源占用',
   overview_versions: '版本',
@@ -507,6 +508,7 @@ const en: Record<string, string> = {
   status_stopped: 'Stopped',
   cpu_usage: 'CPU usage',
   mem_usage: 'Memory',
+  dsh_pid: 'Process PID',
   // Overview page card titles (dsh info & lifecycle / versions / quick access)
   overview_dsh_desc: 'Process state and resource usage',
   overview_versions: 'Versions',

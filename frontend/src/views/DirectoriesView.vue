@@ -362,13 +362,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-6xl mx-auto">
-    <!-- 页头（图标 + 标题 + 恢复备份 / 备份 / 添加） -->
-    <PageHeader class="mb-6" :title="t('nav_directory')" :icon="icons.folder">
+  <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
+    <!-- 页头（图标 + 标题 + 恢复备份 / 备份 / 添加；标题栏按钮统一样式：
+         小一号字号 + 细边框 + 不填充底色） -->
+    <PageHeader class="mb-3" :title="t('nav_directory')" :icon="icons.folder">
       <!-- 恢复备份（红色边框红色文字，位于备份按钮左侧） -->
-      <button class="g-btn-danger h-9 px-3 text-xs flex-shrink-0" @click="onRestoreClick()">{{ t('directory_restore') }}</button>
-      <button class="g-btn-secondary flex-shrink-0" :disabled="backupBusy" @click="onBackupClick()">{{ t('directory_backup') }}</button>
-      <button class="g-btn-primary flex-shrink-0" @click="openPicker()">{{ t('directory_add') }}</button>
+      <button class="g-btn-danger h-8 px-3 text-xs flex-shrink-0" @click="onRestoreClick()">{{ t('directory_restore') }}</button>
+      <button class="g-btn-secondary h-8 px-3 text-xs flex-shrink-0" :disabled="backupBusy" @click="onBackupClick()">{{ t('directory_backup') }}</button>
+      <button class="g-btn-secondary h-8 px-3 text-xs flex-shrink-0" @click="openPicker()">{{ t('directory_add') }}</button>
     </PageHeader>
 
     <!-- 每个目录一张卡片，按容器宽度自适应分栏（.g-card-grid）：

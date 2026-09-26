@@ -123,6 +123,14 @@ let touchStartY = 0
 let touchStartTime = 0
 let pasteHelper: HTMLTextAreaElement | null = null
 
+// 触摸滚动相关（见 onTouchMove）：
+//   touchLastY    —— 上一次已换算成行的手指位置（行数是整数值，余量留到下一帧）
+//   touchScrolling—— 本次手势是否已判定为「滚终端」而非点击/长按
+//   TOUCH_SCROLL_MIN —— 判定阈值：竖向位移超过它、且明显大于横向位移，才算滚动
+const TOUCH_SCROLL_MIN = 10
+let touchLastY = 0
+let touchScrolling = false
+
 // 快捷指令弹窗状态
 const quickCmdsVisible = ref(false)
 const editVisible = ref(false)
@@ -310,30 +318,60 @@ function showPasteMenu() {
 }
 
 function onTouchStart(e: TouchEvent) {
-  if (!term || !sock || sock.readyState !== WebSocket.OPEN) return
   if (e.touches.length !== 1) return
   const target = e.target as HTMLElement
   if (target.closest('[data-keypad-bar]')) return
   const touch = e.touches[0]
   touchStartX = touch.clientX
   touchStartY = touch.clientY
+  touchLastY = touch.clientY
   touchStartTime = Date.now()
-  longPressTimer = window.setTimeout(() => {
-    showPasteMenu()
-    longPressTimer = null
-  }, 600)
+  touchScrolling = false
+  // 长按粘贴要求在线：没连上时连菜单都不弹，这里顺带不发定时器
+  if (term && sock && sock.readyState === WebSocket.OPEN) {
+    longPressTimer = window.setTimeout(() => {
+      showPasteMenu()
+      longPressTimer = null
+    }, 600)
+  }
 }
 
+// onTouchMove 兼管两件事：取消长按判定、以及**触摸滚动终端**。
+//
+// 为什么要自己实现滚动：xterm 只监听 wheel/鼠标事件，那个可滚动的 .xterm-viewport
+// 又是屏幕层（.xterm-screen）的**兄弟节点** —— 手指落点永远不在它身上，浏览器只能顺着
+// 祖先链往上找滚动容器，结果滚的是整个文档：终端内容不动，整页（含辅助键栏）被拖着
+// 上滚。这里把手指的垂直位移按行高换算成行数直接调 scrollLines()，并在判定为滚动后
+// preventDefault()，把这一次手势从浏览器手里接管过来。
+// 方向与自然滚动一致：手指向上拖 = delta 为正 = scrollLines(+) = 往新内容方向滚。
 function onTouchMove(e: TouchEvent) {
-  if (longPressTimer) {
-    const touch = e.touches[0]
-    const dx = touch.clientX - touchStartX
-    const dy = touch.clientY - touchStartY
-    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-      clearTimeout(longPressTimer)
-      longPressTimer = null
-    }
+  const touch = e.touches[0]
+  if (!touch) return
+  const dx = touch.clientX - touchStartX
+  const dy = touch.clientY - touchStartY
+  if (longPressTimer && (Math.abs(dx) > TOUCH_SCROLL_MIN || Math.abs(dy) > TOUCH_SCROLL_MIN)) {
+    clearTimeout(longPressTimer)
+    longPressTimer = null
   }
+
+  if (!term || e.touches.length !== 1) return
+  if (!touchScrolling) {
+    // 竖直方向主导、且位移超过阈值才升级为滚动；否则交给浏览器（点击/选择/横向手势）
+    if (Math.abs(dy) < TOUCH_SCROLL_MIN || Math.abs(dy) <= Math.abs(dx)) return
+    touchScrolling = true
+    touchLastY = touch.clientY
+  }
+  // 行高 = 屏幕层高度 / 可见行数（FitAddon 保证两者严格对应）
+  const screen = term.element?.querySelector('.xterm-screen') as HTMLElement | null
+  const cellH = screen && term.rows > 0 ? screen.clientHeight / term.rows : 0
+  if (cellH <= 0) return
+  const lines = Math.trunc((touchLastY - touch.clientY) / cellH)
+  if (lines !== 0) {
+    term.scrollLines(lines)
+    // 只把「整行」的位移记进基准，不足一行的余量留到下一次触摸移动
+    touchLastY -= lines * cellH
+  }
+  e.preventDefault()
 }
 
 function onTouchEnd() {
@@ -341,6 +379,7 @@ function onTouchEnd() {
     clearTimeout(longPressTimer)
     longPressTimer = null
   }
+  touchScrolling = false
 }
 // ------------------------------------------------
 
@@ -833,12 +872,13 @@ function showToast(msg: string) {
     <!-- 内缩只给「标题栏 + 终端卡片」这一层：移动端辅助键条保持通栏（它自带 px-2 与顶部分隔线，
          再套一层页面内边距会把它挤窄、分隔线也缩进，窄屏上键位会被挤压）。 -->
     <div class="flex flex-col gap-3 p-3 sm:p-4 flex-1 min-h-0">
-      <!-- 工具栏（与其他子页面一致的卡片式标题栏） -->
+      <!-- 工具栏（与其他子页面一致的卡片式标题栏；标题栏按钮统一样式：
+           小一号字号 + 细边框 + 不填充底色） -->
       <PageHeader :title="t('terminal_title')" :icon="icons.terminal">
-        <button class="g-btn-ghost" :title="t('term_quick_cmds')" @click="openQuickCmds">{{ t('term_quick_cmds') }}</button>
-        <button class="g-btn-ghost" :title="t('term_paste')" @click="pasteClipboard">{{ t('term_paste') }}</button>
-        <button class="g-btn-ghost" @click="reconnect">{{ t('term_reconnect') }}</button>
-        <button class="g-btn-ghost" @click="clearTerminal">{{ t('term_clear') }}</button>
+        <button class="g-btn-secondary h-8 px-3 text-xs" :title="t('term_quick_cmds')" @click="openQuickCmds">{{ t('term_quick_cmds') }}</button>
+        <button class="g-btn-secondary h-8 px-3 text-xs" :title="t('term_paste')" @click="pasteClipboard">{{ t('term_paste') }}</button>
+        <button class="g-btn-secondary h-8 px-3 text-xs" @click="reconnect">{{ t('term_reconnect') }}</button>
+        <button class="g-btn-secondary h-8 px-3 text-xs" @click="clearTerminal">{{ t('term_clear') }}</button>
       </PageHeader>
 
       <!-- 终端卡片：外框由这张卡片负责（圆角 + 边框 + 撑满剩余高度），终端底色铺满整张卡片。

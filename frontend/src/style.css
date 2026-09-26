@@ -124,7 +124,10 @@ h1, h2, h3, h4 {
 @media (pointer: coarse) {
   input,
   select,
-  textarea {
+  textarea,
+  /* 快捷访问地址（.g-access-url）与表单控件同一档字号，这里必须一起抬 —— 否则触屏下
+     「输入框 16px、列出来的地址 14px」，同一张卡片里同一个网址会忽大忽小。 */
+  .g-access-url {
     font-size: 16px !important;
   }
 }
@@ -374,6 +377,13 @@ html, body {
     margin: 0;
   }
 
+  /* 快捷访问地址（列出的一条地址）：与 .g-input 同一档字号（text-sm），保证「在上面输入框
+     里输入的地址」和「下面列出来的地址」大小一致；触屏设备由上面的 pointer: coarse 规则
+     一起抬到 16px。地址保持等宽字体（便于逐字符核对）。 */
+  .g-access-url {
+    @apply text-sm font-mono;
+  }
+
   /* 标签 chip：胶囊形状 */
   .g-chip {
     @apply inline-flex items-center gap-1 rounded-full bg-black/5 dark:bg-white/10
@@ -386,6 +396,28 @@ html, body {
   /* 状态 chip：胶囊 + 语义色 */
   .g-status {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+
+  /* ===== 弹窗统一结构（配合 components/DialogCloseButton.vue） =====
+     弹窗标题用 .g-dialog-title（统一字号/字重/前景色，并给右上角 X 留出位置），
+     关闭按钮统一用 <DialogCloseButton>（内部就是 .g-dialog-close，绝对定位到右上角），
+     底部操作行用 .g-dialog-actions（统一右对齐与间距）。
+     弹窗里的按钮一律**带边框、不填充底色、同一档字号**：
+       - 普通操作：g-btn-secondary
+       - 危险操作（删除/取消下载/丢弃等）：g-btn-danger
+     不要再在弹窗里写 g-btn-primary（填充品牌色）或自创尺寸 —— 之前各弹窗的确认按钮
+     有的是填充色、有的是纯文字，看起来像两套 UI。 */
+  .g-dialog-title {
+    @apply font-display text-lg font-semibold text-ink dark:text-white pr-11;
+  }
+  .g-dialog-close {
+    @apply absolute right-3 top-3 inline-flex items-center justify-center w-8 h-8 rounded-md
+      bg-transparent text-ink-soft dark:text-[#A6A6AD]
+      hover:text-ink dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5
+      disabled:opacity-40 disabled:cursor-not-allowed transition-colors;
+  }
+  .g-dialog-actions {
+    @apply flex justify-end gap-3 mt-6;
   }
 
   /* 弹窗遮罩：只负责压暗（半透明黑）与吃掉触摸拖拽。
@@ -401,4 +433,72 @@ html, body {
     @apply absolute inset-0 bg-black/50;
     touch-action: none;
   }
+}
+/* ===== 日志区域：底色与行色都跟随主题 =====
+   浅色主题「浅底深字」、暗色主题「深底浅字」；行级色（WARN / ERROR / dsh 子进程输出）
+   同样各一套 —— 暗色主题那套亮黄/亮红放到浅底上会发白、几乎看不清，所以浅色主题用深一档
+   的语义色。这几条刻意放在 @layer 之外：它们要盖过 Tailwind 工具类写死的前景色，
+   且 .dark 变体是自己写的，不依赖 utilities 层的生成顺序。
+   类名由 LogView 的行着色逻辑给出（见 LEVEL_CLASS / DSH_CLASS）。 */
+.log-viewer {
+  background-color: #f7f8fa;
+  color: #33373d;
+}
+.dark .log-viewer {
+  background-color: #0f1115;
+  color: #d6dce4;
+}
+.log-line-warn {
+  color: #b45309;
+}
+.dark .log-line-warn {
+  color: #fbbf24;
+}
+.log-line-error {
+  color: #dc2626;
+}
+.dark .log-line-error {
+  color: #f87171;
+}
+.log-line-dsh {
+  color: #a16207;
+}
+.dark .log-line-dsh {
+  color: #facc15;
+}
+
+/* ===== 全局文本选择策略 =====
+   控制台是「应用式」UI：默认全局禁止文本选择 —— 拖动/长按不会误选中一片文字（触屏上还会
+   弹出系统选择菜单，与终端的长按粘贴、键条的长按连发互相干扰）。只有明确需要复制的地方
+   用 Tailwind 的 select-text 放开，共两处：
+     - 日志内容（LogView 的日志 pre；日志路径与「自动滚动」状态**不放**，那里不需要拖选）
+     - 终端区域（TerminalView 整页：xterm 的「选中即复制」依赖原生选择）
+   插件名/版本号也不走选择 —— 插件名是「点击即复制」（PluginsView 的 copyPluginName），
+   版本号刻意不可复制。
+   输入框 / 文本域 / contenteditable 始终可选中：否则没法用鼠标在框内框选或替换文字。
+   user-select 的「子元素取父元素 used value」语义决定了：给容器设 text 即整棵子树可选中，
+   容器内显式写了 select-none 的元素（如辅助键条）仍然保持不可选中。
+   -webkit-user-select 是给老 Safari / iOS 的（它们只认前缀版）。 */
+html {
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+textarea,
+[contenteditable='true'],
+.select-text {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ===== 鼠标拖拽：全局不产生「半透明快照」 =====
+   原生 HTML5 拖拽（mousedown + 移动）会给被拖元素画一张拖拽影像；控制台到处是 v-html
+   注入的内联 <svg> 图标，Chromium 把它当图片一样可拖，随手一点再拖就会冒出整块快照。
+   JS 侧已在 App.vue 用捕获阶段的 dragstart 统一拦掉（含 data-allow-drag 逃生口），
+   这里再给可拖的元素类型兜一道：WebKit 系只认 -webkit-user-drag（无标准属性名）。
+   不影响从系统里往页面拖文件（那是 dragover/drop，页面目前也没用到）。 */
+img,
+a,
+svg {
+  -webkit-user-drag: none;
 }

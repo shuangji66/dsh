@@ -36,16 +36,18 @@ const MAX_LEN = 500 * 1024
 const MAX_LINES = 2000
 
 // 日志行着色。行格式与后端 logging.go 的约定一致：
-//   - `[Harness] <时间> [LEVEL] message` → INFO 白 / WARN 黄 / ERROR 红；
+//   - `[Harness] <时间> [LEVEL] message` → INFO 用日志区域的默认前景色 / WARN 黄 / ERROR 红；
 //   - 其余行（没有 [Harness] 前缀）是 dsh 子进程的原样输出 → 固定黄色，
 //     内容不做任何加工（后端也是原样透传的）。
+// 具体颜色写在 style.css 的 .log-* 里（浅色主题用深一档的语义色），这样底色与行色
+// 都跟随主题；这里只给类名，不再写死十六进制颜色。
 const HARNESS_LINE = /^\[Harness\] \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} \[(INFO|WARN|ERROR)\]/
 const LEVEL_CLASS: Record<string, string> = {
-  INFO: 'text-[#d6dce4]',
-  WARN: 'text-[#fbbf24]',
-  ERROR: 'text-[#f87171]'
+  INFO: '', // 继承 .log-viewer 的主题前景色
+  WARN: 'log-line-warn',
+  ERROR: 'log-line-error'
 }
-const DSH_CLASS = 'text-[#facc15]'
+const DSH_CLASS = 'log-line-dsh'
 
 const logLines = computed(() => {
   let c = logContent.value
@@ -140,12 +142,15 @@ onMounted(() => {
           {{ stickToBottom ? t('log_auto_scroll_on') : t('log_auto_scroll_off') }}
         </button>
       </div>
-      <!-- 逐行着色：等级见 logLines；dsh 子进程输出固定黄色 -->
+      <!-- 日志内容（只有这一块允许拖选复制；上面的日志路径与「自动滚动」状态刻意不放）。
+           逐行着色：等级见 logLines；dsh 子进程输出固定黄色。
+           底色与行色都由 style.css 的 .log-viewer / .log-line-* 提供，跟随主题
+           （浅色主题浅底深字，暗色主题深底浅字）；截断提示沿用 WARN 黄。 -->
       <pre
         ref="el"
         @scroll="onScroll"
-        class="flex-1 min-h-0 overflow-auto p-4 bg-[#0f1115] text-[#d6dce4] text-xs leading-5 font-mono whitespace-pre-wrap break-all m-0"
-      ><span v-if="!logLines.lines.length">{{ t('log_empty') }}</span><template v-else><span v-if="logLines.truncated" class="block text-[#fbbf24]">{{ t('log_truncated') }}</span><span v-for="(l, i) in logLines.lines" :key="i" :class="[l.cls, 'block']">{{ l.text }}</span></template></pre>
+        class="log-viewer select-text flex-1 min-h-0 overflow-auto p-4 text-xs leading-5 font-mono whitespace-pre-wrap break-all m-0"
+      ><span v-if="!logLines.lines.length">{{ t('log_empty') }}</span><template v-else><span v-if="logLines.truncated" class="block log-line-warn">{{ t('log_truncated') }}</span><span v-for="(l, i) in logLines.lines" :key="i" :class="[l.cls, 'block']">{{ l.text }}</span></template></pre>
     </div>
   </div>
 </template>

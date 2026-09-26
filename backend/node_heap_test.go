@@ -189,3 +189,51 @@ func TestLoadConfigFillsMemLimitFromNode(t *testing.T) {
 		t.Fatalf("已配置的 dshMemLimit 被改写: %d", cfg.DshMemLimit)
 	}
 }
+
+// 手动设置（DshMemAuto=false）的 node 堆内存上限低于下限时必须整次拒绝保存，
+// 值恰好等于下限则允许；「自动设置」打开时不校验这个持久化值（可能是历史遗留的小值）。
+func TestSaveSettingsRejectsTooLowMemLimit(t *testing.T) {
+	prev := GetConfig()
+	t.Cleanup(func() { initConfig(&prev) })
+
+	cfg := defaultConfig()
+	cfg.DshPort = closedPort(t)
+	cfg.ProxyPort = closedPort(t)
+	cfg.DshMemAuto = false
+	cfg.DshMemLimit = 4096
+	initConfig(&cfg)
+
+	m := &AdminMux{
+		renv: &RuntimeEnv{ConfigFile: filepath.Join(t.TempDir(), "config.json")},
+		dsh:  newTestDshManager(t.TempDir(), ""),
+		auth: NewAuth(),
+		boot: newBootState(),
+	}
+
+	// 低于下限：拒绝保存，内存值保持不变。
+	code, resp := saveProxySettings(t, m, func(c *AppConfig) { c.DshMemLimit = minDshMemLimitMB - 1 })
+	if code != http.StatusBadRequest {
+		t.Fatalf("过低堆内存上限的保存状态 = %d, want 400 (%v)", code, resp)
+	}
+	if got := GetConfig().DshMemLimit; got != 4096 {
+		t.Fatalf("被拒后内存上限 = %d, want 4096", got)
+	}
+
+	// 恰好等于下限：允许（只由前端给黄字提醒，不阻止保存）。
+	code, resp = saveProxySettings(t, m, func(c *AppConfig) { c.DshMemLimit = minDshMemLimitMB })
+	if code != http.StatusOK {
+		t.Fatalf("等于下限的保存状态 = %d, want 200 (%v)", code, resp)
+	}
+	if got := GetConfig().DshMemLimit; got != minDshMemLimitMB {
+		t.Fatalf("保存后内存上限 = %d, want %d", got, minDshMemLimitMB)
+	}
+
+	// 自动设置打开：持久化的小值不再阻止保存（自动模式不使用它）。
+	code, resp = saveProxySettings(t, m, func(c *AppConfig) {
+		c.DshMemAuto = true
+		c.DshMemLimit = minDshMemLimitMB - 1
+	})
+	if code != http.StatusOK {
+		t.Fatalf("自动设置下的小值保存状态 = %d, want 200 (%v)", code, resp)
+	}
+}

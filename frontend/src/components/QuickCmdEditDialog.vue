@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import type { QuickCmd } from '@/serverapi'
 
 const props = defineProps<{
@@ -76,7 +77,8 @@ function onSave() {
         <div
           class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6"
         >
-          <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-4">
+          <DialogCloseButton :label="t('dialog_close')" @close="close" />
+          <h3 class="g-dialog-title mb-4">
             {{ props.cmd ? t('qc_edit_title') : t('qc_add_title') }}
           </h3>
 
@@ -87,6 +89,7 @@ function onSave() {
             class="g-input mb-1"
             :placeholder="t('qc_name_placeholder')"
             maxlength="120"
+            autocomplete="off"
           />
           <p v-if="nameError" class="text-xs text-[#EF4444] mb-2">{{ nameError }}</p>
 
@@ -96,6 +99,7 @@ function onSave() {
             rows="3"
             class="g-input mb-1 resize-y font-mono"
             :placeholder="t('qc_content_placeholder')"
+            autocomplete="off"
           ></textarea>
           <p v-if="contentError" class="text-xs text-[#EF4444] mb-2">{{ contentError }}</p>
 
@@ -121,9 +125,9 @@ function onSave() {
             </span>
           </label>
 
-          <div class="flex justify-end gap-3 mt-6">
+          <div class="g-dialog-actions">
             <button class="g-btn-secondary" @click="close">{{ t('qc_cancel') }}</button>
-            <button class="g-btn-primary" @click="onSave">{{ t('qc_save') }}</button>
+            <button class="g-btn-secondary" @click="onSave">{{ t('qc_save') }}</button>
           </div>
         </div>
       </div>

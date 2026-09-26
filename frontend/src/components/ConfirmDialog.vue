@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useI18n } from '@/composables/useI18n'
+import DialogCloseButton from '@/components/DialogCloseButton.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -24,6 +26,8 @@ watch(
   () => props.visible,
   (v) => (open.value = v)
 )
+
+const { t } = useI18n()
 
 // 弹窗打开期间锁定页面滚动，避免在弹窗背后继续滚动/拖动页面
 useBodyScrollLock(() => open.value)
@@ -57,16 +61,19 @@ function onConfirm() {
         <div
           class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6"
         >
-          <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ title }}</h3>
+          <!-- 右上角 X：所有弹窗统一（见 DialogCloseButton.vue）；放在标题前是为了让
+               键盘 Tab 顺序也是「先关闭、再取消、最后确认」 -->
+          <DialogCloseButton :label="t('dialog_close')" :disabled="props.confirmLoading" @close="close" />
+          <h3 class="g-dialog-title mb-3">{{ title }}</h3>
           <!-- 自定义内容（默认插槽）优先；否则回退到 message 文本 -->
           <slot>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ message }}</p>
           </slot>
-          <div class="flex justify-end gap-3 mt-6">
+          <div class="g-dialog-actions">
             <button class="g-btn-secondary" :disabled="props.confirmLoading" @click="close">{{ cancelText }}</button>
+            <!-- 危险操作（删除/取消下载等）用红字红框，其余一律边框不填色 —— 弹窗按钮统一见 style.css -->
             <button
-              class="g-btn-primary"
-              :class="danger ? '!bg-danger hover:!bg-danger/90' : ''"
+              :class="danger ? 'g-btn-danger' : 'g-btn-secondary'"
               :disabled="props.confirmLoading"
               @click="onConfirm"
             >{{ confirmText }}</button>

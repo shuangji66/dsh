@@ -50,6 +50,10 @@
   反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
 - `config.go` — `AppConfig`（前端可改，含反代端口 `ProxyPort`）与 `RuntimeEnv`（环境变量）。
   **反代端口是持久化配置项**（`proxyPort`，默认 `3079`），不再读 `PROXY_PORT`。
+  **手动设置的 node 堆内存上限**（`dshMemLimit`，`dshMemAuto` 关闭时）低于
+  `minDshMemLimitMB`（500）会让整次保存被拒（`handleSaveSettings`）；前端同阈值
+  （`stores/settings.ts` 的 `MEM_LIMIT_MIN_MB`）红字提示并在 `save()` 里拦截，
+  <800 只黄字提醒、不拦。自动设置不受该限制。
 - `admin.go` — Admin mux（Unix socket）：`buildHandler()` 里一个大的 `switch` 分发
   所有 `/api/*` 路由；`spaHandler` 提供内嵌前端。
 - `dsh.go` — `DshManager`：进程生命周期；`effectivePID`/`findDshPid` 处理**装插件自重启**
@@ -104,6 +108,22 @@
   切换修饰键，方向键长按连发）。`composables/useMobileLayout.ts`（触屏或窄视口 /
   `useWideLayout` 平板档）与 `composables/useKeypadPage.ts`（模块级共享的当前页）。
 - i18n（`useI18n.ts`）只存 localStorage，不随设置持久化到后端。
+- **弹窗统一结构**：右上角关闭一律用 `components/DialogCloseButton.vue`（内部是
+  `.g-dialog-close`，绝对定位 `right-3/top-3` 的 X 图标），标题用 `.g-dialog-title`
+  （自带 `pr-11` 给 X 让位），底部操作行用 `.g-dialog-actions`；弹窗里的动作按钮一律
+  「带边框 + 不填充底色 + 同档字号」—— 普通操作用 `g-btn-secondary`、危险操作用
+  `g-btn-danger`、警告用 `g-btn-warning`，**不要在弹窗里用 `g-btn-primary`**（填充色）或
+  自创尺寸。新增弹窗时照这套来（列表行内的纯图标按钮仍用 `g-btn-ghost`，那是列表操作）。
+- **全局禁选 / 禁原生拖拽 / 输入框禁自动填充**（`style.css` + `App.vue`）：
+  `html { user-select: none }` 全局禁止文本选择，需要拖选的地方必须显式加 Tailwind 的
+  `select-text` —— 现在只有两处：`LogView` 的日志 `<pre>`、`TerminalView` 整页；日志路径与
+  「自动滚动」状态、插件名与版本号都刻意不放（插件名走「点击即复制」，见 `PluginsView` 的
+  `copyPluginName`）。输入框 / textarea / contenteditable 已在同一条规则里放开。
+  **原生拖拽**由 `App.vue` onMounted 里捕获阶段的 `dragstart` 统一拦掉 —— Chromium 把
+  v-html 注入的内联 SVG 图标当图片一样可拖，随手点一下就拖出半透明拖拽快照；将来要加拖拽
+  排序/拖放上传，给对应元素标 `data-allow-drag` 即可放行。所有输入框都要带 `autocomplete`
+  （密码框用 `new-password`，其余 `off`）。剪贴板写入统一走 `utils/clipboard.ts`
+  （http 反代访问时没有 Clipboard API，内部有 execCommand 兜底），别再各写一份。
 
 ---
 

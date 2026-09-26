@@ -1,8 +1,14 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api, type AppConfig, type DshStatus, type RuntimeInfo, type SettingsPayload } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
+
+// 手动设置的 node 堆内存上限阈值（MB）。MEM_LIMIT_MIN_MB 与后端 config.go 的
+// minDshMemLimitMB 保持一致（低于它后端也拒绝保存）；MEM_LIMIT_WARN_MB 只用于前端
+// 黄字提醒，不进后端校验。
+export const MEM_LIMIT_MIN_MB = 500
+export const MEM_LIMIT_WARN_MB = 800
 
 export const useSettingsStore = defineStore('settings', () => {
   const config = ref<AppConfig>({
@@ -31,6 +37,21 @@ export const useSettingsStore = defineStore('settings', () => {
   const toast = useToastStore()
   const { t } = useI18n()
 
+  // 手动设置的 node 堆内存上限（MB）风险等级：
+  //   'danger' —— 低于 MEM_LIMIT_MIN_MB：红字提示并阻止保存（save() 直接返回 false，
+  //               后端 handleSaveSettings 有同阈值校验兜底）；
+  //   'warn'   —— 低于 MEM_LIMIT_WARN_MB：黄字提示，**不**阻止保存；
+  //   null     —— 正常值，或「自动设置」打开（此时输入框禁用，上限由系统 node 决定）。
+  // 0/空值不算「低」：后端会按当前 node 自身的堆上限补齐（见 defaultDshMemLimit）。
+  const memLimitLevel = computed<'danger' | 'warn' | null>(() => {
+    if (config.value.dshMemAuto) return null
+    const v = config.value.dshMemLimit
+    if (v <= 0) return null
+    if (v < MEM_LIMIT_MIN_MB) return 'danger'
+    if (v < MEM_LIMIT_WARN_MB) return 'warn'
+    return null
+  })
+
   async function load() {
     loading.value = true
     try {
@@ -46,7 +67,13 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  async function save(showBuiltInToast = true) {
+  async function save(showBuiltInToast = true): Promise<boolean> {
+    // 堆内存上限过低时整体拒绝保存：配置是整份一起提交的，顺手改别的开关（即时保存）
+    // 也会把过低的数值一起写下去。后端 handleSaveSettings 有同阈值校验兜底。
+    if (memLimitLevel.value === 'danger') {
+      toast.show(t('settings_dsh_mem_too_low'), 'error')
+      return false
+    }
     loading.value = true
     // 记录保存前的代理状态（开关 + 地址）
     const oldProxyEnabled = config.value.proxyEnabled
@@ -70,8 +97,10 @@ export const useSettingsStore = defineStore('settings', () => {
         }
       }
       await load()
+      return true
     } catch (e) {
       toast.show((e as Error).message, 'error')
+      return false
     } finally {
       loading.value = false
     }
@@ -113,5 +142,5 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  return { config, runtime, status, locked, loading, load, save, startDsh, stopDsh, restartDsh }
+  return { config, runtime, status, locked, loading, memLimitLevel, load, save, startDsh, stopDsh, restartDsh }
 })

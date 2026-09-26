@@ -89,8 +89,6 @@ watch(
 )
 
 // ===== 图标：统一放在 utils/icons.ts（侧边栏与子页面标题栏共用同一套） =====
-// 折叠状态下的箭头方向：折叠→右（可展开），展开→左（可收起）
-const collapseIcon = computed(() => collapsed.value ? icons.chevronRight : icons.chevronLeft)
 
 // 主题图标与提示文案随当前模式变化：light=太阳 / dark=月亮 / system=显示器
 const themeIcon = computed(() =>
@@ -116,6 +114,23 @@ onMounted(() => {
   onBeforeUnmount(() => {
     window.removeEventListener('popstate', blockBack)
   })
+
+  // 全局禁止鼠标「按住拖动」触发原生拖拽：控制台是应用式 UI，拖动任何东西都不该冒出
+  // 浏览器的半透明拖拽快照（最典型的是拖内联 SVG 图标 —— Chromium 把内联 <svg> 当图片
+  // 一样可拖，而整个控制台到处是 v-html 注入的图标）。这里在**捕获阶段**拦掉 dragstart，
+  // 比逐个元素写 draggable="false" 可靠：新加的元素自动生效。
+  //
+  // 只拦 dragstart，不碰 dragover/drop —— 从系统里拖文件进页面（将来若做拖放上传）不受影响；
+  // 将来要加拖拽排序之类的功能，给对应元素标上 data-allow-drag 即可放行。
+  const blockDrag = (ev: DragEvent) => {
+    const target = ev.target as HTMLElement | null
+    if (target && typeof target.closest === 'function' && target.closest('[data-allow-drag]')) return
+    ev.preventDefault()
+  }
+  document.addEventListener('dragstart', blockDrag, true)
+  onBeforeUnmount(() => {
+    document.removeEventListener('dragstart', blockDrag, true)
+  })
 })
 </script>
 
@@ -138,10 +153,14 @@ onMounted(() => {
           :class="collapsed ? 'justify-center px-1' : 'justify-start px-1.5'"
           :title="collapsed ? t('sidebar_expand') : t('sidebar_collapse')"
         >
+          <!-- 「展开/折叠」按钮的图标：鲸鱼（icons.whale，自带配色，父级的 text-* 不影响它）。
+               源 SVG 带 800px 固定尺寸，已去掉并改为由这里的 w-6 h-6（24px）控制 ——
+               在 32px 的圆角方框里留出呼吸感，与导航图标（20px）比例协调。 -->
           <span
-            class="w-8 h-8 rounded-xl bg-brand/10 text-brand flex items-center justify-center shrink-0 transition-transform duration-500 group-hover:scale-110"
-            v-html="icons.logo"
-          ></span>
+            class="w-8 h-8 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 transition-transform duration-500 group-hover:scale-110"
+          >
+            <span class="w-6 h-6 inline-block" v-html="icons.whale"></span>
+          </span>
           <span
             class="font-display text-sm font-semibold whitespace-nowrap overflow-hidden text-ink dark:text-white transition-all duration-300 ease-in-out"
             :class="collapsed ? 'opacity-0 max-w-0 ml-0' : 'opacity-100 max-w-[8rem] ml-2.5'"

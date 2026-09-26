@@ -186,6 +186,12 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
   或代理通路失败时**照旧回退直连**（下载通路是「代理在前、直连在后」）；
   插件市场的 tarball 下载始终直连，不受它影响。改完立即生效，无需重启任何进程。
 
+node 堆内存上限（`dshMemLimit`，设置页「node 堆内存上限」）在**手动设置**
+（`dshMemAuto` 关闭）时有两档阈值：低于 **800 MB** 输入框下黄字提醒（仍可保存），
+低于 **500 MB** 红字报错并**阻止保存** —— 前端在 `store.save()` 里拦截
+（`MEM_LIMIT_MIN_MB`），后端 `handleSaveSettings` 用同阈值 `minDshMemLimitMB` 兜底。
+「自动设置」（默认）不受此限：上限由系统 node 的 `heap_size_limit` 决定，输入框只展示它。
+
 其中 `proxyPort`（反代本身对外监听的 TCP 端口，设置页「反代监听端口」）与 `dshPort`
 语义不同：`dshPort` 由 dsh 进程绑定、必须停 dsh 才能改；`proxyPort` 是 harness 自己的
 监听，保存时先绑定新端口、成功后才关闭旧监听并落盘，因此改完立即生效，端口被占用则
@@ -301,7 +307,7 @@ dsh 服务的地址，无需用户配置：控制台的当前访问地址（由�
 ## 浏览器兼容模式（`browserCompat`）
 
 **用途** — 一处开关、两处**只影响特定引擎**的兼容修复，默认**关闭**，在设置页
-「node 栈内存限制」与「启用登录鉴权」之间切换；Chromium 内核（Chrome / Edge）开启无副作用：
+「node 堆内存上限」与「启用登录鉴权」之间切换；Chromium 内核（Chrome / Edge）开启无副作用：
 
 1. **会话历史无法加载** —— **Firefox / Zen（SpiderMonkey）** 与 **Safari / 苹果设备
    （JavaScriptCore）** 上「会话历史一直显示『载入历史…』、且 AI 输出后无法恢复实时对话」；

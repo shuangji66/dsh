@@ -443,6 +443,13 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "dsh 内存限制必须大于 0 MB", http.StatusBadRequest)
 		return
 	}
+	// 手动设置的 node 堆内存上限过低时拒绝保存（前端同阈值红字提示并阻止提交）：
+	// 这个量级下 dsh 起来就会频繁 GC / OOM，比「保存成功但跑不稳」更糟。
+	// 「自动设置」不受此限：自动模式不使用这个持久化值，它可能是历史遗留的小数值。
+	if !req.Config.DshMemAuto && req.Config.DshMemLimit < minDshMemLimitMB {
+		writeErr(w, fmt.Sprintf("node 堆内存上限过低，请增大分配（至少 %d MB）", minDshMemLimitMB), http.StatusBadRequest)
+		return
+	}
 	locked := m.dsh.Running()
 	// 校验反代端口：1..65535，且不能与 dsh 端口相同（两者会争抢同一个 TCP 端口）。
 	// 字段缺失/为 0（旧版前端缓存提交的配置）按“未修改”处理，沿用已存端口。

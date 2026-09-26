@@ -10,6 +10,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
+import { copyText } from '@/utils/clipboard'
 
 const store = usePluginsStore()
 const { plugins, pluginsLoading } = storeToRefs(store)
@@ -30,6 +31,13 @@ const needsRestartPlugin = ref<string | null>(null)
 const restarting = ref(false)
 const restartDialogVisible = ref(false)
 const restartTarget = ref<string | null>(null)
+
+// 插件名点击即复制：只复制名字（版本号既不可选中也不做复制入口）。
+// 复制走 utils/clipboard 的兜底实现（http 反代访问时没有 Clipboard API）。
+function copyPluginName(name: string) {
+  copyText(name)
+  toast.show(t('plugin_name_copied'), 'success')
+}
 
 function onUninstallClick(name: string) {
   uninstallTarget.value = name
@@ -187,10 +195,20 @@ onMounted(() => {
       <template v-else>
         <div v-for="p in plugins" :key="p.name" class="g-card g-card-hover p-4 flex flex-col">
           <div class="min-w-0">
-            <!-- 过长的插件名自动向左循环滚动显示 -->
-            <div class="font-mono text-sm font-medium text-ink dark:text-white">
+            <!-- 插件名：点击即复制（提 issue / 报错时要贴名字）。按钮化而不是可拖选 ——
+                 全局默认禁止文本选择（见 style.css），这里连 select-text 也不加，点击的
+                 语义就是「复制」，复制成功弹 toast。
+                 过长的插件名由 MarqueeText 自动向左循环滚动显示。 -->
+            <button
+              type="button"
+              class="block w-full text-left font-mono text-sm font-medium text-ink dark:text-white hover:text-brand dark:hover:text-brand transition-colors"
+              :title="t('plugin_copy_name')"
+              :aria-label="t('plugin_copy_name')"
+              @click="copyPluginName(p.name)"
+            >
               <MarqueeText :text="p.name" />
-            </div>
+            </button>
+            <!-- 版本号：刻意不可复制、不可点击 -->
             <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ p.version }}</div>
           </div>
 

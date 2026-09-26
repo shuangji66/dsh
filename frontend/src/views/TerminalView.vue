@@ -16,6 +16,7 @@ import QuickCmdEditDialog from '@/components/QuickCmdEditDialog.vue'
 import KeypadBar from '@/components/KeypadBar.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
+import { copyText } from '@/utils/clipboard'
 
 defineOptions({ name: 'TerminalView' })
 const { t } = useI18n()
@@ -802,33 +803,7 @@ async function onQuickCmdReorder(ordered: QuickCmd[]) {
 }
 
 // ---------- 复制：桌面端鼠标选中已自动复制，不再提供复制按钮入口 ----------
-// 剪贴板写入：优先异步 Clipboard API；非安全上下文（http 反代）时用 execCommand 兜底
-function legacyCopy(text: string) {
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.style.position = 'fixed'
-  ta.style.left = '-9999px'
-  ta.style.top = '-9999px'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.focus()
-  ta.select()
-  try {
-    document.execCommand('copy')
-  } catch {
-    /* 忽略 */
-  }
-  document.body.removeChild(ta)
-}
-
-function copyText(text: string) {
-  if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(text).catch(() => legacyCopy(text))
-  } else {
-    legacyCopy(text)
-  }
-}
-
+// 剪贴板写入统一走 utils/clipboard.ts（插件名的「点击复制」用的也是它）
 // ---------- 粘贴：读取剪贴板并发送到终端 ----------
 async function pasteClipboard() {
   if (!term || !sock || sock.readyState !== WebSocket.OPEN) {
@@ -867,8 +842,11 @@ function showToast(msg: string) {
        空间高一截，最下面的功能键栏被底栏盖住（键盘弹起时就表现为“底栏没跟着抬升”）。
        键盘弹起时由 style.css 的 html[data-kb] .terminal-page 规则把本页高度切成可视
        视口高度（--vv-h）—— 功能键栏紧贴键盘顶边，终端区域随之适配大小；xterm 的
-       ResizeObserver 会自动 refit，无需额外处理。 -->
-  <div class="terminal-page flex flex-col h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
+       ResizeObserver 会自动 refit，无需额外处理。
+       整页加 select-text：全局默认禁止文本选择（见 style.css「全局文本选择策略」），
+       而终端是明确需要复制的地方 —— xterm 的「鼠标选中即复制」与长按粘贴都依赖原生选择。
+       键条自身仍写 select-none（长按连发不能被选择菜单打断），其子树保持不可选中。 -->
+  <div class="terminal-page select-text flex flex-col h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
     <!-- 内缩只给「标题栏 + 终端卡片」这一层：移动端辅助键条保持通栏（它自带 px-2 与顶部分隔线，
          再套一层页面内边距会把它挤窄、分隔线也缩进，窄屏上键位会被挤压）。 -->
     <div class="flex flex-col gap-3 p-3 sm:p-4 flex-1 min-h-0">

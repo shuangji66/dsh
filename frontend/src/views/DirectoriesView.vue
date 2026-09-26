@@ -9,6 +9,7 @@ import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { api, type DshDataBackup } from '@/serverapi'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
 
@@ -543,7 +544,8 @@ onBeforeUnmount(() => {
         <div v-if="restoreVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="restoreBusy ? null : (restoreVisible = false)"></div>
           <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">{{ t('confirm_restore_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" :disabled="restoreBusy" @close="restoreVisible = false" />
+            <h3 class="g-dialog-title mb-2">{{ t('confirm_restore_title') }}</h3>
 
             <div v-if="restoreBusy" class="py-8 text-center">
               <div class="inline-block animate-spin h-6 w-6 border-2 border-danger border-t-transparent rounded-full mb-2"></div>
@@ -589,7 +591,7 @@ onBeforeUnmount(() => {
               </div>
             </template>
 
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" :disabled="restoreBusy" @click="restoreVisible = false">{{ t('confirm_cancel') }}</button>
               <button
                 v-if="selectedRestore && !restoreBusy"
@@ -615,9 +617,10 @@ onBeforeUnmount(() => {
         <div v-if="confirmRestoreVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="confirmRestoreVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('confirm_restore_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" @close="confirmRestoreVisible = false" />
+            <h3 class="g-dialog-title mb-3">{{ t('confirm_restore_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('confirm_restore_msg', { name: selectedRestore || '' }) }}</p>
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" @click="confirmRestoreVisible = false">{{ t('confirm_cancel') }}</button>
               <button class="g-btn-danger" @click="doRestore">{{ t('confirm_ok') }}</button>
             </div>
@@ -639,9 +642,10 @@ onBeforeUnmount(() => {
         <div v-if="restoreDeleteName" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="restoreDeleteName = null"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('restore_delete_confirm_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" @close="restoreDeleteName = null" />
+            <h3 class="g-dialog-title mb-3">{{ t('restore_delete_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('restore_delete_confirm_msg', { name: restoreDeleteName || '' }) }}</p>
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" @click="restoreDeleteName = null">{{ t('confirm_cancel') }}</button>
               <button class="g-btn-danger" @click="doRestoreDelete">{{ t('restore_delete') }}</button>
             </div>

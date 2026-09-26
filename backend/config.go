@@ -349,6 +349,13 @@ func defaultDshMemLimit(cur int, nodeVersion string) int {
 	return cur
 }
 
+// minDshMemLimitMB 是「手动设置」时 node 堆内存上限（dshMemLimit）的下限（MB）：
+// 低于它整次保存被拒绝（handleSaveSettings），前端同阈值给红字提示并阻止提交
+// （见 frontend/src/stores/settings.ts 的 MEM_LIMIT_MIN_MB）。这个量级下 dsh 起来
+// 就会频繁 GC、随时 OOM。仅在「自动设置」（DshMemAuto）关闭时校验 —— 自动模式不
+// 使用这个持久化值，它可能是历史遗留的小数值。
+const minDshMemLimitMB = 500
+
 // ensureValidNodeVersion 检测当前持久化配置里的 node 版本是否仍可用。
 // 若配置为 node26，但宿主机上 node v26 已被卸载/不存在，则主动回退到 node24
 // 并把持久化配置改写为 node24（自动落盘）。返回 true 表示发生了回退。

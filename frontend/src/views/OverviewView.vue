@@ -8,6 +8,7 @@ import { useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import UpdateSection from '@/components/UpdateSection.vue'
 import AccessCard from '@/components/AccessCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -464,7 +465,8 @@ onBeforeUnmount(() => {
           <div class="g-modal-mask" @click="aboutVisible = false"></div>
           <!-- 比默认弹窗略宽：特性按类别双列排布，窄了会大量折行 -->
           <div class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-4">{{ t('about_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" @close="aboutVisible = false" />
+            <h3 class="g-dialog-title mb-4">{{ t('about_title') }}</h3>
 
             <!-- Github 仓库按钮 -->
             <button
@@ -499,10 +501,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
-            <!-- 底部关闭按钮 -->
-            <div class="flex justify-end mt-6">
-              <button class="g-btn-primary" @click="aboutVisible = false">{{ t('about_close') }}</button>
-            </div>
+            <!-- 关闭入口只有右上角的 X（底部不再放「关闭」按钮） -->
           </div>
         </div>
       </Transition>

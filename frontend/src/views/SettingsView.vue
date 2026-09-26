@@ -10,7 +10,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
 
 const store = useSettingsStore()
-const { config, runtime, locked, loading } = storeToRefs(store)
+const { config, runtime, locked, loading, memLimitLevel } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
 const { themeMode, setTheme } = useTheme()
@@ -114,16 +114,18 @@ function removeAccessUrl(idx: number) {
 }
 
 // --- 开关即时保存 ---
+// 以下即时保存都要看 store.save() 的返回值：返回 false 表示这次保存被拒绝
+// （如堆内存上限过低）或后端报错，此时不能再弹「已保存」的成功提示。
 
 // 「代理dsh」开关：即时保存，提示需重启 dsh 生效（代理是 dsh 启动时下发的环境变量）
-function onProxyToggle() {
-  store.save(false)
+async function onProxyToggle() {
+  if (!(await store.save(false))) return
   toast.show(t('saved_proxy_restart'), 'info', 5000)
 }
 
 // 「代理更新」开关：即时保存。它只影响 harness 自身的更新探测与下载，不需要重启 dsh。
-function onProxyUpdateToggle() {
-  store.save(false)
+async function onProxyUpdateToggle() {
+  if (!(await store.save(false))) return
   toast.show(
     config.value.proxyUpdate ? t('settings_proxy_update_on') : t('settings_proxy_update_off'),
     'success',
@@ -131,13 +133,15 @@ function onProxyUpdateToggle() {
   )
 }
 
-// 栈内存自动设置开关：即时保存，提示需重启 dsh 生效
-function onMemAutoToggle() {
-  store.save(false)
+// 堆内存「自动设置」开关：即时保存，提示需重启 dsh 生效。
+// 注意：保存被拒时（手动值 < MEM_LIMIT_MIN_MB）**不把开关回滚**，与鉴权开关的处理
+// 相反 —— 回滚成「自动设置」会让上面的输入框重新禁用，用户就没法把值改大了。
+async function onMemAutoToggle() {
+  if (!(await store.save(false))) return
   toast.show(t('saved_mem_restart'), 'info', 5000)
 }
 
-// 栈内存输入框的展示值：
+// 堆内存上限输入框的展示值：
 //  - 「自动设置」打开时，输入框（禁用）展示当前 node 自身的堆上限 —— 后端用
 //    `v8.getHeapStatistics().heap_size_limit` 折算出的 MB 数（runtime.nodeHeapLimitMB），
 //    这才是自动设置实际生效的上限；不再展示持久化的手动值；
@@ -157,13 +161,13 @@ const memLimit = computed<number | string>({
 // 浏览器兼容模式：即时保存。反代按该开关决定是否修正引擎兼容判断，
 // 该修正发生在页面加载阶段，因此提示用户刷新页面即可生效（无需重启 dsh）。
 async function onBrowserCompatToggle() {
-  await store.save(false)
+  if (!(await store.save(false))) return
   toast.show(t('settings_browser_compat_saved'), 'success', 5000)
 }
 
 // node 版本切换：即时保存，切换后需重启 dsh 服务生效
-function onNodeVersionChange() {
-  store.save(false)
+async function onNodeVersionChange() {
+  if (!(await store.save(false))) return
   toast.show(t('saved_node_version_restart'), 'info', 5000)
 }
 
@@ -179,7 +183,7 @@ async function onAuthToggle() {
       return
     }
   }
-  await store.save(false)
+  if (!(await store.save(false))) return
   toast.show(t('settings_toggle_saved'), 'success')
 }
 </script>
@@ -208,6 +212,7 @@ async function onAuthToggle() {
             <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
           </span>
         </label>
+        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_enable_proxy_hint') }}</p>
 
         <!-- 代理更新：只控制 harness 与 dsh 服务更新是否先从代理走（探测不通回退直连），
              与上面的「代理dsh」相互独立；插件市场下载始终直连。 -->
@@ -224,7 +229,7 @@ async function onAuthToggle() {
         <!-- 代理地址：两个开关共用，任一开启即显示 -->
         <div v-if="config.proxyEnabled || config.proxyUpdate" class="mt-4">
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
-          <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" />
+          <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>
         </div>
       </section>
@@ -243,6 +248,7 @@ async function onAuthToggle() {
               type="number"
               min="1"
               max="65535"
+              autocomplete="off"
               :disabled="locked"
               class="g-input disabled:cursor-not-allowed"
             />
@@ -257,6 +263,7 @@ async function onAuthToggle() {
               type="number"
               min="1"
               max="65535"
+              autocomplete="off"
               class="g-input"
             />
             <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_port_hint') }}</p>
@@ -279,7 +286,7 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ③ node 版本与内存：node 版本切换 + node 栈内存限制（含自动设置） -->
+      <!-- ③ node 版本与内存：node 版本切换 + node 堆内存上限（含自动设置） -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_node') }}
@@ -298,7 +305,7 @@ async function onAuthToggle() {
             </p>
           </div>
 
-          <!-- node栈内存限制（MB，单位已在标签里说明，输入框内不再重复） -->
+          <!-- node 堆内存上限（MB，单位已在标签里说明，输入框内不再重复） -->
           <div>
             <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
               {{ t('settings_dsh_mem_limit') }} <span class="text-ink-faint">{{ t('settings_dsh_mem_mb') }}</span>
@@ -308,9 +315,23 @@ async function onAuthToggle() {
               type="number"
               min="1"
               max="65536"
+              autocomplete="off"
               :disabled="config.dshMemAuto"
               class="g-input disabled:cursor-not-allowed"
             />
+            <!-- 输入框下的说明/告警（两者互斥）：
+                 - 手动设置且过低：「<800」黄字提醒但不阻止保存，「<500」红字并阻止保存
+                   （阻止逻辑在 store.save()，后端有同阈值校验兜底）；
+                 - 其余情况：自动设置时说明当前上限由系统 node 决定，手动时给一般提示。 -->
+            <p v-if="memLimitLevel === 'danger'" class="text-xs text-danger mt-1.5">
+              {{ t('settings_dsh_mem_too_low') }}
+            </p>
+            <p v-else-if="memLimitLevel === 'warn'" class="text-xs text-warning mt-1.5">
+              {{ t('settings_dsh_mem_warn') }}
+            </p>
+            <p v-else class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
+              {{ config.dshMemAuto ? t('settings_dsh_mem_auto_hint') : t('settings_dsh_mem_hint') }}
+            </p>
             <!-- 自动设置开关：关闭时传 NODE_OPTIONS，由系统 node 自动分配内存 -->
             <div class="flex items-center justify-between gap-3 mt-3">
               <span class="text-sm text-ink dark:text-[#EDEDF0]">{{ t('settings_dsh_mem_auto') }}</span>
@@ -320,9 +341,6 @@ async function onAuthToggle() {
                 <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
               </label>
             </div>
-            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
-              {{ config.dshMemAuto ? t('settings_dsh_mem_auto_hint') : t('settings_dsh_mem_hint') }}
-            </p>
           </div>
         </div>
       </section>
@@ -353,6 +371,7 @@ async function onAuthToggle() {
               :type="showPassword ? 'text' : 'password'"
               v-model="config.password"
               :placeholder="t('settings_password_placeholder')"
+              autocomplete="new-password"
               class="g-input pr-10"
             />
             <button
@@ -378,6 +397,7 @@ async function onAuthToggle() {
             min="1"
             max="720"
             step="1"
+            autocomplete="off"
             class="g-input"
           />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
@@ -396,6 +416,7 @@ async function onAuthToggle() {
           <input
             v-model="newAccessUrl"
             :placeholder="t('access_urls_placeholder')"
+            autocomplete="off"
             class="g-input flex-1"
             @keydown.enter="addAccessUrl"
           />
@@ -404,7 +425,7 @@ async function onAuthToggle() {
         </div>
         <div v-if="config.accessUrls && config.accessUrls.length" class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32]">
           <div v-for="(url, i) in config.accessUrls" :key="i" class="flex items-center justify-between gap-2 px-3 py-2">
-            <span class="text-sm text-ink dark:text-[#EDEDF0] font-mono truncate">{{ url }}</span>
+            <span class="g-access-url text-ink dark:text-[#EDEDF0] truncate">{{ url }}</span>
             <button
               type="button"
               class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger dark:hover:text-[#EF4444] transition-colors"

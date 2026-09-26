@@ -74,7 +74,7 @@ export interface AppConfig {
   authEnabled: boolean
   password?: string
   authTTLHours: number
-  // node 栈内存限制（MB）。未设置时由后端按当前 node 版本自身的堆上限补齐
+  // node 堆内存上限（MB）。未设置时由后端按当前 node 版本自身的堆上限补齐
   // （见 runtime.nodeHeapLimitMB），不再写死 2048。
   dshMemLimit: number
   dshMemAuto: boolean

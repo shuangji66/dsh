@@ -6,6 +6,7 @@ import { useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import MarkdownText from '@/components/MarkdownText.vue'
+import DialogCloseButton from '@/components/DialogCloseButton.vue'
 
 // 概览页「版本」卡片：三个版本（harness 控制台 / dsh 服务 / 插件市场）的当前版本、
 // 检查更新入口与更新弹窗、dsh 服务的备份回滚，全部收敛在本组件内。
@@ -62,7 +63,7 @@ const dialogKind = ref<UpdateKind>('harness')
 const updatingDone = ref(false) // 更新成功后短暂显示“更新成功”
 const targetVersion = ref('') // 本次要安装的目标版本号（用于判定安装完成）
 const installing = ref(false) // 是否正在安装（点击“安装更新”后）
-// 是否处于进行中（下载中 / 安装中）：禁用关闭与重复操作
+// 是否处于进行中（下载中 / 安装中）：禁用右上角 X（避免关掉正在跑的更新）与重复操作
 const busy = computed(() => {
   const ph = dialogStatus.value.phase
   return ph === 'downloading' || ph === 'installing' || installing.value
@@ -780,7 +781,8 @@ watch(
         <div v-if="dialogVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="closeDialog"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-1">{{ dialogTitle }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" :disabled="busy" @close="closeDialog" />
+            <h3 class="g-dialog-title mb-1">{{ dialogTitle }}</h3>
 
             <div v-if="updatingDone" class="py-6 text-center">
               <div class="text-sm font-medium text-success dark:text-[#10B981] mb-1">{{ t('update_installed_done') }}</div>
@@ -813,7 +815,7 @@ watch(
                   @click="doPause"
                 >{{ t('update_pause_btn') }}</button>
                 <button
-                  class="g-btn-secondary text-danger hover:!bg-danger/10 !border-danger/40"
+                  class="g-btn-danger"
                   :disabled="cancelling"
                   @click="openCancelConfirm"
                 >{{ t('update_cancel') }}</button>
@@ -834,7 +836,7 @@ watch(
 
               <div class="flex items-center justify-center gap-3 mt-4">
                 <button
-                  class="g-btn-secondary text-danger hover:!bg-danger/10 !border-danger/40"
+                  class="g-btn-danger"
                   :disabled="cancelling"
                   @click="openCancelConfirm"
                 >{{ t('update_cancel') }}</button>
@@ -849,7 +851,7 @@ watch(
               <!-- 删除更新包（清除下载，重置为待更新） -->
               <div class="text-center mt-4">
                 <button
-                  class="g-btn-secondary text-danger hover:!bg-danger/10 !border-danger/40"
+                  class="g-btn-danger"
                   @click="openDiscardConfirm"
                 >{{ t('update_discard_btn') }}</button>
               </div>
@@ -911,18 +913,20 @@ watch(
               </template>
             </template>
 
-            <div class="flex justify-end gap-3 mt-6">
-              <button class="g-btn-secondary" :disabled="busy" @click="closeDialog">{{ t('update_close') }}</button>
+            <!-- 底部操作行：只放「本次可执行的动作」（安装/下载/继续/重新下载）。
+                 关闭不再需要底部按钮 —— 右上角 X 统一负责；没有可执行动作时整行隐藏，
+                 避免留一条空白。 -->
+            <div v-if="downloaded || (dialogStatus.hasUpdate && !busy && !updatingDone)" class="g-dialog-actions">
               <!-- 已下载待安装 → 安装更新 -->
               <button
                 v-if="downloaded"
-                class="g-btn-primary"
+                class="g-btn-secondary"
                 @click="openInstallConfirm"
               >{{ t('update_install_btn') }}</button>
               <!-- 空闲且有待更新 → 下载更新 / 继续下载（暂停后断点续传）/ 重新下载（取消后） -->
               <button
                 v-else-if="dialogStatus.hasUpdate && !busy && !updatingDone"
-                class="g-btn-primary"
+                class="g-btn-secondary"
                 @click="doDownload"
               >{{ paused ? t('update_resume_btn') : dialogStatus.cancelled ? t('update_redownload') : t('update_download_btn') }}</button>
             </div>
@@ -944,11 +948,12 @@ watch(
         <div v-if="cancelConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="cancelConfirmVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_cancel_confirm_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" :disabled="cancelling" @close="cancelConfirmVisible = false" />
+            <h3 class="g-dialog-title mb-3">{{ t('update_cancel_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_cancel_confirm_msg') }}</p>
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" :disabled="cancelling" @click="cancelConfirmVisible = false">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-primary !bg-danger hover:!bg-danger/90" :disabled="cancelling" @click="doCancelUpdate">{{ t('update_cancel_confirm_ok') }}</button>
+              <button class="g-btn-danger" :disabled="cancelling" @click="doCancelUpdate">{{ t('update_cancel_confirm_ok') }}</button>
             </div>
           </div>
         </div>
@@ -968,11 +973,12 @@ watch(
         <div v-if="installConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="installConfirmVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_install_confirm_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" @close="installConfirmVisible = false" />
+            <h3 class="g-dialog-title mb-3">{{ t('update_install_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ installConfirmMsg }}</p>
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" @click="installConfirmVisible = false">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-primary" @click="doInstall">{{ t('update_install_confirm_ok') }}</button>
+              <button class="g-btn-secondary" @click="doInstall">{{ t('update_install_confirm_ok') }}</button>
             </div>
           </div>
         </div>
@@ -992,11 +998,12 @@ watch(
         <div v-if="discardConfirmVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="discardConfirmVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('update_discard_confirm_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" @close="discardConfirmVisible = false" />
+            <h3 class="g-dialog-title mb-3">{{ t('update_discard_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6">{{ t('update_discard_confirm_msg') }}</p>
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" @click="discardConfirmVisible = false">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-primary !bg-danger hover:!bg-danger/90" @click="doDiscard">{{ t('update_discard_confirm_ok') }}</button>
+              <button class="g-btn-danger" @click="doDiscard">{{ t('update_discard_confirm_ok') }}</button>
             </div>
           </div>
         </div>
@@ -1016,7 +1023,8 @@ watch(
         <div v-if="rollbackVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="rollbackRunning ? null : (rollbackVisible = false)"></div>
           <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-2">{{ t('rollback_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" :disabled="rollbackRunning" @close="rollbackVisible = false" />
+            <h3 class="g-dialog-title mb-2">{{ t('rollback_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-4">{{ t('rollback_desc') }}</p>
 
             <div v-if="rollbackRunning" class="py-8 text-center">
@@ -1064,11 +1072,10 @@ watch(
               </div>
             </template>
 
-            <div class="flex justify-end gap-3 mt-6">
-              <button class="g-btn-secondary" :disabled="rollbackRunning" @click="rollbackVisible = false">{{ t('update_close') }}</button>
+            <!-- 底部操作行：只有「回滚到该版本」这一个动作；关闭走右上角 X -->
+            <div v-if="selectedRollback && !rollbackRunning" class="g-dialog-actions">
               <button
-                v-if="selectedRollback && !rollbackRunning"
-                class="g-btn-primary"
+                class="g-btn-secondary"
                 :disabled="!selectedRollback"
                 @click="openConfirmRollback"
               >{{ t('rollback_to') }}</button>
@@ -1091,11 +1098,12 @@ watch(
         <div v-if="confirmRollbackVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="confirmRollbackVisible = false"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('rollback_confirm_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" @close="confirmRollbackVisible = false" />
+            <h3 class="g-dialog-title mb-3">{{ t('rollback_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('rollback_confirm_msg', { name: selectedRollback || '' }) }}</p>
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" @click="confirmRollbackVisible = false">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-primary" @click="doRollback">{{ t('rollback_confirm_ok') }}</button>
+              <button class="g-btn-secondary" @click="doRollback">{{ t('rollback_confirm_ok') }}</button>
             </div>
           </div>
         </div>
@@ -1115,11 +1123,12 @@ watch(
         <div v-if="deleteConfirmName" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="deleteConfirmName = null"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <h3 class="font-display text-lg font-semibold text-ink dark:text-white mb-3">{{ t('rollback_delete_confirm_title') }}</h3>
+            <DialogCloseButton :label="t('dialog_close')" @close="deleteConfirmName = null" />
+            <h3 class="g-dialog-title mb-3">{{ t('rollback_delete_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('rollback_delete_confirm_msg', { name: deleteConfirmName || '' }) }}</p>
-            <div class="flex justify-end gap-3 mt-6">
+            <div class="g-dialog-actions">
               <button class="g-btn-secondary" @click="deleteConfirmName = null">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-primary !bg-danger hover:!bg-danger/90" @click="doDeleteBackup">{{ t('rollback_delete') }}</button>
+              <button class="g-btn-danger" @click="doDeleteBackup">{{ t('rollback_delete') }}</button>
             </div>
           </div>
         </div>

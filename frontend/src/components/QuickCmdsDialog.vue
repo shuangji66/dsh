@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import type { QuickCmd } from '@/serverapi'
 
 const props = defineProps<{
@@ -71,13 +72,16 @@ function moveDown(idx: number) {
         <div
           class="relative w-full max-w-lg h-[90dvh] max-h-full bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card flex flex-col"
         >
-          <!-- 顶部：标题 + 新增 / 关闭（紧凑化：两个纯图标按钮，无文字） -->
-          <div class="flex items-center justify-between px-5 py-3 border-b border-line dark:border-[#2A2A32] shrink-0">
+          <!-- 右上角 X：所有弹窗统一（见 DialogCloseButton.vue） -->
+          <DialogCloseButton :label="t('dialog_close')" @close="close" />
+          <!-- 顶部：标题 + 新增。
+               新增与右上角的 X 同样是「32px 方形的边框图标按钮」（同尺寸、同边框、不填色，
+               只是图标不同），右侧留出 pr-14 给绝对定位的 X，避免两个按钮叠在一起。 -->
+          <div class="flex items-center justify-between px-5 py-3 pr-14 border-b border-line dark:border-[#2A2A32] shrink-0">
             <h3 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('qc_title') }}</h3>
-            <div class="flex items-center gap-2">
-              <button class="g-btn-primary !h-8 !px-2 text-lg leading-none" @click="emit('add')">+</button>
-              <button class="g-btn-ghost !h-8 !px-2 text-lg leading-none" @click="close">×</button>
-            </div>
+            <button class="g-btn-secondary !h-8 !w-8 !p-0" :title="t('qc_add_title')" :aria-label="t('qc_add_title')" @click="emit('add')">
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+            </button>
           </div>
 
           <!-- 命令卡片列表：弹窗整体高度固定为终端页的 90%，列表占满剩余空间并滚动 -->

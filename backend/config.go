@@ -22,6 +22,14 @@ type AppConfig struct {
 	ProxyPort    int    `json:"proxyPort"`
 	ProxyEnabled bool   `json:"proxyEnabled"`
 	ProxyAddr    string `json:"proxyAddr"`
+	// ProxyUpdate 是「代理更新」开关：harness 与 dsh 服务的更新（版本探测用的
+	// HTTP 客户端 + 发布资产下载）是否**先从代理更新**，默认关闭。
+	// 与 ProxyEnabled（设置页「代理dsh」，只管 dsh 进程自身的出网）相互独立：
+	//   - 开 ProxyEnabled、关 ProxyUpdate：dsh 走代理，更新走直连；
+	//   - 开 ProxyUpdate：更新优先走代理地址，**代理地址探测不通照旧回退直连**
+	//     （见 updateClients 的「代理在前、直连在后」与 downloadToFile 的逐通路重试）。
+	// 插件市场的 tarball 下载刻意不受它影响（只直连，见 marketRoutesFn）。
+	ProxyUpdate  bool   `json:"proxyUpdate"`
 	AuthEnabled  bool   `json:"authEnabled"`
 	Password     string `json:"password,omitempty"`
 	AuthTTLHours int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 4
@@ -162,6 +170,8 @@ func defaultConfig() AppConfig {
 		DshPort:      dshPort,
 		ProxyPort:    defaultProxyPort,
 		ProxyEnabled: proxyEnabled,
+		// 代理更新（ProxyUpdate）没有环境变量播种，默认关闭，只能由设置页开关打开。
+		ProxyUpdate:  false,
 		ProxyAddr:    envOr("proxy_addr", "http://127.0.0.1:7890"),
 		AuthEnabled:  authEnabled,
 		Password:     os.Getenv("password"),

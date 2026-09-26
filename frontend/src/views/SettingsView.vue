@@ -115,10 +115,20 @@ function removeAccessUrl(idx: number) {
 
 // --- 开关即时保存 ---
 
-// 代理开关：即时保存，提示需重启 dsh 生效
+// 「代理dsh」开关：即时保存，提示需重启 dsh 生效（代理是 dsh 启动时下发的环境变量）
 function onProxyToggle() {
   store.save(false)
   toast.show(t('saved_proxy_restart'), 'info', 5000)
+}
+
+// 「代理更新」开关：即时保存。它只影响 harness 自身的更新探测与下载，不需要重启 dsh。
+function onProxyUpdateToggle() {
+  store.save(false)
+  toast.show(
+    config.value.proxyUpdate ? t('settings_proxy_update_on') : t('settings_proxy_update_off'),
+    'success',
+    5000
+  )
 }
 
 // 栈内存自动设置开关：即时保存，提示需重启 dsh 生效
@@ -184,7 +194,7 @@ async function onAuthToggle() {
     <!-- 六个卡片自适应分栏：代理 / 端口与兼容 / node 版本与内存 / 登录鉴权 / 快捷访问 / 控制台设置。
          列数由容器宽度自动决定（见 style.css 的 .g-card-grid），窄屏自动降为单列。 -->
     <div class="g-card-grid g-fade-in">
-      <!-- ① 代理：开关 + 代理地址（仅开启时显示） -->
+      <!-- ① 代理：「代理dsh」与「代理更新」两个开关 + 共用的代理地址（任一开启时显示） -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_proxy') }}
@@ -199,7 +209,20 @@ async function onAuthToggle() {
           </span>
         </label>
 
-        <div v-if="config.proxyEnabled" class="mt-4">
+        <!-- 代理更新：只控制 harness 与 dsh 服务更新是否先从代理走（探测不通回退直连），
+             与上面的「代理dsh」相互独立；插件市场下载始终直连。 -->
+        <label class="mt-4 flex items-center justify-between gap-3 cursor-pointer select-none">
+          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_proxy_update') }}</span>
+          <span class="relative inline-flex items-center flex-shrink-0">
+            <input type="checkbox" v-model="config.proxyUpdate" class="sr-only peer" @change="onProxyUpdateToggle">
+            <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
+            <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
+          </span>
+        </label>
+        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_update_hint') }}</p>
+
+        <!-- 代理地址：两个开关共用，任一开启即显示 -->
+        <div v-if="config.proxyEnabled || config.proxyUpdate" class="mt-4">
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
           <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>

@@ -76,6 +76,9 @@
   `harnessVersion` 由 `-ldflags -X` 注入。下载策略按类型分开（`downloadPlanFor`）：
   发布资产（harness/dsh）走「代理+直连各 2 次 + HTTP Range 断点续传 + 暂停/取消」，
   插件市场**只直连、不支持续传/暂停**（包小、registry 通常不需要代理）。
+  **是否「先从代理更新」由 `AppConfig.ProxyUpdate`（设置页「代理更新」）控制** ——
+  代理地址探测不通或代理通路失败回退直连；它与 `ProxyEnabled`（设置页「代理dsh」，
+  只管 dsh 进程自身的出网环境变量，见 `dsh.go` 的 `buildEnv`）**相互独立**，别混用。
   **备份包留不留只看有没有回滚入口**：只有 `server-*`（概览页有「dsh 服务回滚」）与
   用户主动的 `dsh-data-*` 需要留存；harness 与插件市场的备份包收尾即删
   （`removeUnusedBackup`）—— 新增更新分支时没有回滚入口就别把包留在盘上。

@@ -648,12 +648,13 @@ func stripHTMLToText(seg string) string {
 // --- HTTP 客户端（代理回退） ---
 
 // httpClientForUpdate 构造用于「元数据拉取」（GitHub tag / release notes / npm
-// registry）的 HTTP 客户端：优先用配置里的代理，不可用时回退直连，带 60s 总超时。
+// registry）的 HTTP 客户端：「代理更新」开关打开且代理地址探测可达时优先走代理，
+// 否则直连，带 60s 总超时。
 // 注意大文件下载不走它 —— 下载用 updateClients() 的「代理/直连」双通路 + 断点续传，
 // 且不设总超时（见该函数注释）。探测代理可用性通过一次轻量 HEAD 完成。
 func (m *UpdateManager) httpClientForUpdate() *http.Client {
 	cfg := GetConfig()
-	if cfg.ProxyEnabled && cfg.ProxyAddr != "" && proxyReachable(cfg.ProxyAddr) {
+	if cfg.ProxyUpdate && cfg.ProxyAddr != "" && proxyReachableFn(cfg.ProxyAddr) {
 		proxyURL, err := url.Parse(cfg.ProxyAddr)
 		if err == nil {
 			tr := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
@@ -1304,7 +1305,8 @@ func (m *UpdateManager) PauseUpdate() bool {
 
 // --- 下载策略（通路 / 续传 / 暂停） ---
 
-// updateRoute 是一条下载通路：要么走配置里的代理，要么直连。
+// updateRoute 是一条下载通路：要么走配置里的代理（仅当「代理更新」开关打开且地址可达），
+// 要么直连。
 // 按用户要求已移除 GitHub 加速源前缀分支 —— 只剩这两条。
 type updateRoute struct {
 	label  string
@@ -1341,9 +1343,12 @@ var updateRoutesFn = func(m *UpdateManager) []updateRoute { return m.updateClien
 // 同样是变量，便于测试注入。
 var marketRoutesFn = func(m *UpdateManager) []updateRoute { return []updateRoute{m.directRoute()} }
 
-// updateClients 构造发布资产的下载通路序列：代理（已启用且可达时）在前，直连兜底。
+// updateClients 构造发布资产的下载通路序列：代理（「代理更新」开关打开且地址可达时）
+// 在前，直连兜底 —— 开关关闭或代理地址探测不通时只剩直连，即「不通回退直连」。
 //
 // 说明两点与旧实现不同的地方：
+//   - 是否走代理只看 ProxyUpdate（设置页「代理更新」），不再跟随 ProxyEnabled
+//     （「代理dsh」只管 dsh 进程自身的出网，与更新无关）；
 //   - 不再使用 GitHub 加速源前缀（用户要求），包只能从原始地址取；
 //   - 下载客户端不设总超时（Timeout=0）：旧的 60 秒总超时会掐断大包/慢网，
 //     改为「建连 30s + 响应头 30s + 传输空闲 60s」三个更贴合实际的限制
@@ -1351,7 +1356,7 @@ var marketRoutesFn = func(m *UpdateManager) []updateRoute { return []updateRoute
 func (m *UpdateManager) updateClients() []updateRoute {
 	routes := make([]updateRoute, 0, 2)
 	cfg := GetConfig()
-	if cfg.ProxyEnabled && cfg.ProxyAddr != "" && proxyReachableFn(cfg.ProxyAddr) {
+	if cfg.ProxyUpdate && cfg.ProxyAddr != "" && proxyReachableFn(cfg.ProxyAddr) {
 		if proxyURL, err := url.Parse(cfg.ProxyAddr); err == nil {
 			routes = append(routes, updateRoute{
 				label:  "代理 " + cfg.ProxyAddr,

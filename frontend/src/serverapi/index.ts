@@ -65,8 +65,12 @@ export interface AppConfig {
   // 反向代理监听端口（外部端口访问），默认 3079，随配置持久化。
   // 与 dshPort 不同：它由 harness 自己监听，保存后即时重绑生效，无需重启 dsh。
   proxyPort: number
+  // 「代理dsh」：只影响 dsh 进程自身的出网（下发 http_proxy/https_proxy 等），默认关闭。
   proxyEnabled: boolean
   proxyAddr: string
+  // 「代理更新」：harness 与 dsh 服务的更新（版本探测 + 下载）是否先从代理走，默认关闭。
+  // 代理地址探测不通时照旧回退直连；与 proxyEnabled 相互独立。
+  proxyUpdate: boolean
   authEnabled: boolean
   password?: string
   authTTLHours: number

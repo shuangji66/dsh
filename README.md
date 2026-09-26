@@ -51,7 +51,8 @@
   不加前缀），在终端与控制台里都固定显示为黄色。更新类日志按目标分开打标签
   （`[harness]` / `[dsh]` / `[market]`），升级控制台与升级 dsh 服务的步骤不会混在一起。
 - **更新管理** — 自动检测 harness 控制台 / dsh 服务 / 插件市场的新版本（每小时），
-  下载走「代理 / 直连」两条通路（各 2 次机会，支持暂停与断点续传），
+  下载走「代理 / 直连」两条通路（各 2 次机会，支持暂停与断点续传；是否先走代理由设置页
+  的「代理更新」开关控制，不通则回退直连），
   并可一键应用更新、回滚（数据备份 / 恢复）。
 - **node-pty 自动安装** — 主进程启动后自动补齐 `node-pty` 预构建文件与 patch。
 
@@ -164,16 +165,26 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_DSH_DIAG` | 非空时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
 | `PROXY_PORT` | **已废弃**：反代监听端口改为设置页配置项（`config.json` 的 `proxyPort`，默认 `3079`），此环境变量不再生效 | — |
 | `dsh_port` / `TARGET_PORT` | dsh web 端口 | `13080` |
-| `proxy_mode` | 设为 `1` 启用代理 | `0` |
-| `proxy_addr` | 代理地址 | `http://127.0.0.1:7890` |
+| `proxy_mode` | 设为 `1` 时默认打开设置页的「代理dsh」（只影响 dsh 进程自身的出网） | `0` |
+| `proxy_addr` | 代理地址（「代理dsh」与「代理更新」共用） | `http://127.0.0.1:7890` |
 | `auth_mode` / `PROXY_AUTH` | 启用鉴权 | `true` |
 | `password` | 登录密码 | 空 |
 | `auth_ttl_hours` | 登录鉴权有效期（小时） | `4` |
 | `TRIM_API_TOKEN` / `TRIM_APPNAME` | fnOS gateway 凭据 | — |
 
-运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、`proxyAddr`、
-`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
+运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、`proxyUpdate`、
+`proxyAddr`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
 `homeDir`、`accessUrls`、`browserCompat`。可通过设置页修改并保存。
+
+代理卡片有**两个相互独立的开关**，共用同一个代理地址：
+
+- **代理dsh**（`proxyEnabled`，默认关闭）—— 只影响 dsh 进程自身的出网：开启时给 dsh
+  下发 `http_proxy` / `https_proxy`（大小写与 `all_proxy` 一组，见 `dsh.go` 的 `buildEnv`），
+  保存后需**重启 dsh** 才生效。
+- **代理更新**（`proxyUpdate`，默认关闭）—— 只影响 harness 与 dsh 服务的**更新**
+  （版本探测用的 HTTP 客户端 + 发布资产下载）：开启时更新优先走代理，代理地址探测不通
+  或代理通路失败时**照旧回退直连**（下载通路是「代理在前、直连在后」）；
+  插件市场的 tarball 下载始终直连，不受它影响。改完立即生效，无需重启任何进程。
 
 其中 `proxyPort`（反代本身对外监听的 TCP 端口，设置页「反代监听端口」）与 `dshPort`
 语义不同：`dshPort` 由 dsh 进程绑定、必须停 dsh 才能改；`proxyPort` 是 harness 自己的
@@ -539,7 +550,7 @@ const onBlur = (event) => {
 
 | | harness / dsh（发布资产） | 插件市场（npm tarball） |
 |---|---|---|
-| 通路 | 代理（启用且探测可达时）+ 直连 | **只有直连，不走代理** |
+| 通路 | 代理（「代理更新」开启且探测可达时）+ 直连 | **只有直连，不走代理** |
 | 重试 | 每条通路 2 次（最多 4 次） | 直连 2 次 |
 | 断点续传 | 支持（HTTP Range） | **不支持**，每次从零下 |
 | 暂停 | 支持 | **不支持**（按钮不显示，后端也忽略暂停请求） |

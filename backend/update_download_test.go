@@ -400,11 +400,11 @@ func TestDownloadLocalIOFailureIsNotReportedAsNetwork(t *testing.T) {
 
 // --- 插件市场的独立策略：只直连、不续传、不暂停 ---
 
-// 即使配置了可达代理，市场也必须只走直连（用户要求：市场不走代理）。
+// 即使开了代理，市场也必须只走直连（用户要求：市场不走代理）。
 func TestMarketPlanIsDirectOnlyEvenWithProxy(t *testing.T) {
 	prevCfg := GetConfig()
 	prevProbe := proxyReachableFn
-	initConfig(&AppConfig{ProxyEnabled: true, ProxyAddr: "http://127.0.0.1:7890"})
+	initConfig(&AppConfig{ProxyEnabled: true, ProxyUpdate: true, ProxyAddr: "http://127.0.0.1:7890"})
 	proxyReachableFn = func(string) bool { return true }
 	t.Cleanup(func() {
 		initConfig(&prevCfg)
@@ -517,7 +517,7 @@ func TestDownloadControlIgnoresPauseWhenNotPausable(t *testing.T) {
 func TestUpdateClientsFallsBackToDirectWhenProxyUnreachable(t *testing.T) {
 	prevCfg := GetConfig()
 	prevProbe := proxyReachableFn
-	initConfig(&AppConfig{ProxyEnabled: true, ProxyAddr: "http://127.0.0.1:7890"})
+	initConfig(&AppConfig{ProxyEnabled: true, ProxyUpdate: true, ProxyAddr: "http://127.0.0.1:7890"})
 	proxyReachableFn = func(string) bool { return false }
 	t.Cleanup(func() {
 		initConfig(&prevCfg)
@@ -533,6 +533,54 @@ func TestUpdateClientsFallsBackToDirectWhenProxyUnreachable(t *testing.T) {
 	routes = (&UpdateManager{}).updateClients()
 	if len(routes) != 2 || routes[0].label == "直连" || routes[1].label != "直连" {
 		t.Fatalf("代理可达时应为「代理在前、直连在后」两条通路，实际 %+v", routes)
+	}
+}
+
+// 「代理dsh」（ProxyEnabled）不再影响更新：「代理更新」（ProxyUpdate）才是更新
+// 是否先从代理走的开关，两者相互独立。
+func TestUpdateProxyControlledByProxyUpdateSwitch(t *testing.T) {
+	prevCfg := GetConfig()
+	prevProbe := proxyReachableFn
+	t.Cleanup(func() {
+		initConfig(&prevCfg)
+		proxyReachableFn = prevProbe
+	})
+	// 代理地址探测恒为可达：通路条数只取决于开关，不取决于网络。
+	proxyReachableFn = func(string) bool { return true }
+
+	directOnly := func(routes []updateRoute) bool {
+		return len(routes) == 1 && routes[0].label == "直连"
+	}
+	proxyFirst := func(routes []updateRoute) bool {
+		return len(routes) == 2 && routes[0].label != "直连" && routes[1].label == "直连"
+	}
+	hasProxyTransport := func(c *http.Client) bool {
+		tr, ok := c.Transport.(*http.Transport)
+		return ok && tr.Proxy != nil
+	}
+
+	// 只开「代理dsh」：dsh 出网走代理，但更新（下载通路 + 元数据客户端）仍走直连。
+	initConfig(&AppConfig{ProxyEnabled: true, ProxyAddr: "http://127.0.0.1:7890"})
+	if routes := (&UpdateManager{}).updateClients(); !directOnly(routes) {
+		t.Fatalf("只开「代理dsh」时更新应只走直连，实际 %+v", routes)
+	}
+	if hasProxyTransport((&UpdateManager{}).httpClientForUpdate()) {
+		t.Fatal("只开「代理dsh」时元数据拉取不应走代理")
+	}
+
+	// 只开「代理更新」：dsh 出网直连，更新优先走代理、直连兜底。
+	initConfig(&AppConfig{ProxyUpdate: true, ProxyAddr: "http://127.0.0.1:7890"})
+	if routes := (&UpdateManager{}).updateClients(); !proxyFirst(routes) {
+		t.Fatalf("开「代理更新」后应为「代理在前、直连在后」，实际 %+v", routes)
+	}
+	if !hasProxyTransport((&UpdateManager{}).httpClientForUpdate()) {
+		t.Fatal("开「代理更新」且代理可达时元数据拉取应走代理")
+	}
+
+	// 「代理更新」开着但代理地址为空：静默退回直连，不报错。
+	initConfig(&AppConfig{ProxyUpdate: true})
+	if routes := (&UpdateManager{}).updateClients(); !directOnly(routes) {
+		t.Fatalf("代理地址为空时应只走直连，实际 %+v", routes)
 	}
 }
 

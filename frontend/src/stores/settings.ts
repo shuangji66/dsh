@@ -9,6 +9,7 @@ export const useSettingsStore = defineStore('settings', () => {
     dshPort: 13080,
     proxyPort: 3079,
     proxyEnabled: false,
+    proxyUpdate: false,
     proxyAddr: 'http://127.0.0.1:7890',
     authEnabled: true,
     password: '',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { computed, ref, onMounted, nextTick } from 'vue'
 import { useToastStore } from '@/stores/toast'
 import { sseUrl } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
@@ -31,6 +31,44 @@ const el = ref<HTMLElement | null>(null)
 
 // 日志过大时仅保留尾部，避免渲染超大文本卡顿
 const MAX_LEN = 500 * 1024
+const MAX_LINES = 2000
+
+// 日志行着色。行格式与后端 logging.go 的约定一致：
+//   - `[Harness] <时间> [LEVEL] message` → INFO 白 / WARN 黄 / ERROR 红；
+//   - 其余行（没有 [Harness] 前缀）是 dsh 子进程的原样输出 → 固定黄色，
+//     内容不做任何加工（后端也是原样透传的）。
+const HARNESS_LINE = /^\[Harness\] \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} \[(INFO|WARN|ERROR)\]/
+const LEVEL_CLASS: Record<string, string> = {
+  INFO: 'text-[#d6dce4]',
+  WARN: 'text-[#fbbf24]',
+  ERROR: 'text-[#f87171]'
+}
+const DSH_CLASS = 'text-[#facc15]'
+
+const logLines = computed(() => {
+  let c = logContent.value
+  let truncated = false
+  if (c.length > MAX_LEN) {
+    c = c.slice(-MAX_LEN)
+    // 从行首开始，避免首行被截成半截（会被误判成 dsh 输出）
+    const nl = c.indexOf('\n')
+    if (nl >= 0) c = c.slice(nl + 1)
+    truncated = true
+  }
+  let ls = c.split('\n')
+  if (ls.length > MAX_LINES) {
+    ls = ls.slice(-MAX_LINES)
+    truncated = true
+  }
+  return {
+    truncated,
+    lines: ls.map((text) => {
+      if (!text) return { text, cls: '' }
+      const m = HARNESS_LINE.exec(text)
+      return { text, cls: m ? LEVEL_CLASS[m[1]] ?? LEVEL_CLASS.INFO : DSH_CLASS }
+    })
+  }
+})
 
 function applySnapshot(snap: { path?: string; content?: string; exists?: boolean }) {
   if (snap.path !== undefined) logPath.value = snap.path
@@ -39,11 +77,7 @@ function applySnapshot(snap: { path?: string; content?: string; exists?: boolean
   // 记录新内容到达前是否处于底部
   const wasAtBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 40
   if (content !== logContent.value) {
-    let c = content
-    if (c.length > MAX_LEN) {
-      c = '…（日志过长，仅显示末尾）\n' + c.slice(-MAX_LEN)
-    }
-    logContent.value = c
+    logContent.value = content
     if (wasAtBottom) {
       nextTick().then(scrollToBottom)
     }
@@ -101,11 +135,12 @@ onMounted(() => {
           {{ stickToBottom ? t('log_auto_scroll_on') : t('log_auto_scroll_off') }}
         </button>
       </div>
+      <!-- 逐行着色：等级见 logLines；dsh 子进程输出固定黄色 -->
       <pre
         ref="el"
         @scroll="onScroll"
         class="h-[62vh] overflow-auto p-4 bg-[#0f1115] text-[#d6dce4] text-xs leading-5 font-mono whitespace-pre-wrap break-all m-0"
-      >{{ logContent || t('log_empty') }}</pre>
+      ><span v-if="!logLines.lines.length">{{ t('log_empty') }}</span><template v-else><span v-if="logLines.truncated" class="block text-[#fbbf24]">{{ t('log_truncated') }}</span><span v-for="(l, i) in logLines.lines" :key="i" :class="[l.cls, 'block']">{{ l.text }}</span></template></pre>
     </div>
   </div>
 </template>

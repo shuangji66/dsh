@@ -36,6 +36,12 @@
 - **插件管理** — 列出 / 移除 / 重置 dsh web profile 的插件依赖。
 - **快捷指令** — 持久化的终端快捷命令（`HARNESS_QUICK_CMDS_FILE`）。
 - **日志** — 查看 / 下载 / SSE 实时流式输出 dsh 与主进程日志（`HARNESS_LOG_FILE`）。
+  后端日志统一走 `backend/logging.go` 这一个出口，分三级：`[INFO]`（白）/ `[WARN]`（黄）/
+  `[ERROR]`（红）；终端（stdout 是 TTY）用 ANSI 着色，日志文件保持纯文本，由控制台日志页
+  按 `[LEVEL]` 标记着色。连续重复的同一行只记一次、序列结束时汇总（如 `(previous message
+  repeated 3566 times) …`）；基础的成功操作不记日志；dsh 子进程的输出原样透传（不改格式、
+  不加前缀），在终端与控制台里都固定显示为黄色。更新类日志按目标分开打标签
+  （`[harness]` / `[dsh]` / `[market]`），升级控制台与升级 dsh 服务的步骤不会混在一起。
 - **更新管理** — 自动检测 harness 控制台 / dsh 服务 / 插件市场的新版本（每小时），
   下载走「代理 / 直连」两条通路（各 2 次机会，支持暂停与断点续传），
   并可一键应用更新、回滚（数据备份 / 恢复）。
@@ -65,6 +71,7 @@
 │   ├── main.go              # 入口：runtime env、日志、启动反代、启动 dsh、优雅退出
 │   ├── boot.go              # 启动阶段状态机（等待页文案 / 反代放行门禁的输入）
 │   ├── config.go            # 应用配置 & 运行时环境（环境变量解析）
+│   ├── logging.go           # 统一日志出口（等级 / 终端着色 / 重复抑制 / dsh 透传）
 │   ├── admin.go             # Admin 管理 mux：SPA、API 路由、Unix socket 服务
 │   ├── auth.go              # 登录鉴权（Cookie / HMAC / 密码校验）
 │   ├── dsh.go               # DshManager：dsh 进程生命周期 / token 交换 / 状态 / 插件

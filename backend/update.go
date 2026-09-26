@@ -72,6 +72,33 @@ const (
 	updateKindMarket updateKind = "market"
 )
 
+// updateLogTag 返回某个更新目标的日志标签：harness（控制台）与 dsh（dsh 服务）
+// 的更新日志分开输出，便于按目标筛日志、看清「这次更新的是谁」；
+// market（插件市场）的作用域同样独立，因此也单独一个标签。
+func updateLogTag(k updateKind) string {
+	switch k {
+	case updateKindHarness:
+		return "[harness]"
+	case updateKindDsh:
+		return "[dsh]"
+	case updateKindMarket:
+		return "[market]"
+	default:
+		return "[update]"
+	}
+}
+
+// pendingKind 从待安装包文件名（`harness-1.2.6.tar.gz` / `dsh-…` / `market-…`）
+// 反推更新目标；认不出时返回空串，日志退化为通用的 [update]。
+func pendingKind(name string) updateKind {
+	for _, k := range []updateKind{updateKindHarness, updateKindDsh, updateKindMarket} {
+		if strings.HasPrefix(name, string(k)+"-") {
+			return k
+		}
+	}
+	return ""
+}
+
 // tagInfo 描述一个从仓库读取到的 tag 及其解析出的版本号。
 type tagInfo struct {
 	name    string // 完整 tag 名，如 harness-1.0.1 / dsh-0.1.2-alpha.5
@@ -150,6 +177,11 @@ type UpdateManager struct {
 	// pendingMu 保护 pending：记录某个 kind 已下载完成、等待用户确认安装的更新包。
 	pendingMu sync.Mutex
 	pending   *PendingUpdate
+
+	// checkLogMu 保护 lastCheckSig：按更新目标分别记录「上次检测结论」，
+	// 只在某个目标的结论发生变化时才记一行，避免每小时自动检测重复输出同样的内容。
+	checkLogMu   sync.Mutex
+	lastCheckSig map[updateKind]string
 }
 
 // newUpdateManager 创建更新管理器并依据运行时环境填充本地版本。
@@ -664,7 +696,7 @@ func (m *UpdateManager) checkOnce() {
 	m.mu.Unlock()
 
 	if err != nil {
-		logger().Printf("[update] 拉取 tag 失败: %v", err)
+		logWarn("[update] failed to fetch tags: %v", err)
 		m.mu.Lock()
 		for k, st := range m.statuses {
 			// 市场的版本来自 npm registry，与 GitHub tag 拉取无关；把 tag 的错误
@@ -733,18 +765,41 @@ func (m *UpdateManager) checkOnce() {
 	// 市场检测：版本来自 npm registry，与 GitHub tag 是两条独立链路。
 	m.refreshMarketStatus()
 
-	// 仅当 harness / dsh / 市场 任一个有更新时才打印检测结果，无更新时不刷日志。
+	// harness、dsh、市场各自一行，且只有**自己**的结论变化时才打印（三者的
+	// 「上次结论」分别记录）：三类更新是彼此独立的升级动作，合并成一行既难读、也没法
+	// 按目标筛日志；而每小时自动检测若每次都输出同样的结论，只会把日志刷满。
 	hs := m.getStatus(updateKindHarness)
 	ds := m.getStatus(updateKindDsh)
 	ms := m.getStatus(updateKindMarket)
-	if hs.HasUpdate || ds.HasUpdate {
-		logger().Printf("[update] 发现更新 harness 本地=%s 最新=%s | dsh 本地=%s 最新=%s",
-			harnessVersion, hs.LatestVersion,
-			dshLocal, ds.LatestVersion)
+	// changed 判断某目标的结论是否与上次不同（true 才允许输出该目标那一行）。
+	changed := func(k updateKind, has bool, latest string) bool {
+		sig := fmt.Sprintf("%v/%s", has, latest)
+		if m.lastCheckSig[k] == sig {
+			return false
+		}
+		m.lastCheckSig[k] = sig
+		return true
 	}
-	if ms.HasUpdate {
-		logger().Printf("[market] 发现更新 市场本地=%s 最新=%s（%s）",
-			ms.LocalVersion, ms.LatestVersion, ms.MarketScope)
+	m.checkLogMu.Lock()
+	if m.lastCheckSig == nil {
+		m.lastCheckSig = map[updateKind]string{}
+	}
+	showHarness := changed(updateKindHarness, hs.HasUpdate, hs.LatestVersion)
+	showDsh := changed(updateKindDsh, ds.HasUpdate, ds.LatestVersion)
+	showMarket := changed(updateKindMarket, ms.HasUpdate, ms.LatestVersion)
+	m.checkLogMu.Unlock()
+
+	if showHarness && hs.HasUpdate {
+		logInfo("%s update available: %s -> %s",
+			updateLogTag(updateKindHarness), harnessVersion, hs.LatestVersion)
+	}
+	if showDsh && ds.HasUpdate {
+		logInfo("%s update available: %s -> %s",
+			updateLogTag(updateKindDsh), dshLocal, ds.LatestVersion)
+	}
+	if showMarket && ms.HasUpdate {
+		logInfo("%s update available: %s -> %s (%s)",
+			updateLogTag(updateKindMarket), ms.LocalVersion, ms.LatestVersion, ms.MarketScope)
 	}
 }
 
@@ -1140,11 +1195,11 @@ func (m *UpdateManager) clearOrphanPending() {
 		full := filepath.Join(dir, e.Name())
 		if err := os.Remove(full); err == nil {
 			removed++
-			logger().Printf("[update] 清理残留更新包: %s", e.Name())
+			logInfo("%s removing leftover package: %s", updateLogTag(pendingKind(e.Name())), e.Name())
 		}
 	}
 	if removed > 0 {
-		logger().Printf("[update] 共清理 %d 个残留更新包", removed)
+		logInfo("[update] removed %d leftover packages", removed)
 	}
 }
 
@@ -1158,10 +1213,12 @@ type downloadControl struct {
 	reason string
 	// pausable 为 false 时忽略暂停请求（插件市场：包小、不走续传，暂停没有意义）。
 	pausable bool
+	// kind 只用于日志标签（取消/暂停时把日志归到对应目标下）。
+	kind updateKind
 }
 
-func newDownloadControl(pausable bool) *downloadControl {
-	return &downloadControl{ch: make(chan struct{}), pausable: pausable}
+func newDownloadControl(pausable bool, kind updateKind) *downloadControl {
+	return &downloadControl{ch: make(chan struct{}), pausable: pausable, kind: kind}
 }
 
 // stop 记录中断原因并广播（只生效一次：先到者为准）。
@@ -1196,24 +1253,27 @@ func (m *UpdateManager) stopDownload(reason string) bool {
 	if c == nil {
 		return false
 	}
-	return c.stop(reason)
+	if !c.stop(reason) {
+		return false
+	}
+	tag := updateLogTag(c.kind)
+	if reason == "pause" {
+		logInfo("%s download pause requested (partial file kept for resume)", tag)
+	} else {
+		logInfo("%s download cancel requested", tag)
+	}
+	return true
 }
 
 // CancelUpdate 请求取消当前正在进行的更新下载：半成品文件会被删除，状态回到空闲。
 func (m *UpdateManager) CancelUpdate() {
-	if m.stopDownload("cancel") {
-		logger().Printf("[update] 已请求取消下载")
-	}
+	m.stopDownload("cancel")
 }
 
 // PauseUpdate 请求暂停当前正在进行的更新下载：半成品文件保留，可继续续传。
 // 返回是否真的命中了一个进行中的下载（没有则忽略）。
 func (m *UpdateManager) PauseUpdate() bool {
-	if m.stopDownload("pause") {
-		logger().Printf("[update] 已请求暂停下载（半成品保留，可继续）")
-		return true
-	}
-	return false
+	return m.stopDownload("pause")
 }
 
 // --- 下载策略（通路 / 续传 / 暂停） ---
@@ -1225,7 +1285,7 @@ type updateRoute struct {
 	client *http.Client
 }
 
-// downloadPlan 描述一次下载的策略：走哪些通路、能否续传、能否暂停。
+// downloadPlan 描述一次下载的策略：走哪些通路、能否续传、能否暂停、属于哪个目标。
 //
 // 目前有两种组合，差异是刻意的：
 //   - harness / dsh 的发布资产：代理+直连各 2 次，支持 Range 续传与暂停（包大、网络差）；
@@ -1235,14 +1295,17 @@ type downloadPlan struct {
 	routes   []updateRoute
 	resume   bool
 	pausable bool
+	// kind 只用于日志标签：底层下载函数拿不到更新目标，靠它把日志归到
+	// [harness] / [dsh] / [market] 之下（见 updateLogTag）。
+	kind updateKind
 }
 
 // downloadPlanFor 按更新类型给出下载策略。
 func (m *UpdateManager) downloadPlanFor(k updateKind) downloadPlan {
 	if k == updateKindMarket {
-		return downloadPlan{routes: marketRoutesFn(m), resume: false, pausable: false}
+		return downloadPlan{routes: marketRoutesFn(m), resume: false, pausable: false, kind: k}
 	}
-	return downloadPlan{routes: updateRoutesFn(m), resume: true, pausable: true}
+	return downloadPlan{routes: updateRoutesFn(m), resume: true, pausable: true, kind: k}
 }
 
 // updateRoutesFn 便于测试注入发布资产的通路列表；生产实现见 updateClients。
@@ -1269,7 +1332,7 @@ func (m *UpdateManager) updateClients() []updateRoute {
 				client: &http.Client{Transport: updateTransport(proxyURL)},
 			})
 		} else {
-			logger().Printf("[update] 代理地址无法解析，本次只用直连: %v", err)
+			logWarn("[update] proxy address unparsable, direct download only: %v", err)
 		}
 	}
 	routes = append(routes, m.directRoute())
@@ -1325,7 +1388,7 @@ func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downlo
 		for try := 1; try <= attemptsPerRoute; try++ {
 			if ctrl != nil {
 				if stop, reason := ctrl.stopped(); stop {
-					return finishInterruptedDownload(dest, reason)
+					return finishInterruptedDownload(dest, reason, plan.kind)
 				}
 			}
 			if !plan.resume {
@@ -1334,11 +1397,11 @@ func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downlo
 				os.Remove(dest)
 			}
 			offset := partialSize(dest)
-			logger().Printf("[update] 下载尝试 %s 第 %d/%d 次（已有 %d 字节）", route.label, try, attemptsPerRoute, offset)
+			logInfo("%s download attempt via %s %d/%d (offset %d bytes)", updateLogTag(plan.kind), route.label, try, attemptsPerRoute, offset)
 
 			n, err := m.downloadOnce(route, rawURL, dest, progress, ctrl, plan.resume)
 			if err == nil {
-				logger().Printf("[update] 下载成功（%s，共 %d 字节）", route.label, n)
+				logInfo("%s download finished via %s (%d bytes)", updateLogTag(plan.kind), route.label, n)
 				return n, nil
 			}
 			if errors.Is(err, errUpdateCancelled) || errors.Is(err, errUpdatePaused) {
@@ -1346,13 +1409,13 @@ func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downlo
 				if stop, r := ctrlState(ctrl); stop {
 					reason = r
 				}
-				return finishInterruptedDownload(dest, reason)
+				return finishInterruptedDownload(dest, reason, plan.kind)
 			}
 			if isLocalIOError(err) {
 				networkOnly = false
 			}
 			lastErr = fmt.Errorf("%s 第 %d 次: %w", route.label, try, err)
-			logger().Printf("[update] %v", lastErr)
+			logWarn("%s download attempt failed via %s (%d/%d): %v", updateLogTag(plan.kind), route.label, try, attemptsPerRoute, err)
 			if try < attemptsPerRoute {
 				// 短暂退避再试，避免对同一故障点连续猛打。
 				time.Sleep(updateRetryBackoff)
@@ -1382,14 +1445,15 @@ func isLocalIOError(err error) bool {
 }
 
 // finishInterruptedDownload 处理被取消/暂停的下载：取消要删半成品，暂停要留。
-func finishInterruptedDownload(dest, reason string) (int64, error) {
+// k 只用于日志标签（把这条日志归到 harness / dsh / market 之下）。
+func finishInterruptedDownload(dest, reason string, k updateKind) (int64, error) {
 	if reason == "pause" {
 		n := partialSize(dest)
-		logger().Printf("[update] 下载已暂停，保留半成品 %s（%d 字节）", dest, n)
+		logInfo("%s download paused, partial file kept at %s (%d bytes)", updateLogTag(k), dest, n)
 		return n, errUpdatePaused
 	}
 	os.Remove(dest)
-	logger().Printf("[update] 下载已取消，已清理半成品 %s", dest)
+	logInfo("%s download cancelled, partial file removed: %s", updateLogTag(k), dest)
 	return 0, errUpdateCancelled
 }
 
@@ -1425,7 +1489,7 @@ func (m *UpdateManager) removeOtherPendingFiles(k updateKind, keep string) {
 			continue
 		}
 		if err := os.Remove(full); err == nil {
-			logger().Printf("[update] 清理旧版本半成品: %s", name)
+			logInfo("%s removing stale partial file: %s", updateLogTag(k), name)
 		}
 	}
 }
@@ -1678,7 +1742,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		rawURL = m.assetURL(k, version, m.updateArch())
 	}
 	arch := m.updateArch()
-	logger().Printf("[update] 开始下载 %s 到 %s (arch=%s)", k, version, arch)
+	logInfo("%s downloading %s (arch=%s)", updateLogTag(k), version, arch)
 
 	// 下载策略：harness/dsh = 代理+直连各 2 次 + Range 续传 + 可暂停；
 	// 插件市场 = 只直连重试，不续传、不暂停（见 downloadPlanFor）。
@@ -1697,7 +1761,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 
 	// 建立中断信号：取消（删半成品）与暂停（留半成品）都经它传达。
 	// 不支持暂停的下载（市场）会直接忽略暂停请求。
-	ctrl := newDownloadControl(plan.pausable)
+	ctrl := newDownloadControl(plan.pausable, k)
 	m.ctrlMu.Lock()
 	m.ctrl = ctrl
 	m.ctrlMu.Unlock()
@@ -1759,7 +1823,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 			s.ErrorHint = ""
 			s.Cancelled = false
 		})
-		logger().Printf("[update] %s 下载已暂停，已下载 %d 字节", k, partialSize(pkgPath))
+		logInfo("%s download paused after %d bytes", updateLogTag(k), partialSize(pkgPath))
 		return err
 	case errors.Is(err, errUpdateCancelled):
 		m.updateStatus(k, func(s *UpdateStatus) {
@@ -1815,7 +1879,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 			s.LatestVersion = version
 		}
 	})
-	logger().Printf("[update] %s 更新包已下载到 %s (%d bytes)，等待安装", k, pkgPath, n)
+	logInfo("%s package downloaded to %s (%d bytes), waiting to install", updateLogTag(k), pkgPath, n)
 	return nil
 }
 
@@ -1838,7 +1902,7 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 		m.clearPending()
 		return fmt.Errorf("待安装更新包已不存在（可能被清理），请重新下载: %w", err)
 	}
-	logger().Printf("[update] 开始安装 %s 到 %s", k, p.Version)
+	logInfo("%s installing %s", updateLogTag(k), p.Version)
 
 	// 进入“安装中”状态。
 	m.updateStatus(k, func(s *UpdateStatus) {
@@ -1901,7 +1965,7 @@ func (m *UpdateManager) installHarness(extractDir string) error {
 	// 收尾（必须在 exec 之前）：删除待安装更新包、清理解压临时目录。
 	m.clearPending()
 	os.RemoveAll(extractDir)
-	logger().Printf("[update] harness 更新包与临时目录已清理，准备重启控制台")
+	logInfo("[harness] package and temp dir cleaned, restarting console")
 	m.restartHarness(newBin)
 	// 仅当 exec 失败时才会走到这里。
 	return fmt.Errorf("重启控制台失败（新二进制已就位，手动重启后生效）")
@@ -1957,7 +2021,7 @@ func (m *UpdateManager) DiscardUpdate(k updateKind) error {
 		s.ErrorHint = ""
 		s.Cancelled = false
 	})
-	logger().Printf("[update] 已删除 %s 的待安装更新包", k)
+	logInfo("%s removed pending package", updateLogTag(k))
 	return nil
 }
 
@@ -2014,7 +2078,7 @@ func (m *UpdateManager) applyHarness(extractDir string) (string, error) {
 		return "", fmt.Errorf("备份当前二进制失败: %w", err)
 	}
 	os.RemoveAll(stage)
-	logger().Printf("[update] harness 已备份到 %s", backupPath)
+	logInfo("[harness] backed up current binary to %s", backupPath)
 
 	// 替换二进制：在目标同目录下先写入临时文件，再 atomic rename 替换。
 	// 不能用 copyFile 直接覆盖（os.Create 截断正在运行的可执行文件会报 "text file busy"）；
@@ -2029,16 +2093,16 @@ func (m *UpdateManager) applyHarness(extractDir string) (string, error) {
 		return "", fmt.Errorf("替换二进制失败: %w", err)
 	}
 	if err := os.Chmod(dest, 0755); err != nil {
-		logger().Printf("[update] chmod 失败: %v", err)
+		logError("[harness] chmod failed: %v", err)
 	}
 
 	// 先停止 dsh 服务，再由新二进制 exec 覆盖当前进程镜像（保持同一 PID，fnOS 监管不失效）。
 	// 新 harness 进程启动时会自动拉起 dsh，先停止可避免端口冲突或残留进程。
-	logger().Printf("[update] 停止 dsh 服务")
+	logInfo("[harness] stopping dsh service")
 	if err := m.dsh.Stop(); err != nil {
-		logger().Printf("[update] 停止 dsh 失败: %v", err)
+		logError("[harness] failed to stop dsh: %v", err)
 	}
-	logger().Printf("[update] harness 二进制已更新，等待收尾后重启控制台")
+	logInfo("[harness] binary updated, waiting to restart console")
 	return dest, nil
 }
 
@@ -2049,7 +2113,7 @@ func (m *UpdateManager) restartHarness(newBin string) {
 	env := os.Environ()
 	argv := append([]string{newBin}, os.Args[1:]...)
 	if err := syscall.Exec(newBin, argv, env); err != nil {
-		logger().Printf("[update] 重启控制台失败: %v", err)
+		logError("[harness] failed to restart console: %v", err)
 	}
 }
 
@@ -2107,7 +2171,7 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 	//
 	// 走统一入口：先过忙守卫（有插件操作在跑就拒绝，避免把它连根拔掉并留下陈旧
 	// profile 写锁），再停止并等端口释放；被拒绝时不产生任何停机、也不会改盘。
-	logger().Printf("[update] 停止 dsh 服务")
+	logInfo("[dsh] stopping dsh service")
 	if err := m.stopDshForReplacement("更新 dsh 服务"); err != nil {
 		return err
 	}
@@ -2122,18 +2186,18 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 	if err := tgzDir(serverDir, backupPath); err != nil {
 		// 更新失败，尽量恢复 dsh（重启后需重新捕获会话凭据）
 		if serr := m.startDshCaptured(); serr != nil {
-			logger().Printf("[update] 恢复 dsh 启动失败: %v", serr)
+			logError("[dsh] failed to restart dsh: %v", serr)
 		}
 		return fmt.Errorf("备份 server 目录失败: %w", err)
 	}
-	logger().Printf("[update] server 已备份到 %s", backupPath)
+	logInfo("[dsh] server backed up to %s", backupPath)
 
 	// 替换：把旧的 server 移到临时位置，放入新的，再删除临时旧目录。
 	oldTmp := filepath.Join(parent, ".server-old-"+time.Now().Format("20060102150405"))
 	if err := os.Rename(serverDir, oldTmp); err != nil {
 		// 更新失败，尽量恢复 dsh（重启后需重新捕获会话凭据）
 		if serr := m.startDshCaptured(); serr != nil {
-			logger().Printf("[update] 恢复 dsh 启动失败: %v", serr)
+			logError("[dsh] failed to restart dsh: %v", serr)
 		}
 		return fmt.Errorf("移动旧 server 目录失败: %w", err)
 	}
@@ -2141,19 +2205,19 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 		// 回滚：把旧目录放回去，并恢复 dsh（重启后需重新捕获会话凭据）
 		os.Rename(oldTmp, serverDir)
 		if serr := m.startDshCaptured(); serr != nil {
-			logger().Printf("[update] 恢复 dsh 启动失败: %v", serr)
+			logError("[dsh] failed to restart dsh: %v", serr)
 		}
 		return fmt.Errorf("复制新 server 失败: %w", err)
 	}
 	os.RemoveAll(oldTmp)
 
-	logger().Printf("[update] server 目录已更新，启动 dsh 服务")
+	logInfo("[dsh] server dir replaced, starting dsh service")
 	// 启动 dsh（fire-and-forget）：解压+备份替换已完成，安装流程立即返回成功，
 	// 不等待 dsh 完全启动（会话 cookie 由异步 captureDshSession 后台换取）。
 	// 若 dsh 启动失败，只记录日志，不阻塞“安装成功”的返回。
 	go func() {
 		if err := m.startDshCaptured(); err != nil {
-			logger().Printf("[update] 启动 dsh 失败（异步，安装已完成）: %v", err)
+			logWarn("[dsh] start failed (async, install finished): %v", err)
 		}
 	}()
 	return nil
@@ -2306,26 +2370,26 @@ func (m *UpdateManager) RollbackServer(backupPath string) error {
 
 // doRollbackServer 执行实际的回滚步骤。
 func (m *UpdateManager) doRollbackServer(backupPath string) error {
-	logger().Printf("[rollback] 开始回滚 server，备份文件: %s", backupPath)
+	logInfo("[rollback] rolling back server from backup %s", backupPath)
 	serverDir := serverDirFn(m)
 
 	// 1. 停止 dsh 服务。同样是「替换 server 产物」，走统一入口：先过忙守卫，
 	//    避免在插件安装进行中杀 dsh（那会留下陈旧的 profile 写锁）。
 	//    守卫只在市场/控制台的插件操作**确实在跑**时拒绝，且市场不回答时视为不忙，
 	//    所以「dsh 已经坏了要回滚」这种场景不会被挡。
-	logger().Printf("[rollback] 停止 dsh 服务")
+	logInfo("[rollback] stopping dsh service")
 	if err := m.stopDshForReplacement("回滚 dsh 服务"); err != nil {
 		return err
 	}
 
 	// 2. 删除当前 server 目录
-	logger().Printf("[rollback] 删除当前 server 目录: %s", serverDir)
+	logInfo("[rollback] removing current server dir %s", serverDir)
 	if err := os.RemoveAll(serverDir); err != nil {
 		return fmt.Errorf("删除 server 目录失败: %w", err)
 	}
 
 	// 3. 解压备份到 server 目录
-	logger().Printf("[rollback] 解压备份到 %s", serverDir)
+	logInfo("[rollback] extracting backup to %s", serverDir)
 	if err := os.MkdirAll(serverDir, 0755); err != nil {
 		return fmt.Errorf("创建 server 目录失败: %w", err)
 	}
@@ -2339,7 +2403,7 @@ func (m *UpdateManager) doRollbackServer(backupPath string) error {
 	// 5. 启动 dsh 服务（并异步捕获新 token 换取会话 cookie，供反代转发）。
 	//   注：不在此处等待 dsh 完全启动成功——启动动作发出即可，会话 cookie
 	//   由异步 captureDshSession 在后台换取，前端无需等待。
-	logger().Printf("[rollback] 启动 dsh 服务")
+	logInfo("[rollback] starting dsh service")
 	if err := m.startDshCaptured(); err != nil {
 		return fmt.Errorf("启动 dsh 失败: %w", err)
 	}
@@ -2347,7 +2411,7 @@ func (m *UpdateManager) doRollbackServer(backupPath string) error {
 	// 6. 回滚完成后刷新 dsh 版本号状态，前端 reload 后版本行立即显示新版本。
 	m.refreshDshVersion()
 
-	logger().Printf("[rollback] server 回滚完成")
+	logInfo("[rollback] server rollback finished")
 	return nil
 }
 
@@ -2487,7 +2551,7 @@ func (m *UpdateManager) doRestoreDshData(backupPath string) error {
 		return fmt.Errorf("无法获取主目录")
 	}
 	dshDir := filepath.Join(home, ".dsh")
-	logger().Printf("[restore] 开始恢复 dsh 数据，备份文件: %s", backupPath)
+	logInfo("[restore] restoring dsh data from backup %s", backupPath)
 
 	// 这条路径会删掉整个 ~/.dsh 并重建，先确认没有插件操作在跑：正在装的插件会被
 	// 连同 profile 一起删掉，用户会看到一次莫名其妙的失败。被拒绝时不产生任何破坏。
@@ -2497,30 +2561,30 @@ func (m *UpdateManager) doRestoreDshData(backupPath string) error {
 	}
 
 	// 1. 停止 dsh 服务
-	logger().Printf("[restore] 停止 dsh 服务")
+	logInfo("[restore] stopping dsh service")
 	if err := m.dsh.Stop(); err != nil {
-		logger().Printf("[restore] 停止 dsh 失败: %v", err)
+		logError("[restore] failed to stop dsh: %v", err)
 	}
 
 	// 2. 删除当前 ~/.dsh 目录
-	logger().Printf("[restore] 删除当前 ~/.dsh 目录: %s", dshDir)
+	logInfo("[restore] removing current ~/.dsh at %s", dshDir)
 	if err := os.RemoveAll(dshDir); err != nil {
 		return fmt.Errorf("删除 ~/.dsh 目录失败: %w", err)
 	}
 
 	// 3. 解压备份到 HOME（tar 中顶层为 .dsh/，解压后在 HOME 下还原 ~/.dsh）
-	logger().Printf("[restore] 解压备份到 %s", home)
+	logInfo("[restore] extracting backup to %s", home)
 	if err := extractTarGz(backupPath, home); err != nil {
 		return fmt.Errorf("解压备份失败: %w", err)
 	}
 
 	// 4. 启动 dsh 服务（并异步捕获新 token 换取会话 cookie，供反代转发）
-	logger().Printf("[restore] 启动 dsh 服务")
+	logInfo("[restore] starting dsh service")
 	if err := m.startDshCaptured(); err != nil {
 		return fmt.Errorf("启动 dsh 失败: %w", err)
 	}
 
-	logger().Printf("[restore] dsh 数据恢复完成")
+	logInfo("[restore] dsh data restore finished")
 	return nil
 }
 
@@ -2575,11 +2639,11 @@ func (m *UpdateManager) runBackupCleanup() {
 			fullPath := filepath.Join(dir, name)
 			if err := os.Remove(fullPath); err == nil {
 				removed++
-				logger().Printf("[cleanup] 已删除过期备份: %s", name)
+				logInfo("[cleanup] removed expired backup: %s", name)
 			}
 		}
 	}
 	if removed > 0 {
-		logger().Printf("[cleanup] 共删除 %d 个过期备份文件", removed)
+		logInfo("[cleanup] removed %d expired backups", removed)
 	}
 }

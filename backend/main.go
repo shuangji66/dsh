@@ -4,8 +4,6 @@ import (
 	"context"
 	"embed"
 	"errors"
-	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -28,39 +26,33 @@ func embeddedFrontend() embed.FS {
 // stopCh is closed when the process should shut down gracefully.
 var stopCh = make(chan struct{})
 
-// logOut 是全局日志输出目标；默认写到 stdout，配置了 HARNESS_LOG_FILE 时
-// 同时写入日志文件（主进程与 dsh 子进程的日志都会经由此处落盘）。
-var logOut io.Writer = os.Stdout
-
-func logger() *log.Logger {
-	return log.New(logOut, "[Harness] ", log.LstdFlags)
-}
-
 // setupLogFile 根据运行时日志路径（RuntimeEnv.LogFile，含默认值）打开日志文件；
-// 路径为空则返回 nil，表示不落盘。返回的清理函数负责关闭并删除日志文件。
+// 路径为空则不落盘。日志出口见 logging.go（等级 / 终端着色 / 重复抑制 /
+// dsh 输出原样透传）。返回的清理函数负责关闭并删除日志文件。
 func setupLogFile(path string) func() {
 	if path == "" {
 		return func() {}
 	}
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			logger().Printf("failed to create log dir %s: %v", dir, err)
+			logError("failed to create log dir %s: %v", dir, err)
 		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		logger().Printf("failed to open log file %s: %v", path, err)
+		logError("failed to open log file %s: %v", path, err)
 		return func() {}
 	}
-	logOut = io.MultiWriter(os.Stdout, f)
-	logger().Printf("logging to file %s", path)
+	logs.mu.Lock()
+	logs.file = f
+	logs.mu.Unlock()
 	return func() {
 		if err := f.Close(); err != nil {
-			logger().Printf("failed to close log file %s: %v", path, err)
+			logError("failed to close log file %s: %v", path, err)
 		}
 		// 主进程停止时删除日志文件
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			logger().Printf("failed to remove log file %s: %v", path, err)
+			logError("failed to remove log file %s: %v", path, err)
 		}
 	}
 }
@@ -85,7 +77,7 @@ func removePidFile(path string) {
 		return
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		logger().Printf("failed to remove pid file %s: %v", path, err)
+		logError("failed to remove pid file %s: %v", path, err)
 	}
 }
 
@@ -101,9 +93,7 @@ func main() {
 	pidFile := renv.PidFile
 	if pidFile != "" {
 		if err := writePidFile(pidFile, os.Getpid()); err != nil {
-			logger().Printf("failed to write pid file %s: %v", pidFile, err)
-		} else {
-			logger().Printf("pid written to %s", pidFile)
+			logError("failed to write pid file %s: %v", pidFile, err)
 		}
 		defer removePidFile(pidFile)
 	}
@@ -112,11 +102,10 @@ func main() {
 	defer removePidFile(renv.DshPidFile)
 
 	if _, err := net.Dial("unix", renv.AdminSock); err == nil {
-		logger().Printf("Admin socket %s is already in use, another instance is running. Exiting.", renv.AdminSock)
+		logError("admin socket %s already in use, another instance is running - exiting", renv.AdminSock)
 		os.Exit(1)
 	}
 	os.Remove(renv.AdminSock)
-	logger().Printf("Harness backend starting (pid=%d)", os.Getpid())
 
 	cfg := LoadConfig(&renv)
 	initConfig(&cfg)
@@ -124,20 +113,20 @@ func main() {
 	// 启动时检测 node 版本：若此前选了 node26 但 node v26 已被卸载/不存在，
 	// 主动回退到 node24 并改写持久化配置，避免用失效版本启动 dsh。
 	if ensureValidNodeVersion(&renv) {
-		logger().Printf("[node] node26 已不存在，版本已回退到 node24 并持久化")
+		logWarn("[node] node26 no longer present, node version reverted to node24 (persisted)")
 	}
 
 	auth := NewAuth()
 	if cfg.AuthEnabled {
 		if cfg.Password == "" {
-			logger().Printf("[Auth] 未设置密码 —— 鉴权未启用，任何人都可访问。")
+			logWarn("[auth] no password configured - login auth disabled, console is open to anyone")
 		} else if v := validatePassword(cfg.Password); v != "" {
-			logger().Printf("[Auth] 密码校验失败: %s —— 鉴权未启用。", v)
+			logError("[auth] password rejected (%s) - login auth disabled", v)
 		} else {
-			logger().Printf("[Auth] 密码校验通过，登录鉴权已启用。")
+			logInfo("[auth] login auth enabled")
 		}
 	} else {
-		logger().Printf("[Auth] 鉴权已禁用（AuthEnabled=false）。")
+		logWarn("[auth] login auth disabled by config (authEnabled=false)")
 	}
 
 	dsh := NewDshManager(&renv)
@@ -156,7 +145,7 @@ func main() {
 	createdSessionDir := false
 	if renv.SessionDir != "" && renv.SessionDir != "/" && renv.SessionDir != "." {
 		if err := os.MkdirAll(renv.SessionDir, 0o700); err != nil {
-			logger().Printf("failed to create session dir %s: %v", renv.SessionDir, err)
+			logError("failed to create session dir %s: %v", renv.SessionDir, err)
 		} else {
 			createdSessionDir = true
 		}
@@ -165,10 +154,9 @@ func main() {
 	// 启动 admin socket（非阻塞）
 	go func() {
 		if err := serveAdminSocket(admin); err != nil {
-			logger().Printf("admin socket server: %v", err)
+			logError("admin console server stopped: %v", err)
 		}
 	}()
-	logger().Printf("admin console on unix socket %s baseurl %q", renv.AdminSock, renv.AdminBaseURL)
 
 	// 反代在 dsh 启动之前就开始监听：控制台启动期间访问反代端口不再是“无响应”，
 	// 而是先走登录鉴权、再看带阶段的等待页，dsh 完成启动（含换取凭据、安装依赖）
@@ -176,7 +164,7 @@ func main() {
 	// 监听端口取自持久化配置（AppConfig.ProxyPort，默认 3079），绑定失败不致命：
 	// 控制台（admin socket）与 Unix Socket 挂载照常提供，仅这条 TCP 监听缺席。
 	if err := startProxy(cfg.ProxyPort, auth, dsh, boot); err != nil {
-		logger().Printf("reverse proxy listen on :%d failed: %v", cfg.ProxyPort, err)
+		logError("reverse proxy listen on :%d failed: %v", cfg.ProxyPort, err)
 	}
 	// 第二条监听：unix socket + 子路径挂载（fnOS 网关把 /app/Harness/dsh 转发到这里）。
 	startProxySocket(renv.ProxySock, renv.ProxyBaseURL, auth, dsh, boot)
@@ -186,7 +174,7 @@ func main() {
 		boot.set(phaseStarting, "")
 		if err := dsh.Start(); err != nil {
 			boot.set(phaseFailed, err.Error())
-			logger().Printf("autostart dsh: %v", err)
+			logError("autostart dsh failed: %v", err)
 		} else {
 			// dsh 启动成功，等待并捕获其一次性访问 token（新版 dsh 会打印
 			// "dsh web: http://127.0.0.1:<port>/?token=XXX"），并从 Set-Cookie
@@ -199,15 +187,15 @@ func main() {
 			boot.set(phaseDeps, "")
 			restartNeeded, err := ensureNodePty(&renv, "")
 			if err != nil {
-				logger().Printf("Warning: node-pty setup failed: %v, dsh may not work", err)
+				logWarn("[node-pty] setup failed: %v, dsh may not work", err)
 			}
 			if restartNeeded {
-				logger().Printf("node-pty setup changed workspace, restarting dsh")
+				logInfo("[node-pty] workspace changed by setup, restarting dsh")
 				boot.set(phaseDeps, "依赖已更新，正在重启 dsh")
 				if serr := dsh.Stop(); serr != nil {
-					logger().Printf("restart dsh (stop) after node-pty setup failed: %v", serr)
+					logError("[node-pty] restart dsh (stop) failed: %v", serr)
 				} else if serr := dsh.Start(); serr != nil {
-					logger().Printf("restart dsh (start) after node-pty setup failed: %v", serr)
+					logError("[node-pty] restart dsh (start) failed: %v", serr)
 				} else {
 					// 重启后 dsh 会生成新的访问 token，需重新捕获会话。
 					boot.set(phaseAuth, "")
@@ -220,7 +208,7 @@ func main() {
 		}
 	} else {
 		boot.set(phaseDisabled, "")
-		logger().Printf("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
+		logInfo("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
 	}
 
 	// 等待退出信号
@@ -228,9 +216,9 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	select {
 	case s := <-sig:
-		logger().Printf("received signal %v, shutting down", s)
+		logInfo("received signal %v, shutting down", s)
 	case <-stopCh:
-		logger().Printf("shutdown requested, stopping")
+		logInfo("shutdown requested from console, stopping")
 	}
 
 	dsh.Stop()
@@ -241,7 +229,9 @@ func main() {
 	}
 	os.Remove(renv.AdminSock)
 	stopProxySocket()
-	logger().Printf("backend stopped")
+	// 退出前补出被抑制重复的汇总行，否则计数丢失。
+	flushLog()
+	logInfo("backend stopped")
 }
 
 // captureDshSession 等待并捕获 dsh 的一次性访问 token，并用 token 换取 dsh
@@ -257,7 +247,7 @@ func captureDshSession(dsh *DshManager) {
 		// 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
 		// 供反代转发时携带（访问不带 token 的 dsh 地址）。成功时不输出日志。
 		if err := dsh.ExchangeToken(); err != nil {
-			logger().Printf("dsh token exchange failed: %v", err)
+			logWarn("[dsh] token exchange failed: %v", err)
 		}
 	}
 }
@@ -300,11 +290,10 @@ func startProxy(port int, auth *Auth, dsh *DshManager, boot *bootState) error {
 	proxyMu.Unlock()
 
 	go func() {
-		logger().Printf("reverse proxy listening on %s", addr)
 		// 端口切换（或进程退出）时监听会被主动关闭，Serve 返回的 ErrServerClosed /
 		// net.ErrClosed 属正常收尾，不记为错误。
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-			logger().Printf("proxy server error: %v", err)
+			logError("proxy server error: %v", err)
 		}
 	}()
 	closeProxyListener(oldSrv, oldLn)
@@ -320,14 +309,14 @@ func closeProxyListener(srv *http.Server, ln net.Listener) {
 	// 先关监听让 Serve 立刻返回，再优雅关闭在途请求（等待页是短连接，不会久留）。
 	if ln != nil {
 		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			logger().Printf("close old proxy listener: %v", err)
+			logError("close old proxy listener: %v", err)
 		}
 	}
 	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.DeadlineExceeded) {
-			logger().Printf("shutdown old proxy server: %v", err)
+			logError("shutdown old proxy server: %v", err)
 		}
 	}
 }
@@ -348,36 +337,35 @@ var (
 // 时只记日志并跳过——这条监听是可选的部署形态，不能因此让控制台起不来。
 func startProxySocket(sockPath, baseURL string, auth *Auth, dsh *DshManager, boot *bootState) {
 	if sockPath == "" || sockPath == "off" {
-		logger().Printf("proxy unix socket disabled (HARNESS_PROXY_SOCK=%q)", sockPath)
+		logInfo("proxy unix socket disabled (HARNESS_PROXY_SOCK=%q)", sockPath)
 		return
 	}
 	if dir := filepath.Dir(sockPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			logger().Printf("proxy unix socket dir %s unavailable: %v — skipping", dir, err)
+			logWarn("proxy unix socket dir %s unavailable: %v - skipping", dir, err)
 			return
 		}
 	}
 	// socket 存在且能连上，说明已有活着的持有者（正常路径下 main 的 admin socket
 	// 占用检查会先退出，这里只是兜底）：让它继续服务，自己不再抢。
 	if _, err := net.Dial("unix", sockPath); err == nil {
-		logger().Printf("proxy unix socket %s already in use, skipping", sockPath)
+		logWarn("proxy unix socket %s already in use, skipping", sockPath)
 		return
 	}
 	os.Remove(sockPath)
 	ln, err := netListen("unix", sockPath)
 	if err != nil {
-		logger().Printf("proxy unix socket listen %s failed: %v", sockPath, err)
+		logError("proxy unix socket listen %s failed: %v", sockPath, err)
 		return
 	}
 	if err := os.Chmod(sockPath, 0o660); err != nil {
-		logger().Printf("chmod proxy unix socket %s: %v", sockPath, err)
+		logError("chmod proxy unix socket %s: %v", sockPath, err)
 	}
 	proxySockServer = &http.Server{Handler: newReverseProxyAt(auth, dsh, boot, baseURL)}
 	proxySockPath = sockPath
 	go func() {
-		logger().Printf("reverse proxy listening on unix socket %s (baseurl %q)", sockPath, newProxyMount(baseURL).dir())
 		if err := proxySockServer.Serve(ln); err != nil && err != http.ErrServerClosed {
-			logger().Printf("proxy unix socket server error: %v", err)
+			logError("proxy unix socket server error: %v", err)
 		}
 	}()
 }

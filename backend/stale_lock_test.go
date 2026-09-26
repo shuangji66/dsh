@@ -34,7 +34,7 @@ func newTestDshManager(home, pidFile string) *DshManager {
 	return &DshManager{
 		renv:       &RuntimeEnv{Home: home},
 		dshPidFile: pidFile,
-		logf:       func(string, ...interface{}) {},
+		logf:       func(logLevel, string, ...interface{}) {},
 	}
 }
 

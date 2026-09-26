@@ -110,7 +110,7 @@ setup:
 	restartNeeded = needRebuild
 
 	if !needRebuild {
-		logger().Printf("[node-pty] 已更新 pnpm-workspace.yaml，无需重装依赖")
+		// 只写了 pnpm-workspace.yaml，没有实际重装动作，不记日志。
 		return restartNeeded, nil
 	}
 
@@ -130,7 +130,7 @@ setup:
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("pnpm install failed: %w, output:\n%s", err, out)
 	}
-	logger().Printf("[node-pty] 已重装依赖并固定 node-pty 到 1.2.0-beta.15（需重启）")
+	logInfo("[node-pty] dependencies reinstalled, node-pty pinned to 1.2.0-beta.15 (dsh restart required)")
 	return restartNeeded, nil
 }
 

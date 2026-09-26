@@ -307,7 +307,7 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	// 每次拉取设置前自愈：若配置为 node26 但 node v26 已被卸载/不存在，
 	// 主动回退到 node24 并改写持久化配置，保证前端拿到的总是有效状态。
 	if ensureValidNodeVersion(m.renv) {
-		logger().Printf("[node] node26 已不存在，版本已回退到 node24 并持久化")
+		logWarn("[node] node26 no longer present, node version reverted to node24 (persisted)")
 	}
 	cfg := GetConfig()
 	locked := m.dsh.Running()
@@ -384,7 +384,7 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	// node26 已不再可用（如被卸载）时，不拒绝保存，而是静默回退到 node24，
 	// 与"卸载后自动回退"语义一致，并随本次保存一并把 node24 持久化。
 	if req.Config.NodeVersion == "node26" && !node26Available() {
-		logger().Printf("[node] 保存时 node26 不可用，回退到 node24")
+		logWarn("[node] node26 unavailable while saving, falling back to node24")
 		req.Config.NodeVersion = "node24"
 	}
 	// 内存限制的兜底放在 node 版本确定之后：默认值取决于具体用哪个 node。
@@ -444,7 +444,7 @@ func (m *AdminMux) rebindProxyPort(port int) error {
 	if err := startProxy(port, m.auth, m.dsh, m.boot); err != nil {
 		return fmt.Errorf("反代端口 %d 监听失败: %v", port, err)
 	}
-	logger().Printf("[proxy] reverse proxy port switched %d -> %d", old, port)
+	logInfo("[proxy] reverse proxy port switched %d -> %d", old, port)
 	return nil
 }
 
@@ -611,21 +611,21 @@ func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
 	if len(rows) == 0 {
 		// 没有可写的行 id（纯客户端插件等）：补丁层无从下手，仅靠 state.json 记录。
 		// 仍返回 ok，前端据 needsRestart 提示刷新/重启。
-		logger().Printf("toggle plugin %s: no patch rows (client-only?) — state.json only", body.Name)
+		logInfo("[plugin] toggle %s: no patch rows (client-only?), state.json only", body.Name)
 	}
 	for _, id := range rows {
 		if err := setPluginDisabled(patchPath, id, !body.Enabled); err != nil {
-			logger().Printf("toggle plugin %s id %s -> %v: %v", body.Name, id, body.Enabled, err)
+			logError("[plugin] toggle %s id %s -> %v failed: %v", body.Name, id, body.Enabled, err)
 			writeErr(w, "写入补丁层失败: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
 	// 同步 state.json 的 disabled 数组（包名）
 	if err := writeMarketDisabled(profileWebDir, body.Name, !body.Enabled); err != nil {
-		logger().Printf("toggle plugin %s: sync state.json failed: %v", body.Name, err)
+		logError("[plugin] toggle %s: state.json sync failed: %v", body.Name, err)
 	}
 	restart := body.Enabled && needsRestart(profileWebDir, body.Name)
-	logger().Printf("toggle plugin %s -> enabled=%v rows=%v restart=%v (patch %s)", body.Name, body.Enabled, rows, restart, patchPath)
+	logInfo("[plugin] toggle %s -> enabled=%v rows=%v restart=%v", body.Name, body.Enabled, rows, restart)
 	writeJSON(w, map[string]interface{}{
 		"ok":      true,
 		"name":    body.Name,
@@ -684,12 +684,12 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 	profileDeleted := false
 	if profilesDir != "" {
 		if derr := os.RemoveAll(profilesDir); derr != nil {
-			logger().Printf("删除 profiles 目录失败 %s: %v", profilesDir, derr)
+			logError("[reset] failed to remove profiles dir %s: %v", profilesDir, derr)
 		} else {
 			profileDeleted = true
 		}
 	} else {
-		logger().Printf("未确定 HOME，无法定位 profiles 目录，重置中止")
+		logError("[reset] HOME unresolved, profiles dir not found - reset aborted")
 	}
 
 	// 仅当 ~/.dsh/profiles 删除成功后才继续；失败则立即返回，不重启也不 patch。
@@ -707,13 +707,11 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 	// 这样三者仍严格按“删除成功 → 重启 dsh → patch”的顺序发生，且不阻塞请求。
 	go func() {
 		if rerr := m.restartDsh(); rerr != nil {
-			logger().Printf("reset 后 dsh 重启失败: %v", rerr)
+			logError("[reset] dsh restart failed: %v", rerr)
 			return
 		}
 		if perr := m.patchNodePty(); perr != nil {
-			logger().Printf("node-pty auto-patch after reset failed: %v", perr)
-		} else {
-			logger().Printf("node-pty auto-patch after reset completed")
+			logWarn("[node-pty] auto-patch after reset failed: %v", perr)
 		}
 	}()
 
@@ -816,15 +814,15 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 					writeErr(w, "迁移配置失败: 无法移除目标 ~/.dsh: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
-				logger().Printf("set-home: removed existing ~/.dsh at %s (overwritten by migration)", dstDsh)
+				logWarn("[home] removed existing ~/.dsh at %s (overwritten by migration)", dstDsh)
 			}
 			if err := copyDir(srcDsh, dstDsh); err != nil {
 				writeErr(w, "迁移配置失败: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			logger().Printf("set-home: migrated ~/.dsh from %s to %s", srcDsh, dstDsh)
+			logInfo("[home] migrated ~/.dsh from %s to %s", srcDsh, dstDsh)
 		} else {
-			logger().Printf("set-home: source ~/.dsh not found at %s, skip migration", srcDsh)
+			logInfo("[home] source ~/.dsh not found at %s, migration skipped", srcDsh)
 		}
 	}
 
@@ -835,20 +833,19 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "保存配置失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	logger().Printf("set-home: homeDir switched to %s", dest)
+	logInfo("[home] homeDir switched to %s", dest)
 
 	// 后台重启 dsh，使新的 HOME 环境变量生效（避免阻塞请求线程）；
 	// 重启后触发 node-pty 自动 patch，确保新 HOME 的 .dsh/profiles 下 node-pty 正常。
 	go func() {
 		if err := m.restartDsh(); err != nil {
-			logger().Printf("set-home: restart dsh failed: %v", err)
+			logError("[home] dsh restart failed: %v", err)
 			return
 		}
-		logger().Printf("set-home: dsh restarted with new HOME=%s", dest)
+		logInfo("[home] dsh restarted with new HOME=%s", dest)
 		if perr := m.patchNodePtyHome(dest); perr != nil {
-			logger().Printf("set-home: node-pty patch after switch failed: %v", perr)
+			logWarn("[node-pty] patch after home switch failed: %v", perr)
 		} else {
-			logger().Printf("set-home: node-pty patch after switch completed")
 		}
 	}()
 
@@ -893,7 +890,7 @@ func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 	if fi, err := os.Stat(dest); err == nil {
 		size = fi.Size()
 	}
-	logger().Printf("dsh backup: %s (%d bytes)", dest, size)
+	logInfo("[backup] dsh data backed up to %s (%d bytes)", dest, size)
 	writeJSON(w, map[string]interface{}{
 		"ok":   true,
 		"name": name,
@@ -1065,7 +1062,7 @@ func getUIDFromRequest(r *http.Request) int {
 			return uid
 		}
 	}
-	logger().Printf("Warning: getUIDFromRequest: unable to get valid UID from request")
+	logWarn("[admin] getUIDFromRequest: no valid uid in request")
 	return 0
 }
 
@@ -1225,7 +1222,7 @@ func serveAdminSocket(m *AdminMux) error {
 		return err
 	}
 	if e := os.Chmod(renv.AdminSock, 0660); e != nil {
-		logger().Printf("admin socket chmod: %v", e)
+		logError("[admin] chmod socket %s: %v", renv.AdminSock, e)
 	}
 	h := m.buildHandler()
 	srv := &http.Server{Handler: h}
@@ -1364,7 +1361,7 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 	// 后台执行，避免占用请求线程；进度/完成/取消/暂停均经 SSE 推送。
 	go func() {
 		if err := m.update.downloadUpdate(kind); err != nil {
-			logger().Printf("[update] 下载 %s 失败: %v", kind, err)
+			logError("%s download failed: %v", updateLogTag(kind), err)
 			// 暂停/取消都不是「错误」，downloadUpdate 已经推送了对应状态，
 			// 这里不要再覆盖成失败（否则弹窗会同时显示“已暂停”和一条红色错误）。
 			if errors.Is(err, errUpdatePaused) || errors.Is(err, errUpdateCancelled) {
@@ -1410,7 +1407,7 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		if err := m.update.installUpdate(kind); err != nil {
-			logger().Printf("[update] 安装 %s 失败: %v", kind, err)
+			logError("%s install failed: %v", updateLogTag(kind), err)
 			upd := m.update
 			st := upd.getStatus(kind)
 			st.CheckedAt = time.Now()
@@ -1420,7 +1417,7 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 			upd.setStatus(kind, &st)
 			return
 		}
-		logger().Printf("[update] 安装 %s 成功", kind)
+		logInfo("%s installed", updateLogTag(kind))
 		// 成功后立即推送成功状态：完成更新解压/备份替换动作即可结束弹窗，
 		// 不等待 dsh 启动成功（会话 cookie 由异步 captureDshSession 换取）。
 		// 用 updateStatus 就地修改（而非 getStatus+setStatus 副本替换），

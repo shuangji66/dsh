@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -288,7 +289,7 @@ func TestDownloadPauseKeepsPartialThenResumes(t *testing.T) {
 	m := &UpdateManager{}
 
 	dest := filepath.Join(t.TempDir(), "pkg.tar.gz")
-	ctrl := newDownloadControl(true)
+	ctrl := newDownloadControl(true, updateKindHarness)
 	// 进度过半就暂停：用进度回调驱动，时序确定，不靠 sleep 猜。
 	progress := func(downloaded, total int64) {
 		if downloaded > int64(len(data))/4 {
@@ -305,7 +306,7 @@ func TestDownloadPauseKeepsPartialThenResumes(t *testing.T) {
 	}
 
 	// 继续下载：应当带 Range 从半成品之后接上，并最终与源一致。
-	ctrl2 := newDownloadControl(true)
+	ctrl2 := newDownloadControl(true, updateKindHarness)
 	n, err := m.downloadToFile(srv.URL+"/pkg.tar.gz", dest, nil, ctrl2, releasePlan(directRoute(srv)))
 	if err != nil {
 		t.Fatalf("续传失败: %v", err)
@@ -329,7 +330,7 @@ func TestDownloadCancelRemovesPartial(t *testing.T) {
 	useRoutes(t, []updateRoute{directRoute(srv)})
 
 	dest := filepath.Join(t.TempDir(), "pkg.tar.gz")
-	ctrl := newDownloadControl(true)
+	ctrl := newDownloadControl(true, updateKindHarness)
 	progress := func(downloaded, total int64) {
 		if downloaded > int64(len(data))/4 {
 			ctrl.stop("cancel")
@@ -488,7 +489,7 @@ func TestMarketDownloadLeavesNoPartialOnFailure(t *testing.T) {
 
 // 不支持的暂停请求应被忽略（否则市场下载会被前端误暂停）。
 func TestDownloadControlIgnoresPauseWhenNotPausable(t *testing.T) {
-	np := newDownloadControl(false)
+	np := newDownloadControl(false, updateKindMarket)
 	if np.stop("pause") {
 		t.Fatal("不可暂停的下载不应接受暂停")
 	}
@@ -499,7 +500,7 @@ func TestDownloadControlIgnoresPauseWhenNotPausable(t *testing.T) {
 		t.Fatal("取消在任何下载上都应生效")
 	}
 
-	p := newDownloadControl(true)
+	p := newDownloadControl(true, updateKindHarness)
 	if !p.stop("pause") {
 		t.Fatal("可暂停的下载应接受暂停")
 	}
@@ -532,5 +533,80 @@ func TestUpdateClientsFallsBackToDirectWhenProxyUnreachable(t *testing.T) {
 	routes = (&UpdateManager{}).updateClients()
 	if len(routes) != 2 || routes[0].label == "直连" || routes[1].label != "直连" {
 		t.Fatalf("代理可达时应为「代理在前、直连在后」两条通路，实际 %+v", routes)
+	}
+}
+
+// --- 更新日志按目标分开（harness / dsh / market） ---
+
+// 标签映射：三类更新各自一个标签，未知目标退回通用的 [update]。
+func TestUpdateLogTag(t *testing.T) {
+	cases := []struct {
+		in   updateKind
+		want string
+	}{
+		{updateKindHarness, "[harness]"},
+		{updateKindDsh, "[dsh]"},
+		{updateKindMarket, "[market]"},
+		{"", "[update]"},
+		{"unknown", "[update]"},
+	}
+	for _, tc := range cases {
+		if got := updateLogTag(tc.in); got != tc.want {
+			t.Fatalf("updateLogTag(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// 待安装包名（kind+版本）反推目标：启动清理与“删除更新包”的日志据此归类。
+func TestPendingKind(t *testing.T) {
+	cases := map[string]updateKind{
+		"harness-1.2.6.tar.gz":  updateKindHarness,
+		"dsh-0.1.7-rc.3.tar.gz": updateKindDsh,
+		"market-1.66.1.tar.gz":  updateKindMarket,
+		"something-else.tgz":    "",
+	}
+	for name, want := range cases {
+		if got := pendingKind(name); got != want {
+			t.Fatalf("pendingKind(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// 底层下载函数的日志必须带上所属目标（plan.kind 一路传下来），
+// 这样 dsh 服务更新的下载日志不会混进 harness 的那一堆里。
+func TestDownloadLogsTaggedByKind(t *testing.T) {
+	out, _ := captureLogs(t)
+	data := testPayload(8 << 10)
+	srv := httptest.NewServer(http.HandlerFunc((&pkgServer{data: data}).handler))
+	defer srv.Close()
+
+	plan := releasePlan(directRoute(srv))
+	plan.kind = updateKindDsh
+	dest := filepath.Join(t.TempDir(), "dsh-pkg.tar.gz")
+	if _, err := (&UpdateManager{}).downloadToFile(srv.URL+"/dsh-pkg.tar.gz", dest, nil, nil, plan); err != nil {
+		t.Fatalf("下载失败: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "[dsh] download finished via") {
+		t.Fatalf("下载日志缺少 [dsh] 标签:\n%s", got)
+	}
+	if strings.Contains(got, "[harness]") || strings.Contains(got, "[update] download") {
+		t.Fatalf("下载日志混入了其它目标的标签:\n%s", got)
+	}
+}
+
+// 取消/暂停的日志同样按目标打标签（downloadControl 记住 kind）。
+func TestPauseLogTaggedByKind(t *testing.T) {
+	out, _ := captureLogs(t)
+	m := &UpdateManager{}
+	ctrl := newDownloadControl(true, updateKindHarness)
+	m.ctrlMu.Lock()
+	m.ctrl = ctrl
+	m.ctrlMu.Unlock()
+	if !m.PauseUpdate() {
+		t.Fatal("进行中的可暂停下载应接受暂停")
+	}
+	if got := out.String(); !strings.Contains(got, "[harness] download pause requested") {
+		t.Fatalf("暂停日志缺少 [harness] 标签:\n%s", got)
 	}
 }

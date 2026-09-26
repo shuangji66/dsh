@@ -26,7 +26,7 @@ type DshManager struct {
 	cmd         *exec.Cmd
 	startedAt   time.Time
 	renv        *RuntimeEnv
-	logf        func(string, ...interface{})
+	logf        logFunc // 带等级的日志出口（测试注入静默实现）
 	statsMu     sync.Mutex
 	lastCpu     float64 // 最近一次采样的 CPU 使用率（%）
 	lastMemory  int64   // 最近一次采样的常驻内存（MB）
@@ -232,10 +232,19 @@ func NewDshManager(renv *RuntimeEnv) *DshManager {
 	return &DshManager{
 		renv:       renv,
 		dshPidFile: renv.DshPidFile,
-		logf: func(f string, a ...interface{}) {
-			logger().Printf(f, a...)
-		},
+		logf:       logAt,
 	}
+}
+
+// logInfo / logWarn / logError 是 DshManager 的日志出口包装（等级见 logging.go）。
+func (m *DshManager) logInfo(format string, a ...interface{}) {
+	m.logf(levelInfo, format, a...)
+}
+func (m *DshManager) logWarn(format string, a ...interface{}) {
+	m.logf(levelWarn, format, a...)
+}
+func (m *DshManager) logError(format string, a ...interface{}) {
+	m.logf(levelError, format, a...)
 }
 
 // effectiveHome returns the HOME directory that dsh should run with. When the
@@ -401,11 +410,15 @@ func (m *DshManager) effectivePID() int {
 		return tracked
 	}
 	// 被跟踪的 PID 已失效，重新发现实时 dsh 进程。
+	prevLive := m.livePid
 	found := m.findDshPid()
 	m.livePid = found
 	m.pidCheckedAt = time.Now()
-	if found > 0 && found != tracked {
-		m.logf("dsh pid changed: tracked=%d -> live=%d", tracked, found)
+	// 只在实时 PID 真正变化时记一行：本函数由状态轮询高频调用，而 dsh 自重启后
+	// m.cmd 里的旧 PID 永远是「已死」，按 found != tracked 判定会每次调用都刷一行
+	// （历史上曾把同一行刷出 3500+ 条）。
+	if found > 0 && found != prevLive {
+		m.logInfo("dsh pid changed: tracked=%d -> live=%d", tracked, found)
 		// 旧受管进程（dsh-market 自重启前的）已退出：异步回收，避免残留僵尸。
 		// 即使反代 hook 未触发（如自发重启），这里也能兜底回收。ProcessState
 		// 守卫保证每个 cmd 只发起一次 Wait。
@@ -433,11 +446,11 @@ func (m *DshManager) writeDshPidFile(pid int) {
 		return
 	}
 	if err := writePidFile(m.dshPidFile, pid); err != nil {
-		m.logf("failed to write dsh pid file %s: %v", m.dshPidFile, err)
+		m.logError("failed to write dsh pid file %s: %v", m.dshPidFile, err)
 		return
 	}
+	// 写入成功是常规操作，不记日志。
 	m.dshPidFilePid = pid
-	m.logf("dsh pid file %s updated -> %d", m.dshPidFile, pid)
 }
 
 // removeDshPidFile 移除 dsh 服务 PID 文件（dsh 停止或自重启窗口内）：
@@ -450,7 +463,7 @@ func (m *DshManager) removeDshPidFile() {
 	}
 	m.dshPidFilePid = 0
 	if err := os.Remove(m.dshPidFile); err != nil && !os.IsNotExist(err) {
-		m.logf("failed to remove dsh pid file %s: %v", m.dshPidFile, err)
+		m.logError("failed to remove dsh pid file %s: %v", m.dshPidFile, err)
 	}
 }
 
@@ -501,9 +514,9 @@ func (m *DshManager) reapCmd(cmd *exec.Cmd) {
 	}()
 	select {
 	case <-done:
-		m.logf("reaped dsh child process (was pid %d)", cmd.Process.Pid)
+		// 回收成功是常规收尾，不记日志。
 	case <-time.After(3 * time.Second):
-		m.logf("reap of dsh child pid %d deferred (process still shutting down)", cmd.Process.Pid)
+		m.logWarn("reap of dsh child pid %d deferred (process still shutting down)", cmd.Process.Pid)
 	}
 }
 
@@ -534,7 +547,7 @@ func (m *DshManager) notifySelfRestart() {
 	// 自重启窗口内先移除 dsh PID 文件（旧进程即将退出，文件中不应残留旧 PID），
 	// 新 dsh PID 由 watchSelfRestart / effectivePID 发现后再写回。
 	m.removeDshPidFile()
-	m.logf("dsh self-restart requested (old pid=%d), watching for the replacement", tracked)
+	m.logInfo("dsh self-restart requested (old pid=%d), watching for the replacement", tracked)
 	go m.watchSelfRestart(tracked)
 }
 
@@ -550,7 +563,7 @@ func (m *DshManager) watchSelfRestart(oldPID int) {
 			break
 		}
 		if time.Now().After(waitDead) {
-			m.logf("dsh self-restart: tracked pid %d still alive after 30s, restart likely rejected", oldPID)
+			m.logWarn("dsh self-restart: tracked pid %d still alive after 30s, restart likely rejected", oldPID)
 			return
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -581,11 +594,11 @@ func (m *DshManager) watchSelfRestart(oldPID int) {
 				m.startedAt = start
 				m.mu.Unlock()
 			}
-			m.logf("dsh self-restart detected: tracked=%d -> live=%d", oldPID, found)
+			m.logInfo("dsh self-restart detected: tracked=%d -> live=%d", oldPID, found)
 			return
 		}
 		if time.Now().After(deadline) {
-			m.logf("dsh self-restart: no replacement found within 90s (old pid=%d)", oldPID)
+			m.logError("dsh self-restart: no replacement found within 90s (old pid=%d)", oldPID)
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -856,10 +869,11 @@ func (m *DshManager) Start() error {
 	cmd := exec.Command(bin, "web", "--no-open", "--port", fmt.Sprintf("%d", cfg.DshPort))
 	cmd.Dir = m.renv.TRIMAppDest
 	cmd.Env = m.buildEnv()
-	// 拦截 dsh 子进程的 stdout/stderr：既照常写到全局日志，又扫描其中的
-	// 一次性访问 token（新版 dsh 启动时会打印 "dsh web: http://...?token=XXX"）。
+	// 拦截 dsh 子进程的 stdout/stderr：既原样写到全局日志（dshLogWriter，
+	// 不改格式、固定黄色），又扫描其中的一次性访问 token（新版 dsh 启动时会打印
+	// "dsh web: http://...?token=XXX"）。
 	scanner := &tokenScanner{
-		dst: logOut,
+		dst: dshLogWriter{},
 		cb: func(tok string) {
 			m.tokenMu.Lock()
 			m.token = tok
@@ -878,7 +892,7 @@ func (m *DshManager) Start() error {
 	// dsh 启动成功：把 dsh 服务 PID 文件指向新进程（harness 控制台自身的
 	// HARNESS_PID_FILE 不受影响，仍记录控制台 PID）。
 	m.writeDshPidFile(cmd.Process.Pid)
-	m.logf("dsh started pid=%d port=%d", cmd.Process.Pid, cfg.DshPort)
+	m.logInfo("dsh started pid=%d port=%d", cmd.Process.Pid, cfg.DshPort)
 	return nil
 }
 
@@ -925,16 +939,16 @@ func (m *DshManager) Stop() error {
 	// 控制台插件列表空白，且浏览器轮询不断堆积挂起的 dsh 进程）。
 	// 精准路径本来就已经写好（pid 文件 → 进程组兜底），这里改为始终走它。
 	if pidFilePid := m.readDshPidFile(); pidFilePid > 0 && processAlive(pidFilePid) {
-		m.logf("dsh stop: killing by pid-file pid %d", pidFilePid)
+		m.logInfo("dsh stop: killing by pid-file pid %d", pidFilePid)
 		m.killPidGracefully(pidFilePid)
 	}
 	if live := m.findDshPid(); live > 0 {
-		m.logf("dsh stop: killing process group of dsh pid %d", live)
+		m.logInfo("dsh stop: killing process group of dsh pid %d", live)
 		m.fallbackKill(live)
 	}
 	// 受管子进程仍在（例如 pid 文件没跟上）时再补一刀。
 	if tracked > 0 && processAlive(tracked) && tracked != target {
-		m.logf("dsh stop: killing tracked pid %d", tracked)
+		m.logInfo("dsh stop: killing tracked pid %d", tracked)
 		m.killPidGracefully(tracked)
 	}
 
@@ -1096,18 +1110,18 @@ func (m *DshManager) cleanStaleProfileLocks() int {
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 		if err != nil || pid <= 0 {
-			m.logf("stale lock: 无法解析持有者 PID，保守跳过 %s", path)
+			m.logWarn("stale lock: unparsable owner pid, skipping %s", path)
 			continue
 		}
 		if processAlive(pid) {
 			continue // 真有人在用，绝不删
 		}
 		if err := os.Remove(path); err != nil {
-			m.logf("stale lock: 删除失败 %s: %v", path, err)
+			m.logError("stale lock: failed to remove %s: %v", path, err)
 			continue
 		}
 		cleaned++
-		m.logf("stale lock: 已清理陈旧锁 %s（持有者 pid %d 已不存在）", path, pid)
+		m.logWarn("stale lock: removed %s (owner pid %d is gone)", path, pid)
 	}
 	return cleaned
 }

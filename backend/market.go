@@ -739,7 +739,7 @@ func (m *UpdateManager) stopDshForReplacement(action string) error {
 	}
 	if err := dshStopFn(m); err != nil {
 		// 与旧行为一致：停止失败也继续尝试替换，但后面必须确认它真的停了。
-		logger().Printf("[update] 停止 dsh 服务失败（继续尝试替换）: %v", err)
+		logWarn("[update] failed to stop dsh (continuing with replacement): %v", err)
 	}
 	dshPortFreeFn(m, 30*time.Second)
 	return nil
@@ -786,7 +786,7 @@ func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error
 	}
 
 	oldVersion := target.Version
-	logger().Printf("[market] 开始更新市场 %s → %s（目录 %s）", oldVersion, p.Version, target.Dir)
+	logInfo("[market] updating market %s -> %s (dir %s)", oldVersion, p.Version, target.Dir)
 
 	// 2) 停 dsh（含忙守卫：有插件操作在跑就拒绝，且此时还没产生任何停机）。
 	if err := m.stopDshForReplacement("更新插件市场"); err != nil {
@@ -808,14 +808,14 @@ func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error
 	case marketWaitReady:
 		// 成功：走下面的收尾。
 	case marketWaitExited:
-		logger().Printf("[market] 新版本 %s 启动后进程退出，回滚到 %s", p.Version, oldVersion)
+		logWarn("[market] new version %s exited right after start, rolling back to %s", p.Version, oldVersion)
 		if rbErr := rollback(); rbErr != nil {
 			return fmt.Errorf("市场更新失败且回滚失败（目录已损坏，请手动处理 %s）: %v", target.Dir, rbErr)
 		}
 		m.marketRestartDsh()
 		return fmt.Errorf("新版本 %s 启动后立即退出，已回滚到 %s；请从市场面板或控制台日志确认具体原因", p.Version, oldVersion)
 	default:
-		logger().Printf("[market] 新版本 %s 启动后 %s 内未监听端口，回滚到 %s", p.Version, marketReadyTimeout, oldVersion)
+		logWarn("[market] new version %s did not listen within %s, rolling back to %s", p.Version, marketReadyTimeout, oldVersion)
 		if rbErr := rollback(); rbErr != nil {
 			return fmt.Errorf("市场更新失败且回滚失败（目录已损坏，请手动处理 %s）: %v", target.Dir, rbErr)
 		}
@@ -825,7 +825,7 @@ func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error
 
 	cleanup()
 	m.clearPending()
-	logger().Printf("[market] 市场已更新到 %s（旧版本 %s，备份在 %s/）", p.Version, oldVersion, m.backupDir())
+	logInfo("[market] market updated to %s (previous %s, backup in %s/)", p.Version, oldVersion, m.backupDir())
 	return nil
 }
 
@@ -867,12 +867,12 @@ func waitMarketDsh(m *UpdateManager, max time.Duration) marketWaitResult {
 func (m *UpdateManager) marketRestartDsh() {
 	if m.dsh.Running() {
 		if err := dshStopFn(m); err != nil {
-			logger().Printf("[market] 拉起前停止残留 dsh 失败: %v", err)
+			logWarn("[market] failed to stop leftover dsh before start: %v", err)
 		}
 		dshPortFreeFn(m, 30*time.Second)
 	}
 	if err := marketStartDshFn(m); err != nil {
-		logger().Printf("[market] 启动 dsh 服务失败: %v", err)
+		logError("[market] failed to start dsh service: %v", err)
 	}
 }
 
@@ -943,12 +943,12 @@ func (m *UpdateManager) swapMarketDir(targetDir, srcDir, oldVersion string) (fun
 	if err := os.Rename(staging, targetDir); err != nil {
 		// 放回旧目录，保持现场不变。
 		if rbErr := os.Rename(oldDir, targetDir); rbErr != nil {
-			logger().Printf("[market] 严重：旧目录放回失败 %v（旧目录仍在 %s）", rbErr, oldDir)
+			logError("[market] CRITICAL: failed to restore old dir %v (old dir still at %s)", rbErr, oldDir)
 		}
 		os.RemoveAll(staging)
 		return nil, nil, fmt.Errorf("放入新版本目录失败: %w", err)
 	}
-	logger().Printf("[market] 目录已替换：%s（备份 %s，旧目录 %s）", targetDir, backupPath, oldDir)
+	logInfo("[market] dir replaced: %s (backup %s, old dir %s)", targetDir, backupPath, oldDir)
 
 	restored := false
 	rollback := func() error {

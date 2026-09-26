@@ -295,13 +295,13 @@ func probeNodeHeapLimitMB(nodeVersion string) int {
 	cmd := exec.CommandContext(ctx, nodeHeapProbeBin(nodeVersion), "-e", nodeHeapLimitProbe)
 	out, err := cmd.Output()
 	if err != nil {
-		logger().Printf("[node] 探测 %s 默认堆上限失败: %v", nodeVersion, err)
+		logWarn("[node] failed to probe %s default heap limit: %v", nodeVersion, err)
 		return 0
 	}
 	s := strings.TrimSpace(string(out))
 	bytes, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || bytes <= 0 {
-		logger().Printf("[node] 解析 %s 默认堆上限失败: %q", nodeVersion, s)
+		logWarn("[node] failed to parse %s default heap limit: %q", nodeVersion, s)
 		return 0
 	}
 	return bytesToMB(bytes)

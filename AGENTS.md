@@ -38,6 +38,14 @@
 - `main.go` — 入口。顺序：解析环境 → 建日志 → 写 PID → 查 socket 占用 → 读配置 →
   校验密码 → 起 Admin socket → **起反代**（早于 dsh：先监听、先鉴权，未就绪给等待页）
   → 起 dsh（非 `HARNESS_AUTOSTART=0`）→ 换 Cookie → 装 node-pty → 标记就绪 → 等信号退出。
+- `logging.go` — **唯一的日志出口**：`logInfo` / `logWarn` / `logError` 三个等级
+  （`[INFO]` 白 / `[WARN]` 黄 / `[ERROR]` 红），行格式
+  `[Harness] <时间> [LEVEL] message`；终端（stdout 是 TTY）额外用 ANSI 着色，日志文件
+  保持纯文本，由控制台日志页按 `[LEVEL]` 着色。连续重复的同一行只记一次、序列结束时补
+  汇总行（`flushLog` 在退出前补出）。dsh 子进程的 stdout/stderr 经 `dshLogWriter`
+  **原样透传**（不加前缀、不做抑制），终端固定黄色。更新类日志按**目标分开打标签**：
+  `[harness]`（控制台）/ `[dsh]`（dsh 服务）/ `[market]`（插件市场），见
+  `updateLogTag` —— 新增加更新步骤时不要再用通用的 `[update]`，否则升级日志又会混在一起。
 - `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled`）+ `proxyState`。
   反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
 - `config.go` — `AppConfig`（前端可改，含反代端口 `ProxyPort`）与 `RuntimeEnv`（环境变量）。
@@ -97,7 +105,13 @@
 5. **前端改动必须重编译验证** —— 修改前端后运行构建并刷新确认，别只改文件。
 6. **遵循 Vue 最佳实践** —— 优先 Composition API；状态进 Pinia；可复用逻辑进
    composables。
-7. **保持双语注释习惯** —— 现有代码中文注释占多数，新增注释建议保持项目既有风格。
+7. **日志只用 `logInfo` / `logWarn` / `logError`，且用英文** —— 不要再引入
+   `logger()` / `log.Printf` / `fmt.Println`。基础的成功操作（PID 文件写入、无需重装的
+   空操作、回收子进程成功等）**不记日志**；只记状态变化、用户发起的操作与失败/异常。
+   高频路径（状态轮询、每小时自动检测）要么只在结果真正变化时记一行，要么依赖
+   `logging.go` 的重复抑制，**不要每次调用都刷一行**。dsh 子进程的输出必须原样透传，
+   不要加前缀或改写格式（控制台靠「无 `[Harness]` 前缀」把它识别为黄色 dsh 输出）。
+8. **保持双语注释习惯** —— 现有代码中文注释占多数，新增注释建议保持项目既有风格。
 
 ---
 

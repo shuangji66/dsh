@@ -283,7 +283,6 @@ func (m *SessionManager) create() (*Session, error) {
 	m.mu.Lock()
 	m.sessions[id] = s
 	m.mu.Unlock()
-	logger().Printf("[terminal] session %s started", id)
 	return s, nil
 }
 
@@ -368,9 +367,7 @@ func (m *SessionManager) closeByID(id string) error {
 	if !ok {
 		return errors.New("session not found")
 	}
-	err := s.close()
-	logger().Printf("[terminal] session %s closed", id)
-	return err
+	return s.close()
 }
 
 // CloseAll 终止所有会话（进程 + 文件），随后由 main 删除整个临时目录。
@@ -475,7 +472,7 @@ func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if err1 == nil && err2 == nil && cols > 0 && rows > 0 {
 						if sess, ok := t.mgr.get(id); ok {
 							if err := sess.resize(uint16(cols), uint16(rows)); err != nil {
-								logger().Printf("[terminal] resize error: %v", err)
+								logWarn("[terminal] resize failed: %v", err)
 							}
 						}
 					}

@@ -175,18 +175,47 @@ function fmtUptime(sec?: number): string {
   return t('uptime_d_h', { d: Math.floor(h / 24), h: h % 24 })
 }
 
-// --- 运行时间：后端只读一次，之后由前端自己走表 ---
+// --- 运行时间：基准只取「新鲜的一拍」，之后由前端自己走表 ---
 //
-// 状态流（/api/dsh/stream）每秒都会推 CPU / 内存，但**运行时间不必跟着轮询**：
-// 拿到一次基准值（该 PID 已运行的秒数）后本机按时间差自己推进；只有「dsh 启停 / 重启 /
-// 装插件自重启」这类生命周期变化才重新采纳 —— 它们在状态里表现为 running 翻转或
-// （自重启时）pid 变化，因此不需要额外开一个「刷新运行时间」的接口。
+// 状态流（/api/dsh/stream）每秒都会推 CPU / 内存，但**运行时间不跟着这些推送换算**：
+// 拿到一次基准值（该 PID 已运行的秒数）后，本机按时间差自己推进，后续每秒推来的秒数一律忽略。
+// 需要重新定基准的只有三种情况：dsh 启动/停止、重启（含装插件自重启，表现为 pid 变化），
+// 以及**从其他子页面切回概览后的第一拍推送** —— 见下面那段「踩过的坑」。
+//
+// 踩过的坑（这段逻辑存在的理由）：本页**不在** ViewSwitcher 的 KeepAlive 白名单里
+// （那里只缓存 TerminalView），切到别的子页面时本组件会被**卸载** —— SSE 连接随之关闭，
+// store 里的 status 冻结在「离开的那一刻」；切回来则是**重新挂载**。若直接拿 store 里那份
+// 旧快照当基准，计时就会从离开时的秒数接着走，表现为「切回来像暂停过、时间对不上」。
+// 因此进入页面后必须用第一拍**推送**重新定基准（SSE 连上时后端会立刻补发初始快照，
+// 见 backend/sse.go 的 handleDshStream）。
 //
 // 用本机时钟推进而不是每拍 +1：页面被切到后台时定时器会被节流，按真实时间差算回来才不会走慢。
 type UptimeBase = { pid: number; seconds: number; at: number }
 const uptimeBase = ref<UptimeBase | null>(null)
 const uptimeTick = ref(Date.now())
 let uptimeTimer: number | null = null
+// 是否还欠一次「用推送重定基准」：组件每次建立（含切回概览）都为 true。
+// 注意：本视图没有进 KeepAlive 的 include，切回来一定是重新挂载，初始值就够用；
+// 将来若把它加进 ViewSwitcher 的 keep-alive 名单，必须在 onActivated 里再置回 true。
+let needsReanchor = true
+
+// 采纳一份状态作为计时基准。fromPush 表示它来自 SSE 推送（新鲜数据）而不是 store 里的旧值。
+function adoptStatus(s: DshStatus | null, fromPush: boolean) {
+  const pid = s?.pid ?? 0
+  const up = s?.uptimeSeconds
+  // 未运行 / 后端读不到该 PID 的启动时刻 → 显示「—」，并等下次运行重新定基准
+  if (s?.running !== true || up === undefined) {
+    uptimeBase.value = null
+    needsReanchor = true
+    return
+  }
+  const samePid = uptimeBase.value !== null && uptimeBase.value.pid === pid
+  // 同一 PID 的常规状态：不采纳，展示值继续由本机秒表推进。
+  // 唯一例外是「刚进入页面后的第一拍推送」——store 里那份快照可能已经过期，必须用它纠正。
+  if (samePid && !(fromPush && needsReanchor)) return
+  uptimeBase.value = { pid, seconds: up, at: Date.now() }
+  if (fromPush) needsReanchor = false
+}
 
 // 展示值 = 基准秒数 + 本机已过去的秒数；没有基准（未运行 / 读不到）时 undefined → 「—」
 const uptimeSeconds = computed(() => {
@@ -195,25 +224,10 @@ const uptimeSeconds = computed(() => {
   return b.seconds + Math.max(0, Math.floor((uptimeTick.value - b.at) / 1000))
 })
 
-watch(
-  () => ({
-    pid: status.value?.pid ?? 0,
-    running: status.value?.running === true,
-    up: status.value?.uptimeSeconds,
-  }),
-  (cur) => {
-    // 同一个 PID 仍在运行 → 已有基准，继续自己走表，不采纳后面每秒推来的值
-    if (uptimeBase.value && cur.running && uptimeBase.value.pid === cur.pid) return
-    // 停止 / 后端没给值（读不到该 PID 的启动时刻）→ 显示「—」
-    if (!cur.running || cur.up === undefined) {
-      uptimeBase.value = null
-      return
-    }
-    // 首次拿到状态，或启停/重启（pid 变化）后的新基准
-    uptimeBase.value = { pid: cur.pid, seconds: cur.up, at: Date.now() }
-  },
-  { immediate: true }
-)
+// 本页发起的启停 / 重启会写回 store.status：这里兜住「生命周期变化」（running 翻转 / pid 变化）。
+// 刚挂载时 store 里可能还是上次离开时的旧快照，先用它顶一下（避免数字闪成「—」），
+// needsReanchor 仍为 true，等第一拍推送到达即被纠正。
+watch(() => status.value, (cur) => adoptStatus(cur, false), { immediate: true })
 
 // CPU 占用阈值颜色：0-20% 绿 / 20-50% 橙 / 50% 以上红；未知用黑色（—）
 function cpuColor(v?: number): string {
@@ -255,7 +269,10 @@ const visitorStream = useEventStream(() => sseUrl('/api/visitors/stream'), {
 // 通过 SSE 每 1 秒接收 dsh 运行状态（CPU 使用率 / 内存占用），实现自动刷新
 const statusStream = useEventStream(() => sseUrl('/api/dsh/stream'), {
   status: (data) => {
-    status.value = data as DshStatus
+    const s = data as DshStatus
+    // 先按「推送」采纳计时基准（进入页面后的第一拍就是靠它纠正过期快照的），再写入 store
+    adoptStatus(s, true)
+    status.value = s
   }
 })
 

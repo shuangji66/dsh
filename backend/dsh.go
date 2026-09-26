@@ -178,6 +178,17 @@ func (m *DshManager) bumpSessionGen() {
 	m.sessionMu.Unlock()
 }
 
+// SessionGen 返回当前的 dsh 启动代号。captureDshSession 必须在**开始等待 token 之前**
+// 取一次，结束时用同一个代号做 compare-and-set（见 markSessionSettledGen）：
+// 等待期间 dsh 可能又重启了一代（旧版 dsh 不打印 token 时这次等待要空等 15 秒，
+// 期间足够发生一次重启），用「当前代号」标记会把**新一代**误标成凭据已落定，
+// 反代据此放行，用户被送进 dsh 的未授权页。
+func (m *DshManager) SessionGen() int {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.sessionGen
+}
+
 // SessionSettled 报告本代 dsh 的访问凭据是否已尘埃落定。
 //
 // dsh 每次启动都会打印一次性 token，harness 需要用它换取 dsh-auth-* 会话 cookie
@@ -193,20 +204,44 @@ func (m *DshManager) SessionSettled() bool {
 	return m.sessionReadyGen >= m.sessionGen
 }
 
-// markSessionSettled 由 captureDshSession 在等待 token（拿到或超时）结束后调用。
+// markSessionSettled 标记「此刻这一代」凭据已落定（等价于
+// markSessionSettledGen(SessionGen())）。异步等待 token 的路径必须用
+// markSessionSettledGen 传**发起等待时**那一代的代号，不能走这个「取当前代号」的
+// 便捷入口，否则等待期间的 dsh 重启会被误标（见 SessionGen 的说明）。
 func (m *DshManager) markSessionSettled() {
+	m.markSessionSettledGen(m.SessionGen())
+}
+
+// markSessionSettledGen 只在 gen 仍是当前启动代号时才标记落定（compare-and-set）。
+//
+// 语义：只有发起这次等待的那一代才算「已落定」。若等待期间 dsh 已重启（gen 前进），
+// 这一代的结果不代表新一代的凭据状态 —— 新一代由它自己的 captureDshSession 负责标记。
+// 注意「无论是否拿到 token 都要落定」的语义不变：调用方在等待结束（拿到或超时）后
+// 调用本方法，只要这一代还是当前代，就照样标记。
+func (m *DshManager) markSessionSettledGen(gen int) {
 	m.sessionMu.Lock()
-	m.sessionReadyGen = m.sessionGen
-	m.sessionMu.Unlock()
+	defer m.sessionMu.Unlock()
+	if gen != m.sessionGen {
+		return
+	}
+	m.sessionReadyGen = gen
 }
 
 // ExchangeToken 用启动日志中捕获的一次性 token 访问一次带 token 的 dsh 地址
 // （http://127.0.0.1:<dshPort>/?token=XXX），从响应头的 Set-Cookie 中提取
 // dsh 会话 cookie（dsh-auth-*）并保存。此后反代访问 dsh 时携带该 cookie、
 // 访问不带 token 的地址即可。
+//
+// 失败语义（重要）：没有换到 dsh-auth-* cookie 时**返回错误**，不能像旧实现那样
+// 静默返回 nil —— 那样「token 无效 / dsh 版本不匹配 / 响应异常」与「成功换取」
+// 完全无法区分，日志里没有线索，用户只能靠自己撞上 dsh 的未授权响应发现。
+// 调用方是 captureDshSession，它已有 logWarn 兜底（见 main.go）。
 func (m *DshManager) ExchangeToken() error {
 	tok := m.Token()
 	if tok == "" {
+		// 没有可用的 token（旧版 dsh 不打印 token，或本次启动的 token 已被消费）：
+		// 这不是错误，调用方本就不该在这一代换凭据。captureDshSession 只在拿到
+		// 非空 token 时才调用本函数，因此这里不会掩盖真实故障。
 		return nil
 	}
 	port := GetConfig().DshPort
@@ -233,7 +268,11 @@ func (m *DshManager) ExchangeToken() error {
 			return nil
 		}
 	}
-	return nil
+	// 带上状态码与收到的 cookie 数量：状态码能区分「token 被拒（4xx）」与
+	// 「dsh 还没起来/端口不对（连接错误、5xx）」，数量能区分「一个 cookie 都没回」
+	// 与「回了 cookie 但没有 dsh-auth-*（dsh 版本行为变了）」。
+	return fmt.Errorf("token exchange got no dsh-auth-* cookie (http status %d, %d cookie(s) received)",
+		resp.StatusCode, len(cookies))
 }
 
 func NewDshManager(renv *RuntimeEnv) *DshManager {
@@ -286,12 +325,28 @@ func (m *DshManager) stopped() bool {
 	if m.cmd.ProcessState != nil {
 		return true
 	}
+	// ProcessState 只有 Wait() 会写，而 dsh 自行退出（崩溃、被用户在终端里 kill、
+	// 自重启后新进程没能拉起）时控制台并不一定 Wait 过它 —— 只看 ProcessState 会把
+	// 一个已死的受管子进程一直当成「仍在运行」：Status/Running 报 running、Start 以
+	// 「already running」拒绝、Stop 因 /proc 里找不到实时 dsh 而提前返回，用户除了
+	// 重启控制台没有任何出路。这里补一次 PID 存活性判定（僵尸态由 processAlive 判死，
+	// 正好覆盖「已退出但未回收」）。
+	if !processAlive(m.cmd.Process.Pid) {
+		return true
+	}
 	return false
 }
 
 // PID returns the current dsh pid or 0.
 func (m *DshManager) PID() int {
 	return m.effectivePID()
+}
+
+// alreadyRunningLocked 报告「是否已有受管的、仍存活的 dsh 进程」——Start 的前置检查。
+// 调用方必须持有 m.mu。单独抽出来是为了让「受管进程已死」这条路径可测（不必真的
+// 去拉起一个 dsh 进程）。
+func (m *DshManager) alreadyRunningLocked() bool {
+	return m.cmd != nil && m.cmd.Process != nil && !m.stopped()
 }
 
 // isDshEntry 判断某参数的文件名（basename）是否为 dsh CLI 入口。匹配范围与
@@ -889,11 +944,16 @@ func (m *DshManager) buildEnv() []string {
 func (m *DshManager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cmd != nil && m.cmd.Process != nil && !m.stopped() {
+	if m.alreadyRunningLocked() {
 		return fmt.Errorf("dsh is already running (pid %d)", m.cmd.Process.Pid)
 	}
 
 	cfg := GetConfig()
+	// 受管子进程已死（自行退出/崩溃/自重启后没拉起）时先回收，避免僵尸残留，也让
+	// 后面的状态判定干净：stopped() 现在能识别这种「PID 已不存在」的受管 cmd。
+	if m.cmd != nil && m.cmd.Process != nil && m.stopped() {
+		m.reapCmd(m.cmd)
+	}
 	// dsh 可执行文件统一按 PATH 解析（node_modules/.bin/dsh），不再用额外覆盖。
 	bin := "dsh"
 	// 启动前自愈：清掉持有者已不存在的 profile 写锁。上一次 dsh 被停掉/被杀死时，
@@ -938,13 +998,12 @@ func (m *DshManager) Start() error {
 	return nil
 }
 
-// Stop terminates the dsh process. 主路径用 pkill 按主线程进程名匹配并终止
-// （node24 为 "MainThread"、node26 为 "node-MainThread"，用正则同时覆盖）；
-// 未命中/超时时进入精确保底：先按「dsh.pid」文件记录的 PID 精确杀进程，
-// 若仍存活再退回进程组 kill。
+// Stop terminates the dsh process. 只按 PID / 进程组精准终止（不再按进程名 pkill，
+// 原因见下方注释）：先按「dsh.pid」文件记录的 PID 杀，再用 /proc 发现的实时 dsh PID
+// 兜底，最后补一刀受管 PID。
 // 兼容 dsh-market 自重启：m.cmd 可能已指向退出的旧进程（僵尸或已回收），因此
-// 终结目标按“受管 PID 若失效则用 /proc 中的实时 dsh PID”计算（pkill 按 comm
-// 匹配也覆盖不在 m.cmd 中的新进程），并在结束后回收受管子进程，避免残留僵尸。
+// 终结目标按“受管 PID 若失效则用 /proc 中的实时 dsh PID”计算，并在结束后回收受管
+// 子进程，避免残留僵尸。
 func (m *DshManager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -964,7 +1023,13 @@ func (m *DshManager) Stop() error {
 	}
 	if target <= 0 {
 		// 既没有受管 dsh 也没有实时 dsh：无需停止（保持原行为，避免误杀其他进程），
-		// 但 dsh 进程已不存在时仍清理可能残留的 dsh PID 文件。
+		// 但必须把受管状态收尾：dsh 自行退出（崩溃/被 kill/自重启没拉起）时它可能
+		// 仍是未回收的僵尸，而 m.cmd 与凭据都还挂着 —— 不清理的话 Start() 会一直以
+		// 「already running」拒绝启动，用户只能重启控制台。
+		if trackedCmd != nil {
+			m.reapCmd(trackedCmd)
+		}
+		m.forgetDshProcessLocked()
 		m.removeDshPidFile()
 		return nil
 	}
@@ -988,8 +1053,11 @@ func (m *DshManager) Stop() error {
 		m.logInfo("dsh stop: killing process group of dsh pid %d", live)
 		m.fallbackKill(live)
 	}
-	// 受管子进程仍在（例如 pid 文件没跟上）时再补一刀。
-	if tracked > 0 && processAlive(tracked) && tracked != target {
+	// 受管子进程仍在（pid 文件不可写/内容不对，或 findDshPid 没命中它 —— 例如
+	// 启动参数与 cfg.DshPort 不一致）时补一刀。
+	// 注意：条件不能回到 `tracked != target` —— target 只在受管 PID 已死时才会重新
+	// 发现，因此那个组合恒为假，历史实现里的这一分支从未执行过。
+	if tracked > 0 && processAlive(tracked) {
 		m.logInfo("dsh stop: killing tracked pid %d", tracked)
 		m.killPidGracefully(tracked)
 	}
@@ -999,17 +1067,23 @@ func (m *DshManager) Stop() error {
 		m.reapCmd(trackedCmd)
 	}
 
-	// 停止后清空访问 token 与会话 cookie，避免把已失效的旧凭据继续用于反代转发。
-	m.tokenMu.Lock()
-	m.token = ""
-	m.tokenMu.Unlock()
-	m.setAuthCookie("")
-
-	m.cmd = nil
+	m.forgetDshProcessLocked()
 	// dsh 已停止：移除 dsh 服务 PID 文件（进程已不存在，文件不应残留旧 PID）；
 	// harness 控制台自身的 HARNESS_PID_FILE 保持不变。
 	m.removeDshPidFile()
 	return nil
+}
+
+// forgetDshProcessLocked 忘掉受管的 dsh 进程：清空访问 token、会话 cookie 与
+// m.cmd（调用方必须持有 m.mu）。Stop 的两条返回路径共用它，避免「终端里 dsh 自己
+// 退出后 Stop 只清了 PID 文件、m.cmd 仍挂着」的半清理状态。
+func (m *DshManager) forgetDshProcessLocked() {
+	m.tokenMu.Lock()
+	m.token = ""
+	m.tokenMu.Unlock()
+	// 清空会话 cookie：避免把已失效的旧凭据继续用于反代转发。
+	m.setAuthCookie("")
+	m.cmd = nil
 }
 
 // fallbackKill 是回退的进程组终止逻辑；pid 为实时 dsh PID（自重启后的新进程

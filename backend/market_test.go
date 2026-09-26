@@ -549,7 +549,7 @@ func TestInstallMarketRollsBackWhenDshNotReady(t *testing.T) {
 		t.Fatalf("回滚后残留目录: %v", leftovers)
 	}
 	// 失败时不清 pending（用户可重试/排查）。
-	if m.getPending() == nil {
+	if m.getPending(updateKindMarket) == nil {
 		t.Fatal("安装失败时不应清掉待安装包")
 	}
 }

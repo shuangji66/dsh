@@ -54,9 +54,13 @@ const (
 	// updateHeaderTimeout 是单次下载请求等待响应头的上限（不限制整体时长：
 	// 大包在慢网下可能下很久，整体超时会把它掐断）。
 	updateHeaderTimeout = 30 * time.Second
-	// updateIdleTimeout 是「传输空闲」上限：连续这么久没有新字节才判定本次尝试失败。
-	updateIdleTimeout = 60 * time.Second
 )
+
+// updateIdleTimeout 是「传输空闲」上限：连续这么久没有新字节才判定本次尝试失败。
+// 变量而非常量：测试里会调小，用来覆盖「响应头已到、正文迟迟不来」的半开连接窗口
+// （见 update_interrupt_test.go）。它必须大于 updateHeaderTimeout，否则会误伤正常的
+// 建连/握手阶段。
+var updateIdleTimeout = 60 * time.Second
 
 // updateRetryBackoff 是同一通路上两次尝试之间的退避时间（变量而非常量：测试里会调小）。
 var updateRetryBackoff = 800 * time.Millisecond
@@ -174,9 +178,12 @@ type UpdateManager struct {
 	ctrlMu sync.Mutex
 	ctrl   *downloadControl
 
-	// pendingMu 保护 pending：记录某个 kind 已下载完成、等待用户确认安装的更新包。
+	// pendingMu 保护 pending：按 kind 记录「已下载完成、等待用户确认安装」的更新包。
+	// 必须是按 kind 隔离的（不是单槽）：harness 与 dsh 的包可以先后下载，单槽会让
+	// 先下的那份变成幽灵 —— 状态仍显示「已下载待安装」，安装时报「尚未下载」，
+	// 而「删除更新包」还会误删另一种 kind 的文件。
 	pendingMu sync.Mutex
-	pending   *PendingUpdate
+	pending   map[updateKind]*PendingUpdate
 
 	// checkLogMu 保护 lastCheckSig：按更新目标分别记录「上次检测结论」，
 	// 只在某个目标的结论发生变化时才记一行，避免每小时自动检测重复输出同样的内容。
@@ -189,6 +196,7 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	m := &UpdateManager{
 		subs:     make(map[chan struct{}]struct{}),
 		statuses: make(map[updateKind]*UpdateStatus),
+		pending:  make(map[updateKind]*PendingUpdate),
 		renv:     renv,
 		dsh:      dsh,
 	}
@@ -880,6 +888,15 @@ func extractTarGz(src, dest string) error {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	// destRoot 用于「解析软链后仍在目标内」的判定；destLex 用于便宜的字符串前缀检查。
+	destLex := filepath.Clean(dest)
+	destRoot, rerr := filepath.EvalSymlinks(destLex)
+	if rerr != nil {
+		destRoot = destLex
+	}
+	// outsideLinks 统计「目标在 dest 之外」的软链条目。它们照原样创建（见 TypeSymlink
+	// 分支的说明），只在收尾时汇总一行，避免逐条刷日志。
+	outsideLinks := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -892,17 +909,24 @@ func extractTarGz(src, dest string) error {
 		if name == "" {
 			continue
 		}
-		target := filepath.Join(dest, filepath.Clean(name))
-		if !strings.HasPrefix(target, filepath.Clean(dest)+string(os.PathSeparator)) && target != filepath.Clean(dest) {
+		target := filepath.Join(destLex, filepath.Clean(name))
+		if !strings.HasPrefix(target, destLex+string(os.PathSeparator)) && target != destLex {
 			return fmt.Errorf("解压路径越界: %s", target)
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			// 父目录必须先过软链校验：归档里先前的 `link -> /etc` + `link/sub` 会在
+			// dest 之外把目录建出来（zip-slip 变体）。
+			if _, err := extractParentDir(target, destRoot); err != nil {
+				return err
+			}
 			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)&0777); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			// 同上：校验「解析软链后的父目录」仍在 dest 内，否则 OpenFile 会跟着
+			// 归档里先前的软链把字节写到 dest 之外。
+			if _, err := extractParentDir(target, destRoot); err != nil {
 				return err
 			}
 			w, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode)&0777)
@@ -915,16 +939,79 @@ func extractTarGz(src, dest string) error {
 			}
 			w.Close()
 		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if _, err := extractParentDir(target, destRoot); err != nil {
 				return err
 			}
 			os.Remove(target)
 			if err := os.Symlink(hdr.Linkname, target); err != nil {
 				return err
 			}
+			// 软链目标在 dest 之外时**不跳过**：真实归档里就存在这种链接 ——
+			// dsh 数据备份中的 ~/.dsh/profiles/node_modules/@deepseek-ai/*（本机实测
+			// 546 条软链里有 505 条是指向 server 目录的绝对链接），跳过会让恢复出来的
+			// profile 少掉整层「profile → server 闭包」镜像。创建软链本身不会在 dest
+			// 之外写字节，而「通过软链写内容」已被上面的父目录校验挡死，因此这里只统计。
+			if !linkInside(destRoot, filepath.Dir(target), hdr.Linkname) {
+				outsideLinks++
+			}
 		}
 	}
+	if outsideLinks > 0 {
+		logInfo("[update] extracted %d symlinks pointing outside %s (kept as-is: symlink creation writes nothing outside, and writes through them are blocked)", outsideLinks, destLex)
+	}
 	return nil
+}
+
+// extractParentDir 在写入 target 之前校验：它的父目录（解析软链后）必须仍落在
+// destRoot 之内，必要时把父目录建出来，返回父目录路径。
+//
+// 为什么必须解析而不是只比字符串：归档可以先用一个软链条目 `link -> /etc` 打下钉子，
+// 再用 `link/evil` 让 MkdirAll / OpenFile 跟着软链写到 dest 之外 —— 字符串前缀检查在
+// 这种情况下完全失效（target 字面上是 dest/link/evil）。
+func extractParentDir(target, destRoot string) (string, error) {
+	dir := filepath.Dir(target)
+	// 从最深的「已存在祖先」开始解析：路径里尚未创建的部分本来就不可能被软链替换。
+	probe := dir
+	for {
+		real, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			if !pathInside(real, destRoot) {
+				return "", fmt.Errorf("解压路径越界（软链逃逸）: %s", target)
+			}
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", fmt.Errorf("解压路径无法解析: %s", target)
+		}
+		probe = parent
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// pathInside 报告 p 是否等于 root 或位于 root 之内（两者都应是已 Clean/解析的绝对路径）。
+func pathInside(p, root string) bool {
+	if p == root {
+		return true
+	}
+	return strings.HasPrefix(p, root+string(os.PathSeparator))
+}
+
+// linkInside 报告软链 <dir>/<linkname> 解析后是否仍在 root 内（仅用于统计/说明，
+// 见 extractTarGz 的 TypeSymlink 分支）。绝对 Linkname 按原样判断，相对 Linkname
+// 相对 <dir> 解析。
+func linkInside(root, dir, linkname string) bool {
+	if linkname == "" {
+		return false
+	}
+	resolved := filepath.Clean(linkname)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Clean(filepath.Join(dir, linkname))
+	}
+	return pathInside(resolved, root)
 }
 
 // tgzDir 把目录压缩成 .tar.gz（用于备份）。
@@ -995,6 +1082,14 @@ func tgzDir(srcDir, destFile string) error {
 // tgzDirAs 将 srcDir 目录内容压缩，tar 中的条目以 rootName 作为顶层前缀。
 // 例：tgzDirAs("/home/user/.dsh", "b.tar.gz", ".dsh") 生成 ".dsh/KEY"、".dsh/..." 等条目，
 // 仅包含 .dsh 目录自身（不含 HOME 其它内容），解压到 /home/user 可还原完整的 ~/.dsh。
+//
+// 排除规则只针对**本次的备份产物自身**（destFile 恰好落在 srcDir 内时跳过，避免
+// 一边写一边把自己读进去）。旧实现按「相对路径后缀 .tar.gz」排除，会把 srcDir 下
+// 用户自己的所有 .tar.gz（例如 `~/.dsh/backups/x.tar.gz`）静默漏掉 —— 用户以为备份
+// 完整，恢复时才发现少了数据。判断依据：dsh 数据备份的 destFile 来自
+// UpdateManager.backupDir()（$TRIM_PKGVAR/backup），而 srcDir 是 $HOME/.dsh，
+// 两者正常部署下互不包含，因此「排除产物自身」这条规则在正常路径上根本不触发，
+// 它只是防御性的；真要防的也只有这一个文件。
 func tgzDirAs(srcDir, destFile, rootName string) error {
 	out, err := os.Create(destFile)
 	if err != nil {
@@ -1004,6 +1099,16 @@ func tgzDirAs(srcDir, destFile, rootName string) error {
 	gz := gzip.NewWriter(out)
 	tw := tar.NewWriter(gz)
 	base := filepath.Clean(srcDir)
+	// destFile 可能是相对路径，而 walk 回调里的 p 基于 base（可能是绝对路径），
+	// 两侧都换算成绝对路径再比较，避免漏排除而把半写状态的备份包读进去。
+	destAbs, derr := filepath.Abs(destFile)
+	if derr != nil {
+		destAbs = filepath.Clean(destFile)
+	}
+	baseAbs, berr := filepath.Abs(base)
+	if berr != nil {
+		baseAbs = base
+	}
 	root := strings.Trim(rootName, "/")
 	err = filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -1019,8 +1124,8 @@ func tgzDirAs(srcDir, destFile, rootName string) error {
 		} else {
 			name = root + "/" + rel
 		}
-		// 不包含备份产物自身，避免递归膨胀
-		if strings.HasSuffix(rel, ".tar.gz") {
+		// 只排除本次备份产物自身（见函数注释），不要按扩展名整类排除。
+		if filepath.Join(baseAbs, rel) == destAbs {
 			return nil
 		}
 		if info.IsDir() {
@@ -1170,32 +1275,38 @@ func (m *UpdateManager) pendingDir() string {
 	return dir
 }
 
-// getPending 读取当前待安装更新包（可能为 nil）。
-func (m *UpdateManager) getPending() *PendingUpdate {
+// getPending 读取指定 kind 的待安装更新包（可能为 nil）。
+func (m *UpdateManager) getPending(k updateKind) *PendingUpdate {
 	m.pendingMu.Lock()
 	defer m.pendingMu.Unlock()
-	return m.pending
+	return m.pending[k]
 }
 
 // setPending 记录新的待安装更新包；若该 kind 已有旧包则清理旧文件。
+// 其它 kind 的待安装包不动 —— 它们是各自独立的「下载→安装」两步流程。
 func (m *UpdateManager) setPending(p *PendingUpdate) {
 	m.pendingMu.Lock()
 	defer m.pendingMu.Unlock()
-	// 清理同 kind 旧的待安装包文件。
-	if old := m.pending; old != nil && old.Kind == p.Kind && old.PkgPath != "" && old.PkgPath != p.PkgPath {
+	// 懒初始化：部分单测直接构造 UpdateManager 字面量（不走 newUpdateManager）。
+	if m.pending == nil {
+		m.pending = make(map[updateKind]*PendingUpdate)
+	}
+	if old := m.pending[p.Kind]; old != nil && old.PkgPath != "" && old.PkgPath != p.PkgPath {
 		os.Remove(old.PkgPath)
 	}
-	m.pending = p
+	m.pending[p.Kind] = p
 }
 
-// clearPending 清除当前待安装更新包并删除其文件。
-func (m *UpdateManager) clearPending() {
+// clearPending 清除指定 kind 的待安装更新包并删除其文件。
+// **只删这一个 kind**：早期实现是无条件清空唯一那个槽，于是「删除 harness 更新包」
+// 会把 dsh 刚下好的包一起删掉（dsh 的 UI 却仍显示已下载待安装）。
+func (m *UpdateManager) clearPending(k updateKind) {
 	m.pendingMu.Lock()
 	defer m.pendingMu.Unlock()
-	if m.pending != nil && m.pending.PkgPath != "" {
-		os.Remove(m.pending.PkgPath)
+	if p := m.pending[k]; p != nil && p.PkgPath != "" {
+		os.Remove(p.PkgPath)
 	}
-	m.pending = nil
+	delete(m.pending, k)
 }
 
 // clearOrphanPending 删除 pendingDir 下所有“无主”更新包文件。
@@ -1233,11 +1344,18 @@ func (m *UpdateManager) clearOrphanPending() {
 // --- 下载中断控制 ---
 
 // downloadControl 承载一次下载的中断信号，并区分原因：取消要删半成品、暂停要留。
+//
+// 中断是「原因 + 打断当前请求」两件事：
+//   - reason 记录原因，io.Copy 的每次 Read 入口据此判定，并决定半成品的去留；
+//   - abort 用来**立刻打断阻塞中的那次读**。下载客户端刻意不设总超时（大包/慢网会被
+//     整体掐断），因此只靠 reason 是不够的：卡在 resp.Body.Read 里时根本不会去查
+//     reason，用户的「取消/暂停」会表现为毫无反应，一直挂到看门狗超时（甚至更久）。
 type downloadControl struct {
-	ch chan struct{}
 	mu sync.Mutex
 	// reason 为空表示未被中断；"cancel" / "pause" 由前端按钮设置。
 	reason string
+	// abort 取消当前这次请求的 context（由 downloadOnce 建立 ctx 后注入、尝试结束时清掉）。
+	abort func()
 	// pausable 为 false 时忽略暂停请求（插件市场：包小、不走续传，暂停没有意义）。
 	pausable bool
 	// kind 只用于日志标签（取消/暂停时把日志归到对应目标下）。
@@ -1245,22 +1363,49 @@ type downloadControl struct {
 }
 
 func newDownloadControl(pausable bool, kind updateKind) *downloadControl {
-	return &downloadControl{ch: make(chan struct{}), pausable: pausable, kind: kind}
+	return &downloadControl{pausable: pausable, kind: kind}
 }
 
-// stop 记录中断原因并广播（只生效一次：先到者为准）。
+// setAbort 登记「打断本次请求」的回调（nil 安全，便于 ctrl 为 nil 的调用点复用）。
+func (c *downloadControl) setAbort(fn func()) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.abort = fn
+	c.mu.Unlock()
+}
+
+// clearAbort 清除打断回调。同一份 downloadControl 的多次尝试（重试/续传）是**串行**的，
+// 所以无条件清空即可（不会误清下一次尝试刚登记的回调）。
+func (c *downloadControl) clearAbort() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.abort = nil
+	c.mu.Unlock()
+}
+
+// stop 记录中断原因并打断正在进行的请求（只生效一次：先到者为准）。
 // 返回 true 表示这次请求真的生效了（暂停在不支持暂停的下载上会被忽略）。
 func (c *downloadControl) stop(reason string) bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if reason == "pause" && !c.pausable {
+		c.mu.Unlock()
 		return false
 	}
 	if c.reason != "" {
+		c.mu.Unlock()
 		return false
 	}
 	c.reason = reason
-	close(c.ch)
+	abort := c.abort
+	c.mu.Unlock()
+	// 在锁外打断：取消 context 会连带唤醒阻塞在 Read 上的协程，不必占着这把锁。
+	if abort != nil {
+		abort()
+	}
 	return true
 }
 
@@ -1556,6 +1701,14 @@ func (m *UpdateManager) downloadOnce(route updateRoute, rawURL, dest string, pro
 	defer cancel()
 	idle := &idleWatchdog{timeout: updateIdleTimeout, onIdle: cancel}
 	defer idle.stop()
+	// 立刻武装看门狗，而不是等到读到第一个字节才武装（reset 只在读到数据时被调用）：
+	// 否则「响应头到达后对端不再给字节」这种半开连接没有任何超时能兜住 —— 请求会永久
+	// 阻塞，用户的取消/暂停也无效（那时还没登记 abort），整条更新链路要等重启进程。
+	// updateIdleTimeout(60s) > updateHeaderTimeout(30s)，因此它不会误伤正常的建连/握手。
+	idle.reset()
+	// 登记「立刻打断本次请求」的回调：取消/暂停要能唤醒阻塞中的 Read（见 downloadControl）。
+	ctrl.setAbort(cancel)
+	defer ctrl.clearAbort()
 	req = req.WithContext(ctx)
 
 	resp, err := route.client.Do(req)
@@ -1925,12 +2078,12 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 	m.applying.Lock()
 	defer m.applying.Unlock()
 
-	p := m.getPending()
-	if p == nil || p.Kind != k {
+	p := m.getPending(k)
+	if p == nil {
 		return fmt.Errorf("尚未下载 %s 更新包，请先下载更新", k)
 	}
 	if _, err := os.Stat(p.PkgPath); err != nil {
-		m.clearPending()
+		m.clearPending(k)
 		return fmt.Errorf("待安装更新包已不存在（可能被清理），请重新下载: %w", err)
 	}
 	logInfo("%s installing %s", updateLogTag(k), p.Version)
@@ -1994,7 +2147,7 @@ func (m *UpdateManager) installHarness(extractDir string) error {
 		return err
 	}
 	// 收尾（必须在 exec 之前）：删除待安装更新包、清理解压临时目录。
-	m.clearPending()
+	m.clearPending(updateKindHarness)
 	os.RemoveAll(extractDir)
 	logInfo("[harness] package and temp dir cleaned, restarting console")
 	m.restartHarness(newBin)
@@ -2008,7 +2161,7 @@ func (m *UpdateManager) installDsh(extractDir string) error {
 	if err := m.applyServer(extractDir); err != nil {
 		return err
 	}
-	m.clearPending()
+	m.clearPending(updateKindDsh)
 	return nil
 }
 
@@ -2023,23 +2176,12 @@ func (m *UpdateManager) DiscardUpdate(k updateKind) error {
 	defer m.applying.Unlock()
 
 	m.removeOtherPendingFiles(k, "")
-	if m.getPending() == nil {
-		// 没有待安装包也照样复位状态：暂停中的半成品已被上面清掉。
-		m.updateStatus(k, func(s *UpdateStatus) {
-			s.Phase = ""
-			s.Paused = false
-			s.ReadyToInstall = false
-			s.Downloading = false
-			s.DownloadPct = 0
-			s.DownloadedBytes = 0
-			s.TotalBytes = 0
-			s.Error = ""
-			s.ErrorHint = ""
-			s.Cancelled = false
-		})
-		return nil
+	// 只处理这个 kind 的待安装包（clearPending 也只删这一份文件）：另一种 kind 的
+	// 待安装包不受影响 —— 用户点的是这个弹窗里的「删除更新包」。
+	hadPending := m.getPending(k) != nil
+	if hadPending {
+		m.clearPending(k)
 	}
-	m.clearPending()
 	m.updateStatus(k, func(s *UpdateStatus) {
 		s.Phase = ""
 		s.Paused = false
@@ -2052,7 +2194,9 @@ func (m *UpdateManager) DiscardUpdate(k updateKind) error {
 		s.ErrorHint = ""
 		s.Cancelled = false
 	})
-	logInfo("%s removed pending package", updateLogTag(k))
+	if hadPending {
+		logInfo("%s removed pending package", updateLogTag(k))
+	}
 	return nil
 }
 
@@ -2210,7 +2354,7 @@ func (m *UpdateManager) applyServer(extractDir string) error {
 	// 走统一入口：先过忙守卫（有插件操作在跑就拒绝，避免把它连根拔掉并留下陈旧
 	// profile 写锁），再停止并等端口释放；被拒绝时不产生任何停机、也不会改盘。
 	logInfo("[dsh] stopping dsh service")
-	if err := m.stopDshForReplacement("更新 dsh 服务"); err != nil {
+	if err := m.stopDshForReplacement("更新 dsh 服务", updateKindDsh); err != nil {
 		return err
 	}
 
@@ -2383,6 +2527,14 @@ func (m *UpdateManager) RollbackServer(backupPath string) error {
 	if _, err := os.Stat(backupPath); err != nil {
 		return fmt.Errorf("备份文件不存在: %w", err)
 	}
+	// 互斥与重入保护：回滚会 RemoveAll(server) 再解压备份，必须与「下载/安装更新」
+	// 以及其它回滚/恢复串行 —— 交错执行会得到半新半旧的 server 目录（两条路径都以为
+	// 自己成功）。用 TryLock 而不是 Lock：拿不到锁说明别的更新正在跑，直接拒绝，
+	// 不要把请求线程阻塞到网关超时。
+	if !m.applying.TryLock() {
+		return fmt.Errorf("正在执行其它更新/回滚操作，请等它结束后再回滚 dsh 服务")
+	}
+
 	// 重置回滚状态
 	m.rollbackMu.Lock()
 	m.rollbackDone = false
@@ -2392,6 +2544,7 @@ func (m *UpdateManager) RollbackServer(backupPath string) error {
 
 	// 异步执行
 	go func() {
+		defer m.applying.Unlock()
 		err := m.doRollbackServer(backupPath)
 		m.rollbackMu.Lock()
 		m.rollbackDone = true
@@ -2416,7 +2569,7 @@ func (m *UpdateManager) doRollbackServer(backupPath string) error {
 	//    守卫只在市场/控制台的插件操作**确实在跑**时拒绝，且市场不回答时视为不忙，
 	//    所以「dsh 已经坏了要回滚」这种场景不会被挡。
 	logInfo("[rollback] stopping dsh service")
-	if err := m.stopDshForReplacement("回滚 dsh 服务"); err != nil {
+	if err := m.stopDshForReplacement("回滚 dsh 服务", updateKindDsh); err != nil {
 		return err
 	}
 
@@ -2565,6 +2718,12 @@ func (m *UpdateManager) RestoreDshData(backupPath string) error {
 	if _, err := os.Stat(backupPath); err != nil {
 		return fmt.Errorf("备份文件不存在: %w", err)
 	}
+	// 互斥与重入保护：恢复会 RemoveAll(~/.dsh) 再解压备份，必须与「下载/安装更新」、
+	// 回滚以及另一次恢复串行 —— 交错执行会在同一个 HOME 上并发删目录/解压。
+	// 与 RollbackServer 一样用 TryLock：拿不到就拒绝，不阻塞请求线程。
+	if !m.applying.TryLock() {
+		return fmt.Errorf("正在执行其它更新/回滚操作，请等它结束后再恢复 dsh 数据")
+	}
 	// 重置状态
 	dshRestore.mu.Lock()
 	dshRestore.done = false
@@ -2573,6 +2732,7 @@ func (m *UpdateManager) RestoreDshData(backupPath string) error {
 	dshRestore.mu.Unlock()
 
 	go func() {
+		defer m.applying.Unlock()
 		err := m.doRestoreDshData(backupPath)
 		if err != nil {
 			dshRestore.complete(false, err.Error())

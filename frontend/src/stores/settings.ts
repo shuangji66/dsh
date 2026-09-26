@@ -34,6 +34,16 @@ export const useSettingsStore = defineStore('settings', () => {
   const locked = ref(false)
   const loading = ref(false)
 
+  // 「上次保存生效」的代理设置快照（load()/save() 成功后更新）。
+  // 为什么需要单独记一份：save() 里拿本地 config 与同一 tick 的提交快照比较时，两者取自
+  // 同一个对象、必然相等，「代理设置已变更 → 请重启」的提示（saved_proxy_restart）恒不出现。
+  // 只有与「已保存生效的值」比较才能判出本次保存是否真的改了代理设置。
+  const appliedProxy = ref<{ enabled: boolean; addr: string } | null>(null)
+
+  function markApplied(cfg: AppConfig) {
+    appliedProxy.value = { enabled: cfg.proxyEnabled, addr: cfg.proxyAddr }
+  }
+
   const toast = useToastStore()
   const { t } = useI18n()
 
@@ -60,6 +70,8 @@ export const useSettingsStore = defineStore('settings', () => {
       runtime.value = p.runtime
       status.value = p.status
       locked.value = p.locked
+      // 后端下发的就是当前生效的配置，作为「已保存」基准
+      markApplied(p.config)
     } catch (e) {
       toast.show((e as Error).message, 'error')
     } finally {
@@ -75,21 +87,22 @@ export const useSettingsStore = defineStore('settings', () => {
       return false
     }
     loading.value = true
-    // 记录保存前的代理状态（开关 + 地址）
-    const oldProxyEnabled = config.value.proxyEnabled
-    const oldProxyAddr = config.value.proxyAddr
+    // 本次要提交的配置快照（提交后 config.value 会被后端下发值覆盖，先留一份）
+    const submitted = { ...config.value }
     try {
-      // 提交的配置快照，用于判断用户本次是否改动了代理设置
-      const submitted = { ...config.value }
       const p = await api.saveSettings(submitted)
       config.value = p.config
       locked.value = p.locked
       // 部分开关（如设置页的即时保存）由调用方自行弹 toast，此处可关闭内置提示
       if (showBuiltInToast) {
-        // 若 dsh 正在运行且代理相关设置发生变化，提示重启使配置生效
+        // 与「上次保存生效」的代理设置比较：dsh 只在启动时读取代理环境变量，
+        // 保存后若代理开关/地址变了，必须提示重启才生效。
+        // 还没有基准（load() 从未成功过）时不提示 —— 判不出变化时宁可不说，
+        // 也不要凭空弹「代理已变更」。
+        const prev = appliedProxy.value
         const proxyChanged =
-          oldProxyEnabled !== submitted.proxyEnabled ||
-          oldProxyAddr !== submitted.proxyAddr
+          !!prev &&
+          (prev.enabled !== submitted.proxyEnabled || prev.addr !== submitted.proxyAddr)
         if (status.value?.running && proxyChanged) {
           toast.show(t('saved_proxy_restart'), 'info', 5000)
         } else {

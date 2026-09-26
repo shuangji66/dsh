@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,7 +95,12 @@ func portOfURL(t *testing.T, raw string) int {
 // sessionCookieHeader 造一份有效的控制台登录凭据。
 func sessionCookieHeader() string {
 	expire := time.Now().Add(time.Hour).Unix()
-	return authCookie + "=" + strconv.FormatInt(expire, 10) + "." + hmacToken(proxyTestPassword, expire)
+	// 三段式：<过期秒>.<nonce>.<mac>，mac 用密码 + 进程外随机密钥签名（见 auth.go 的
+	// sessionSign）。用同一个进程内的 Auth 取密钥即可 —— 密钥来自同一个密钥文件。
+	nonce := newSessionNonce()
+	auth := NewAuth()
+	return authCookie + "=" + strconv.FormatInt(expire, 10) + "." + nonce + "." +
+		sessionSign(auth.sessionKey(proxyTestPassword), expire, nonce)
 }
 
 // proxyGet 直接调用反代 handler（httptest.NewRequest 的 RemoteAddr 非回环，
@@ -134,6 +140,109 @@ func rawUpgradeStatus(t *testing.T, addr, cookie string) string {
 	return strings.TrimSpace(line)
 }
 
+// fakeUpgradeUpstream 起一个只认 WebSocket 升级的假 dsh：回 101，并记录第一份升级
+// 请求的完整请求头（用于断言转发给上游的 Cookie）。端口探测连接不发任何字节就断开
+// （见 BackendChecker.quick），读到 EOF 直接忽略。
+func fakeUpgradeUpstream(t *testing.T) (port int, headOfUpgrade func() string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("无法监听本地端口: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	var mu sync.Mutex
+	var got string
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				var head strings.Builder
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					head.WriteString(line)
+					if line == "\r\n" || line == "\n" {
+						break
+					}
+				}
+				text := head.String()
+				if !strings.HasPrefix(text, "GET ") {
+					return
+				}
+				mu.Lock()
+				got = text
+				mu.Unlock()
+				_, _ = io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			}(conn)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return got
+	}
+}
+
+// countedUpstream 起一个极简的假 dsh（只回固定 200），只统计「真正发过请求」的连接数：
+// 端口探测连接不发任何字节（直接 EOF），不计入，因此计数等于转发用的上游连接数。
+func countedUpstream(t *testing.T) (port int, conns func() int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("无法监听本地端口: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	var mu sync.Mutex
+	n := 0
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				first := true
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if first {
+						first = false
+						if !strings.HasPrefix(line, "GET ") {
+							return
+						}
+						mu.Lock()
+						n++
+						mu.Unlock()
+					}
+					if line == "\r\n" {
+						if _, err := io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok"); err != nil {
+							return
+						}
+					}
+				}
+			}(conn)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
 // --- 鉴权先于就绪判断 ---
 
 func TestProxyAsksForLoginBeforeBackendReady(t *testing.T) {
@@ -162,9 +271,10 @@ func TestProxyAsksForLoginBeforeBackendReady(t *testing.T) {
 	}
 }
 
-// 面板后端的内部调用（回环 + /dsh-market/ 前缀）仍然跳过登录鉴权：dsh 未就绪时
-// 拿到等待页，而不是被重定向到登录页。
-func TestProxyInternalRequestSkipsLogin(t *testing.T) {
+// 面板后端的内部调用（回环 + /dsh-market/ 前缀）不再免鉴权：市场探测是到 dsh 端口的
+// 直连（market.go 的 marketBusyFn），不经过反代；免鉴权分支在仓库内没有使用者，却让
+// 本机任意进程（或同机嵌套反代）无口令拿到市场全部控制面接口。未登录时同样 302 登录页。
+func TestProxyInternalRequestStillRequiresLogin(t *testing.T) {
 	f := newProxyFixture(t, closedPort(t))
 	f.boot.set(phaseStarting, "")
 
@@ -173,8 +283,39 @@ func TestProxyInternalRequestSkipsLogin(t *testing.T) {
 	rec := httptest.NewRecorder()
 	f.proxy.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "__DSH_WAIT__") {
-		t.Fatalf("内部调用应拿到等待页，实际 code=%d", rec.Code)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("回环 + /dsh-market/ 在未登录时应重定向到登录页, 实际 code=%d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, authLogin+"?next=") {
+		t.Fatalf("重定向目标 = %q, 期望 %s?next=...", loc, authLogin)
+	}
+}
+
+// 等待页的 Refresh 兜底跳转不得被请求行里的协议相对地址劫持：根挂载下
+// `GET //evil.com/` 会被 Go 原样保留（r.URL.RequestURI() == "//evil.com/"），
+// 浏览器按协议相对地址解析 → 10 秒后把已登录用户送往外站（开放重定向）。
+func TestProxyWaitingPageRefreshRejectsProtocolRelativeURI(t *testing.T) {
+	f := newProxyFixture(t, closedPort(t))
+	f.boot.set(phaseDeps, "")
+
+	for _, target := range []string{"//evil.com/", "//evil.com", "///evil.com/x"} {
+		rec := proxyGet(t, f.proxy, target, sessionCookieHeader())
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "__DSH_WAIT__") {
+			t.Fatalf("%s: 应给等待页, code=%d", target, rec.Code)
+		}
+		refresh := rec.Header().Get("Refresh")
+		if strings.Contains(refresh, "evil.com") {
+			t.Fatalf("%s: Refresh 头不得携带外站地址, 实际 %q", target, refresh)
+		}
+		if refresh != "10; url=/" {
+			t.Fatalf("%s: Refresh 应回落到挂载目录, 实际 %q", target, refresh)
+		}
+	}
+
+	// 合法路径仍按原地址兜底重载（保留 query）。
+	rec := proxyGet(t, f.proxy, "/a/b?x=1", sessionCookieHeader())
+	if want := "10; url=/a/b?x=1"; rec.Header().Get("Refresh") != want {
+		t.Fatalf("Refresh = %q, want %q", rec.Header().Get("Refresh"), want)
 	}
 }
 
@@ -268,6 +409,11 @@ func TestProxyReadyStatePhases(t *testing.T) {
 		{name: "凭据未落定", up: true, bootPhase: phaseReady, pend: true, wantPhase: phaseAuth},
 		{name: "端口未监听且进程不在", up: false, bootPhase: phaseReady, wantPhase: phaseStopped},
 		{name: "启动失败", up: false, bootPhase: phaseFailed, bootDetail: "boom", wantPhase: phaseFailed, wantDetail: "boom"},
+		// 端口通但凭据未落定时只把「流水线已收尾」的阶段改写成 auth；failed /
+		// disabled 必须原样保留（否则 dsh 启动失败而端口被旧进程占着时，等待页
+		// 只剩转圈、看不到失败原因）。
+		{name: "启动失败且端口被占用时保留失败原因", up: true, bootPhase: phaseFailed, bootDetail: "boom", pend: true, wantPhase: phaseFailed, wantDetail: "boom"},
+		{name: "端口被占用时保留未自动启动", up: true, bootPhase: phaseDisabled, pend: true, wantPhase: phaseDisabled},
 		{name: "未自动启动", up: false, bootPhase: phaseDisabled, wantPhase: phaseDisabled},
 		{name: "就绪", up: true, bootPhase: phaseReady, wantPhase: phaseReady, wantReady: true},
 	}
@@ -302,6 +448,27 @@ func TestProxyReadyStatePhases(t *testing.T) {
 }
 
 // --- 转发 ---
+
+// 全仓没有跨源调用方（后端只有反代这一处 CORS、前端也没有跨源请求）：不得无条件给
+// 所有转发响应加上 access-control-allow-origin: *，否则任意站点都能读取已登录用户的
+// 转发响应（dsh 页面与 API 内容）。
+func TestProxyForwardAddsNoCORSHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	f := newProxyFixture(t, portOfURL(t, upstream.URL))
+	f.boot.set(phaseReady, "")
+
+	rec := proxyGet(t, f.proxy, "/", sessionCookieHeader())
+	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
+		t.Fatalf("转发失败: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if acao := rec.Header().Get("Access-Control-Allow-Origin"); acao != "" {
+		t.Fatalf("反代不得自行追加 CORS 头, 实际 %q", acao)
+	}
+}
 
 // 核心回归：dsh 端口已通但凭据还没落定时不得转发；凭据落定后立刻放行。
 func TestProxyDoesNotForwardBeforeCredentialsSettled(t *testing.T) {
@@ -354,6 +521,113 @@ func TestProxyForwardCarriesDshAuthCookie(t *testing.T) {
 }
 
 // --- WebSocket ---
+
+// WS 升级与 HTTP 共用 state() 这一份放行判定：启动流水线还处于 deps（内部阶段，
+// 收尾时还会重启一次 dsh）时，即使 dsh 端口已经能连通也必须 503，否则刚建立的连接
+// 会在流水线收尾重启时失效。
+func TestProxyWebSocketRejectedDuringBootPipeline(t *testing.T) {
+	f := newProxyFixture(t, listenHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})))
+	f.boot.set(phaseDeps, "")
+
+	srv := httptest.NewServer(f.proxy)
+	defer srv.Close()
+
+	status := rawUpgradeStatus(t, srv.Listener.Addr().String(), sessionCookieHeader())
+	if !strings.Contains(status, "503") {
+		t.Fatalf("boot 流水线未收尾时的 WebSocket 状态行 = %q, want 503", status)
+	}
+}
+
+// 流水线收尾 + 凭据落定 + 端口通（state() 报告 ready）：升级照旧放行。
+func TestProxyWebSocketAllowedWhenStateReady(t *testing.T) {
+	port, _ := fakeUpgradeUpstream(t)
+	f := newProxyFixture(t, port)
+	f.boot.set(phaseReady, "")
+
+	srv := httptest.NewServer(f.proxy)
+	defer srv.Close()
+
+	status := rawUpgradeStatus(t, srv.Listener.Addr().String(), sessionCookieHeader())
+	if !strings.Contains(status, "101") {
+		t.Fatalf("就绪时的 WebSocket 状态行 = %q, want 101", status)
+	}
+}
+
+// dsh 凭据为空是可达状态（旧版 dsh 不打印 token → 等待超时后仍算落定；ExchangeToken
+// 失败），此时不得把控制台的 harness_session 交给 dsh 及其插件。
+func TestProxyForwardDropsConsoleCookieWhenDshCredentialsMissing(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = append(got, r.Header.Values("Cookie")...)
+		mu.Unlock()
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	f := newProxyFixture(t, portOfURL(t, upstream.URL))
+	f.boot.set(phaseReady, "")
+
+	if rec := proxyGet(t, f.proxy, "/", sessionCookieHeader()); rec.Body.String() != "ok" {
+		t.Fatalf("转发失败: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, c := range got {
+		if strings.Contains(c, authCookie) {
+			t.Fatalf("dsh 凭据为空时不得转发控制台 cookie, 上游收到 %q", c)
+		}
+	}
+	if len(got) != 0 {
+		t.Fatalf("dsh 凭据为空时上游不应收到任何 Cookie, 实际 %q", got)
+	}
+}
+
+// WS 升级重建头时同样要先清掉控制台 cookie。
+func TestProxyUpgradeDropsConsoleCookieWhenDshCredentialsMissing(t *testing.T) {
+	port, headOfUpgrade := fakeUpgradeUpstream(t)
+	f := newProxyFixture(t, port)
+	f.boot.set(phaseReady, "")
+
+	srv := httptest.NewServer(f.proxy)
+	defer srv.Close()
+
+	status := rawUpgradeStatus(t, srv.Listener.Addr().String(), sessionCookieHeader())
+	if !strings.Contains(status, "101") {
+		t.Fatalf("WebSocket 状态行 = %q, want 101", status)
+	}
+	head := headOfUpgrade()
+	if head == "" {
+		t.Fatal("上游未收到升级请求")
+	}
+	if strings.Contains(head, authCookie) {
+		t.Fatalf("dsh 凭据为空时升级请求不得携带控制台 cookie:\n%s", head)
+	}
+	for _, line := range strings.Split(head, "\r\n") {
+		if strings.HasPrefix(strings.ToLower(line), "cookie:") {
+			t.Fatalf("dsh 凭据为空时升级请求不应带 Cookie 行: %q", line)
+		}
+	}
+}
+
+// 共享 transport 的核心收益：上游连接复用。旧实现每个请求新建 &http.Transport{}，
+// 连接永不复用（每请求一次新 TCP 握手 + 一批 TIME_WAIT）。
+func TestProxyForwardReusesUpstreamConnection(t *testing.T) {
+	port, conns := countedUpstream(t)
+	f := newProxyFixture(t, port)
+	f.boot.set(phaseReady, "")
+
+	for i := 1; i <= 3; i++ {
+		rec := proxyGet(t, f.proxy, "/api/rpc?i="+strconv.Itoa(i), sessionCookieHeader())
+		if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
+			t.Fatalf("第 %d 次转发失败: code=%d body=%q", i, rec.Code, rec.Body.String())
+		}
+		if n := conns(); n != 1 {
+			t.Fatalf("第 %d 次转发时上游已建立 %d 条连接, 期望始终复用同一条", i, n)
+		}
+	}
+}
 
 func TestProxyWebSocketRejectsBeforeCredentialsSettled(t *testing.T) {
 	f := newProxyFixture(t, listenHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})))

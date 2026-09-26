@@ -96,18 +96,21 @@ func TestProxyPortConfigDefaultAndPersistence(t *testing.T) {
 }
 
 func TestProxyPortValidation(t *testing.T) {
+	// 用户可配置端口的范围是 1025-65535：<1025 是特权端口（应用以自身 uid 运行，
+	// 绑定需要 CAP_NET_BIND_SERVICE），反代端口与 dsh 端口共用这一套校验。
 	for _, tc := range []struct {
 		port int
 		ok   bool
 	}{
-		{0, false}, {-1, false}, {1, true}, {3079, true}, {65535, true}, {65536, false}, {70000, false},
+		{0, false}, {-1, false}, {80, false}, {1024, false}, {1025, true},
+		{3079, true}, {13080, true}, {65535, true}, {65536, false}, {70000, false},
 	} {
-		if got := validProxyPort(tc.port); got != tc.ok {
-			t.Fatalf("validProxyPort(%d) = %v, want %v", tc.port, got, tc.ok)
+		if got := validListenPort(tc.port); got != tc.ok {
+			t.Fatalf("validListenPort(%d) = %v, want %v", tc.port, got, tc.ok)
 		}
 	}
 	for _, tc := range []struct{ in, want int }{
-		{0, defaultProxyPort}, {70000, defaultProxyPort}, {4096, 4096},
+		{0, defaultProxyPort}, {70000, defaultProxyPort}, {1024, defaultProxyPort}, {4096, 4096},
 	} {
 		if got := normalizeProxyPort(tc.in); got != tc.want {
 			t.Fatalf("normalizeProxyPort(%d) = %d, want %d", tc.in, got, tc.want)
@@ -165,6 +168,22 @@ func TestSaveSettingsProxyPortRebind(t *testing.T) {
 	code, _ = saveProxySettings(t, m, func(c *AppConfig) { c.ProxyPort = dshPort })
 	if code != http.StatusBadRequest {
 		t.Fatalf("与 dsh 端口相同时的状态 = %d, want 400", code)
+	}
+
+	// 2b) dsh 端口本身非法（特权端口 / 0）：拒绝保存，且不得触发反代重绑。
+	// 历史上这里只拿 dsh 端口比相等，0/超范围的值会直接落盘，之后 dsh 以
+	// `--port 0` 启动、反代永远停在等待页。
+	for _, bad := range []int{0, 80, 1024, 70000} {
+		code, resp = saveProxySettings(t, m, func(c *AppConfig) { c.DshPort = bad })
+		if code != http.StatusBadRequest {
+			t.Fatalf("dsh 端口 %d 的状态 = %d, want 400 (%v)", bad, code, resp)
+		}
+	}
+	if got := GetConfig().DshPort; got != dshPort {
+		t.Fatalf("被拒后 dsh 端口 = %d, want %d", got, dshPort)
+	}
+	if !proxyPortDialable(oldPort) {
+		t.Fatalf("非法 dsh 端口被拒后，反代旧监听 :%d 不应被动过", oldPort)
 	}
 
 	// 3) 合法端口：保存成功、监听切换到新端口、旧端口释放、配置落盘。

@@ -749,21 +749,32 @@ function onQuickCmdDelete(cmd: QuickCmd) {
 async function confirmDeleteQuickCmd() {
   const target = deleteTarget.value
   if (!target) return
+  const snapshot = snapshotQuickCmds() // 必须在改动之前拍，见 persistQuickCmds
   quickCmds.value = quickCmds.value.filter((c) => c.id !== target.id)
   deleteTarget.value = null
   deleteDialogVisible.value = false
-  await persistQuickCmds()
-  toast.show(t('qc_deleted'), 'success')
+  try {
+    await persistQuickCmds(snapshot)
+    toast.show(t('qc_deleted'), 'success')
+  } catch {
+    // persistQuickCmds 已提示失败并把列表回滚到改动前
+  }
 }
 
-// 把当前列表整体写回持久化文件；失败时回滚本地列表（深拷贝快照，编辑场景也能正确回滚）
-async function persistQuickCmds() {
-  const snapshot = quickCmds.value.map((c) => ({ ...c }))
+// 改动前的深拷贝快照：回滚路径必须回到「用户动手之前」的状态。
+// 旧实现把快照拍在 persistQuickCmds 内部，那时本地改动已经发生，回滚写回的是
+// 「已改动」状态（qc_deleted 等操作失败后界面与后端不一致）。
+function snapshotQuickCmds(): QuickCmd[] {
+  return quickCmds.value.map((c) => ({ ...c }))
+}
+
+// 把当前列表整体写回持久化文件；失败时回滚到调用方在改动之前拍下的快照
+async function persistQuickCmds(rollbackTo: QuickCmd[]) {
   try {
     const res = await api.saveQuickCmds(quickCmds.value)
     quickCmds.value = res.commands || quickCmds.value
   } catch (e) {
-    quickCmds.value = snapshot
+    quickCmds.value = rollbackTo
     toast.show(t('qc_save_failed'), 'error')
     console.warn('save quick cmds error:', e)
     throw e
@@ -771,6 +782,7 @@ async function persistQuickCmds() {
 }
 
 async function onQuickCmdSave(payload: { name: string; content: string; auto: boolean }) {
+  const snapshot = snapshotQuickCmds() // 改动之前拍快照（编辑是就地改，push 是新增）
   if (editingCmd.value) {
     editingCmd.value.name = payload.name
     editingCmd.value.content = payload.content
@@ -785,20 +797,21 @@ async function onQuickCmdSave(payload: { name: string; content: string; auto: bo
   }
   editVisible.value = false
   try {
-    await persistQuickCmds()
+    await persistQuickCmds(snapshot)
     toast.show(t('qc_saved'), 'success')
   } catch {
-    // persistQuickCmds 已提示失败
+    // persistQuickCmds 已提示失败并回滚（编辑场景同样还原为改动前的内容）
   }
 }
 
 // 快捷指令上移/下移：QuickCmdsDialog 已算出新顺序，这里整体写回持久化文件
 async function onQuickCmdReorder(ordered: QuickCmd[]) {
+  const snapshot = snapshotQuickCmds() // 改动之前拍快照
   quickCmds.value = ordered
   try {
-    await persistQuickCmds()
+    await persistQuickCmds(snapshot)
   } catch {
-    // persistQuickCmds 已提示失败并回滚
+    // persistQuickCmds 已提示失败并回滚为改动前的顺序
   }
 }
 

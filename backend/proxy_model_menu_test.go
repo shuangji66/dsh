@@ -128,3 +128,48 @@ func TestDshDiagnosticInjectionIsOptIn(t *testing.T) {
 		t.Fatal("环境变量开启时 dshDiagEnabled(nil) 应为 true")
 	}
 }
+
+// 环境变量只认 1/true/yes（大小写与空白容错，语义与 auth.go 的 truthyHeader 一致）：
+// 按习惯写 HARNESS_DSH_DIAG=0 的意图是关闭，旧的「非空即开」恰好反着来 —— 打开打点、
+// 把界面操作细节写进平台 nginx 的 access.log。
+func TestDshDiagnosticEnvIsTruthyOnly(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"no", false},
+		{"off", false},
+		{"disabled", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"yes", true},
+		{"  Yes  ", true},
+	} {
+		t.Setenv("HARNESS_DSH_DIAG", tc.val)
+		if got := dshDiagEnabled(nil); got != tc.want {
+			t.Fatalf("HARNESS_DSH_DIAG=%q: dshDiagEnabled = %v, want %v", tc.val, got, tc.want)
+		}
+	}
+
+	// 访问级 ?dsh-diag=1 语义保持不变（只有 1/true 开启）。
+	t.Setenv("HARNESS_DSH_DIAG", "")
+	for _, tc := range []struct {
+		q    string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"yes", false},
+		{"1", true},
+		{"true", true},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/?dsh-diag="+tc.q, nil)
+		if got := dshDiagEnabled(req); got != tc.want {
+			t.Fatalf("?dsh-diag=%q: dshDiagEnabled = %v, want %v", tc.q, got, tc.want)
+		}
+	}
+}

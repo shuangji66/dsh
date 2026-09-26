@@ -21,6 +21,7 @@
 // 显隐不能交给 md:hidden（宽度断点）：iPad 宽度 ≥768px 会被判成桌面而丢掉整条辅助键，
 //   改用 composables/useMobileLayout.ts 的「触屏或窄视口」判据；「是否平板档」用同文件的
 //   useWideLayout()（就是 md 断点，别另发明数值）。
+import { onBeforeUnmount, watch } from 'vue'
 import { useMobileLayout, useWideLayout } from '@/composables/useMobileLayout'
 import { useKeypadPage } from '@/composables/useKeypadPage'
 import { useI18n } from '@/composables/useI18n'
@@ -56,6 +57,12 @@ function stopRepeat() {
     repeatTimer = null
   }
 }
+
+// 连发定时器必须跟着生命周期走：按键所在容器是 `v-if="wide || page === 0"`，
+// 切页或切布局档会把按住的按钮整体卸载 —— 之后 touchend/mouseup 不再到达该节点，
+// 100ms 的连发会一直往 PTY 灌 ESC 序列（组件卸载也不会自动停）。
+watch([page, wide], stopRepeat)
+onBeforeUnmount(stopRepeat)
 
 // 单次按键：@click + @touchstart.prevent 双保险
 // touchstart 用于移动端保底；touchend 时不重复触发（点击只触发一次）。

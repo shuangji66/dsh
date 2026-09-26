@@ -23,7 +23,29 @@ import (
 
 // 会话历史回放/读取的大小上限：避免把无限增长的临时文件全部塞进单次 WebSocket
 // 或 JSON 响应。仅回放最近 maxHistoryBytes 的内容即可满足“恢复会话历史”。
-const maxHistoryBytes = 4 * 1024 * 1024 // 4MB
+//
+// 它同时是**历史文件的写入侧上限**（见 Session.trimHistoryLocked）：文件本身若不
+// 截断，读取侧的限制只能保证「一次不读太多」，磁盘占用仍随会话时长无限增长
+// —— 一个长跑会话 + 高频输出足以把 TRIM_PKGVAR 所在分区写满。
+const maxHistoryBytes = 4 * 1024 * 1024
+
+const (
+	// maxFrameBytes 是单个 WebSocket 帧的载荷上限。帧头里的长度是客户端说了算的
+	// （16/64 位），畸形或恶意的一帧可以声明 TB 级长度 —— 直接 make 会把控制台打爆
+	// （OOM 杀掉本进程；而它同时是 dsh 的守护进程，等于整站掉线）。
+	maxFrameBytes = 1 << 20 // 1 MiB
+	// maxMessageBytes 是分片累积后单条消息的上限：否则用连续的 continuation 帧就能
+	// 把 msgBuf 撑爆。
+	maxMessageBytes = 8 << 20 // 8 MiB
+	// connWriteTimeout 是向终端连接写数据的超时。客户端不再读取（笔记本休眠、网络
+	// 半开、代理不再收）时，写会在发送缓冲写满后阻塞 —— 而广播与历史回放都发生在
+	// histMu 临界区内：没有超时就会连带冻结 PTY 读、/api/sessions（list 持 m.mu 再取
+	// histMu）与新挂载，连「重连夺回」这条自救路径都会失效。
+	connWriteTimeout = 5 * time.Second
+)
+
+// errFrameTooLarge 表示客户端发来的帧/消息超过上限，连接会被关闭。
+var errFrameTooLarge = errors.New("terminal websocket frame too large")
 
 // wsChunkSize 是历史回放时单帧的最大字节数。
 const wsChunkSize = 32 * 1024 // 32KB
@@ -71,6 +93,30 @@ func (s *Session) isClosed() bool {
 	return s.closed
 }
 
+// writeFrame 向终端连接写一帧，带写超时。返回错误表示该端已经写不动了
+// （不读数据/连接已断），调用方应把它当死连接处理。timeout 取值见 connWriteTimeout。
+func writeFrame(c net.Conn, frame []byte) error {
+	if c == nil {
+		return nil
+	}
+	// 每次写前重设：上一次的过期时间不能留下来影响本次。
+	_ = c.SetWriteDeadline(time.Now().Add(connWriteTimeout))
+	_, err := c.Write(frame)
+	return err
+}
+
+// dropConn 把写不动的连接从会话上摘掉并关闭。会话本身不受影响（继续运行并写历史
+// 文件），下次挂载仍可回放。调用方可能持有 histMu —— detach 只取 connMu，顺序与
+// pump/attach 一致，不会反向嵌套。
+func (s *Session) dropConn(c net.Conn, err error) {
+	if c == nil {
+		return
+	}
+	s.detach(c)
+	_ = c.Close()
+	logWarn("[terminal] session %s: dropped unresponsive client connection: %v", s.id, err)
+}
+
 // pump 持续读取 PTY 输出：追加到历史文件，并向已挂载的连接实时广播。
 // 同一把 histMu 保证“文件”与“连接”两路输出顺序一致。
 func (s *Session) pump() {
@@ -80,14 +126,15 @@ func (s *Session) pump() {
 		if n > 0 {
 			chunk := buf[:n]
 			s.histMu.Lock()
-			if s.hist != nil {
-				s.hist.Write(chunk)
-			}
+			s.appendHistoryLocked(chunk)
 			s.connMu.Lock()
 			c := s.conn
 			s.connMu.Unlock()
 			if c != nil {
-				c.Write(wsFrame(opText, chunk))
+				if werr := writeFrame(c, wsFrame(opText, chunk)); werr != nil {
+					// 写不动就不写了：摘掉并关闭它，别让它继续占着 histMu。
+					s.dropConn(c, werr)
+				}
 			}
 			s.histMu.Unlock()
 		}
@@ -99,17 +146,76 @@ func (s *Session) pump() {
 	// 进程退出后补一条提示帧与退出控制帧（若还有连接在挂载）
 	s.histMu.Lock()
 	note := []byte("\r\n\x1b[31m[process exited]\x1b[0m\r\n")
-	if s.hist != nil {
-		s.hist.Write(note)
-	}
+	s.appendHistoryLocked(note)
 	s.connMu.Lock()
 	c := s.conn
 	s.connMu.Unlock()
 	if c != nil {
-		c.Write(wsFrame(opText, note))
-		c.Write(wsFrame(opText, []byte("\x1b]exit\x07")))
+		if werr := writeFrame(c, wsFrame(opText, note)); werr == nil {
+			if werr = writeFrame(c, wsFrame(opText, []byte("\x1b]exit\x07"))); werr != nil {
+				s.dropConn(c, werr)
+			}
+		} else {
+			s.dropConn(c, werr)
+		}
 	}
 	s.histMu.Unlock()
+}
+
+// appendHistoryLocked 把一段 PTY 输出追加到历史文件，并维护写入侧上限。
+// 调用方必须持有 s.histMu（与「回放历史 + 实时广播」共用同一临界区）。
+//
+// 抽成独立方法是为了让「写入侧上限」这条语义可以被单测覆盖：沙箱里建不起 PTY
+// （/dev/ptmx 权限），pump 本体没法起，但这段纯文件逻辑可以。
+func (s *Session) appendHistoryLocked(chunk []byte) {
+	if s.hist == nil {
+		return
+	}
+	if _, err := s.hist.Write(chunk); err != nil {
+		// 历史写失败不影响实时流，但回放能力会降级 —— 留一条线索（重复行由
+		// logging.go 的重复抑制兜住，不会刷屏）。
+		logWarn("[terminal] session %s: append history failed: %v", s.id, err)
+		return
+	}
+	s.trimHistoryLocked()
+}
+
+// trimHistoryLocked 给历史文件加**写入侧上限**：超过 maxHistoryBytes 时滚动截断，
+// 只保留末尾 maxHistoryBytes 字节。调用方必须持有 s.histMu，且在 Write 之后调用。
+//
+// 为什么选「滚动截断」而不是「给已退出会话加 TTL 回收」：
+//   - 读取侧本来只回放末尾 maxHistoryBytes，截掉更早的字节不影响任何可见语义
+//     （attach 回放、/api/session/history、/api/sessions 的 size 都只看末尾那段）；
+//   - 会话继续运行时磁盘占用有界，而 TTL 回收只解决「已退出会话」那一半问题；
+//   - TTL 回收会让「浏览器断开 → 稍后回来重连」这条被明确要求保留的路径出现
+//     新语义（过期后 history 为空、会话从列表消失），风险更大。
+//
+// 保留的边界是「末尾 N 字节」而不是整数个转义序列：attach/history 的读取路径本来
+// 就从任意偏移开始回放，这里与它们保持一致（终端渲染对残缺的头部序列本就容错）。
+func (s *Session) trimHistoryLocked() {
+	if s.hist == nil {
+		return
+	}
+	st, err := s.hist.Stat()
+	if err != nil || st.Size() <= maxHistoryBytes {
+		return
+	}
+	keep := int64(maxHistoryBytes)
+	start := st.Size() - keep
+	buf := make([]byte, keep)
+	// ReadAt 不改文件游标；写入侧仍靠 O_APPEND 追加，两者互不干扰。
+	if _, err := s.hist.ReadAt(buf, start); err != nil {
+		logWarn("[terminal] session %s: read history tail failed: %v", s.id, err)
+		return
+	}
+	if err := s.hist.Truncate(0); err != nil {
+		logWarn("[terminal] session %s: truncate history failed: %v", s.id, err)
+		return
+	}
+	// 文件是 O_APPEND 打开的，Truncate(0) 之后 Write 必然落在位置 0。
+	if _, err := s.hist.Write(buf); err != nil {
+		logWarn("[terminal] session %s: rewrite history tail failed: %v", s.id, err)
+	}
 }
 
 // attach 把连接挂载到会话：先回放历史文件内容（上限 maxHistoryBytes，分帧发送），
@@ -134,7 +240,7 @@ func (s *Session) attach(c net.Conn) (net.Conn, error) {
 				for {
 					n, rerr := s.hist.Read(chunk)
 					if n > 0 {
-						if _, werr := c.Write(wsFrame(opText, chunk[:n])); werr != nil {
+						if werr := writeFrame(c, wsFrame(opText, chunk[:n])); werr != nil {
 							return nil, werr
 						}
 					}
@@ -145,7 +251,7 @@ func (s *Session) attach(c net.Conn) (net.Conn, error) {
 			}
 		}
 	}
-	if _, err := c.Write(wsFrame(opText, []byte("\x1b]ready\x07"))); err != nil {
+	if err := writeFrame(c, wsFrame(opText, []byte("\x1b]ready\x07"))); err != nil {
 		return nil, err
 	}
 	// 换主与历史回放同处一个 histMu 临界区：新连接既不漏字节，也不与广播交叉。
@@ -236,29 +342,61 @@ func NewSessionManager(renv *RuntimeEnv) *SessionManager {
 	return &SessionManager{renv: renv, sessions: map[string]*Session{}}
 }
 
-// terminalEnv builds the environment for the bash session: current app user's
-// PATH and HOME are captured from the runtime, then the harness process
-// environment is appended as-is.
+// terminalEnv builds the environment for the bash session: the harness process
+// environment is used as the base, then the app user's HOME/PATH and the
+// terminal-specific values are written over it in place.
 //
 // 这里刻意不注入代理设置：终端是用户自己的 shell，控制台的代理配置只服务于 dsh 与
 // harness 的对外请求（dsh 进程见 DshManager.buildEnv）。注入只会让控制台配置与平台
 // 自己导出的代理变量在同一份环境里并存，而 os.Environ() 本来就带着后者。
-func terminalEnv(renv *RuntimeEnv) []string {
-	env := []string{
-		"HOME=" + renv.Home,
-		"PATH=" + renv.Path,
-		"TERM=xterm-256color",
-		"LANG=" + localeLang(renv.Lang),
-		"COLORTERM=truecolor",
-		"PWD=" + renv.Home,
-		"PS1=\\u@\\h:\\w\\$ ",
-		"SHELL=/bin/bash",
+//
+// 构造顺序很关键：os.Environ() 必须先铺底，再用 set() **原位覆盖**。os/exec 的
+// dedupEnv 对同名键是「最后一个生效」，反过来写（先显式值、后 append 环境）会让
+// LANG 的 UTF-8 兜底、TERM、SHELL 等被父进程的同名变量整体覆盖 —— dsh.go 的
+// buildEnv 用的就是这套「原位替换」写法，这里保持一致。
+func terminalEnv(renv *RuntimeEnv, home string) []string {
+	env := os.Environ()
+	set := func(kv string) {
+		key := kv[:strings.IndexByte(kv, '=')]
+		for i, e := range env {
+			if strings.HasPrefix(e, key+"=") {
+				env[i] = kv
+				return
+			}
+		}
+		env = append(env, kv)
 	}
+	// HOME 解析失败（空）时不要写 HOME=""，否则 bash 会拿到一个空主目录，
+	// 保留父进程环境里的值更合理。
+	if home != "" {
+		set("HOME=" + home)
+		set("PWD=" + home)
+	}
+	set("PATH=" + renv.Path)
+	set("TERM=xterm-256color")
+	set("LANG=" + localeLang(renv.Lang))
+	set("COLORTERM=truecolor")
+	set("PS1=\\u@\\h:\\w\\$ ")
+	set("SHELL=/bin/bash")
 	if renv.PnpmHome != "" {
-		env = append(env, "PNPM_HOME="+renv.PnpmHome)
+		set("PNPM_HOME=" + renv.PnpmHome)
 	}
-	env = append(env, os.Environ()...)
 	return env
+}
+
+// effectiveHome 返回终端会话应使用的主目录：用户在资源页切换过主目录后以
+// AppConfig.HomeDir 为准（与 DshManager.effectiveHome 同一语义），否则回退到启动时
+// 解析出的 HOME。终端必须与 dsh 服务用同一份 HOME —— 否则在终端里执行
+// `dsh plugin --profile web …` 操作的是另一份 ~/.dsh，与 dsh 服务实际加载的 profile
+// 不是同一个（现象：控制台/市场里改了插件，终端里看不到）。
+func (m *SessionManager) effectiveHome() string {
+	if h := GetConfig().HomeDir; h != "" {
+		return h
+	}
+	if m.renv != nil {
+		return m.renv.Home
+	}
+	return os.Getenv("HOME")
 }
 
 func newID() string {
@@ -292,8 +430,12 @@ func (m *SessionManager) create() (*Session, error) {
 		return nil, err
 	}
 	cmd := exec.Command("/bin/bash")
-	cmd.Dir = m.renv.Home
-	cmd.Env = terminalEnv(m.renv)
+	// 用「当前生效的主目录」（跟随资源页的切换），与 dsh 服务保持一致。
+	home := m.effectiveHome()
+	if home != "" {
+		cmd.Dir = home
+	}
+	cmd.Env = terminalEnv(m.renv, home)
 	f, err := pty.Start(cmd)
 	if err != nil {
 		hist.Close()
@@ -493,6 +635,12 @@ func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if op != opCont {
 				msgBuf = msgBuf[:0]
 			}
+			// 分片累积同样要有上限：否则客户端用连续的 continuation 帧就能把
+			// msgBuf 撑到内存耗尽（单帧上限在 wsReadFrame 里，这里管整条消息）。
+			if len(msgBuf)+len(payload) > maxMessageBytes {
+				logWarn("[terminal] message exceeds %d bytes, closing connection", maxMessageBytes)
+				goto done
+			}
 			msgBuf = append(msgBuf, payload...)
 			if !fin {
 				continue
@@ -524,7 +672,10 @@ func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		case opPing:
-			conn.Write(wsFrame(opPong, payload))
+			if werr := writeFrame(conn, wsFrame(opPong, payload)); werr != nil {
+				logWarn("[terminal] pong write failed: %v", werr)
+				goto done
+			}
 		case opClose:
 			goto done
 		}
@@ -626,6 +777,11 @@ func wsReadFrame(r io.Reader) (byte, bool, []byte, error) {
 			return 0, false, nil, err
 		}
 		ln = binary.BigEndian.Uint64(e[:])
+	}
+	// 上限校验放在最前面（读完长度、还没读掩码/载荷、更没 make）：长度由客户端声明，
+	// 64 位长度可到 TB 级，畸形帧根本不该继续处理。
+	if ln > maxFrameBytes {
+		return 0, false, nil, errFrameTooLarge
 	}
 	var mask [4]byte
 	if masked {

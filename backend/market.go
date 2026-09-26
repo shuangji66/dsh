@@ -735,13 +735,17 @@ func (m *UpdateManager) replaceBusyGuard(action string) error {
 //
 // 统一入口的意义：三处替换 server 产物的路径共用同一套前置检查与停机序列，
 // 不会再出现「某一条路径忘了守卫」。
-func (m *UpdateManager) stopDshForReplacement(action string) error {
+//
+// kind 是本次替换的目标（dsh 服务 / 插件市场）—— 日志按目标打标签（AGENTS 第 3 节）：
+// 旧实现固定打 "[update]"，而更新日志的筛选是按 [harness]/[dsh]/[market] 分目标的，
+// 于是「更新 dsh / 更新市场时停 dsh 失败」这条最需要看到的警告恰好过滤不出来。
+func (m *UpdateManager) stopDshForReplacement(action string, kind updateKind) error {
 	if err := m.replaceBusyGuard(action); err != nil {
 		return err
 	}
 	if err := dshStopFn(m); err != nil {
 		// 与旧行为一致：停止失败也继续尝试替换，但后面必须确认它真的停了。
-		logWarn("[update] failed to stop dsh (continuing with replacement): %v", err)
+		logWarn("%s failed to stop dsh (continuing with replacement): %v", updateLogTag(kind), err)
 	}
 	dshPortFreeFn(m, 30*time.Second)
 	return nil
@@ -794,7 +798,7 @@ func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error
 	logInfo("[market] updating market %s -> %s (dir %s)", oldVersion, p.Version, target.Dir)
 
 	// 2) 停 dsh（含忙守卫：有插件操作在跑就拒绝，且此时还没产生任何停机）。
-	if err := m.stopDshForReplacement("更新插件市场"); err != nil {
+	if err := m.stopDshForReplacement("更新插件市场", updateKindMarket); err != nil {
 		return err
 	}
 
@@ -829,7 +833,7 @@ func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error
 	}
 
 	cleanup()
-	m.clearPending()
+	m.clearPending(updateKindMarket)
 	logInfo("[market] market updated to %s (previous %s, backup discarded)", p.Version, oldVersion)
 	return nil
 }

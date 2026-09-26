@@ -112,10 +112,16 @@ func loadQuickCmds(path string) ([]QuickCmd, error) {
 }
 
 // saveQuickCmds atomically writes the command list (tmp file + rename).
+//
+// 临时文件名必须唯一（os.CreateTemp），不能共用一个 <path>.tmp —— 与 config.go 的
+// SaveConfig 同一类竞态（前端每次增删改都会整份保存，两次请求完全可能交错）：
+// 后一次保存的 rename 会把前一次写到一半的临时文件改名成正式文件，于是盘上留下
+// 一份被截断的 JSON。失败路径负责清掉临时文件，不在配置目录里堆 .tmp。
 func saveQuickCmds(path string, cmds []QuickCmd) error {
 	quickCmdsMu.Lock()
 	defer quickCmdsMu.Unlock()
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
@@ -124,9 +130,38 @@ func saveQuickCmds(path string, cmds []QuickCmd) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if dir == "" {
+		dir = "."
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpName := tmp.Name()
+	// 失败路径上清掉临时文件（成功时它已被 rename 走）。
+	defer func() {
+		if _, statErr := os.Stat(tmpName); statErr == nil {
+			os.Remove(tmpName)
+		}
+	}()
+	// 0644 → 0600：快捷指令是用户自己的命令文本，与 config.json 同档即可（同目录下
+	// 没必要让同机其它用户读到）。
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	// 先刷盘再 rename：否则断电/崩溃后可能拿到「文件在但内容为空」的列表
+	// （loadQuickCmds 会解析失败并把用户的快捷指令当成空列表）。
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

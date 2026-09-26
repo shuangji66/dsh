@@ -62,6 +62,12 @@ function validatePassword(pwd: string): string {
   return ''
 }
 
+// 用户可配置端口（dsh 端口 / 反代监听端口）的取值范围，与后端 config.go 的
+// minListenPort/maxListenPort 保持一致：下限 1025 是刻意的 —— 应用以自身 uid
+// （非 root）运行，绑定 <1025 的特权端口需要 CAP_NET_BIND_SERVICE，注定失败。
+const PORT_MIN = 1025
+const PORT_MAX = 65535
+
 // 保存前校验：仅当开启登录鉴权且填写了密码时，才要求满足强度要求（≥8位，含字母、数字、标点）；
 // 关闭鉴权时不校验，与后端 handleSaveSettings 保持一致
 function submit() {
@@ -73,15 +79,19 @@ function submit() {
       return
     }
   }
-  // 反代端口校验（后端同样校验，这里先拦一道给出可读提示）：
-  // 必须落在 1-65535，且不能与 dsh 端口相同 —— 两者会争抢同一个 TCP 端口。
-  const pp = config.value.proxyPort
-  if (!Number.isInteger(pp) || pp < 1 || pp > 65535) {
-    toast.show(t('settings_proxy_port_invalid'), 'error')
+  // 端口校验（后端 handleSaveSettings 有同一套校验，这里先拦一道给出可读提示）：
+  // 两个端口都必须落在 1025-65535，且不能相同 —— 相同会争抢同一个 TCP 端口。
+  const validPort = (p: unknown) => Number.isInteger(p) && (p as number) >= PORT_MIN && (p as number) <= PORT_MAX
+  if (!validPort(config.value.dshPort)) {
+    toast.show(t('settings_port_invalid', { min: PORT_MIN, max: PORT_MAX }), 'error')
     return
   }
-  if (pp === config.value.dshPort) {
-    toast.show(t('settings_proxy_port_same'), 'error')
+  if (!validPort(config.value.proxyPort)) {
+    toast.show(t('settings_port_invalid', { min: PORT_MIN, max: PORT_MAX }), 'error')
+    return
+  }
+  if (config.value.proxyPort === config.value.dshPort) {
+    toast.show(t('settings_port_same'), 'error')
     return
   }
   store.save()
@@ -246,8 +256,8 @@ async function onAuthToggle() {
             <input
               v-model.number="config.dshPort"
               type="number"
-              min="1"
-              max="65535"
+              :min="PORT_MIN"
+              :max="PORT_MAX"
               autocomplete="off"
               :disabled="locked"
               class="g-input disabled:cursor-not-allowed"
@@ -261,8 +271,8 @@ async function onAuthToggle() {
             <input
               v-model.number="config.proxyPort"
               type="number"
-              min="1"
-              max="65535"
+              :min="PORT_MIN"
+              :max="PORT_MAX"
               autocomplete="off"
               class="g-input"
             />

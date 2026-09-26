@@ -246,6 +246,22 @@ func TestProxyMountWaitingPageKeepsPrefix(t *testing.T) {
 	}
 }
 
+// 子路径挂载下同样要挡住协议相对地址：校验必须在「补挂载前缀之前」对剥完前缀的
+// 请求 URI 做（补完前缀的地址本该以 "<prefix>/" 开头，校验对象用错就会把合法地址
+// 全判掉，或漏掉 "//evil.com/" 这类外站地址）。
+func TestProxyMountWaitingPageRefreshRejectsProtocolRelativeURI(t *testing.T) {
+	f := newMountedFixture(t, closedPort(t), proxyMountTestBase)
+	f.boot.set(phaseDeps, "")
+
+	rec := proxyGet(t, f.proxy, proxyMountTestBase+"//evil.com/", sessionCookieHeader())
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "__DSH_WAIT__") {
+		t.Fatalf("应给等待页, code=%d", rec.Code)
+	}
+	if want := "10; url=" + proxyMountTestBase + "/"; rec.Header().Get("Refresh") != want {
+		t.Fatalf("Refresh = %q, want %q（不合法时回落到挂载目录）", rec.Header().Get("Refresh"), want)
+	}
+}
+
 // --- unix socket 端到端 ---
 
 // startProxySocket 起的监听要真的能服务：建目录、建 socket、剥前缀转发，

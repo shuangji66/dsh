@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, nextTick } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useToastStore } from '@/stores/toast'
 import { sseUrl } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
@@ -12,8 +12,18 @@ const { t } = useI18n()
 const logContent = ref('')
 const logPath = ref('')
 const loading = ref(true)
-const error = ref('')
-const stickToBottom = ref(true) // 是否跟随底部自动滚动
+// 是否跟随新内容自动滚到底。**唯一判据**：由「自动滚动」按钮切换，也由用户主动上翻/回到底部维护
+// （见 onScroll）。不能再由「内容到达时的滚动位置」推断 —— 那样按钮对行为毫无影响。
+const stickToBottom = ref(true)
+// 程序性滚动到尾部时置位：这次 scroll 事件是我们自己造成的，不能拿它当成「用户回到底部」
+// 而恢复跟随（否则用户在内容到达与滚动之间主动上翻的暂停会被立刻冲掉）。
+let programmaticScroll = false
+let programmaticScrollTimer: ReturnType<typeof setTimeout> | null = null
+// 拉取失败提示（区分「没有日志」与「拉不到日志」）。SSE 从未连上、也没收到过任何快照时才有值，
+// 已经在显示旧内容的情况下断线不报错（useEventStream 会自动重连，回来后会补发快照）。
+const streamDown = ref(false)
+const gotSnapshot = ref(false)
+const error = computed(() => (streamDown.value && !gotSnapshot.value ? t('log_stream_failed') : ''))
 
 // 导出日志原文件：浏览器下载后端附件
 function exportLog() {
@@ -76,29 +86,54 @@ const logLines = computed(() => {
 
 function applySnapshot(snap: { path?: string; content?: string; exists?: boolean }) {
   if (snap.path !== undefined) logPath.value = snap.path
+  gotSnapshot.value = true
   const content = snap.content || ''
-  const box = el.value
-  // 记录新内容到达前是否处于底部
-  const wasAtBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 40
   if (content !== logContent.value) {
     logContent.value = content
-    if (wasAtBottom) {
+    // 只有「自动滚动」处于开启状态才跟随；用户暂停后即使新内容到达也保持当前视口
+    if (stickToBottom.value) {
       nextTick().then(scrollToBottom)
     }
   }
   loading.value = false
 }
 
+// 程序性滚到底：先置标记，让随之而来的 scroll 事件不被误判成用户操作。
+// 兜底定时器处理「本来就在底部、scrollTop 没变、浏览器不发 scroll 事件」的情况，
+// 避免标记悬挂把之后一次真实的用户滚动吞掉。
 function scrollToBottom() {
   const box = el.value
-  if (box) box.scrollTop = box.scrollHeight
+  if (!box) return
+  programmaticScroll = true
+  box.scrollTop = box.scrollHeight
+  if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer)
+  programmaticScrollTimer = setTimeout(() => {
+    programmaticScroll = false
+    programmaticScrollTimer = null
+  }, 200)
 }
 
 function onScroll() {
   const box = el.value
   if (!box) return
-  // 用户上翻查看历史时暂停自动滚动；回到底部时恢复
-  stickToBottom.value = box.scrollHeight - box.scrollTop - box.clientHeight < 40
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40
+  if (programmaticScroll) {
+    // 程序滚动命中的就是底部：消费掉这次事件，不改跟随状态
+    if (atBottom) {
+      programmaticScroll = false
+      return
+    }
+    // 目标不是底部 → 这是一次真实（被排在我们之后）的用户滚动，按用户操作处理
+    programmaticScroll = false
+  }
+  // 用户主动上翻查看历史时暂停自动滚动；回到底部附近时恢复
+  stickToBottom.value = atBottom
+}
+
+// 「自动滚动」按钮：立即生效 —— 切到开启时先滚到底，切到关闭时停止跟随
+function toggleStickToBottom() {
+  stickToBottom.value = !stickToBottom.value
+  if (stickToBottom.value) scrollToBottom()
 }
 
 // 通过 SSE 监听后端主动推送，替换 2 秒轮询。
@@ -108,8 +143,37 @@ const logStream = useEventStream(() => sseUrl('/api/logs/stream'), {
   log: (data) => applySnapshot(data as { path?: string; content?: string; exists?: boolean })
 })
 
+// 首帧宽限：EventSource 首次连接需要一点时间，不能一挂载就报「拉不到日志」。
+// 宽限内既没连上、也一份快照都没收到 → 判定为「拉不到日志」，页面给可读提示
+// （此前 error 永远是空串，该分支不可达，连不上时页面只显示「暂无日志内容」）。
+const STREAM_DOWN_GRACE_MS = 8000
+let streamDownTimer: ReturnType<typeof setTimeout> | null = null
+
+function armStreamDownCheck() {
+  if (streamDownTimer) return
+  streamDownTimer = setTimeout(() => {
+    streamDownTimer = null
+    if (!logStream.connected.value && !gotSnapshot.value) streamDown.value = true
+  }, STREAM_DOWN_GRACE_MS)
+}
+
+// 连上即清除失败提示（重连成功会立刻收到一份快照）；断开则重新开始宽限计时
+watch(
+  () => logStream.connected.value,
+  (up) => {
+    if (up) streamDown.value = false
+    else armStreamDownCheck()
+  }
+)
+
 onMounted(() => {
   logStream.start()
+  armStreamDownCheck()
+})
+
+onBeforeUnmount(() => {
+  if (streamDownTimer) clearTimeout(streamDownTimer)
+  if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer)
 })
 </script>
 
@@ -135,7 +199,7 @@ onMounted(() => {
       <div class="flex items-center justify-between gap-3 px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32] shrink-0">
         <span class="font-mono text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ logPath || t('log_no_file') }}</span>
         <button
-          @click="stickToBottom = !stickToBottom"
+          @click="toggleStickToBottom()"
           class="g-btn-ghost text-xs flex-shrink-0"
           :title="stickToBottom ? t('log_pause_scroll') : t('log_resume_scroll')"
         >

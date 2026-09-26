@@ -275,7 +275,7 @@ func TestStopDshForReplacementRespectsGuard(t *testing.T) {
 	upd := &UpdateManager{dsh: m}
 
 	marketBusyFn = func(*UpdateManager) (bool, string) { return true, "dsh-mobile@0.4.4" }
-	if err := upd.stopDshForReplacement("更新 dsh 服务"); err == nil {
+	if err := upd.stopDshForReplacement("更新 dsh 服务", updateKindDsh); err == nil {
 		t.Fatal("市场忙时应拒绝")
 	}
 	if len(calls) != 0 {
@@ -283,7 +283,7 @@ func TestStopDshForReplacementRespectsGuard(t *testing.T) {
 	}
 
 	marketBusyFn = func(*UpdateManager) (bool, string) { return false, "" }
-	if err := upd.stopDshForReplacement("更新 dsh 服务"); err != nil {
+	if err := upd.stopDshForReplacement("更新 dsh 服务", updateKindDsh); err != nil {
 		t.Fatalf("空闲时应放行: %v", err)
 	}
 	if strings.Join(calls, ",") != "stop,portfree" {

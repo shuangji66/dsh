@@ -446,9 +446,12 @@ func browserCompatFlagScript(enabled bool) string {
 
 // dshDiagEnabled 判断这次要不要给 dsh 页面注入移动端诊断打点（默认关闭）：
 // 环境变量 HARNESS_DSH_DIAG（进程级）或页面 URL 的 ?dsh-diag=1（访问级），任一满足即可。
+// 环境变量只认 1/true/yes（大小写与空白容错，语义与 auth.go 的 truthyHeader 一致）：
+// 按习惯写 HARNESS_DSH_DIAG=0 的意图是关闭，旧的「非空即开」会反着来 —— 打开打点、
+// 把界面操作细节写进平台 nginx 的 access.log（见 AGENTS.md 的真机诊断打点一节）。
 // 每次现读环境变量（不缓存），便于测试直接 t.Setenv、运行时改环境也无需重启。
 func dshDiagEnabled(r *http.Request) bool {
-	if os.Getenv("HARNESS_DSH_DIAG") != "" {
+	if truthyHeader(os.Getenv("HARNESS_DSH_DIAG")) {
 		return true
 	}
 	if r == nil || r.URL == nil {
@@ -750,13 +753,40 @@ func waitingPageHTMLFor(st proxyState, mount proxyMount) string {
 	return strings.Replace(page, "__READY_URL__", string(ready), 1)
 }
 
+// safeRefreshURI 校验「能不能把挂载内的请求 URI 作为跳转目标」。
+//
+// 为什么需要：r.URL.RequestURI() 直接来自请求行、未经任何校验，而 Refresh 头的
+// url= 是浏览器会自己解析并跳转的地址。根挂载下 `GET //evil.com/` 会被 Go 原样
+// 保留（实测 r.URL.RequestURI() 就是 "//evil.com/"），浏览器把它当协议相对地址
+// 解析成 https://evil.com/ —— 已登录用户会在 10 秒后被送往外站（开放重定向）。
+//
+// 语义与 auth.go 的 safeNext 一致：必须以单个 "/" 开头，且第二个字符不能又是 "/"
+// 或 "\"（浏览器把 "\" 也当路径分隔符，"/\evil.com" 同样会落到外站）。
+// 传入的必须是**剥完挂载前缀**的请求 URI（刚补完前缀的地址恰好以 "//" 开头，
+// 直接校验会把合法地址全判掉）。
+func safeRefreshURI(uri string) bool {
+	if !strings.HasPrefix(uri, "/") {
+		return false
+	}
+	if len(uri) > 1 && (uri[1] == '/' || uri[1] == '\\') {
+		return false
+	}
+	return true
+}
+
 // serveWaitingPage 在 dsh 尚未就绪（或正在重启）时输出等待页。页面脚本会轮询
 // /_ready，并在就绪后立即跳转；Refresh 头是无 JS 客户端的兜底路径。
 // 传入的 r 已经剥掉挂载前缀（见 stripMount），因此两处对外地址都要用 mount 补回。
 func serveWaitingPage(w http.ResponseWriter, r *http.Request, st proxyState, mount proxyMount) {
+	// 兜底重载目标：合法就用当前请求地址（保留 query，刷新后回到同一页面），
+	// 不合法（协议相对地址等，见 safeRefreshURI）则回落到挂载目录。
+	target := mount.dir()
+	if uri := r.URL.RequestURI(); safeRefreshURI(uri) {
+		target = mount.joinURI(uri)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Refresh", "10; url="+mount.joinURI(r.URL.RequestURI()))
+	w.Header().Set("Refresh", "10; url="+target)
 	w.WriteHeader(200)
 	io.WriteString(w, waitingPageHTMLFor(st, mount))
 }
@@ -996,9 +1026,13 @@ func (p *reverseProxy) state() (proxyState, *BackendChecker) {
 			detail = ""
 		}
 	default:
-		// 端口通了但凭据还没换到：继续等凭据。
-		phase = phaseAuth
-		detail = ""
+		// 端口通了但凭据还没换到：继续等凭据。只在不处于 failed/disabled 时改写
+		// 阶段 —— dsh 启动失败（或未自动启动）而端口恰好被旧进程占着时，必须原样
+		// 保留 phase 与 detail，否则等待页只剩转圈、看不到失败原因。
+		if phase != phaseFailed && phase != phaseDisabled {
+			phase = phaseAuth
+			detail = ""
+		}
 	}
 	return proxyState{Phase: phase, Detail: detail}, checker
 }
@@ -1037,20 +1071,22 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 鉴权先于就绪判断。反代从控制台启动的第一刻就在监听，此时 dsh 往往还没起来：
 	// 若沿用旧的「先看 dsh 是否就绪、再鉴权」顺序，访客在控制台启动期间只能看到
 	// 等待页而无法登录。现在未登录先给登录页，登录后再看等待页/放行。
-	// 仅面板后端的内部探测路径（如 /dsh-market/）视为可信、跳过鉴权；
-	// 普通浏览器流量（含经 nginx 嵌套反代到达的）必须通过面板登录鉴权。
-	if !p.isInternalRequest(r) {
-		if !viaGateway && !p.auth.isAuthed(r) {
-			// next 记的是挂载内路径（如 "/api/x"），登录成功后由 handleAuthRoutes
-			// 用 mount.join 补回前缀，浏览器因此留在子路径下。
-			next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
-			http.Redirect(w, r, p.mount.join(authLogin)+"?next="+url.QueryEscape(next), http.StatusFound)
-			return
-		}
-		if r.URL.Path == readyPath {
-			p.serveReadyState(w, st)
-			return
-		}
+	//
+	// 这里刻意没有「回环地址 + /dsh-market/ 前缀就免鉴权」的分支：面板自己的市场探测
+	// 走的是 http://127.0.0.1:<dshPort>/dsh-market/status 直连（见 market.go 的
+	// marketBusyFn），不经过反代；免鉴权分支在仓库内没有使用者，却让本机任意进程
+	// （或同机嵌套反代）无口令拿到市场全部控制面接口（install/uninstall/restart/
+	// recovery）。普通浏览器流量（含经 nginx 嵌套反代到达的）必须通过面板登录鉴权。
+	if !viaGateway && !p.auth.isAuthed(r) {
+		// next 记的是挂载内路径（如 "/api/x"），登录成功后由 handleAuthRoutes
+		// 用 mount.join 补回前缀，浏览器因此留在子路径下。
+		next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
+		http.Redirect(w, r, p.mount.join(authLogin)+"?next="+url.QueryEscape(next), http.StatusFound)
+		return
+	}
+	if r.URL.Path == readyPath {
+		p.serveReadyState(w, st)
+		return
 	}
 	if !st.Ready {
 		serveWaitingPage(w, r, st, p.mount)
@@ -1082,30 +1118,6 @@ func isPrivilegedControlRoute(path string) bool {
 	return false
 }
 
-// isLoopback reports whether the request originates from the local host
-// (127.0.0.1 / ::1). Such internal requests are trusted and bypass auth, so the
-// panel backend can reach dsh's own API (e.g. /dsh-market/install) via the proxy.
-func (p *reverseProxy) isLoopback(r *http.Request) bool {
-	h, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		h = r.RemoteAddr
-	}
-	h = strings.TrimPrefix(h, "::ffff:")
-	return h == "127.0.0.1" || h == "::1" || h == "localhost"
-}
-
-// isInternalRequest reports whether the request is an internal panel-backend
-// call that may bypass the login auth. Only the panel's own backend probing
-// paths (e.g. /dsh-market/install) qualify — ordinary browser traffic reaching
-// the proxy through a nested domain reverse proxy (nginx on the same host) must
-// still pass login auth, so loopback alone is not enough to skip it.
-func (p *reverseProxy) isInternalRequest(r *http.Request) bool {
-	if !p.isLoopback(r) {
-		return false
-	}
-	return strings.HasPrefix(r.URL.Path, "/dsh-market/")
-}
-
 // handleUpgrade proxies a WebSocket upgrade by hijacking the client connection
 // and piping raw bytes to the dsh upstream, mirroring proxy.js upgradeHandler.
 // viaGateway 表示该请求来自飞牛网关那条线且带网关身份头：飞牛 OS 已认证，跳过
@@ -1125,16 +1137,23 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request, via
 		}
 		return
 	}
-	checker := p.getChecker()
-	// 凭据门禁与 HTTP 一致（见 state）：本代 dsh 的会话 cookie 还没换取完成时，
-	// 上游会因缺少 dsh-auth-* cookie 拒绝升级，直接 503 让客户端稍后重试。
-	if !p.dsh.SessionSettled() {
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		return
+	// 放行门禁与 HTTP 分支共用同一份判定（reverseProxy.state）——AGENTS 明确要求
+	// 放行只有一个入口。旧实现在这里单独查 SessionSettled + 端口，漏掉了 boot
+	// 阶段：dsh 端口恰好被上一代进程占着时，启动流水线（starting/auth/deps）尚未
+	// 收尾也能升级成功，随后流水线收尾重启 dsh，刚建立的连接立刻失效。
+	st, checker := p.state()
+	if !st.Ready && (st.Phase == phaseStarting || st.Phase == phaseStopped) {
+		// 保留原有的 10 秒容忍窗口：dsh 自重启（市场一键重启）期间端口会短暂消失，
+		// 此时客户端已在界面上，等它回来比立刻 503 更友好。
+		// 容忍范围刻意限定在「流水线已收尾的启动中/已停止」两种阶段：boot 处于
+		// starting/auth/deps 时 state() 给的是流水线阶段，必须立刻 503（等也没用，
+		// 流水线收尾还会再重启一次 dsh）；凭据未落定（auth）同理，等的是另一件事。
+		if checker.wait(10 * time.Second) {
+			st, checker = p.state()
+		}
 	}
-	// 保留原有的 10 秒容忍窗口：dsh 自重启（市场一键重启）期间端口会短暂消失，
-	// 此时客户端已在界面上，等它回来比立刻 503 更友好。
-	if !checker.wait(10 * time.Second) {
+	if !st.Ready {
+		// 凭据未落定时上游会因缺少 dsh-auth-* cookie 拒绝升级，直接 503 让客户端稍后重试。
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -1162,6 +1181,10 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request, via
 	u, _ := url.Parse(target)
 	b.WriteString("GET " + u.RequestURI() + " HTTP/1.1\r\n")
 	headers := r.Header.Clone()
+	// 只转发 dsh 自己的会话 cookie（与 HTTP 分支同一处理）：先无条件清掉控制台的
+	// harness_session，再按需写入 dsh 的 cookie —— dsh 凭据为空是可达状态，此时
+	// 不能让控制台登录 cookie 跟着升级请求一起送到 dsh 及其插件那里。
+	headers.Del("Cookie")
 	// dsh 启动时一次性 token 已用于换取会话 cookie；WebSocket 升级请求
 	// 同样携带该 cookie、访问不带 token 的地址以通过 dsh 验证。
 	if ck := p.dsh.AuthCookie(); ck != "" {
@@ -1214,6 +1237,29 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request, via
 	}()
 }
 
+// proxyTransport 是所有转发请求共用的 HTTP transport（见 forward）。
+//
+// 为什么可以共享：转发目标只有本机 dsh 一个地址（127.0.0.1:<当前 DshPort>），
+// 鉴权（Cookie 改写）与挂载换算都在 header / URL 层面完成，transport 自身不携带
+// 任何请求状态，复用它不会串味；连接池也只按 hostPort 分桶。
+// 为什么必须共享：原实现每个请求新建 &http.Transport{}，连接永不复用 —— 每个请求
+// 一次新 TCP 握手并留下一批 TIME_WAIT，控制台轮询 / dsh 前端轮询时尤其明显。
+// dsh 端口切换（设置页改 dshPort）不需要重建 transport：连接按 hostPort 复用，
+// 旧 hostPort 上的空闲连接在 IdleConnTimeout 后自然过期，新端口的连接按需新建。
+//
+// DisableCompression 必须保持 true：反代要自行改写 HTML / JS（见 forward 里的
+// encoded 判断与 injectIntoHTML / rewriteJSBundle），若让 Go 自动补
+// Accept-Encoding: gzip 并透明解压，改写面对的就是解压后的字节、还会与 dsh 原本的
+// Content-Encoding 语义打架；反代已显式发 accept-encoding: identity。
+var proxyTransport = &http.Transport{
+	DisableCompression: true,
+	// dsh 前端会并发拉取多个插件 bundle、SSE 与轮询请求，单 host 的空闲连接给足，
+	// 避免每次突发都要重新握手；IdleConnTimeout 让空闲连接自然回收，不留长尾。
+	MaxIdleConns:        64,
+	MaxIdleConnsPerHost: 32,
+	IdleConnTimeout:     30 * time.Second,
+}
+
 func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *BackendChecker) {
 	upstream := "http://" + checker.hostPort()
 	outReq, err := http.NewRequest(r.Method, upstream+r.URL.RequestURI(), r.Body)
@@ -1222,9 +1268,11 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 		return
 	}
 	outReq.Header = r.Header.Clone()
-	// dsh 启动时一次性 token 已用于换取会话 cookie（见 DshManager.ExchangeToken）；
-	// 反代转发到 dsh 时携带该 cookie、访问不带 token 的地址即可通过验证。
-	// 注意：需在 Clone 客户端请求头之后再设置，确保 dsh 的 cookie 优先生效。
+	// 只转发 dsh 自己的会话 cookie（见 DshManager.ExchangeToken）：先无条件清掉
+	// 控制台的 harness_session —— 它不是给 dsh 的，而在 dsh 凭据为空时（旧版 dsh
+	// 不打印 token → 等待超时后仍算落定；ExchangeToken 失败）原样转发等于把控制台
+	// 登录凭据交给 dsh 及其插件。随后再按需设置 dsh 的 cookie。
+	outReq.Header.Del("Cookie")
 	if ck := p.dsh.AuthCookie(); ck != "" {
 		outReq.Header.Set("Cookie", ck)
 	}
@@ -1258,8 +1306,7 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 	}
 	outReq.Header.Set("accept-encoding", "identity")
 
-	tr := &http.Transport{DisableCompression: true}
-	resp, err := tr.RoundTrip(outReq)
+	resp, err := proxyTransport.RoundTrip(outReq)
 	if err != nil {
 		http.Error(w, "Proxy error", http.StatusBadGateway)
 		return
@@ -1275,12 +1322,14 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 		p.dsh.notifySelfRestart()
 	}
 
+	// 注意：这里刻意不追加 access-control-allow-origin。全仓没有跨源调用方
+	// （后端只有这一处 CORS 代码、前端也没有跨源请求），无条件放开 CORS 只会让
+	// 任意站点都能读取已登录用户的转发响应。
 	for k, vv := range resp.Header {
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
 	}
-	w.Header().Set("access-control-allow-origin", "*")
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	enc := strings.ToLower(resp.Header.Get("Content-Encoding"))
@@ -1300,7 +1349,17 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
 
 	if (isHTML || isJS) && ok && !encoded {
-		body, _ := io.ReadAll(resp.Body)
+		body, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			// 上游中途断开（chunked 编码出错、dsh 被杀）时绝不能把已读到的截断字节当成
+			// 「完整响应」返回：下面会把 Content-Length 重设为读到的长度，客户端因此
+			// 拿到一份看起来完整、实际被截断的 HTML/JS。而插件 bundle 带一年期
+			// immutable 缓存，浏览器会把坏字节长期留在本地（普通刷新不回源），故障
+			// 会固化成「清缓存才能恢复」。这里宁可 502。
+			logWarn("[proxy] failed to read upstream body for %s: %v", r.URL.Path, rerr)
+			http.Error(w, "Bad upstream body", http.StatusBadGateway)
+			return
+		}
 		if isHTML {
 			body = injectIntoHTML(body, dshDiagEnabled(r))
 		} else if isJS {

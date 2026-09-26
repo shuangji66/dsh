@@ -121,7 +121,11 @@ func main() {
 		if cfg.Password == "" {
 			logWarn("[auth] no password configured - login auth disabled, console is open to anyone")
 		} else if v := validatePassword(cfg.Password); v != "" {
-			logError("[auth] password rejected (%s) - login auth disabled", v)
+			// 强度不合规**不**等于关闭鉴权：这条密码照旧参与会话 cookie 的校验与
+			// 签发（见 isAuthed），只是提醒用户换一个更安全的。措辞必须与真实
+			// 行为一致 —— 旧文案写成 "login auth disabled"，会把「鉴权其实开着」
+			// 说成「已关闭」。
+			logError("[auth] password strength is weak (%s) - still used for login auth, please change it", v)
 		} else {
 			logInfo("[auth] login auth enabled")
 		}
@@ -241,8 +245,14 @@ func main() {
 // 无论是否拿到 token 都要标记本代凭据「已落定」（SessionSettled）：反代据此
 // 决定放行还是继续显示等待页，漏标会让反代一直停在等待页。旧版 dsh 不打印
 // token 时等待会超时返回空串，同样算落定，避免永久卡住。
+//
+// 但「本代」必须锁定为**发起这次等待时**的启动代号（gen）：旧版 dsh 的这一等就是
+// 整 15 秒，期间足够发生一次重启（dsh.Start 会递增代号使上一代凭据失效）。若结束时
+// 用「当前代号」标记，就会把新一代标成凭据已落定 —— 反代据此放行，而新一代的 token
+// 还没换取，用户被送进 dsh 的未授权页。因此这里取一次 gen，结束时 compare-and-set。
 func captureDshSession(dsh *DshManager) {
-	defer dsh.markSessionSettled()
+	gen := dsh.SessionGen()
+	defer dsh.markSessionSettledGen(gen)
 	if tok := dsh.WaitToken(15 * time.Second); tok != "" {
 		// 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
 		// 供反代转发时携带（访问不带 token 的 dsh 地址）。成功时不输出日志。

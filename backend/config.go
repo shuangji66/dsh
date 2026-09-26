@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -198,12 +199,21 @@ func envOrInt(k string, def int) int {
 // 旧环境变量（以及旧默认 13079）不再生效。
 const defaultProxyPort = 3079
 
-// validProxyPort 校验反代端口是否在可绑定范围内（1..65535）。
-func validProxyPort(p int) bool { return p >= 1 && p <= 65535 }
+// 用户可配置端口（反代端口 / dsh 端口）的取值范围：1025..65535。
+// 下限 1025 是刻意的 —— 应用以自身 uid（非 root）运行，绑定 <1025 的特权端口需要
+// CAP_NET_BIND_SERVICE，注定失败；上限 65535 是 TCP 端口上限。两个端口必须落在
+// 同一范围内并彼此不同（相同会争抢同一个 TCP 端口），校验入口见 handleSaveSettings。
+const (
+	minListenPort = 1025
+	maxListenPort = 65535
+)
+
+// validListenPort 校验端口是否落在可绑定的用户端口范围内（1025..65535）。
+func validListenPort(p int) bool { return p >= minListenPort && p <= maxListenPort }
 
 // normalizeProxyPort 把非法/空值归一化为默认端口。
 func normalizeProxyPort(p int) int {
-	if !validProxyPort(p) {
+	if !validListenPort(p) {
 		return defaultProxyPort
 	}
 	return p
@@ -396,6 +406,9 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	// 例如旧配置没有 dshMemAuto 时仍保持默认 true（由系统 node 自动分配内存）。
 	v := *def
 	if err := json.Unmarshal(data, &v); err != nil {
+		// 解析失败不能静默：调用方会退回默认配置（AuthEnabled 默认 true 但密码通常
+		// 来自环境变量、可能为空），用户看到的是「设置全没了」。至少让日志里有现场。
+		logError("[config] failed to parse %s, falling back to defaults: %v", path, err)
 		return def
 	}
 	// 旧配置文件中可能没有这些字段，回退到默认值
@@ -412,7 +425,28 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	// 旧配置文件（反代端口还来自 PROXY_PORT 环境变量）没有 proxyPort 字段，
 	// 回退到默认 3079 并随下次保存落盘。
 	v.ProxyPort = normalizeProxyPort(v.ProxyPort)
+	// dsh 端口：只在**配置文件里显式写了非法值**时回退（历史上保存过 0/超范围的值会
+	// 让 dsh 起不来、反代常驻等待页）。字段缺失时保留 def 的值 —— 平台可能通过
+	// dsh_port/TARGET_PORT 环境变量播种它，不能在这里改写平台的决定。
+	if !validListenPort(v.DshPort) {
+		if hasJSONField(data, "dshPort") {
+			logWarn("[config] persisted dshPort %d is out of range (%d-%d), falling back to %d",
+				v.DshPort, minListenPort, maxListenPort, def.DshPort)
+			v.DshPort = def.DshPort
+		}
+	}
 	return &v
+}
+
+// hasJSONField 判断 JSON 对象里是否存在某个顶层字段（用于区分「显式写了 0」与
+// 「字段缺失」—— 前者要归一化，后者要保留平台播种的值）。
+func hasJSONField(data []byte, key string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw[key]
+	return ok
 }
 
 // GetConfig returns a copy of the current config.
@@ -425,6 +459,12 @@ func GetConfig() AppConfig {
 // SaveConfig persists the config to disk (atomic write) and updates memory.
 // 注意：反代端口（ProxyPort）由本配置保存，但它不是 dsh 自己绑定的端口 ——
 // 端口值写完内存后需要调用方重新绑定监听（见 admin.go 的 rebindProxyPort）。
+//
+// 并发正确性（三个调用点：保存设置 / 切换主目录 / node 版本回填，彼此可能重叠）：
+//   - 序列化必须在 cfgLock 内、针对**本次的 next** 完成，不能解锁后再读全局 cfg ——
+//     否则 A 的请求可能把 B 的配置写盘（自己的改动静默丢失）；
+//   - 临时文件必须唯一（os.CreateTemp），不能共用一个 <config>.tmp —— 否则两个保存
+//     交错时，后一个 rename 会把前一个写到一半的字节改名成正式配置。
 func SaveConfig(renv *RuntimeEnv, next *AppConfig, lockedPorts bool) error {
 	cfgLock.Lock()
 	if lockedPorts {
@@ -433,12 +473,40 @@ func SaveConfig(renv *RuntimeEnv, next *AppConfig, lockedPorts bool) error {
 		next.DshPort = cfg.DshPort
 	}
 	cfg = *next
+	data, err := json.MarshalIndent(*next, "", "  ")
 	cfgLock.Unlock()
+	if err != nil {
+		return fmt.Errorf("序列化配置失败: %w", err)
+	}
 
-	tmp := renv.ConfigFile + ".tmp"
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	dir := filepath.Dir(renv.ConfigFile)
+	tmp, err := os.CreateTemp(dir, filepath.Base(renv.ConfigFile)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, renv.ConfigFile)
+	tmpName := tmp.Name()
+	// 失败路径上清掉临时文件，避免在配置目录里堆 .tmp（成功时已被 rename 走）。
+	defer func() {
+		if _, statErr := os.Stat(tmpName); statErr == nil {
+			os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	// 先把内容刷到盘再 rename：否则断电/崩溃后可能拿到「文件在但内容为空」的
+	// 配置（loadJSONFile 会解析失败并回落默认值，等于设置丢失）。
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, renv.ConfigFile)
 }

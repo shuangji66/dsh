@@ -451,13 +451,14 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	locked := m.dsh.Running()
-	// 校验反代端口：1..65535，且不能与 dsh 端口相同（两者会争抢同一个 TCP 端口）。
-	// 字段缺失/为 0（旧版前端缓存提交的配置）按“未修改”处理，沿用已存端口。
+	// 校验两个端口：都必须在 1025-65535（应用以自身 uid 运行，绑定 <1025 的特权
+	// 端口需要 CAP_NET_BIND_SERVICE，注定失败），且不能相同（两者会争抢同一个 TCP 端口）。
+	// 反代端口的字段缺失/为 0（旧版前端缓存提交的配置）按“未修改”处理，沿用已存端口。
 	if req.Config.ProxyPort == 0 {
 		req.Config.ProxyPort = GetConfig().ProxyPort
 	}
-	if !validProxyPort(req.Config.ProxyPort) {
-		writeErr(w, "反代端口必须在 1-65535 之间", http.StatusBadRequest)
+	if !validListenPort(req.Config.ProxyPort) {
+		writeErr(w, fmt.Sprintf("反代端口必须在 %d-%d 之间", minListenPort, maxListenPort), http.StatusBadRequest)
 		return
 	}
 	// dsh 运行中时端口被锁定（SaveConfig 会保留旧值），比较基准也要用锁定的旧值。
@@ -465,7 +466,13 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if locked {
 		effDshPort = GetConfig().DshPort
 	}
-	if effDshPort > 0 && req.Config.ProxyPort == effDshPort {
+	// dsh 端口同样必须校验：历史上这里只拿它和反代端口比相等，落盘一个 0/超出范围的
+	// 值会让 `dsh web --port 0` 随机端口、反代永远停在等待页（见 loadJSONFile 的兜底）。
+	if !validListenPort(effDshPort) {
+		writeErr(w, fmt.Sprintf("dsh 端口必须在 %d-%d 之间", minListenPort, maxListenPort), http.StatusBadRequest)
+		return
+	}
+	if req.Config.ProxyPort == effDshPort {
 		writeErr(w, "反代端口不能与 dsh 端口相同", http.StatusBadRequest)
 		return
 	}
@@ -647,6 +654,20 @@ type togglePluginReq struct {
 	Enabled bool   `json:"enabled"`
 }
 
+// validPluginName 校验请求体里的插件名。名字会参与两处危险动作：
+//   - `readPackageRowIds(profileWebDir, name)` 把它拼进
+//     `filepath.Join(profileWebDir, "node_modules", name)`（或 $HOME/.dsh 下的
+//     node_modules）—— `../../..` 之类的名字可以穿越到任意目录读 package.json /
+//     补丁文件，其中的 `- id:` 行会被写进补丁层；
+//   - `dsh plugin --profile web remove <name>` 把它当 argv —— 以 `-` 开头的名字
+//     会被 dsh 当成选项（argv 注入）。
+//
+// 规则与 patch.go 的 packageNameRe 一致（npm 包名），不合法的一律 400：宁可拒掉
+// 一个奇怪但合法的名字，也不能让控制台变成任意文件读取/选项注入的入口。
+func validPluginName(name string) bool {
+	return packageNameRe.MatchString(name)
+}
+
 // handleTogglePlugin 通过编辑 cordis.patch.yml 启停单个插件（机制学自 dsh-market）。
 // 关键改进：
 //   - 用插件在补丁层实际的“行 id”（由包名映射得到，可能不同名，如 ui-git-graph）
@@ -658,6 +679,11 @@ func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
 	var body togglePluginReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErr(w, "缺少插件名", http.StatusBadRequest)
+		return
+	}
+	// 名字会参与拼路径读取 package.json / 补丁行，必须先校验（见 validPluginName）。
+	if !validPluginName(body.Name) {
+		writeErr(w, "插件名不合法（仅允许 npm 包名）", http.StatusBadRequest)
 		return
 	}
 	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
@@ -702,6 +728,12 @@ func (m *AdminMux) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "缺少插件名", http.StatusBadRequest)
 		return
 	}
+	// 名字会原样成为 `dsh plugin … remove <name>` 的 argv：以 "-" 开头会被当成选项，
+	// 含路径分隔符的名字也不是包名。校验不通过直接 400，连命令都不执行。
+	if !validPluginName(body.Name) {
+		writeErr(w, "插件名不合法（仅允许 npm 包名）", http.StatusBadRequest)
+		return
+	}
 	out, err := m.dsh.runPluginCmd("remove", body.Name)
 	if err != nil {
 		writeErr(w, "卸载失败: "+err.Error(), http.StatusInternalServerError)
@@ -718,6 +750,15 @@ func (m *AdminMux) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 // web 目录，最长可达数分钟），因此改为立即返回、把重活交给后台 goroutine，
 // 避免请求线程被拖垮而触发前端网关的 502 Bad Gateway。
 func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
+	// 忙守卫（AGENTS 第 5 节硬约束）：插件的安装/卸载在 dsh 进程内持有 profile 写锁
+	// （profiles/web/package.json.lock），而这里会删掉整个 profiles 目录并重启 dsh
+	// （连带终止它的进程组）—— 正好把锁持有者一起带走：那次安装白做，还会留下陈旧锁
+	// 让之后所有插件操作白等 120 秒。被拒时不产生任何删除与停机。
+	if err := m.busyGuard("重置插件"); err != nil {
+		writeErr(w, err.Error(), http.StatusConflict)
+		return
+	}
+
 	// 删除 $HOME/.dsh/profiles 目录
 	// 使用当前生效的主目录（若已在资源页切换过，则以切换后的为准）。
 	home := m.dsh.effectiveHome()
@@ -821,6 +862,78 @@ func (m *AdminMux) nodeVersionsInfo() []map[string]interface{} {
 	return info
 }
 
+// resolveExistingDir 返回目录的「实际」路径（解析符号链接），失败时退回 Clean 结果。
+// 白名单比对必须对符号链接也成立：授权目录里的一个符号链接指向 /etc 时，路径前缀
+// 看起来在白名单内，实际拷进去的是 /etc（RemoveAll(dest/.dsh) 也随之落到 /etc 下）。
+func resolveExistingDir(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(real)
+	}
+	return filepath.Clean(path)
+}
+
+// homeDirAllowed 判断目标目录是否落在白名单目录**之内**（白名单目录自身也算）。
+//
+// 用 filepath.Rel 判「是否在目录之内」，而不是字符串前缀比较：前缀比较会把
+// /vol1/@appshare/Harness-evil（或 /vol1/@appshare/Harness-bak）误判成
+// /vol1/@appshare/Harness 的子目录 —— 那正是最容易被凑出来的越权路径。
+// 判断前两侧都解析符号链接（见 resolveExistingDir）：dest 是指向白名单外的链接时
+// 必须判为不允许。
+func homeDirAllowed(dest string, allowed []string) bool {
+	target := resolveExistingDir(dest)
+	for _, a := range allowed {
+		if a == "" {
+			continue
+		}
+		root := resolveExistingDir(a)
+		rel, err := filepath.Rel(root, target)
+		if err != nil {
+			continue
+		}
+		if rel == "." {
+			return true
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			continue // 落在该白名单目录之外
+		}
+		return true
+	}
+	return false
+}
+
+// homeAllowedRoots 收集「允许被设为 dsh 主目录」的白名单根目录：
+//  1. 当前请求用户的飞牛授权目录（网关注入的 X-Trim-Userid → fnOS 查询）；
+//  2. 默认主目录：本应用的 shares 目录，即启动时解析出的 renv.Home 与其语义路径
+//     （/var/apps/<AppName>/shares/<AppName>，见 defaultHomeSemantic）。
+//
+// 拿不到授权列表时（非飞牛环境 / m.fnos 不可用 / 请求里没有 uid / 查询失败）的
+// **策略：只保留默认主目录，其余一律拒绝（fail-closed）**。理由：切换主目录是破坏性
+// 操作（migrate 分支会先 RemoveAll(dest/.dsh) 再覆盖拷贝），在拿不到「这个用户被授权
+// 了哪些目录」的时候宁可拒绝也不猜；猜错等于把任意目录交给前端删。默认主目录本身
+// 必须始终可选，否则开发/测试环境里连「切回默认目录」都做不了。
+func (m *AdminMux) homeAllowedRoots(r *http.Request) []string {
+	roots := make([]string, 0, 4)
+	if m.renv != nil && m.renv.Home != "" {
+		roots = append(roots, m.renv.Home)
+	}
+	if s := m.defaultHomeSemantic(); s != "" {
+		roots = append(roots, s)
+	}
+	if m.fnos == nil {
+		return roots
+	}
+	uid := getUIDFromRequest(r)
+	if uid <= 0 {
+		return roots
+	}
+	paths, _, err := m.fnos.GetUserAccessibleFolders(uid)
+	if err != nil {
+		logWarn("[home] cannot resolve authorized folders for uid %d: %v - only the default home dir is allowed", uid, err)
+		return roots
+	}
+	return append(roots, paths...)
+}
+
 // setHomeReq 是“设置为主目录”请求体。
 type setHomeReq struct {
 	Path    string `json:"path"`    // 目标目录的实际系统路径
@@ -846,6 +959,15 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 忙守卫（AGENTS 第 5 节硬约束）：切换主目录会连带做两件危险事 —— 停 dsh
+	// （杀掉进程组，可能带走正在持有 profile 写锁的 `dsh plugin …`）与在 migrate
+	// 分支里 `RemoveAll(dest/.dsh)`。先挡，被拒时不改盘、不重启。
+	// （顺序仍保持「先守卫、后其它校验」：被拒时给出的 409 与历史行为一致。）
+	if err := m.busyGuard("切换 dsh 主目录"); err != nil {
+		writeErr(w, err.Error(), http.StatusConflict)
+		return
+	}
+
 	current := m.dsh.effectiveHome()
 	if current != "" {
 		// 规范化比较，避免符号链接/末尾斜杠造成的误判。
@@ -857,6 +979,18 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 目标必须属于「当前请求用户的授权目录 + 默认主目录」（函数注释与前端文案都写着
+	// 「已授权目录」）。旧实现只校验「存在且是目录」，于是任意绝对目录（/etc、/tmp/x）
+	// 都能被设为 dsh 的 HOME，migrate 分支还会先 RemoveAll(dest/.dsh) 再覆盖拷贝。
+	// 拿不到授权列表时的策略见 homeAllowedRoots（fail-closed，仅默认主目录）。
+	// 放在「同一目录」的短路返回之后：那种情况本就不改盘，无需授权判定。
+	allowedRoots := m.homeAllowedRoots(r)
+	if !homeDirAllowed(dest, allowedRoots) {
+		logWarn("[home] rejected home dir %s: not in the caller's authorized folders", dest)
+		writeErr(w, "目标目录不在当前用户的授权目录中", http.StatusBadRequest)
+		return
+	}
+
 	// 可选：迁移当前主目录的 ~/.dsh 配置至目标目录。
 	if req.Migrate && current != "" {
 		srcDsh := filepath.Join(current, ".dsh")
@@ -865,6 +999,12 @@ func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
 			// 避免残留旧配置或新旧文件混叠。
 			dstDsh := filepath.Join(dest, ".dsh")
 			if _, err := os.Lstat(dstDsh); err == nil {
+				// 删除前再确认一次白名单：这一句删的是目标目录下的整个 .dsh，
+				// 是本次请求里破坏性最强的一步，不能只依赖前面那次判断。
+				if !homeDirAllowed(dest, allowedRoots) {
+					writeErr(w, "目标目录不在当前用户的授权目录中", http.StatusBadRequest)
+					return
+				}
 				if err := os.RemoveAll(dstDsh); err != nil {
 					writeErr(w, "迁移配置失败: 无法移除目标 ~/.dsh: "+err.Error(), http.StatusInternalServerError)
 					return
@@ -1341,6 +1481,18 @@ func (m *AdminMux) dshBusySnapshot() map[string]interface{} {
 // handleDshBusy 返回 dshBusySnapshot（GET /api/dsh/busy）。
 func (m *AdminMux) handleDshBusy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, m.dshBusySnapshot())
+}
+
+// busyGuard 复用更新管理器的「停 dsh / 删 ~/.dsh 之前必须过忙守卫」检查
+// （UpdateManager.replaceBusyGuard，来源是市场 /dsh-market/status 的 busy 与控制台
+// 的插件命令计数）。凡是会停 dsh 或删 ~/.dsh 的控制台入口都要先过它，否则会把正在
+// 持锁的 `dsh plugin …` 连根拔掉并留下陈旧锁（见 AGENTS 第 5 节 gotcha 2）。
+// update 未装配时（部分单测）视为不忙。
+func (m *AdminMux) busyGuard(action string) error {
+	if m.update == nil {
+		return nil
+	}
+	return m.update.replaceBusyGuard(action)
 }
 
 // validUpdateKind 校验更新类型：harness（控制台）/ dsh（服务）/ market（插件市场）。

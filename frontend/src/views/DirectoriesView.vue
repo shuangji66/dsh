@@ -96,6 +96,13 @@ async function loadHomeInfo() {
   }
 }
 
+// 异步的路径转换回调是否仍适用于当前弹窗：期间用户可能关掉弹窗、再点开另一个目录
+// （命中缓存时新目标会同步填好显示路径），此时旧目录的响应必须丢弃 —— 否则会把显示路径
+// 覆盖成旧目录的，而确认提交的仍是新目录（显示与提交不一致）。
+function isCurrentSetHomeTarget(path: string) {
+  return setHomeDialogVisible.value && setHomeTarget.value === path
+}
+
 function onSetHomeClick(path: string) {
   setHomeTarget.value = path
   setHomeConverted.value = convertedPaths.value[path] || ''
@@ -104,9 +111,11 @@ function onSetHomeClick(path: string) {
     api
       .convertPath([path], navigator.language || 'zh-CN')
       .then((res) => {
+        if (!isCurrentSetHomeTarget(path)) return
         setHomeConverted.value = res?.result?.[0]?.semanticPath || ''
       })
       .catch(() => {
+        if (!isCurrentSetHomeTarget(path)) return
         setHomeConverted.value = ''
       })
   }

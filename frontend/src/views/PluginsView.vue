@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePluginsStore } from '@/stores/plugins'
 import { useSettingsStore } from '@/stores/settings'
@@ -122,10 +122,43 @@ async function togglePlugin(p: { name: string; disabled?: boolean }) {
 }
 
 // 点击“重启生效”：与概览页重启按钮一致，先弹二次确认再调用 settings store 的重启逻辑。
+//
+// 「重启生效」就是停 dsh 的入口：插件的安装/卸载在 dsh 进程内持有 profile 写锁，停 dsh 会
+// 把持有者一起带走 —— 安装白做，还留下陈旧锁（之后插件列表与安装会白等 120 秒）。
+// 因此弹窗打开时按需查一次「有没有插件操作在跑」（GET /api/dsh/busy），把代价说清楚；
+// 但**刻意不硬挡**：点它是用户的即时意图。查询不阻塞弹窗（先显示，答案到了再补提示），
+// 查不到就不显示提示。
+type LifecycleBusy = { busy: boolean; source?: 'market' | 'console'; detail?: string }
+const restartBusy = ref<LifecycleBusy | null>(null)
+// 请求代号：用户可能关掉弹窗又马上重开，只接受「当前这次请求」的结果，避免过期结果写回
+let restartBusyReq = 0
+
 function confirmRestart() {
   restartTarget.value = needsRestartPlugin.value
   restartDialogVisible.value = true
+  restartBusy.value = null
+  const req = ++restartBusyReq
+  api
+    .dshBusy()
+    .then((r) => {
+      // 期间用户可能已确认/关闭弹窗：丢弃过期结果
+      if (req === restartBusyReq && restartDialogVisible.value) restartBusy.value = r
+    })
+    .catch(() => {
+      // dsh 不可达等查询失败：不显示提示，也不影响弹窗继续操作
+      if (req === restartBusyReq) restartBusy.value = null
+    })
 }
+
+// 忙碌提示文案：与概览页同一套 i18n 键（按来源区分市场安装 / 控制台插件命令）
+const restartBusyText = computed(() => {
+  const b = restartBusy.value
+  if (!b?.busy) return ''
+  const detail = b.detail?.trim() || ''
+  return b.source === 'console'
+    ? t('lifecycle_busy_console', { detail: detail || 'dsh plugin …' })
+    : t('lifecycle_busy_market', { detail: detail || t('lifecycle_busy_unknown_target') })
+})
 
 async function executeRestart() {
   restarting.value = true
@@ -254,15 +287,28 @@ onMounted(() => {
       </template>
     </div>
 
-    <!-- 重启生效二次确认弹窗（与概览页重启逻辑一致） -->
+    <!-- 重启生效二次确认弹窗（与概览页重启逻辑一致：默认插槽里放原确认文案 +
+         「有插件操作在跑」时的额外风险提示，弹窗结构与样式约定见 AGENTS 第 3 节） -->
     <ConfirmDialog
       v-model:visible="restartDialogVisible"
       :title="t('confirm_plugin_restart_title')"
-      :message="t('confirm_plugin_restart_msg', { name: restartTarget || '' })"
       :confirm-text="t('confirm_ok')"
       :cancel-text="t('confirm_cancel')"
       @confirm="executeRestart()"
-    />
+    >
+      <p
+        class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed whitespace-pre-line"
+        :class="restartBusyText ? 'mb-3' : 'mb-6'"
+      >
+        {{ t('confirm_plugin_restart_msg', { name: restartTarget || '' }) }}
+      </p>
+      <div
+        v-if="restartBusyText"
+        class="mb-6 rounded-lg px-3 py-2 text-xs leading-relaxed bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-[#B45309] dark:text-[#FBBF24]"
+      >
+        {{ restartBusyText }}
+      </div>
+    </ConfirmDialog>
 
     <!-- 卸载插件确认弹窗 -->
     <ConfirmDialog

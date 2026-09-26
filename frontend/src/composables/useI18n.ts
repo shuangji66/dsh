@@ -48,8 +48,10 @@ const zh: Record<string, string> = {
   settings_dsh_port_hint: '停止 dsh 服务后修改',
   settings_proxy_port: '反代监听端口',
   settings_proxy_port_hint: '飞牛入口已切换至网关访问，此设置为外部端口访问；未适配子路径的插件，可通过端口访问使用',
-  settings_proxy_port_invalid: '反代监听端口必须是 1-65535 之间的整数',
-  settings_proxy_port_same: '反代监听端口不能与 dsh 端口相同',
+  // 可配置端口范围与 backend/config.go 的 minListenPort/maxListenPort（1025-65535）一致：
+  // <1025 是特权端口，应用以自身 uid 运行绑不上；参数由调用方注入，避免两处写死数字。
+  settings_port_invalid: '端口必须是 {min}-{max} 之间的整数',
+  settings_port_same: '反代监听端口不能与 dsh 端口相同',
   settings_node_version: 'node 版本',
   settings_node_version_hint: '切换后需重启 dsh 服务生效；Node.js v26 为实验性质，可能遇到未知问题',
   settings_node_version_no26_hint: '可安装 Node.js v26 来切换版本（实验性质，可能存在未知问题）',
@@ -182,6 +184,10 @@ const zh: Record<string, string> = {
   directory_loading: '加载中…',
   directory_empty: '暂无已授权的目录',
   directory_empty_desc: '点击添加按钮授权你的飞牛目录。',
+  // 目录接口失败（HTTP 200 + ok:false，见 stores/directories.ts）
+  directory_load_failed: '加载授权目录失败',
+  directory_convert_failed: '路径转换失败',
+  directory_remove_failed: '移除授权目录失败',
   directory_open: '打开',
   directory_remove: '移除',
   confirm_directory_remove_title: '移除授权目录',
@@ -279,6 +285,8 @@ const zh: Record<string, string> = {
   log_pause_scroll: '暂停自动滚动',
   log_resume_scroll: '恢复自动滚动',
   log_empty: '暂无日志内容',
+  // SSE 连不上、一份快照都没收到：区分「没有日志」与「拉不到日志」
+  log_stream_failed: '无法连接日志流，暂时拉取不到日志内容（将自动重连）',
   log_truncated: '…（日志过长，仅显示末尾）',
   log_no_file: '（未配置日志文件，未设置 HARNESS_LOG_FILE）',
   log_export: '导出',
@@ -445,8 +453,10 @@ const en: Record<string, string> = {
   settings_dsh_port_hint: 'Change after stopping the dsh service',
   settings_proxy_port: 'Reverse proxy port',
   settings_proxy_port_hint: 'The fnOS entry now goes through the gateway, so this setting is for external port access; plugins not adapted to sub-path access can be used through port access',
-  settings_proxy_port_invalid: 'The reverse proxy port must be an integer between 1 and 65535',
-  settings_proxy_port_same: 'The reverse proxy port cannot be the same as the dsh port',
+  // Same port range as minListenPort/maxListenPort in backend/config.go (1025-65535):
+  // <1025 are privileged ports this app (running as its own uid) cannot bind.
+  settings_port_invalid: 'The port must be an integer between {min} and {max}',
+  settings_port_same: 'The reverse proxy port cannot be the same as the dsh port',
   settings_node_version: 'Node version',
   settings_node_version_hint: 'Restart the dsh service after switching. Node.js v26 is experimental and may have unknown issues',
   settings_node_version_no26_hint: 'Node.js v26 can be installed to switch versions (experimental, may have unknown issues)',
@@ -576,6 +586,10 @@ const en: Record<string, string> = {
   directory_loading: 'Loading…',
   directory_empty: 'No authorized directories',
   directory_empty_desc: 'Click Add to authorize your fnOS directory.',
+  // Directory API failure (HTTP 200 + ok:false, see stores/directories.ts)
+  directory_load_failed: 'Failed to load authorized directories',
+  directory_convert_failed: 'Failed to convert path',
+  directory_remove_failed: 'Failed to remove authorized directory',
   directory_open: 'Open',
   directory_remove: 'Remove',
   confirm_directory_remove_title: 'Remove authorized directory',
@@ -652,6 +666,12 @@ const en: Record<string, string> = {
   plugin_toggle_refresh: 'Plugin {name} {action}; refresh the dsh page to apply',
   // Toast shown after enabling a plugin that needs a dsh service restart to take effect
   plugin_toggle_restart: 'Plugin {name} enabled; restart the dsh service to apply',
+  // Inline banner + "Restart to apply" button (same condition as plugin_toggle_restart)
+  plugin_restart_prompt: 'Plugin {name} enabled; restart the dsh service to apply',
+  plugin_restart_apply: 'Restart to apply',
+  plugin_restarting: 'Restarting…',
+  confirm_plugin_restart_title: 'Restart dsh service',
+  confirm_plugin_restart_msg: 'Restart the dsh service so plugin {name} takes effect?',
   plugin_reset_started: 'Reset started — restarting service and patching node-pty…',
   plugin_reset_failed: 'Reset failed',
   confirm_plugin_uninstall_title: 'Uninstall Plugin',
@@ -665,6 +685,8 @@ const en: Record<string, string> = {
   log_pause_scroll: 'Pause auto-scroll',
   log_resume_scroll: 'Resume auto-scroll',
   log_empty: 'No log content',
+  // SSE never connected and no snapshot arrived: distinguishes "no logs" from "cannot fetch logs"
+  log_stream_failed: 'Cannot connect to the log stream — log content is unavailable (will retry automatically)',
   log_truncated: '… (log too long, showing the tail only)',
   log_no_file: '(No log file configured, HARNESS_LOG_FILE not set)',
   log_export: 'Export',

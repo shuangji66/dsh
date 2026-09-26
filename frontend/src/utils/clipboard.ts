@@ -16,6 +16,10 @@ export function copyText(text: string) {
 }
 
 function legacyCopy(text: string) {
+  // 先记住当前焦点。临时 textarea 必须 focus 才能选中，但移除它之后焦点会落到 body：
+  // xterm 只把 keydown 绑在自己的 helper textarea 上，于是 TerminalView 每次框选自动复制
+  // 之后物理键盘就失效，必须再点一下终端。兜底实现因此要把焦点原样还回去。
+  const prev = document.activeElement
   const ta = document.createElement('textarea')
   ta.value = text
   ta.style.position = 'fixed'
@@ -31,4 +35,12 @@ function legacyCopy(text: string) {
     /* 忽略 */
   }
   document.body.removeChild(ta)
+  // 还原焦点：仅当原焦点元素仍在文档里（视图可能已被卸载）才尝试，失败不影响复制结果
+  if (prev instanceof HTMLElement && prev.isConnected) {
+    try {
+      prev.focus()
+    } catch {
+      /* 该元素当前不可聚焦，保持现状 */
+    }
+  }
 }

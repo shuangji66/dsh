@@ -252,7 +252,12 @@ func ensureSetting(lines []string, sectionKey, entryLine string) ([]string, bool
 			if strings.TrimSpace(parts[1]) == entryVal {
 				return lines, false
 			}
-			lines[i] = "  " + entryLine
+			// 必须原样写回 entryLine：调用方传入的 entryLine **已经带 2 格缩进**
+			// （如 "  node-pty: 1.2.0-beta.15"），这里再补两格会让该条目比同区其它
+			// 条目深一级 —— YAML 块映射一旦混排缩进即 ParserError（"mapping values
+			// are not allowed in this context"），pnpm install 会持续失败到手工修
+			// 文件为止。触发条件就是「文件里已有同键但值不同」：升级固定版本时必现。
+			lines[i] = entryLine
 			return lines, true
 		}
 	}

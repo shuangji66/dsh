@@ -335,6 +335,22 @@
     「升级了控制台还是旧界面」——与上面 dsh 插件 bundle 同一个坑。
   内嵌 FS（`//go:embed`）没有可用的修改时间，校验器只能用内容摘要 ETag；`spaPath()` 会把
   无扩展名的 SPA 路由都映射到 `/index.html`，因此前端路由回退也走「不缓存」那条分支。
+- **目录页的宿主桥接必须在「页面加载时」握手（`@trimjs/web-app` 的 60 秒窗口）** ——
+  现象：打开控制台一段时间后再进目录页，「添加授权目录 / 打开」点了毫无反应（不报错、
+  不弹 toast）；关掉应用窗口重开、马上进目录页又正常。成因链：
+  1. 飞牛桌面（宿主）挂载应用 iframe 时建立 postmate 连接，**握手超时写死 60 秒**
+     （宿主前端包 `n1e({ ..., timeout: 60 * 1e3 })`，包在 `/usr/trim/www/assets/index-*.js`）；
+     超时即 `destroy()` 掉自己的 `message` 监听 —— 之后子页再发 SYN 永远没人应答。
+  2. 子页 SDK 的初始化链在宿主无应答时**不会失败**：1.5s 宿主探测 → 5s 扩展宿主探测 →
+     一条**无超时、永不 settle**的兜底连接，且该结果按模块缓存。
+  3. 于是 `sdk.ready()` / `openFileManager()` / `pickUserFile()` 全部永久 pending ——
+     这不抛错，所以既没有 toast 也没有日志，表现就是「按钮没反应」。
+  硬约束：**SDK 单例在 `main.ts` 的 `primeTrimApp()`（`utils/trimApp.ts`）里创建，页面一
+  加载就握手**；视图里不要再 `new TrimApp()`（等视图挂载才握手就晚了）；等待桥接一律走
+  `trimAppReady()`（带超时，超时给用户「关闭并重新打开本应用」的提示）。刷新 iframe 救不回来
+  （宿主侧的监听已经没了），只能回桌面重开应用窗口。
+  排查同类问题：宿主打开文件管理器时会打 `GET /app/token` 与 `/websocket?type=file`，
+  `/usr/trim/nginx/logs/access.log` 里「进了目录页却没有这两条」就是握手已失效的现场。
 
 ---
 

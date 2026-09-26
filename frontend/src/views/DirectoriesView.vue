@@ -3,11 +3,11 @@ import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useDirectoriesStore } from '@/stores/directories'
 import { useSettingsStore } from '@/stores/settings'
-import { TrimApp } from '@trimjs/web-app'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { api, type DshDataBackup } from '@/serverapi'
+import { trimAppReady } from '@/utils/trimApp'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -19,7 +19,9 @@ const { paths, loading, convertedPaths } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
 
-const sdk = new TrimApp()
+// 宿主 SDK（@trimjs/web-app）是 utils/trimApp.ts 里的单例，且在页面加载时（main.ts）
+// 就已开始握手 —— 不能在这里 new：宿主桌面的握手监听只保留 60 秒，等本页挂载再握手，
+// 打开应用一段时间后进来的用户就永远握不上了（详见该文件头注释）。
 
 // 主目录信息（来自后端 settings API 的 runtime）：默认主目录与当前主目录。
 const defaultHomeDir = ref('') // 默认主目录的实际系统路径
@@ -302,8 +304,13 @@ function handleAuthCallback(event: MessageEvent) {
 }
 
 async function openPicker() {
+  // 等宿主桥接就绪；返回 null = 宿主的握手监听已销毁（重开应用窗口才能恢复）
+  const sdk = await trimAppReady()
+  if (!sdk) {
+    toast.show(t('directory_host_bridge_lost'), 'error')
+    return
+  }
   try {
-    await sdk.ready()
     if (sdk.isStandaloneWeb) {
       // 独立 Web 环境（移动端直达/桌面独立窗口）：无宿主桥接，
       // 需打开 OAuth 授权页，结果经 callback.html 回传
@@ -349,6 +356,12 @@ async function openPicker() {
 }
 
 async function openFileManager(path: string) {
+  // 同 openPicker：桥接未就绪时给明确提示，而不是按钮点了没反应
+  const sdk = await trimAppReady()
+  if (!sdk) {
+    toast.show(t('directory_host_bridge_lost'), 'error')
+    return
+  }
   try {
     await sdk.openFileManager(path)
   } catch (err) {

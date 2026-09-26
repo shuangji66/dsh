@@ -194,6 +194,7 @@ const zh: Record<string, string> = {
   directory_pick_ok: '确认授权',
   directory_open_window: '已打开授权窗口，完成选择后将自动刷新',
   directory_open_failed: '打开文件管理器失败: {msg}',
+  directory_host_bridge_lost: '与飞牛桌面的连接已失效，请关闭本应用窗口后重新打开（刷新页面无效）',
   // 默认主目录固定卡片
   directory_current_home: '当前主目录',
   directory_default_home_title: '默认主目录',
@@ -587,6 +588,7 @@ const en: Record<string, string> = {
   directory_pick_ok: 'Confirm authorization',
   directory_open_window: 'Authorization window opened, refreshing after selection',
   directory_open_failed: 'Failed to open file manager: {msg}',
+  directory_host_bridge_lost: 'Connection to the fnOS desktop was lost. Close and reopen this app window (reloading the page does not help).',
   // Default home pinned card
   directory_current_home: 'Current home',
   directory_default_home_title: 'Default home',

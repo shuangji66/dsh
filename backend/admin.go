@@ -328,6 +328,10 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			// node 版本切换选项：列出可用版本及其标识，前端据此显示下拉选项。
 			// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
 			"nodeVersions": m.nodeVersionsInfo(),
+			// 当前 node 版本自身的堆上限（MB，由 v8.getHeapStatistics().heap_size_limit
+			// 折算）。它就是「自动设置」时 dsh 实际拿到的上限，前端在开关打开时用它
+			// 展示，不再展示持久化的手动值。探测不到时为 0，前端显示空。
+			"nodeHeapLimitMB": detectNodeHeapLimitMB(cfg.NodeVersion),
 			// 默认主目录语义路径及其实际系统路径，与当前主目录（dsh 的 HOME）。
 			"defaultHomeSemantic": m.defaultHomeSemantic(),
 			"defaultHomeDir":      m.renv.Home,
@@ -364,11 +368,10 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "登录有效期不能超过 720 小时（30 天）", http.StatusBadRequest)
 		return
 	}
-	// 校验 dsh 内存限制（MB）：必须为正整数，且不超过 65536 MB（64GB）
-	if req.Config.DshMemLimit <= 0 {
-		writeErr(w, "dsh 内存限制必须大于 0 MB", http.StatusBadRequest)
-		return
-	}
+	// 校验 dsh 内存限制（MB）：不超过 65536 MB（64GB）。
+	// 未设置（<=0，例如旧前端缓存提交的空值）不拒绝，按当前 node 版本自身的堆上限
+	// 补齐（与 LoadConfig 的默认值同源），这样「默认值」始终是这台机器上 node 的
+	// 实际上限，而不是某个写死的数字。
 	if req.Config.DshMemLimit > 65536 {
 		writeErr(w, "dsh 内存限制不能超过 65536 MB（64GB）", http.StatusBadRequest)
 		return
@@ -383,6 +386,14 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if req.Config.NodeVersion == "node26" && !node26Available() {
 		logger().Printf("[node] 保存时 node26 不可用，回退到 node24")
 		req.Config.NodeVersion = "node24"
+	}
+	// 内存限制的兜底放在 node 版本确定之后：默认值取决于具体用哪个 node。
+	if req.Config.DshMemLimit <= 0 {
+		req.Config.DshMemLimit = defaultDshMemLimit(0, req.Config.NodeVersion)
+	}
+	if req.Config.DshMemLimit <= 0 {
+		writeErr(w, "dsh 内存限制必须大于 0 MB", http.StatusBadRequest)
+		return
 	}
 	locked := m.dsh.Running()
 	// 校验反代端口：1..65535，且不能与 dsh 端口相同（两者会争抢同一个 TCP 端口）。

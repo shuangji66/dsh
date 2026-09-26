@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv" // 新增导入
+	"strings"
 	"sync"
+	"time"
 )
 
 // AppConfig holds the settings editable from the frontend.
@@ -21,7 +25,10 @@ type AppConfig struct {
 	AuthEnabled  bool   `json:"authEnabled"`
 	Password     string `json:"password,omitempty"`
 	AuthTTLHours int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 4
-	// dsh 进程内存限制（MB），默认 2048；通过 NODE_OPTIONS 生效。
+	// dsh 进程内存限制（MB），通过 NODE_OPTIONS 生效。
+	// 未设置（0，首次启动或旧配置缺字段）时由 detectNodeHeapLimitMB 取当前 node
+	// 自身的堆上限（`v8.getHeapStatistics().heap_size_limit` 折算为 MB）兜底，
+	// 不再写死一个与机器无关的 2048。
 	// DshMemAuto 为 true（默认）时由系统 node 自动分配内存，不传 NODE_OPTIONS。
 	DshMemLimit int  `json:"dshMemLimit"`
 	DshMemAuto  bool `json:"dshMemAuto"`
@@ -159,9 +166,10 @@ func defaultConfig() AppConfig {
 		AuthEnabled:  authEnabled,
 		Password:     os.Getenv("password"),
 		AuthTTLHours: envOrInt("auth_ttl_hours", 4),
-		DshMemLimit:  2048,
-		DshMemAuto:   true,
-		NodeVersion:  "node24",
+		// DshMemLimit 不在此写死：留 0 表示「未设置」，由 LoadConfig 按当前 node
+		// 的实际堆上限补齐（见 detectNodeHeapLimitMB）。
+		DshMemAuto:  true,
+		NodeVersion: "node24",
 	}
 }
 
@@ -246,6 +254,91 @@ func nodeVersionBinPrefix(v string) string {
 	return ""
 }
 
+// --- node 堆上限探测（栈内存默认值 / 「自动设置」展示值） ---
+
+// nodeHeapLimitProbe 打印 node 在没有任何 --max-old-space-size 覆盖时的堆上限（字节）。
+// 等价于 `node -e "console.log(v8.getHeapStatistics().heap_size_limit)"`；
+// 这里写 require('v8') 而不是裸的 v8 全局，兼容更老的 node（裸全局只在 REPL 与较新
+// 版本的 -e 里存在）。
+const nodeHeapLimitProbe = "console.log(require('v8').getHeapStatistics().heap_size_limit)"
+
+var (
+	nodeHeapMu    sync.Mutex
+	nodeHeapCache = map[string]int{} // key: node 版本标识（node24/node26）
+)
+
+// detectNodeHeapLimitMB 探测指定 node 版本的默认堆上限并折算为 MB（四舍五入）。
+// 结果按版本缓存：同一台机器上 node 的默认上限只取决于 node 版本与可用内存，不必
+// 每次拉设置都起一个 node 进程。探测失败（node 不存在 / 输出无法解析 / 超时）返回 0，
+// 由调用方决定回退；失败结果不缓存，留待下次重试。
+func detectNodeHeapLimitMB(nodeVersion string) int {
+	key := normalizeNodeVersion(nodeVersion)
+	nodeHeapMu.Lock()
+	cached, ok := nodeHeapCache[key]
+	nodeHeapMu.Unlock()
+	if ok {
+		return cached
+	}
+	mb := probeNodeHeapLimitMB(key)
+	if mb > 0 {
+		nodeHeapMu.Lock()
+		nodeHeapCache[key] = mb
+		nodeHeapMu.Unlock()
+	}
+	return mb
+}
+
+// probeNodeHeapLimitMB 起一个 node 进程做探测，5 秒超时。
+func probeNodeHeapLimitMB(nodeVersion string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, nodeHeapProbeBin(nodeVersion), "-e", nodeHeapLimitProbe)
+	out, err := cmd.Output()
+	if err != nil {
+		logger().Printf("[node] 探测 %s 默认堆上限失败: %v", nodeVersion, err)
+		return 0
+	}
+	s := strings.TrimSpace(string(out))
+	bytes, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || bytes <= 0 {
+		logger().Printf("[node] 解析 %s 默认堆上限失败: %q", nodeVersion, s)
+		return 0
+	}
+	return bytesToMB(bytes)
+}
+
+// nodeHeapProbeBin 返回探测某个 node 版本堆上限时要执行的二进制。
+// node26 必须用绝对路径指向它自己的 node：exec.Command 的 LookPath 走的是本进程的
+// PATH，光给子进程前置 PATH 是选不到 node26 的（那样探到的还是 node24 的上限）。
+// node24 用 PATH 里的 node，与 dsh 的启动环境一致。
+func nodeHeapProbeBin(nodeVersion string) string {
+	if prefix := nodeVersionBinPrefix(nodeVersion); prefix != "" {
+		return filepath.Join(prefix, "node")
+	}
+	return "node"
+}
+
+// bytesToMB 把字节数折算为 MB（四舍五入）。node 的 heap_size_limit 通常不是整数 MB
+// （如 4344760320 B ≈ 4143.5 MB），取最接近的整数便于展示，也让「关闭自动设置」时
+// 回填的值尽量贴近 node 默认。
+func bytesToMB(b int64) int {
+	const mb = 1 << 20
+	return int((b + mb/2) / mb)
+}
+
+// defaultDshMemLimit 在内存限制未设置（cur <= 0）时返回按 nodeVersion 探测到的 node
+// 堆上限（MB）；已设置则原样返回。探测不到（宿主机没有 node）时同样原样返回 0，
+// 语义是「交给 node 自己决定」，buildEnv 会因此不下发 NODE_OPTIONS。
+func defaultDshMemLimit(cur int, nodeVersion string) int {
+	if cur > 0 {
+		return cur
+	}
+	if mb := detectNodeHeapLimitMB(nodeVersion); mb > 0 {
+		return mb
+	}
+	return cur
+}
+
 // ensureValidNodeVersion 检测当前持久化配置里的 node 版本是否仍可用。
 // 若配置为 node26，但宿主机上 node v26 已被卸载/不存在，则主动回退到 node24
 // 并把持久化配置改写为 node24（自动落盘）。返回 true 表示发生了回退。
@@ -272,6 +365,8 @@ func LoadConfig(renv *RuntimeEnv) AppConfig {
 	if c := loadJSONFile(renv.ConfigFile, &def); c != nil {
 		return *c
 	}
+	// 没有配置文件（首次启动）：内存限制同样按当前 node 的堆上限补齐。
+	def.DshMemLimit = defaultDshMemLimit(def.DshMemLimit, def.NodeVersion)
 	return def
 }
 
@@ -290,13 +385,13 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	if v.AuthTTLHours <= 0 {
 		v.AuthTTLHours = 4
 	}
-	if v.DshMemLimit <= 0 {
-		v.DshMemLimit = 2048
-	}
 	// 旧配置文件可能没有 nodeVersion 字段，回退到默认 node24。
 	if v.NodeVersion == "" {
 		v.NodeVersion = "node24"
 	}
+	// 内存限制缺失/为 0（旧配置没有该字段）时，用当前 node 版本自身的堆上限兜底，
+	// 不再写死 2048 —— 不同 node 版本与不同机器上的默认上限并不相同。
+	v.DshMemLimit = defaultDshMemLimit(v.DshMemLimit, v.NodeVersion)
 	// 旧配置文件（反代端口还来自 PROXY_PORT 环境变量）没有 proxyPort 字段，
 	// 回退到默认 3079 并随下次保存落盘。
 	v.ProxyPort = normalizeProxyPort(v.ProxyPort)

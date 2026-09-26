@@ -13,7 +13,9 @@ export const useSettingsStore = defineStore('settings', () => {
     authEnabled: true,
     password: '',
     authTTLHours: 4,
-    dshMemLimit: 2048,
+    // 0 = 未设置：真实值由后端按当前 node 自身的堆上限补齐（runtime.nodeHeapLimitMB），
+    // 这里不再预置一个写死的 2048。load() 后即被后端下发的配置覆盖。
+    dshMemLimit: 0,
     dshMemAuto: true,
     nodeVersion: 'node24',
     homeDir: '',

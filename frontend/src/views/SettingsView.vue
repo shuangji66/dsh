@@ -125,6 +125,23 @@ function onMemAutoToggle() {
   toast.show(t('saved_mem_restart'), 'info', 5000)
 }
 
+// 栈内存输入框的展示值：
+//  - 「自动设置」打开时，输入框（禁用）展示当前 node 自身的堆上限 —— 后端用
+//    `v8.getHeapStatistics().heap_size_limit` 折算出的 MB 数（runtime.nodeHeapLimitMB），
+//    这才是自动设置实际生效的上限；不再展示持久化的手动值；
+//  - 关闭时展示并编辑持久化的手动值。
+// 写入只发生在关闭状态下（禁用时不会触发 setter），因此展示值不会覆盖手动值。
+// 探测不到（后端返回 0）时显示空，避免让用户以为上限是 0。
+const memLimit = computed<number | string>({
+  get: () =>
+    config.value.dshMemAuto
+      ? (runtime.value?.nodeHeapLimitMB || '')
+      : config.value.dshMemLimit,
+  set: (v) => {
+    config.value.dshMemLimit = Number(v) || 0
+  }
+})
+
 // 浏览器兼容模式：即时保存。反代按该开关决定是否修正引擎兼容判断，
 // 该修正发生在页面加载阶段，因此提示用户刷新页面即可生效（无需重启 dsh）。
 async function onBrowserCompatToggle() {
@@ -231,7 +248,7 @@ async function onAuthToggle() {
           </label>
           <div class="flex items-center gap-2">
             <input
-              v-model.number="config.dshMemLimit"
+              v-model.number="memLimit"
               type="number"
               min="1"
               max="65536"

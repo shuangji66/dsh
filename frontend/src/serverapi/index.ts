@@ -50,6 +50,10 @@ export interface RuntimeInfo {
   proxyPort: number
   // node 版本切换选项（node24 始终可用；node26 仅在宿主机存在时可用）
   nodeVersions?: NodeVersionInfo[]
+  // 当前 node 版本自身的堆上限（MB，由 v8.getHeapStatistics().heap_size_limit 折算）。
+  // 即「自动设置」时 dsh 实际拿到的上限：开关打开时输入框展示它，而不是持久化的手动值。
+  // 后端探测不到时为 0（此时前端显示空）。
+  nodeHeapLimitMB?: number
   // 主目录相关（资源页）：
   defaultHomeSemantic: string // 默认主目录的相对/语义路径，如 /var/apps/Harness/shares/Harness
   defaultHomeDir: string // 默认主目录的实际系统路径
@@ -66,6 +70,8 @@ export interface AppConfig {
   authEnabled: boolean
   password?: string
   authTTLHours: number
+  // node 栈内存限制（MB）。未设置时由后端按当前 node 版本自身的堆上限补齐
+  // （见 runtime.nodeHeapLimitMB），不再写死 2048。
   dshMemLimit: number
   dshMemAuto: boolean
   nodeVersion: string // dsh 启动使用的 node 版本，"node24"/"node26"，默认 "node24"

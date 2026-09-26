@@ -14,6 +14,8 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import QuickCmdsDialog from '@/components/QuickCmdsDialog.vue'
 import QuickCmdEditDialog from '@/components/QuickCmdEditDialog.vue'
 import KeypadBar from '@/components/KeypadBar.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import { icons } from '@/utils/icons'
 
 defineOptions({ name: 'TerminalView' })
 const { t } = useI18n()
@@ -828,38 +830,38 @@ function showToast(msg: string) {
        视口高度（--vv-h）—— 功能键栏紧贴键盘顶边，终端区域随之适配大小；xterm 的
        ResizeObserver 会自动 refit，无需额外处理。 -->
   <div class="terminal-page flex flex-col h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
-    <!-- 工具栏 -->
-    <div
-      class="flex items-center justify-between px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
-      <div class="flex items-center gap-2">
-        <span class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('terminal_title') }}</span>
-      </div>
-      <div class="flex items-center gap-1">
+    <!-- 内缩只给「标题栏 + 终端卡片」这一层：移动端辅助键条保持通栏（它自带 px-2 与顶部分隔线，
+         再套一层页面内边距会把它挤窄、分隔线也缩进，窄屏上键位会被挤压）。 -->
+    <div class="flex flex-col gap-3 p-3 sm:p-4 flex-1 min-h-0">
+      <!-- 工具栏（与其他子页面一致的卡片式标题栏） -->
+      <PageHeader :title="t('terminal_title')" :icon="icons.terminal">
         <button class="g-btn-ghost" :title="t('term_quick_cmds')" @click="openQuickCmds">{{ t('term_quick_cmds') }}</button>
         <button class="g-btn-ghost" :title="t('term_paste')" @click="pasteClipboard">{{ t('term_paste') }}</button>
         <button class="g-btn-ghost" @click="reconnect">{{ t('term_reconnect') }}</button>
         <button class="g-btn-ghost" @click="clearTerminal">{{ t('term_clear') }}</button>
-      </div>
-    </div>
+      </PageHeader>
 
-    <!-- 终端内缩外框：左 / 下各留 10px 与终端同色的呼吸区（视觉上的“页面底框”）。
-         关键：内缩量只能放在这一层的 padding 上，绝不能放到下面 xterm 挂载容器自身
-         的 border / padding 上 —— FitAddon 按挂载点父元素 computedStyle 的 height/width
-         计算行列数，而 Tailwind 全局 box-sizing:border-box 下 Chrome 返回的是 border-box
-         尺寸，边框那 10px 会被误算成可用空间，最后一行便会排进内缩区并被 overflow:hidden
-         裁掉（桌面端表现为“最底部的消息被底框遮挡”）。 -->
-    <div class="flex-1 min-h-0 pl-[10px] pb-[10px] bg-[#faf5e9] dark:bg-[#1A1A1A]">
-      <!-- 终端容器（xterm 挂载点：保持零 border / 零 padding），绑定触摸事件；
-           相对定位以承载复制提示气泡。
-           深色模式：#1A1A1A 底 / #4EC9B0 字；浅色模式：#faf5e9 底 / #1a1814 字（跟随控制台主题） -->
-      <div ref="el" class="term-container overflow-hidden relative bg-[#faf5e9] dark:bg-[#1A1A1A]"
-        @touchstart="onTouchStart" @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd">
-        <!-- 复制/粘贴反馈提示 -->
-        <div
-          class="term-copy-toast absolute bottom-2 right-2 z-20 px-3 py-1.5 rounded-md bg-black/70 dark:bg-white/85 text-white dark:text-black text-xs font-medium shadow-card opacity-0 pointer-events-none transition-opacity duration-200 whitespace-nowrap">
+      <!-- 终端卡片：外框由这张卡片负责（圆角 + 边框 + 撑满剩余高度），终端底色铺满整张卡片。
+           内缩留白（左 / 下各 10px）放在卡片内的 padding 层上，绝不能放到下面 xterm 挂载容器自身
+           的 border / padding 上 —— FitAddon 按挂载点父元素 computedStyle 的 height/width
+           计算行列数，而 Tailwind 全局 box-sizing:border-box 下 Chrome 返回的是 border-box
+           尺寸，边框那 10px 会被误算成可用空间，最后一行便会排进内缩区并被 overflow:hidden
+           裁掉（桌面端表现为“最底部的消息被底框遮挡”）。 -->
+      <div class="g-card flex-1 min-h-0 overflow-hidden">
+        <div class="h-full w-full pl-[10px] pb-[10px] bg-[#faf5e9] dark:bg-[#1A1A1A]">
+          <!-- 终端容器（xterm 挂载点：保持零 border / 零 padding），绑定触摸事件；
+               相对定位以承载复制提示气泡。
+               深色模式：#1A1A1A 底 / #4EC9B0 字；浅色模式：#faf5e9 底 / #1a1814 字（跟随控制台主题） -->
+          <div ref="el" class="term-container overflow-hidden relative bg-[#faf5e9] dark:bg-[#1A1A1A]"
+            @touchstart="onTouchStart" @touchmove="onTouchMove" @touchend="onTouchEnd" @touchcancel="onTouchEnd">
+            <!-- 复制/粘贴反馈提示 -->
+            <div
+              class="term-copy-toast absolute bottom-2 right-2 z-20 px-3 py-1.5 rounded-md bg-black/70 dark:bg-white/85 text-white dark:text-black text-xs font-medium shadow-card opacity-0 pointer-events-none transition-opacity duration-200 whitespace-nowrap">
+            </div>
+          </div>
         </div>
       </div>
-    </div>
+      </div>
 
     <!-- 移动端辅助键条（两页）：显隐由 KeypadBar 内部的 useMobileLayout 判定（触屏或窄视口），
          **不能**用 md:hidden —— iPad 宽度 ≥768px 会被宽度断点判成桌面而丢掉整条键条；

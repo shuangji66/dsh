@@ -9,6 +9,9 @@ import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import UpdateSection from '@/components/UpdateSection.vue'
+import AccessCard from '@/components/AccessCard.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import { icons } from '@/utils/icons'
 
 defineOptions({ name: 'OverviewView' })
 
@@ -36,6 +39,10 @@ const fnosEntry = computed(() => {
 const visitors = ref<Visitor[]>([])
 const visitorsLoading = ref(false)
 const deleting = ref<string | null>(null)
+
+// dsh 是否在运行：状态未知（status 尚未拉到）时按「运行中」渲染，与旧版按钮逻辑一致
+// （旧版只在 running === false 时显示「启动」）。
+const running = computed(() => status.value?.running !== false)
 
 // “关于”弹窗
 const aboutVisible = ref(false)
@@ -222,46 +229,63 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-3xl mx-auto">
-    <!-- 页头 -->
-    <header class="flex items-center justify-between mb-8">
-      <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('overview_title') }}</p>
-      <!-- 关于按钮（右上角） -->
-      <button class="g-btn-secondary !h-9 !px-4 !text-sm flex-shrink-0" @click="openAbout()">{{ t('about') }}</button>
-    </header>
+  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-6xl mx-auto">
+    <!-- 页头（图标 + 标题 + 右侧操作，统一卡片式标题栏） -->
+    <PageHeader class="mb-6" :title="t('overview_title')" :icon="icons.overview">
+      <button class="g-btn-secondary !h-9 !px-4 !text-sm" @click="openAbout()">{{ t('about') }}</button>
+    </PageHeader>
 
-    <!-- dsh 生命周期 -->
-    <section class="g-card g-card-hover p-6 mb-6">
-      <div class="flex items-center justify-between gap-3 mb-2">
-        <h2 class="font-display text-lg font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-      </div>
-      <div class="flex items-center justify-between gap-3 flex-wrap mt-4">
-        <div class="flex gap-3">
-          <button v-if="status?.running === false" class="g-btn-primary bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
-          <button v-else class="g-btn-danger" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
-          <button class="g-btn-warning" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
+    <!-- 三卡片自适应分栏：dsh 信息与启停 / 三个版本 / 快捷访问。
+         列数由容器宽度自动决定（见 style.css 的 .g-card-grid），窄屏自动降为单列。 -->
+    <div class="g-card-grid g-fade-in">
+      <!-- ① dsh 服务信息与启停 -->
+      <section class="g-card g-card-hover p-5 flex flex-col">
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
+          <!-- 运行状态标记 -->
+          <span
+            class="g-status flex-shrink-0"
+            :class="running
+              ? 'bg-success/10 text-success'
+              : 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'"
+          >
+            <span class="w-1.5 h-1.5 rounded-full" :class="running ? 'bg-success' : 'bg-ink-faint'"></span>
+            {{ running ? t('status_running') : t('status_stopped') }}
+          </span>
         </div>
-        <!-- dsh 进程资源使用情况（CPU / 内存），与操作按钮同行 -->
-        <div class="flex items-center gap-5">
-          <div class="text-right">
-            <div class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('cpu_usage') }}</div>
-            <div class="text-sm font-semibold font-mono" :class="cpuColor(status?.cpuPercent)">{{ fmtCpu(status?.cpuPercent) }}</div>
+        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('overview_dsh_desc') }}</p>
+
+        <!-- 进程资源占用：CPU / 内存两个等宽小面板 -->
+        <div class="grid grid-cols-2 gap-3 mb-4">
+          <div class="rounded-lg bg-black/[0.03] dark:bg-white/[0.05] px-3 py-2.5">
+            <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('cpu_usage') }}</div>
+            <div class="font-mono text-sm font-semibold" :class="cpuColor(status?.cpuPercent)">{{ fmtCpu(status?.cpuPercent) }}</div>
           </div>
-          <div class="text-right">
-            <div class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('mem_usage') }}</div>
-            <div class="text-sm font-semibold font-mono" :class="memColor(status?.memoryMB)">{{ fmtMem(status?.memoryMB) }}</div>
+          <div class="rounded-lg bg-black/[0.03] dark:bg-white/[0.05] px-3 py-2.5">
+            <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('mem_usage') }}</div>
+            <div class="font-mono text-sm font-semibold" :class="memColor(status?.memoryMB)">{{ fmtMem(status?.memoryMB) }}</div>
           </div>
         </div>
-      </div>
 
-      <!-- 自我更新：harness 控制台版本 + dsh 服务版本 -->
-      <UpdateSection :access-urls="store.config.accessUrls || []" :fnos-entry="fnosEntry" />
-    </section>
+        <!-- 启停操作 -->
+        <div class="flex flex-wrap gap-2 mt-auto">
+          <button v-if="!running" class="g-btn-primary !h-9 !px-4 !text-sm bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
+          <button v-else class="g-btn-danger !h-9 !px-4 !text-sm" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
+          <button class="g-btn-warning !h-9 !px-4 !text-sm" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
+        </div>
+      </section>
 
-    <!-- 登录列表 -->
-    <section class="g-card g-card-hover p-6 mb-6">
+      <!-- ② 三个版本：harness 控制台 / dsh 服务 / 插件市场 -->
+      <UpdateSection />
+
+      <!-- ③ 快捷访问 -->
+      <AccessCard :access-urls="store.config.accessUrls || []" :fnos-entry="fnosEntry" />
+    </div>
+
+    <!-- 登录列表：单独占一行（不参与上面的自适应分栏） -->
+    <section class="g-card g-card-hover p-5 sm:p-6 mt-6">
       <div class="flex items-center justify-between mb-2">
-        <h2 class="font-display text-lg font-semibold text-ink dark:text-white">{{ t('login_list') }}</h2>
+        <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('login_list') }}</h2>
       </div>
       <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-5">{{ t('login_list_desc') }}</p>
 

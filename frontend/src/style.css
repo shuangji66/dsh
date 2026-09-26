@@ -206,6 +206,25 @@ html, body {
   }
 }
 
+/* ===== 卡片入场动画 =====
+   整块内容（列表刷新、切换子页面）淡入 + 轻微上移，避免逐项动画造成的闪烁。
+   只作用于容器，不作用于单个卡片，列表数据刷新时不会重放。 */
+@keyframes g-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .g-fade-in {
+    animation: none;
+  }
+}
+
 /* ===== 可复用组件类 ===== */
 @layer components {
   /* 卡片：白色表面、1px 细边框、12px 圆角、悬浮上移 + 轻投影 */
@@ -216,6 +235,28 @@ html, body {
   .g-card-hover:hover {
     transform: translateY(-2px);
     box-shadow: 0 8px 30px rgba(0,0,0,0.08);
+  }
+
+  /* 自适应卡片栅格（概览 / 设置 / 目录 / 插件页共用）：
+     `auto-fit` 按容器可用宽度自动决定列数，每列最小 19rem（≈304px），容器变宽就自动
+     加列、变窄就自动减列，无需为每个页面写一串断点。下限写成 `min(100%, 19rem)`：
+     容器本身比 19rem 还窄时（手机 + 内边距）用容器宽度兜底，不会横向溢出。
+     子项默认 stretch：同一行的卡片等高（想要内容高度、上下不齐时改用 items-start）；
+     卡内可用 `flex flex-col` + `mt-auto` 把操作行压到卡片底部，整行对齐。 */
+  .g-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+    gap: 1rem;
+  }
+
+  /* 入场动画容器：配合上面的 @keyframes，统一时长与缓动 */
+  .g-fade-in {
+    animation: g-fade-in 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .g-fade-in {
+      animation: none;
+    }
   }
 
   /* 主按钮：indigo 填充、白字、6px 圆角、悬浮辉光 + 上移 1px */

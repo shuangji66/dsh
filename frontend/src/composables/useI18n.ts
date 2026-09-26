@@ -67,6 +67,11 @@ const zh: Record<string, string> = {
   settings_browser_compat_saved: '已保存。刷新页面即可生效（iPhone 的模型菜单即刻生效）；若此前访问过，首次生效可能还需清除浏览器缓存或强制刷新（Ctrl+Shift+R）',
   settings_show_password: '显示密码',
   settings_hide_password: '隐藏密码',
+  // 设置页卡片标题（六个卡片：代理 / 端口与兼容 / node 版本与内存 / 登录鉴权 / 快捷访问 / 控制台设置）
+  settings_card_proxy: '代理',
+  settings_card_port: '端口与兼容',
+  settings_card_node: 'node 版本与内存',
+  settings_card_auth: '登录鉴权',
   // 控制台设置
   console_title: '控制台设置',
   console_theme: '主题',
@@ -125,6 +130,10 @@ const zh: Record<string, string> = {
   status_stopped: '已停止',
   cpu_usage: 'CPU 使用率',
   mem_usage: '内存占用',
+  // 概览页卡片标题（dsh 信息与启停 / 三个版本 / 快捷访问）
+  overview_dsh_desc: '进程状态与资源占用',
+  overview_versions: '版本',
+  overview_versions_hint: '点击版本号查看更新详情',
   login_list: '登录列表',
   login_list_desc: '注销后需重新登录',
   visitor_gateway: '网关访问',
@@ -223,6 +232,8 @@ const zh: Record<string, string> = {
   // 启停开关（cordis.patch.yml 补丁层机制）
   plugin_enable: '启用',
   plugin_disable: '停用',
+  plugin_status_enabled: '已启用',
+  plugin_status_disabled: '已停用',
   plugin_toggling: '切换中…',
   plugin_toggle_failed: '切换失败',
   // 切换成功后提示刷新 dsh 页面
@@ -435,6 +446,11 @@ const en: Record<string, string> = {
   settings_browser_compat_saved: 'Saved. Reload to apply (the iPhone model menu applies immediately); if you have used it before, the first time may also need clearing the browser cache or a hard reload (Ctrl+Shift+R).',
   settings_show_password: 'Show password',
   settings_hide_password: 'Hide password',
+  // Settings page card titles (proxy / ports & compatibility / node version & memory / auth / quick access / console)
+  settings_card_proxy: 'Proxy',
+  settings_card_port: 'Ports & compatibility',
+  settings_card_node: 'Node version & memory',
+  settings_card_auth: 'Login authentication',
   console_title: 'Console Settings',
   console_theme: 'Theme',
   console_language: 'Language',
@@ -491,6 +507,10 @@ const en: Record<string, string> = {
   status_stopped: 'Stopped',
   cpu_usage: 'CPU usage',
   mem_usage: 'Memory',
+  // Overview page card titles (dsh info & lifecycle / versions / quick access)
+  overview_dsh_desc: 'Process state and resource usage',
+  overview_versions: 'Versions',
+  overview_versions_hint: 'Click a version to see update details',
   login_list: 'Login list',
   login_list_desc: 'Log out to re-authenticate',
   visitor_gateway: 'Gateway access',
@@ -589,6 +609,8 @@ const en: Record<string, string> = {
   // Enable/disable toggle (cordis.patch.yml patch-layer mechanism)
   plugin_enable: 'Enable',
   plugin_disable: 'Disable',
+  plugin_status_enabled: 'Enabled',
+  plugin_status_disabled: 'Disabled',
   plugin_toggling: 'Toggling…',
   plugin_toggle_failed: 'Toggle failed',
   // Toast shown after a toggle prompting the user to refresh the dsh page

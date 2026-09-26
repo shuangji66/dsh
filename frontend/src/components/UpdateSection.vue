@@ -7,11 +7,10 @@ import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import MarkdownText from '@/components/MarkdownText.vue'
 
-// 概览页传入：dsh 访问地址列表（显示在版本号下方）
-// fnosEntry 是固定在第一行的「飞牛入口」（当前访问环境下经网关访问 dsh 的地址），
-// 由概览页换算后传入，不参与用户配置。
-const props = defineProps<{ accessUrls?: string[]; fnosEntry?: string }>()
-
+// 概览页「版本」卡片：三个版本（harness 控制台 / dsh 服务 / 插件市场）的当前版本、
+// 检查更新入口与更新弹窗、dsh 服务的备份回滚，全部收敛在本组件内。
+// 快捷访问地址原先也渲染在这里，现已拆成独立的 AccessCard（概览页三卡片分栏），
+// 因此本组件不再需要 accessUrls / fnosEntry 入参。
 const toast = useToastStore()
 const { t } = useI18n()
 
@@ -667,14 +666,6 @@ async function doDeleteBackup() {
   }
 }
 
-// 打开 dsh 访问地址（新标签页）
-function openAccessUrl(url: string) {
-  const u = url.trim()
-  if (!u) return
-  const final = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u) ? u : 'http://' + u
-  window.open(final, '_blank', 'noopener')
-}
-
 onMounted(() => {
   // 拉取一次后端状态快照作为初始值
   api.updateStatus().then(merge).catch(() => {})
@@ -700,12 +691,15 @@ watch(
 )
 </script>
 <template>
-  <div>
-    <!-- 版本信息行 -->
-    <div class="mt-4 border-t border-line dark:border-[#2A2A32] pt-4">
+  <!-- 概览页「版本」卡片：三行版本 + 各自检查更新入口；更新/回滚弹窗挂在卡片内（Teleport 到 body） -->
+  <section class="g-card g-card-hover p-5 flex flex-col">
+    <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('overview_versions') }}</h2>
+    <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-3">{{ t('overview_versions_hint') }}</p>
+
+    <div class="divide-y divide-line dark:divide-[#2A2A32]">
       <!-- harness 控制台版本 -->
-      <div class="flex items-center justify-between gap-3 py-2">
-        <span class="text-xs text-ink-soft dark:text-[#A6A6AD] whitespace-nowrap">{{ t('update_harness_ver') }}</span>
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
+        <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_harness_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
           <!-- 版本号右对齐 + 常驻下划线：点击打开更新弹窗 -->
           <button class="relative font-mono text-sm font-semibold text-ink dark:text-white underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50" @click="openDialog('harness')">
@@ -723,8 +717,8 @@ watch(
       </div>
 
       <!-- dsh 服务版本 -->
-      <div class="flex items-center justify-between gap-3 py-2">
-        <span class="text-xs text-ink-soft dark:text-[#A6A6AD] whitespace-nowrap">{{ t('update_dsh_ver') }}</span>
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
+        <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_dsh_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
           <!-- 有备份时显示回滚图标（版本号左侧） -->
           <button
@@ -748,8 +742,8 @@ watch(
       </div>
 
       <!-- 插件市场版本（dshmarket）：server 包自带的那份，控制台可就地更新 -->
-      <div class="flex items-center justify-between gap-3 py-2">
-        <span class="text-xs text-ink-soft dark:text-[#A6A6AD] whitespace-nowrap">{{ t('update_market_ver') }}</span>
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
+        <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_market_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
           <!-- 版本号：可更新时点击打开弹窗；由 profile 提供/找不到时置灰并说明原因 -->
           <button
@@ -770,32 +764,6 @@ watch(
             </svg>
           </button>
         </div>
-      </div>
-    </div>
-
-    <!-- dsh 快捷访问地址列表（显示在版本号下方，带分隔线）：整行是描边按钮，点击即打开。
-         第一行固定为「飞牛入口」（当前访问环境下经飞牛网关访问 dsh 的地址），其后是用户配置的地址。 -->
-    <div v-if="fnosEntry || (accessUrls && accessUrls.length)" class="mt-3 border-t border-line dark:border-[#2A2A32] pt-3">
-      <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mb-2">{{ t('access_urls_overview_title') }}</div>
-      <div class="flex flex-col gap-1.5">
-        <!-- 固定项：只显示「飞牛入口」名称，不展示具体地址（地址在 title 里可悬停查看） -->
-        <button
-          v-if="fnosEntry"
-          class="w-full text-left px-3 py-2 rounded-lg bg-transparent border border-ink/15 dark:border-white/40
-            text-xs font-medium text-ink dark:text-white
-            hover:bg-black/5 dark:hover:bg-white/10 transition-colors duration-150"
-          :title="fnosEntry"
-          @click="openAccessUrl(fnosEntry)"
-        >{{ t('access_urls_fnos_entry') }}</button>
-        <button
-          v-for="(url, i) in accessUrls"
-          :key="i"
-          class="w-full text-left px-3 py-2 rounded-lg bg-transparent border border-ink/15 dark:border-white/40
-            text-xs font-mono truncate text-ink dark:text-white
-            hover:bg-black/5 dark:hover:bg-white/10 transition-colors duration-150"
-          :title="url"
-          @click="openAccessUrl(url)"
-        >{{ url }}</button>
       </div>
     </div>
 
@@ -1157,5 +1125,5 @@ watch(
         </div>
       </Transition>
     </Teleport>
-  </div>
+  </section>
 </template>

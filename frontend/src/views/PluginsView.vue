@@ -8,6 +8,8 @@ import { useI18n } from '@/composables/useI18n'
 import { api } from '@/serverapi'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
+import PageHeader from '@/components/PageHeader.vue'
+import { icons } from '@/utils/icons'
 
 const store = usePluginsStore()
 const { plugins, pluginsLoading } = storeToRefs(store)
@@ -140,67 +142,67 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-3xl mx-auto">
-    <header class="flex items-center justify-between mb-8">
-      <div>
-        <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('nav_plugins') }}</p>
-      </div>
-      <div class="flex items-center gap-2">
-        <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="store.loadPlugins(true)">
-          {{ t('plugin_refresh') }}
-        </button>
-        <button class="g-btn-danger h-8 px-3 text-xs" :disabled="resetting || pluginsLoading" @click="onResetClick">
-          {{ t('plugin_reset') }}
-        </button>
-      </div>
-    </header>
+  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-6xl mx-auto">
+    <!-- 页头（图标 + 标题 + 刷新/重置按钮） -->
+    <PageHeader class="mb-6" :title="t('nav_plugins')" :icon="icons.plugin">
+      <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="store.loadPlugins(true)">
+        {{ t('plugin_refresh') }}
+      </button>
+      <button class="g-btn-danger h-8 px-3 text-xs" :disabled="resetting || pluginsLoading" @click="onResetClick">
+        {{ t('plugin_reset') }}
+      </button>
+    </PageHeader>
 
-    <section class="g-card g-card-hover p-6">
-      <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-5">{{ t('plugin_desc') }}</p>
+    <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-4">{{ t('plugin_desc') }}</p>
 
-      <!-- 启用需重启的插件后的内联提示条（右对齐的重启生效按钮） -->
-      <div
-        v-if="needsRestartPlugin"
-        class="flex items-center justify-between gap-3 mb-4 px-3 py-2.5 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10"
+    <!-- 启用需重启的插件后的内联提示条（右对齐的重启生效按钮） -->
+    <div
+      v-if="needsRestartPlugin"
+      class="flex items-center justify-between gap-3 mb-4 px-3 py-2.5 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10"
+    >
+      <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">
+        {{ t('plugin_restart_prompt', { name: needsRestartPlugin }) }}
+      </span>
+      <button
+        class="g-btn-warning h-8 px-3 text-xs flex-shrink-0"
+        :disabled="restarting || resetting"
+        @click="confirmRestart"
       >
-        <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">
-          {{ t('plugin_restart_prompt', { name: needsRestartPlugin }) }}
-        </span>
-        <button
-          class="g-btn-warning h-8 px-3 text-xs flex-shrink-0"
-          :disabled="restarting || resetting"
-          @click="confirmRestart"
-        >
-          {{ restarting ? t('plugin_restarting') : t('plugin_restart_apply') }}
-        </button>
-      </div>
+        {{ restarting ? t('plugin_restarting') : t('plugin_restart_apply') }}
+      </button>
+    </div>
 
-      <div v-if="pluginsLoading" class="flex items-center justify-center py-8 text-ink-faint text-sm">
+    <!-- 每个插件一张卡片，按容器宽度自适应分栏（.g-card-grid）；
+         加载/空态占满整行。 -->
+    <div class="g-card-grid g-fade-in">
+      <div v-if="pluginsLoading" class="col-span-full flex items-center justify-center py-8 text-ink-faint text-sm">
         <span class="w-4 h-4 rounded-full border-2 border-line border-t-brand animate-spin mr-2"></span>
         {{ t('plugin_loading') }}
       </div>
 
-      <div v-else-if="plugins.length === 0" class="py-8 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
+      <div v-else-if="plugins.length === 0" class="col-span-full py-8 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
         {{ t('plugin_empty') }}
       </div>
 
-      <ul v-else class="divide-y divide-line dark:divide-[#2A2A32]">
-        <li v-for="p in plugins" :key="p.name" class="py-3 flex items-center justify-between gap-3">
-          <div class="min-w-0 flex-1">
+      <template v-else>
+        <div v-for="p in plugins" :key="p.name" class="g-card g-card-hover p-4 flex flex-col">
+          <div class="min-w-0">
             <!-- 过长的插件名自动向左循环滚动显示 -->
             <div class="font-mono text-sm font-medium text-ink dark:text-white">
               <MarqueeText :text="p.name" />
             </div>
-            <div class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ p.version }}</div>
+            <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ p.version }}</div>
           </div>
-          <div class="flex items-center gap-3 flex-shrink-0">
-            <!-- 启停开关（disabled 状态来自 cordis.patch.yml），仅以开关状态表示 -->
+
+          <!-- 第二栏：启停开关 + 状态标记（紧邻开关右侧，disabled 状态来自 cordis.patch.yml）
+               + 卸载按钮（ml-auto 推到最右） -->
+          <div class="flex flex-wrap items-center gap-3 mt-auto pt-3 border-t border-line dark:border-[#2A2A32]">
             <button
               type="button"
               class="inline-flex items-center select-none"
               :disabled="togglingPlugin === p.name || resetting"
               :aria-label="p.disabled ? t('plugin_disable') : t('plugin_enable')"
-              :title="p.disabled ? t('plugin_disable') : t('plugin_enable')"
+              :title="p.disabled ? t('plugin_enable') : t('plugin_disable')"
               @click="togglePlugin(p)"
             >
               <span
@@ -213,17 +215,26 @@ onMounted(() => {
                 ></span>
               </span>
             </button>
+            <span
+              class="g-status"
+              :class="p.disabled
+                ? 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'
+                : 'bg-success/10 text-success'"
+            >
+              <span class="w-1.5 h-1.5 rounded-full" :class="p.disabled ? 'bg-ink-faint' : 'bg-success'"></span>
+              {{ p.disabled ? t('plugin_status_disabled') : t('plugin_status_enabled') }}
+            </span>
             <button
-              class="g-btn-danger h-8 px-3 text-xs"
+              class="g-btn-danger h-8 px-3 text-xs ml-auto"
               :disabled="removingPlugin === p.name || resetting"
               @click="onUninstallClick(p.name)"
             >
               {{ removingPlugin === p.name ? t('plugin_removing') : t('plugin_uninstall') }}
             </button>
           </div>
-        </li>
-      </ul>
-    </section>
+        </div>
+      </template>
+    </div>
 
     <!-- 重启生效二次确认弹窗（与概览页重启逻辑一致） -->
     <ConfirmDialog

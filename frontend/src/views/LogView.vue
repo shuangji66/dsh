@@ -4,6 +4,8 @@ import { useToastStore } from '@/stores/toast'
 import { sseUrl } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
+import PageHeader from '@/components/PageHeader.vue'
+import { icons } from '@/utils/icons'
 
 const toast = useToastStore()
 const { t } = useI18n()
@@ -110,22 +112,21 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="py-8 sm:py-12 px-4 sm:px-8 max-w-5xl mx-auto">
-    <header class="flex items-center justify-between gap-4 mb-6 flex-wrap">
-      <div>
-        <p class="text-ink-faint dark:text-[#8A8A92] text-sm font-medium uppercase tracking-widest">{{ t('logs_title') }}</p>
-      </div>
-      <div class="flex items-center gap-2">
-        <button class="g-btn-secondary !h-9" @click="exportLog">{{ t('log_export') }}</button>
-      </div>
-    </header>
+  <!-- 整页铺满：标题栏与日志卡片各占一段，日志卡片 flex-1 撑满剩余高度（内部 pre 自己滚动）。
+       高度式子与终端页一致：移动端扣掉底部导航占用高度（含 iPhone 安全区），桌面端占满视口；
+       与 main 的 padding-bottom 相加正好等于一个视口，因此本页自身不产生滚动条。 -->
+  <div class="log-page flex flex-col gap-4 px-4 sm:px-8 py-4 sm:py-6 max-w-6xl mx-auto w-full h-[calc(100dvh_-_var(--bottom-nav-h))] md:h-[100dvh]">
+    <!-- 页头（图标 + 标题 + 导出日志） -->
+    <PageHeader :title="t('logs_title')" :icon="icons.logs">
+      <button class="g-btn-secondary !h-9" @click="exportLog">{{ t('log_export') }}</button>
+    </PageHeader>
 
     <div v-if="error && !logContent" class="g-card p-8 text-center text-ink-soft dark:text-[#A6A6AD] text-sm">
       {{ error }}
     </div>
 
-    <div v-else class="g-card overflow-hidden">
-      <div class="flex items-center justify-between gap-3 px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32]">
+    <div v-else class="g-card flex-1 min-h-0 flex flex-col overflow-hidden">
+      <div class="flex items-center justify-between gap-3 px-4 py-2.5 bg-surface dark:bg-[#111115] border-b border-line dark:border-[#2A2A32] shrink-0">
         <span class="font-mono text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ logPath || t('log_no_file') }}</span>
         <button
           @click="stickToBottom = !stickToBottom"
@@ -139,7 +140,7 @@ onMounted(() => {
       <pre
         ref="el"
         @scroll="onScroll"
-        class="h-[62vh] overflow-auto p-4 bg-[#0f1115] text-[#d6dce4] text-xs leading-5 font-mono whitespace-pre-wrap break-all m-0"
+        class="flex-1 min-h-0 overflow-auto p-4 bg-[#0f1115] text-[#d6dce4] text-xs leading-5 font-mono whitespace-pre-wrap break-all m-0"
       ><span v-if="!logLines.lines.length">{{ t('log_empty') }}</span><template v-else><span v-if="logLines.truncated" class="block text-[#fbbf24]">{{ t('log_truncated') }}</span><span v-for="(l, i) in logLines.lines" :key="i" :class="[l.cls, 'block']">{{ l.text }}</span></template></pre>
     </div>
   </div>

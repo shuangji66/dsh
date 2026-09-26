@@ -66,7 +66,12 @@
   `/`、`/api`、`/plugins`；其 0.1.7-alpha.1 起前端全走文档相对路径，靠
   `<base href="./">` 自动拼出 `<prefix>/api`）。挂载换算集中在 `proxyMount`
   （`strip`/`join`/`dir`/`joinURI`）。
-- `terminal.go` — WebSocket + `creack/pty` 的交互式 bash。
+- `terminal.go` — WebSocket + `creack/pty` 的交互式 bash。前端连 `/terminal`（`?id=` 为空
+  则新建，非空则挂载既有会话：回放历史文件 + `\x1b]ready\x07` 后进入实时流），浏览器断开
+  **只解挂载不杀会话**（会话继续运行并写历史临时文件）。**一个会话同时只有一个操作端
+  （单挂载点）**：`Session.attach` 换主并返回被顶掉的旧连接，handler 用 `kickDetached`
+  通知旧端（`\x1b]detached\x07` + close 4001）；被顶掉端的输入 / 尺寸请求在服务端丢弃
+  （`writeInput` / `resize` 走 `isOwner`，非操作端返回 `errNotOwner`，上层静默忽略）。
 - `update.go` — 更新 harness / dsh 服务与插件市场：版本检测、下载、备份与回滚；
   `harnessVersion` 由 `-ldflags -X` 注入。下载策略按类型分开（`downloadPlanFor`）：
   发布资产（harness/dsh）走「代理+直连各 2 次 + HTTP Range 断点续传 + 暂停/取消」，
@@ -88,6 +93,13 @@
   记录；旧 `/directory` 等路径做 302 重定向。
 - 状态用 **Pinia**（`stores/`）；主题 / i18n / 偏好用 `composables/`。
 - 终端视图被 `<KeepAlive>` 缓存，切换标签不销毁会话。
+- `views/TerminalView.vue` + `components/KeypadBar.vue` — Web 终端页：xterm + `/terminal`
+  WebSocket；**单挂载点**（被其他设备接管时进 `detached`：写提示行 + toast，
+  **不自动重连**，点「重连」= 显式夺回，见 `DETACHED_PAYLOAD` / `WS_CLOSE_DETACHED`）；
+  移动端底部辅助键条 `KeypadBar`（两页：功能键/方向键/常用符号 + 常见标点；Shift 是
+  **上档锁定**，见其 `SHIFT_MAP` / `SHIFT_CURSOR`；`@key` / `@toggle` 交由本页发送与
+  切换修饰键，方向键长按连发）。`composables/useMobileLayout.ts`（触屏或窄视口 /
+  `useWideLayout` 平板档）与 `composables/useKeypadPage.ts`（模块级共享的当前页）。
 - i18n（`useI18n.ts`）只存 localStorage，不随设置持久化到后端。
 
 ---
@@ -115,6 +127,15 @@
    `logging.go` 的重复抑制，**不要每次调用都刷一行**。dsh 子进程的输出必须原样透传，
    不要加前缀或改写格式（控制台靠「无 `[Harness]` 前缀」把它识别为黄色 dsh 输出）。
 8. **保持双语注释习惯** —— 现有代码中文注释占多数，新增注释建议保持项目既有风格。
+9. **一个终端会话同时只有一个操作端（单挂载点，语义不可回归）** —— 后端 `Session.conn`
+   就是唯一挂载点，`attach` 换主并返回旧连接，handler 用 `kickDetached` 通知旧端
+   （`\x1b]detached\x07` + close 4001）；被顶掉端的输入 / 尺寸在服务端丢弃
+   （`errNotOwner`）。前端收到后进 `detached` 状态（提示 + **不自动重连**，否则两端会
+   互相顶号），点「重连」= 显式夺回。不要改成「多端同时挂载」，也不要给 detached 加自动重连。
+10. **终端辅助键条的显隐不能按宽度断点** —— `md:`（768px）只表示「屏幕宽」，iPad 的 CSS
+   宽度是 768/834/1024px，会被判成桌面而丢掉整条辅助键（触屏上再没有 ESC/Tab/Ctrl/Alt/
+   方向键）。一律走 `composables/useMobileLayout.ts`（触屏 **或** 窄视口），**不要写回
+   `md:hidden`**；「平板档（两页并排）」用同文件的 `useWideLayout()`（就是 md 断点，别另发明数值）。
 
 ---
 
@@ -235,6 +256,26 @@
   （上面这段是最小可用版本：分片没齐时解码会抛错，跳过即可；需要严格版本时按「idx==1 起新组、
   后续 idx 递增补齐」重组。）**排查结论要落在「事件是否到达目标」与「目标是否还在文档里」两问上**，
   不要只看有没有发出请求。
+- **终端辅助键条：显隐按「触屏 or 窄视口」，两页靠按钮切换（不做滑动），Shift 是上档锁定** ——
+  iPad 的 CSS 宽度 ≥768px，用 `md:hidden` 会整条丢掉键条（触屏上就没有 ESC/Tab/Ctrl/Alt/方向键），
+  故显隐一律走 `useMobileLayout()`；平板档（`useWideLayout()`，≥768px）**两页并排**显示、
+  不显示切页按钮。手机档单页：第一页只在**右侧**显示「›」、第二页只在**左侧**显示「‹」
+  （两侧不同时出现，结构上不存在循环、不支持滑动切页），`useKeypadPage().step(±1)` 夹取不循环，
+  页状态是**模块级共享**的（切页面/切视图再回来不跳回第一页）。Shift 锁定时符号键发上档字符
+  （`SHIFT_MAP`）、方向键变 Home/End/PageUp/PageDown（`SHIFT_CURSOR`，键面 HM/ED/PU/PD），
+  **键面文字与发出的字符必须一起变**（只改颜色或只改文字都是 bug）；因此 `TerminalView` 的
+  「修饰键输入一次后自动解除」**必须排除 shift**（只清 ctrl/alt）。根节点的
+  `@touchstart.prevent.stop` 要保留：它阻止浏览器把触摸合成为鼠标事件与长按菜单，单次按键的
+  `@click` + `@touchstart.prevent` 双保险依赖它。验证时按**可见**判定
+  （`getBoundingClientRect().height > 0`）——旧的 `md:hidden` 只隐藏不卸载，只看 DOM 会假阳性。
+- **单挂载点（一个终端会话只在一台设备上进行）** —— `Session.attach()` 回放历史 + 发 ready 后
+  在 `connMu` 内**原子换主**并返回旧连接；`kickDetached()` 给旧连接发 `\x1b]detached\x07`（先）
+  与 close 4001（后，双保险——帧被代理吞掉也能靠码判定），写带 1s 超时，**绝不能让这次写阻塞
+  新端挂载**。前端 `detached` **不自动重连**（否则两端互相顶号），「重连」= 显式夺回；顶号只
+  作用于该会话，同一设备其他连接不受影响。验证：假连接单测 attach / isOwner / detach /
+  kickDetached 语义（`backend/terminal_attach_test.go`）；沙箱里 PTY 建不起来
+  （`/dev/ptmx: permission denied`），真会话必须部署后真机验证（两台设备 / 两个浏览器上下文
+  互相顶号，且被顶端不自动重连）。
 - **dsh 的插件 bundle 带一年期 `immutable` 强缓存且无 `ETag`/`Last-Modified`** ——
   响应头为 `Cache-Control: public, max-age=31536000, immutable`；`rev` 由 dsh 自身生成、
   不随 harness 升级变化，且该路由严格校验 `rev`（改写/省略一律 404），故 URL 无法被

@@ -13,6 +13,7 @@ import { randomId } from '@/utils/randomId'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import QuickCmdsDialog from '@/components/QuickCmdsDialog.vue'
 import QuickCmdEditDialog from '@/components/QuickCmdEditDialog.vue'
+import KeypadBar from '@/components/KeypadBar.vue'
 
 defineOptions({ name: 'TerminalView' })
 const { t } = useI18n()
@@ -81,6 +82,15 @@ const sessionId = ref<string | null>(null)
 // 会话不存在标记：收到 "session not found" 后丢弃旧 id，连接关闭时自动重建
 let recreateOnClose = false
 
+// 会话被其他设备接管（单挂载点）：后端先发该控制帧，再以 WS_CLOSE_DETACHED 关闭连接
+// （双保险：帧可能被代理吞掉，故 close 码也要判）。与 backend/terminal.go 的
+// oscDetached / wsCloseTaken 一一对应。
+const DETACHED_PAYLOAD = '\x1b]detached\x07'
+const WS_CLOSE_DETACHED = 4001
+// 本端是否已被其他设备顶掉：只解挂载、**不自动夺回**（自动抢回会让两台设备来回顶号），
+// 用户点「重连」才显式夺回。连接重建时复位。
+let detached = false
+
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let sock: WebSocket | null = null
@@ -103,9 +113,6 @@ let toastTimer: number | null = null
 const ctrlPressed = ref(false)
 const altPressed = ref(false)
 const shiftPressed = ref(false)
-
-// 方向键重复
-let repeatTimer: number | null = null
 
 // 长按粘贴相关
 let longPressTimer: number | null = null
@@ -239,19 +246,6 @@ function debouncedFit() {
   })
 }
 
-function startRepeat(key: string) {
-  if (repeatTimer) return
-  sendKey(key)
-  repeatTimer = window.setInterval(() => sendKey(key), 100)
-}
-
-function stopRepeat() {
-  if (repeatTimer) {
-    clearInterval(repeatTimer)
-    repeatTimer = null
-  }
-}
-
 // ---------- 长按粘贴：调用系统文本编辑菜单 ----------
 function showPasteMenu() {
   if (pasteHelper) {
@@ -317,7 +311,7 @@ function onTouchStart(e: TouchEvent) {
   if (!term || !sock || sock.readyState !== WebSocket.OPEN) return
   if (e.touches.length !== 1) return
   const target = e.target as HTMLElement
-  if (target.closest('.md\\:hidden')) return
+  if (target.closest('[data-keypad-bar]')) return
   const touch = e.touches[0]
   touchStartX = touch.clientX
   touchStartY = touch.clientY
@@ -436,18 +430,22 @@ onMounted(() => {
   term.onData((data) => {
     if (!sock || sock.readyState !== WebSocket.OPEN) return
     let toSend = data
+    const hadModifier = ctrlPressed.value || altPressed.value
     if (ctrlPressed.value && data.length === 1) {
       const code = data.charCodeAt(0)
       if (code >= 97 && code <= 122) toSend = String.fromCharCode(code - 96)
       else if (code >= 65 && code <= 90) toSend = String.fromCharCode(code - 64)
-      sock.send(toSend)
-      return
+    } else if (altPressed.value && data.length === 1) {
+      toSend = '\x1b' + data
     }
-    if (altPressed.value && data.length === 1) {
-      sock.send('\x1b' + data)
-      return
+    sock.send(toSend)
+    // 修饰键输入一次后自动解除：点击修饰键 → 键入任意按键 → 修饰键复位。
+    // **Shift 例外**：它是辅助键条的「上档锁定」，要一直有效到再点一次 Shift 才解除
+    // （见 KeypadBar 的 SHIFT_MAP / SHIFT_CURSOR），因此不参与这里的自动复位。
+    if (hadModifier) {
+      ctrlPressed.value = false
+      altPressed.value = false
     }
-    sock.send(data)
   })
 
   // 桌面端：鼠标框选（或双击选词）后自动把选中文本复制进剪贴板，并 toast 提示。
@@ -465,8 +463,8 @@ onMounted(() => {
   })
 })
 
-// 处理来自后端的数据：剥离会话控制帧（\x1b]id;、\x1b]ready\x07、\x1b]exit\x07），
-// 其余内容写入终端。
+// 处理来自后端的数据：剥离会话控制帧（\x1b]id;、\x1b]ready\x07、\x1b]exit\x07、
+// \x1b]detached\x07），其余内容写入终端。
 function handleData(raw: string) {
   if (!raw) return
   let rest = raw
@@ -475,6 +473,11 @@ function handleData(raw: string) {
     return ''
   })
   rest = rest.replace(/\x1b\]ready\x07/g, () => '')
+  // 被其他设备接管：用常量做纯字符串匹配（帧本身含 ESC/]，不必拼正则）
+  if (rest.includes(DETACHED_PAYLOAD)) {
+    rest = rest.split(DETACHED_PAYLOAD).join('')
+    markDetached()
+  }
   rest = rest.replace(/\x1b\]exit\x07/g, () => '')
   // 会话已不存在（如后端重启）：丢弃旧 id，稍后自动重建新会话
   if (rest.includes('session not found')) {
@@ -488,11 +491,25 @@ function handleData(raw: string) {
   }
 }
 
+// ---------- 被其他设备接管（单挂载点） ----------
+// 只解挂载、不杀会话（会话继续在服务端运行并写历史文件），且**不自动重连**：
+// 自动抢回会让两台设备来回顶号。用户点「重连」才夺回。
+function markDetached() {
+  if (detached) return
+  detached = true
+  stopHeartbeat()
+  term?.writeln('\r\n\x1b[33m' + t('term_conn_detached_hint') + '\x1b[0m')
+  scrollToBottom()
+  toast.show(t('term_conn_detached'), 'error')
+}
+
 // 建立 WebSocket：sessionId 为空则新建会话（后端回 \x1b]id;<id>\x07 回填），
 // 否则以 ?id= 挂载已有会话（后端回放历史 + \x1b]ready\x07 后进入实时流）。
 function connect() {
   if (!el.value) return
   disconnect()
+  // 重新建立连接即视为重新参与（可能是一次显式夺回）
+  detached = false
   sock = new WebSocket(wsUrl())
   sock.binaryType = 'arraybuffer'
 
@@ -506,8 +523,17 @@ function connect() {
     const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)
     handleData(data)
   }
-  sock.onclose = () => {
+  sock.onclose = (ev: CloseEvent) => {
     stopHeartbeat()
+    // 被其他设备接管：后端会先发 \x1b]detached\x07 再带这个关闭码（帧可能被代理吞掉，
+    // 所以这里按码兜底），统一走 detached 分支，不打印通用的「连接已关闭」。
+    if (ev?.code === WS_CLOSE_DETACHED) {
+      markDetached()
+      return
+    }
+    // 已因 \x1b]detached\x07 进入 detached（关闭码被中间代理改写时走不到上面那条），
+    // 不再叠一条通用的「连接已关闭」
+    if (detached) return
     if (recreateOnClose) {
       recreateOnClose = false
       connect()
@@ -600,7 +626,6 @@ onBeforeUnmount(() => {
     window.removeEventListener('resize', debouncedFit)
   }
   if (resizeTimeout) cancelAnimationFrame(resizeTimeout)
-  if (repeatTimer) clearInterval(repeatTimer)
   if (longPressTimer) clearTimeout(longPressTimer)
   if (pasteHelper) {
     document.body.removeChild(pasteHelper)
@@ -836,49 +861,18 @@ function showToast(msg: string) {
       </div>
     </div>
 
-    <!-- 移动端功能键（两行）。底部留白只给 10px：iPhone 的底部安全区由它下面的
-         底部导航（App.vue，高度含安全区、键盘弹起时整体抬起）负责，这里再加一次
-         env(safe-area-inset-bottom) 会把本栏顶出可视区，键盘弹起时更明显。 -->
-    <div
-      class="flex md:hidden flex-col gap-1 px-3 py-2.5 bg-bg dark:bg-[#0B0B0F] border-t border-line dark:border-[#2A2A32]">
-      <!-- 第一行 -->
-      <div class="flex items-center justify-around gap-1 flex-wrap">
-        <!-- ESC -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\x1b')">ESC</button>
-        <!-- ↑ 上方向键（长按重复） -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[A')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[A')" @touchend="stopRepeat" @touchcancel="stopRepeat">↑</button>
-        <!-- Tab -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\t')">Tab</button>
-        <!-- Ctrl -->
-        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="ctrlPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('ctrl')">Ctrl</button>
-        <!-- Shift -->
-        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="shiftPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('shift')">Shift</button>
-        <!-- Alt -->
-        <button class="px-2.5 py-1 text-xs font-medium rounded-full transition" :class="altPressed ? 'bg-brand text-white' : 'bg-black/5 dark:bg-white/10 text-ink-soft dark:text-[#A6A6AD]'" @click="toggleModifier('alt')">Alt</button>
-        <!-- Insert -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('\x1b[2~')">Insert</button>
-      </div>
-
-      <!-- 第二行 -->
-      <div class="flex items-center justify-around gap-1 flex-wrap">
-        <!-- ← 左方向键 -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[D')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[D')" @touchend="stopRepeat" @touchcancel="stopRepeat">←</button>
-        <!-- ↓ 下方向键 -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[B')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[B')" @touchend="stopRepeat" @touchcancel="stopRepeat">↓</button>
-        <!-- → 右方向键 -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition select-none" @mousedown="startRepeat('\x1b[C')" @mouseup="stopRepeat" @mouseleave="stopRepeat" @touchstart.prevent="startRepeat('\x1b[C')" @touchend="stopRepeat" @touchcancel="stopRepeat">→</button>
-        <!-- . -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('.')">.</button>
-        <!-- / -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('/')">/</button>
-        <!-- - 新增 -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('-')">-</button>
-        <!-- " -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click='sendKey("\"")'>"</button>
-        <!-- = -->
-        <button class="px-2.5 py-1 text-xs font-medium bg-black/5 dark:bg-white/10 rounded-full text-ink-soft dark:text-[#A6A6AD] hover:bg-black/10 dark:hover:bg-white/15 transition" @click="sendKey('=')">=</button>
-      </div>
-    </div>
+    <!-- 移动端辅助键条（两页）：显隐由 KeypadBar 内部的 useMobileLayout 判定（触屏或窄视口），
+         **不能**用 md:hidden —— iPad 宽度 ≥768px 会被宽度断点判成桌面而丢掉整条键条；
+         底部留白只给 8px：iPhone 的底部安全区由它下面的底部导航（App.vue，高度含安全区、
+         键盘弹起时整体隐去）负责，这里再加一次 env(safe-area-inset-bottom) 会把本栏顶出
+         可视区，键盘弹起时更明显。 -->
+    <KeypadBar
+      :ctrl="ctrlPressed"
+      :alt="altPressed"
+      :shift="shiftPressed"
+      @key="sendKey"
+      @toggle="toggleModifier"
+    />
   </div>
 
   <!-- 快捷指令列表弹窗 -->
@@ -905,8 +899,8 @@ function showToast(msg: string) {
     v-model:visible="deleteDialogVisible"
     :title="t('qc_delete_confirm_title')"
     :message="t('qc_delete_confirm_msg', { name: deleteTarget?.name || '' })"
-    :confirm-text="t('qc_delete')"
-    :cancel-text="t('qc_cancel')"
+    :confirm-text="t('confirm_delete')"
+    :cancel-text="t('confirm_cancel')"
     danger
     @confirm="confirmDeleteQuickCmd"
   />

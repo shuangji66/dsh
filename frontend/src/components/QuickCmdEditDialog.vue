@@ -118,7 +118,6 @@ function onSave() {
             </span>
             <span class="min-w-0">
               <span class="block text-sm font-medium text-ink dark:text-white">{{ t('qc_auto') }}</span>
-              <span class="block text-xs text-ink-soft dark:text-[#A6A6AD] mt-0.5">{{ t('qc_auto_hint') }}</span>
             </span>
           </label>
 

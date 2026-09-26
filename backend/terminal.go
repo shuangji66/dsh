@@ -28,6 +28,10 @@ const maxHistoryBytes = 4 * 1024 * 1024 // 4MB
 // wsChunkSize 是历史回放时单帧的最大字节数。
 const wsChunkSize = 32 * 1024 // 32KB
 
+// errNotOwner：请求来自已不是操作端的连接（已被其他设备顶掉的旧连接）。
+// 上层据此静默忽略：它只是残留帧，不是错误。
+var errNotOwner = errors.New("not session owner")
+
 // Session 是一个独立的 PTY 终端会话。输出实时镜像到临时历史文件（应用停止时
 // 整目录清除），浏览器断开只“解挂载”不杀会话，刷新后凭 id 重新挂载并回放历史。
 type Session struct {
@@ -111,7 +115,11 @@ func (s *Session) pump() {
 // attach 把连接挂载到会话：先回放历史文件内容（上限 maxHistoryBytes，分帧发送），
 // 再发送 ready 标记，最后接管实时流。整段在 histMu 内完成，防止新增输出既被回放
 // 又被实时广播造成重复。
-func (s *Session) attach(c net.Conn) error {
+//
+// **单挂载点语义**：一个会话在任何时刻只允许一个操作端（能写输入、能改 PTY 尺寸）。
+// 挂载成功即成为操作端，返回值是**被顶掉的旧连接**（无则 nil），由调用方负责通知并
+// 关闭它（terminal.go 的 kickDetached）——只影响这一个会话，其他会话的连接不动。
+func (s *Session) attach(c net.Conn) (net.Conn, error) {
 	s.histMu.Lock()
 	defer s.histMu.Unlock()
 	if s.hist != nil {
@@ -127,7 +135,7 @@ func (s *Session) attach(c net.Conn) error {
 					n, rerr := s.hist.Read(chunk)
 					if n > 0 {
 						if _, werr := c.Write(wsFrame(opText, chunk[:n])); werr != nil {
-							return werr
+							return nil, werr
 						}
 					}
 					if rerr != nil {
@@ -138,12 +146,24 @@ func (s *Session) attach(c net.Conn) error {
 		}
 	}
 	if _, err := c.Write(wsFrame(opText, []byte("\x1b]ready\x07"))); err != nil {
-		return err
+		return nil, err
 	}
+	// 换主与历史回放同处一个 histMu 临界区：新连接既不漏字节，也不与广播交叉。
 	s.connMu.Lock()
+	prev := s.conn
 	s.conn = c
 	s.connMu.Unlock()
-	return nil
+	if prev == c {
+		prev = nil // 重复挂载同一连接：无需顶号
+	}
+	return prev, nil
+}
+
+// isOwner 判断该连接是否仍是会话的操作端（被顶掉的旧连接为 false）。
+func (s *Session) isOwner(c net.Conn) bool {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conn != nil && s.conn == c
 }
 
 // detach 解除当前连接挂载（不杀会话，会话继续运行并写入历史文件）。
@@ -155,14 +175,23 @@ func (s *Session) detach(c net.Conn) {
 	s.connMu.Unlock()
 }
 
-// writeInput 把客户端输入写入 PTY。
-func (s *Session) writeInput(p []byte) error {
+// writeInput 把客户端输入写入 PTY。**只有当前操作端能写**：被顶掉的旧连接即使还有
+// 残留帧抵达，也在服务端被丢弃——否则两台设备会同时操作同一个 PTY（两边都能打字，
+// 却只有一边看得到输出）。
+func (s *Session) writeInput(c net.Conn, p []byte) error {
+	if !s.isOwner(c) {
+		return errNotOwner
+	}
 	_, err := s.pty.Write(p)
 	return err
 }
 
-// resize 调整 PTY 尺寸。
-func (s *Session) resize(cols, rows uint16) error {
+// resize 调整 PTY 尺寸。同样只接受操作端的请求：被顶掉的旧设备随后会触发一次
+// 尺寸重排，若不加限制就会把 PTY 改成它自己的窗口大小。
+func (s *Session) resize(c net.Conn, cols, rows uint16) error {
+	if !s.isOwner(c) {
+		return errNotOwner
+	}
 	return pty.Setsize(s.pty, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
@@ -393,6 +422,7 @@ type terminalHandler struct {
 // a new session (id empty → 先发 \x1b]id;<id>\x07 控制帧) or attaches to an
 // existing one (回放历史 + \x1b]ready\x07 后进入实时流)。
 // 浏览器断开只解挂载；会话继续运行并写入历史临时文件，刷新后可重新挂载。
+// **单挂载点**：一个会话同时只有一个操作端，新挂载会顶掉旧连接（kickDetached）。
 func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -427,7 +457,7 @@ func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		conn.Write(wsFrame(opText, []byte("\x1b]id;"+s.id+"\x07")))
-		if aerr := s.attach(conn); aerr != nil {
+		if _, aerr := s.attach(conn); aerr != nil {
 			conn.Close()
 			return
 		}
@@ -440,9 +470,14 @@ func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			conn.Close()
 			return
 		}
-		if aerr := s.attach(conn); aerr != nil {
+		// 单挂载点：挂载成功即成为操作端，旧连接被顶掉并收到「已被接管」通知。
+		prev, aerr := s.attach(conn)
+		if aerr != nil {
 			conn.Close()
 			return
+		}
+		if prev != nil {
+			kickDetached(prev)
 		}
 	}
 
@@ -471,7 +506,8 @@ func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					rows, err2 := strconv.Atoi(parts[1])
 					if err1 == nil && err2 == nil && cols > 0 && rows > 0 {
 						if sess, ok := t.mgr.get(id); ok {
-							if err := sess.resize(uint16(cols), uint16(rows)); err != nil {
+							// 只有操作端的尺寸生效（被顶掉的旧设备会随后触发一次重排）
+							if err := sess.resize(conn, uint16(cols), uint16(rows)); err != nil && !errors.Is(err, errNotOwner) {
 								logWarn("[terminal] resize failed: %v", err)
 							}
 						}
@@ -481,7 +517,10 @@ func (t *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// 心跳：仅保持连接不被代理/NAT 空闲超时断开，不写入 PTY
 			} else {
 				if sess, ok := t.mgr.get(id); ok {
-					sess.writeInput(msgBuf)
+					// 非操作端的残留输入在服务端丢弃（见 Session.writeInput 的说明）
+					if werr := sess.writeInput(conn, msgBuf); werr != nil && !errors.Is(werr, errNotOwner) {
+						logWarn("[terminal] write input failed: %v", werr)
+					}
 				}
 			}
 		case opPing:
@@ -516,6 +555,13 @@ func wsAccept(key string) string {
 }
 
 const (
+	// wsCloseTaken 是「会话被其他设备接管」的 WebSocket 关闭码（4000–4999 为应用自定
+	// 区间）。前端据此提示「已在其他设备打开」，不自动重连（否则两台设备会互抢）。
+	wsCloseTaken = 4001
+	// oscDetached 是顶号通知（OSC 控制帧，不写入 PTY）。与 close 帧双保险：
+	// 帧先到 → 立即提示；帧被代理吞掉时还能靠 close 码判定。
+	oscDetached = "\x1b]detached\x07"
+
 	opText  = 0x1
 	opBin   = 0x2
 	opCont  = 0x0
@@ -539,6 +585,23 @@ func wsFrame(op byte, payload []byte) []byte {
 		hdr = append(hdr, b[:]...)
 	}
 	return append(hdr, payload...)
+}
+
+// wsCloseFrame 构造服务端 close 帧：payload = 2 字节状态码 + UTF-8 reason。
+func wsCloseFrame(code uint16, reason string) []byte {
+	payload := make([]byte, 2+len(reason))
+	binary.BigEndian.PutUint16(payload, code)
+	copy(payload[2:], reason)
+	return wsFrame(opClose, payload)
+}
+
+// kickDetached 通知被顶掉的旧连接：先发 \x1b]detached\x07，再发 close(4001)，最后关闭。
+// 写带 1s 超时：旧连接 TCP 缓冲可能已满，绝不能让这次写阻塞拖住新设备的挂载。
+func kickDetached(c net.Conn) {
+	_ = c.SetWriteDeadline(time.Now().Add(time.Second))
+	_, _ = c.Write(wsFrame(opText, []byte(oscDetached)))
+	_, _ = c.Write(wsCloseFrame(wsCloseTaken, "detached"))
+	_ = c.Close()
 }
 
 // wsReadFrame reads a single client frame, unmasking the payload.

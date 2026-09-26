@@ -32,9 +32,15 @@
   （平台网关注入 `X-Trim-*` 身份头）跳过鉴权，端口访问照旧需要登录
   （见下文「飞牛网关访问」一节）。
 - **Web 终端** — 基于 `creack/pty` + xterm.js 的交互式 bash 会话，通过 WebSocket 传输。
+  **一个会话同一时刻只有一个操作端**：在新设备上打开会接管该会话，原设备收到提示后停在
+  那里（不自动重连，点「重连」即可夺回）；浏览器断开只解挂载，会话继续运行并在重连后回放历史。
+  移动端底部带**两页辅助键条**（功能键/方向键/常用符号 + 常见标点；Shift 为上档锁定，
+  方向键同时变 Home/End/PageUp/PageDown），iPad 等大屏触屏同样显示（按触屏能力判定，
+  不看屏幕宽度），平板档两页并排。
 - **目录授权** — 授权/查看已共享目录，并可将某已授权目录设为 dsh 主目录。
 - **插件管理** — 列出 / 移除 / 重置 dsh web profile 的插件依赖。
-- **快捷指令** — 持久化的终端快捷命令（`HARNESS_QUICK_CMDS_FILE`）。
+- **快捷指令** — 持久化的终端快捷命令（`HARNESS_QUICK_CMDS_FILE`）；列表弹窗为紧凑卡片
+  （新增/关闭为纯图标按钮，编辑/删除/上移/下移与命令名同一行）。
 - **日志** — 查看 / 下载 / SSE 实时流式输出 dsh 与主进程日志（`HARNESS_LOG_FILE`）。
   后端日志统一走 `backend/logging.go` 这一个出口，分三级：`[INFO]`（白）/ `[WARN]`（黄）/
   `[ERROR]`（红）；终端（stdout 是 TTY）用 ANSI 着色，日志文件保持纯文本，由控制台日志页
@@ -76,7 +82,7 @@
 │   ├── auth.go              # 登录鉴权（Cookie / HMAC / 密码校验）
 │   ├── dsh.go               # DshManager：dsh 进程生命周期 / token 交换 / 状态 / 插件
 │   ├── proxy.go             # 反向代理（携带 dsh 会话 Cookie）+ 等待页 / /_ready
-│   ├── terminal.go          # WebSocket 交互式 PTY 终端
+│   ├── terminal.go          # WebSocket 交互式 PTY 终端（会话单挂载点）
 │   ├── update.go            # 更新管理（版本检测、下载通路/续传、回滚/备份）
 │   ├── market.go            # 插件市场（dshmarket）就地更新
 │   ├── install.go           # node-pty 自动安装
@@ -91,9 +97,9 @@
         ├── main.ts / App.vue / style.css
         ├── router/index.ts  # /?view= 切换 + 旧路径 302 重定向
         ├── stores/          # Pinia：settings / toast / plugins / directories
-        ├── composables/     # useTheme / useI18n / useConsolePrefs
+        ├── composables/     # useTheme / useI18n / useConsolePrefs / useMobileLayout / useKeypadPage
         ├── serverapi/index.ts   # 运行时 baseurl 感知的 API / SSE 客户端
-        ├── components/      # Toast / ConfirmDialog / 快捷指令 / 更新区
+        ├── components/      # Toast / ConfirmDialog / 快捷指令 / 终端辅助键条 / 更新区
         └── views/           # 概览 / 设置 / 目录 / 插件 / 终端 / 日志
 ```
 

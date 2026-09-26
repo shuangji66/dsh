@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -161,6 +161,58 @@ function fmtPid(v?: number): string {
   if (v === undefined || v === null || isNaN(v) || v <= 0) return '—'
   return String(v)
 }
+// 格式化进程运行时间：只取最大的两个单位（天+小时 / 小时+分 / 分+秒 / 秒），
+// 小面板一行放得下，也不会每秒都在跳数字。传 undefined（未运行 / 还没拿到基准）显示「—」。
+function fmtUptime(sec?: number): string {
+  if (sec === undefined || sec === null || isNaN(sec) || sec < 0) return '—'
+  const s = Math.floor(sec)
+  if (s < 60) return t('uptime_s', { s })
+  const m = Math.floor(s / 60)
+  if (m < 60) return t('uptime_m_s', { m, s: s % 60 })
+  const h = Math.floor(m / 60)
+  if (h < 24) return t('uptime_h_m', { h, m: m % 60 })
+  return t('uptime_d_h', { d: Math.floor(h / 24), h: h % 24 })
+}
+
+// --- 运行时间：后端只读一次，之后由前端自己走表 ---
+//
+// 状态流（/api/dsh/stream）每秒都会推 CPU / 内存，但**运行时间不必跟着轮询**：
+// 拿到一次基准值（该 PID 已运行的秒数）后本机按时间差自己推进；只有「dsh 启停 / 重启 /
+// 装插件自重启」这类生命周期变化才重新采纳 —— 它们在状态里表现为 running 翻转或
+// （自重启时）pid 变化，因此不需要额外开一个「刷新运行时间」的接口。
+//
+// 用本机时钟推进而不是每拍 +1：页面被切到后台时定时器会被节流，按真实时间差算回来才不会走慢。
+type UptimeBase = { pid: number; seconds: number; at: number }
+const uptimeBase = ref<UptimeBase | null>(null)
+const uptimeTick = ref(Date.now())
+let uptimeTimer: number | null = null
+
+// 展示值 = 基准秒数 + 本机已过去的秒数；没有基准（未运行 / 读不到）时 undefined → 「—」
+const uptimeSeconds = computed(() => {
+  const b = uptimeBase.value
+  if (!b) return undefined
+  return b.seconds + Math.max(0, Math.floor((uptimeTick.value - b.at) / 1000))
+})
+
+watch(
+  () => ({
+    pid: status.value?.pid ?? 0,
+    running: status.value?.running === true,
+    up: status.value?.uptimeSeconds,
+  }),
+  (cur) => {
+    // 同一个 PID 仍在运行 → 已有基准，继续自己走表，不采纳后面每秒推来的值
+    if (uptimeBase.value && cur.running && uptimeBase.value.pid === cur.pid) return
+    // 停止 / 后端没给值（读不到该 PID 的启动时刻）→ 显示「—」
+    if (!cur.running || cur.up === undefined) {
+      uptimeBase.value = null
+      return
+    }
+    // 首次拿到状态，或启停/重启（pid 变化）后的新基准
+    uptimeBase.value = { pid: cur.pid, seconds: cur.up, at: Date.now() }
+  },
+  { immediate: true }
+)
 
 // CPU 占用阈值颜色：0-20% 绿 / 20-50% 橙 / 50% 以上红；未知用黑色（—）
 function cpuColor(v?: number): string {
@@ -245,6 +297,17 @@ onMounted(() => {
   initialLoad()
   visitorStream.start()
   statusStream.start()
+  // 运行时间的本机秒表（见上面的 uptimeSeconds）：只在页面存活期间走，卸载时清掉
+  uptimeTimer = window.setInterval(() => {
+    uptimeTick.value = Date.now()
+  }, 1000)
+})
+
+onBeforeUnmount(() => {
+  if (uptimeTimer !== null) {
+    clearInterval(uptimeTimer)
+    uptimeTimer = null
+  }
 })
 </script>
 
@@ -276,8 +339,8 @@ onMounted(() => {
         </div>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('overview_dsh_desc') }}</p>
 
-        <!-- 进程信息：CPU / 内存 一行两个等宽小面板；PID 折到下一行、与 CPU 面板左对齐
-             （两列栅格放三个子项：第三个自然换行并占第一列，宽度也与上面两个一致）。 -->
+        <!-- 进程信息：CPU / 内存 一行两个等宽小面板；PID 与运行时间折到下一行
+             （两列栅格放四个子项：后两个自然换行，并与上面两个等宽、左对齐）。 -->
         <div class="grid grid-cols-2 gap-3 mb-4">
           <div class="rounded-lg bg-black/[0.03] dark:bg-white/[0.05] px-3 py-2.5">
             <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('cpu_usage') }}</div>
@@ -290,6 +353,11 @@ onMounted(() => {
           <div class="rounded-lg bg-black/[0.03] dark:bg-white/[0.05] px-3 py-2.5">
             <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('dsh_pid') }}</div>
             <div class="font-mono text-sm font-semibold text-ink dark:text-[#EDEDF0]">{{ fmtPid(status?.pid) }}</div>
+          </div>
+          <!-- 运行时间：后端只在打开/启停重启时给一次基准，之后由前端自己走表（未运行时「—」） -->
+          <div class="rounded-lg bg-black/[0.03] dark:bg-white/[0.05] px-3 py-2.5">
+            <div class="text-[11px] text-ink-soft dark:text-[#A6A6AD] mb-0.5">{{ t('dsh_uptime') }}</div>
+            <div class="font-mono text-sm font-semibold text-ink dark:text-[#EDEDF0]">{{ fmtUptime(uptimeSeconds) }}</div>
           </div>
         </div>
 

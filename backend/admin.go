@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,7 +157,7 @@ func spaHandler(fsys fs.FS, baseurl string) http.Handler {
 			if reqPath == "index.html" && base != "" {
 				b = rewriteIndexBase(b, base)
 			}
-			serveBytes(w, reqPath, b)
+			serveBytes(w, r, reqPath, b)
 			return
 		}
 		// 不存在的路径回退到 index.html 以支持 SPA 前端路由
@@ -163,7 +165,7 @@ func spaHandler(fsys fs.FS, baseurl string) http.Handler {
 			if base != "" {
 				b = rewriteIndexBase(b, base)
 			}
-			serveBytes(w, "index.html", b)
+			serveBytes(w, r, "index.html", b)
 			return
 		}
 		http.NotFound(w, r)
@@ -184,12 +186,58 @@ func rewriteIndexBase(body []byte, base string) []byte {
 	return []byte(headTag + s)
 }
 
-func serveBytes(w http.ResponseWriter, name string, data []byte) {
+// serveBytes 输出一个内嵌静态文件，并按文件类型带上缓存策略：
+//
+//   - `assets/**` 是 Vite 构建的**内容哈希产物**（index-DAFlHLaA.css / LogView-xxx.js），
+//     内容一变文件名就变，因此可以放心长期强缓存：升级后 index.html 会指向新文件名，
+//     浏览器直接拿新的，不会用到旧字节。这一层是控制台首屏的最大收益（几个百 KB 的
+//     bundle 不再每次回源）。
+//   - 其余文件（index.html / callback.html 等入口文件，文件名不带哈希）必须**每次回源
+//     校验**（no-cache + ETag）：缓存住就会在升级后继续指向已被替换掉的旧哈希资源，
+//     表现为「重启了控制台还是旧界面」——这正是 dsh 插件 bundle 那边踩过的坑。
+//     ETag 由实际输出的字节（含注入的 base href）算出，校验命中回 304，不重传正文。
+func serveBytes(w http.ResponseWriter, r *http.Request, name string, data []byte) {
 	if ct := mimeTypeByExt(path.Ext(name)); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
+	if strings.HasPrefix(name, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		etag := etagOf(data)
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "no-cache")
+		if etagMatches(r.Header.Get("If-None-Match"), etag) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Write(data)
+}
+
+// etagOf 用内容摘要生成强 ETag（内嵌 FS 没有可用的修改时间，内容摘要才是可靠校验器）。
+func etagOf(data []byte) string {
+	sum := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(sum[:16]) + `"`
+}
+
+// etagMatches 判断请求头里的 If-None-Match 是否命中当前 ETag：支持逗号分隔的多值与
+// `*`，并忽略弱校验前缀（W/）—— 浏览器侧我们只发强 ETag，这里宽松匹配即可。
+func etagMatches(header, etag string) bool {
+	if header == "" {
+		return false
+	}
+	if strings.TrimSpace(header) == "*" {
+		return true
+	}
+	for _, part := range strings.Split(header, ",") {
+		p := strings.TrimSpace(part)
+		p = strings.TrimPrefix(p, "W/")
+		if p == etag {
+			return true
+		}
+	}
+	return false
 }
 
 func mimeTypeByExt(ext string) string {

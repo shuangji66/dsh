@@ -31,10 +31,18 @@ type DshManager struct {
 	lastCpu     float64 // 最近一次采样的 CPU 使用率（%）
 	lastMemory  int64   // 最近一次采样的常驻内存（MB）
 	lastStatsAt time.Time
-	tokenMu     sync.RWMutex
-	token       string // 新版 dsh 启动时在日志输出的一次性访问 token
-	authMu      sync.RWMutex
-	authCookie  string // 用 token 换取到的 dsh 会话 cookie（形如 "dsh-auth-xxx=yyy"）
+	// procStartMu 保护下面这组「PID → 进程启动时刻」缓存。同一个 PID 的启动时刻不会变，
+	// 而 Status() 每秒都被 SSE 推一次（概览页 CPU/内存要实时刷新），没必要每次都去读
+	// /proc；PID 变了（启停 / 装插件自重启）自然会重读。与上面 lastStatsAt 那套秒级
+	// 缓存同一个思路。
+	procStartMu  sync.Mutex
+	procStartPid int
+	procStartAt  time.Time
+	procStartOK  bool
+	tokenMu      sync.RWMutex
+	token        string // 新版 dsh 启动时在日志输出的一次性访问 token
+	authMu       sync.RWMutex
+	authCookie   string // 用 token 换取到的 dsh 会话 cookie（形如 "dsh-auth-xxx=yyy"）
 	// sessionMu 保护下面两个「启动代号」：每代 dsh 启动都会生成新的 token，需要用
 	// 它异步换取会话凭据（见 captureDshSession），换取完成之前反代不应放行转发
 	// （否则转发到 dsh 必然被拒）。用独立互斥锁：Start 会长时间持有 m.mu，而标记
@@ -700,6 +708,37 @@ func procRSSMB(pid int) int64 {
 	return 0
 }
 
+// UptimeSeconds 返回 dsh 当前 PID **该进程**已运行的秒数（进程不在 / 读不到时返回 false）。
+//
+// 按 PID 缓存进程启动时刻：同一个 PID 的启动时刻是常量，而 Status() 每秒都会被 SSE 推
+// 一次，没必要每秒读两遍 /proc（概览页的 CPU/内存也有同样的秒级缓存，见 Stats）。
+// PID 变化（用户启停、装插件自重启）会让缓存失效并重新读取 —— 因此自重启后运行时间
+// 会从新进程的启动时刻重新算起，这正是概览页要展示的语义。
+//
+// 注意：PID 复用（同一 PID 被另一个进程占用）理论上会让缓存偏旧，但这里只在
+// 「PID 没变」时才复用缓存，而 dsh 的 PID 来自 effectivePID()/PID 文件（进程一换就是
+// 新 PID）；Linux 的 PID 回绕需要几万个进程才能撞上，实际不会影响。
+func (m *DshManager) UptimeSeconds(pid int) (int64, bool) {
+	if pid <= 0 {
+		return 0, false
+	}
+	m.procStartMu.Lock()
+	if m.procStartPid != pid || !m.procStartOK {
+		start, ok := procStartTime(pid)
+		m.procStartPid, m.procStartAt, m.procStartOK = pid, start, ok
+	}
+	start, ok := m.procStartAt, m.procStartOK
+	m.procStartMu.Unlock()
+	if !ok {
+		return 0, false
+	}
+	d := time.Since(start)
+	if d < 0 {
+		return 0, true
+	}
+	return int64(d / time.Second), true
+}
+
 // Stats returns the dsh process CPU usage (%) and resident memory (MB). The
 // CPU% is computed from a short sampling window and cached for ~1 second so
 // frequent callers (SSE heartbeat / settings poll) do not each block on a sleep.
@@ -1002,7 +1041,7 @@ func (m *DshManager) Status() map[string]interface{} {
 	}
 	cfg := GetConfig()
 	cpu, mem := m.Stats()
-	return map[string]interface{}{
+	st := map[string]interface{}{
 		"running":    running,
 		"pid":        pid,
 		"startedAt":  startedAt.Format(time.RFC3339),
@@ -1012,6 +1051,14 @@ func (m *DshManager) Status() map[string]interface{} {
 		"cpuPercent": cpu,
 		"memoryMB":   mem,
 	}
+	// 进程运行时间（秒）：按 /proc/<pid>/stat 里**该 PID** 的真实启动时刻算（按 PID 缓存，
+	// 不每秒读 /proc），而不是 m.startedAt —— 装插件会触发 dsh 自重启换 PID，m.startedAt
+	// 可能还停在前一代的时刻，照它算会把新一代的运行时间多加一截。读不到（进程刚消失等）
+	// 就**不带这个字段**，前端显示「—」；进程刚起来不足 1 秒时是真实的 0，前端显示「0 秒」。
+	if up, ok := m.UptimeSeconds(pid); ok {
+		st["uptimeSeconds"] = up
+	}
+	return st
 }
 
 func (m *DshManager) setStarted(t time.Time) { m.startedAt = t }

@@ -131,6 +131,12 @@ const zh: Record<string, string> = {
   cpu_usage: 'CPU 使用率',
   mem_usage: '内存占用',
   dsh_pid: '进程 PID',
+  dsh_uptime: '运行时间',
+  // 运行时间格式：只取最大的两个单位（见 OverviewView 的 fmtUptime）
+  uptime_s: '{s} 秒',
+  uptime_m_s: '{m} 分 {s} 秒',
+  uptime_h_m: '{h} 小时 {m} 分',
+  uptime_d_h: '{d} 天 {h} 小时',
   // 概览页卡片标题（dsh 信息与启停 / 三个版本 / 快捷访问）
   overview_dsh_desc: '进程状态与资源占用',
   overview_versions: '版本',
@@ -509,6 +515,12 @@ const en: Record<string, string> = {
   cpu_usage: 'CPU usage',
   mem_usage: 'Memory',
   dsh_pid: 'Process PID',
+  dsh_uptime: 'Uptime',
+  // Uptime format: only the two largest units (see fmtUptime in OverviewView)
+  uptime_s: '{s}s',
+  uptime_m_s: '{m}m {s}s',
+  uptime_h_m: '{h}h {m}m',
+  uptime_d_h: '{d}d {h}h',
   // Overview page card titles (dsh info & lifecycle / versions / quick access)
   overview_dsh_desc: 'Process state and resource usage',
   overview_versions: 'Versions',

@@ -86,6 +86,9 @@ export interface DshStatus {
   running: boolean
   pid: number
   startedAt: string
+  // 该 PID 进程已运行的秒数：后端按 /proc/<pid>/stat 的启动时刻算（装插件自重启换 PID
+  // 后会归零），进程未运行或读不到时为 0。由 /api/dsh/stream 每秒推送。
+  uptimeSeconds?: number
   dshPort: number
   proxyPort: number
   locked: boolean

@@ -449,6 +449,10 @@ func TestSwapMarketDirReplaceAndRollback(t *testing.T) {
 	if err != nil || string(raw) != "// 1.0.0\n" {
 		t.Fatalf("回滚后文件内容不对: %q err=%v", raw, err)
 	}
+	// 回滚完成即删掉备份包：市场没有回滚入口，旧版本已在原位，这份包不再需要。
+	if names := listBackupNames(t, m, marketBackupPrefix); len(names) != 0 {
+		t.Fatalf("回滚后市场备份应当被删除，实得 %v", names)
+	}
 
 	// 再换一次并正常收尾：不应留下 .old- / staging 残留。
 	rollback2, cleanup2, err := m.swapMarketDir(targetDir, srcDir, "1.0.0")
@@ -463,6 +467,10 @@ func TestSwapMarketDirReplaceAndRollback(t *testing.T) {
 	}
 	if len(leftovers) != 0 {
 		t.Fatalf("残留目录: %v", leftovers)
+	}
+	// 安装成功收尾（cleanup）同样要删掉备份包。
+	if names := listBackupNames(t, m, marketBackupPrefix); len(names) != 0 {
+		t.Fatalf("cleanup 后市场备份应当被删除，实得 %v", names)
 	}
 }
 
@@ -487,6 +495,10 @@ func TestInstallMarketReplacesAndRestartsDsh(t *testing.T) {
 	}
 	if idx := indexOf(*calls, "stop"); idx < 0 || indexOf(*calls, "start") < idx {
 		t.Fatalf("start 必须发生在 stop 之后: %v", *calls)
+	}
+	// 安装成功后不留市场备份包（市场没有回滚入口，见 removeUnusedBackup）。
+	if names := listBackupNames(t, m, marketBackupPrefix); len(names) != 0 {
+		t.Fatalf("安装成功后市场备份应当被删除，实得 %v", names)
 	}
 }
 

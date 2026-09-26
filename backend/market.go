@@ -29,6 +29,8 @@ package main
 //   5. 【备份前缀必须是 market-】runBackupCleanup 只自动清理 harness-*/server-*，
 //      而 ListServerBackups / RollbackServer 认 server- 前缀 —— 用 server- 前缀会让
 //      市场备份出现在「dsh 服务回滚」列表里，一旦被点就会拿市场包覆盖整个 server 目录。
+//      另外市场**没有回滚入口**，备份包只在一次安装内当回滚兜底，收尾即删（见
+//      removeUnusedBackup）；前缀规则仍然要守，历史上留下的包还得靠 30 天清理回收。
 //   6. 【client bundle 的 rev 会自己变】dsh 用 sha1(client.js 内容 + mtimeMs) 生成
 //      rev（@deepseek-ai/dsh-client-modules 的 artifactRevision），该路由严格校验
 //      rev，所以替换 + 重启后浏览器会自动拿到新字节，不需要任何清缓存手段。
@@ -752,10 +754,13 @@ func (m *UpdateManager) stopDshForReplacement(action string) error {
 // 顺序（用户可见的语义：先提示，安装阶段停 dsh，更新完自动拉起并换 token）：
 //  1. 校验新包 + 依赖可解析（不改盘，失败不留停机时间）
 //  2. 停 dsh 并等端口释放（运行中替换会让两半版本错配）
-//  3. 备份当前目录（market-<旧版本>-<时间戳>.tar.gz，可手动回滚）
+//  3. 备份当前目录（market-<旧版本>-<时间戳>.tar.gz，只在本次安装内作为回滚兜底）
 //  4. staging + rename 原子替换
 //  5. 拉起 dsh（startDshCaptured：异步 WaitToken + ExchangeToken）
 //  6. 等就绪；起不来就换回旧目录、重新拉起，并把错误抛给前端
+//
+// 第 3 步的备份包不留存：市场没有「回滚到旧版本」的入口，安装收尾（成功或回滚完成）
+// 即删除 —— 详见 swapMarketDir 的 rollback / cleanup。
 func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error {
 	// 先复核下载阶段校验过的完整性值：两步之间文件可能被替换或截断。
 	if p.Integrity != "" || p.Shasum != "" {
@@ -825,7 +830,7 @@ func (m *UpdateManager) installMarket(p *PendingUpdate, extractDir string) error
 
 	cleanup()
 	m.clearPending()
-	logInfo("[market] market updated to %s (previous %s, backup in %s/)", p.Version, oldVersion, m.backupDir())
+	logInfo("[market] market updated to %s (previous %s, backup discarded)", p.Version, oldVersion)
 	return nil
 }
 
@@ -906,7 +911,9 @@ func sweepMarketDebris(targetDir string) {
 // swapMarketDir 备份当前目录，并用 srcDir 原子替换它。
 //
 // 返回的 rollback 把旧目录换回去（rename 回退，不重新解包，快且精确）；
-// 仅当旧目录已不在时才退化为从备份包解压。cleanup 删除旧目录，安装成功后调用。
+// 仅当旧目录已不在时才退化为从备份包解压。cleanup 删除旧目录与备份包，安装成功后调用；
+// rollback 在恢复成功后同样删掉备份包 —— 市场没有回滚入口，这份包只在本次安装里有意义
+// （失败且恢复不了的路径例外，那时它是旧版本唯一副本，见 rollback）。
 // staging 建在目标同级目录：跨文件系统的 rename 会 EXDEV，/tmp 不可用。
 func (m *UpdateManager) swapMarketDir(targetDir, srcDir, oldVersion string) (func() error, func(), error) {
 	stamp := time.Now().Format("20060102150405")
@@ -921,6 +928,16 @@ func (m *UpdateManager) swapMarketDir(targetDir, srcDir, oldVersion string) (fun
 	if err := tgzDir(targetDir, backupPath); err != nil {
 		return nil, nil, fmt.Errorf("备份当前市场目录失败: %w", err)
 	}
+	// 这份备份包只在本次安装里当回滚兜底用（市场没有「回滚到旧版本」的入口，见
+	// removeUnusedBackup）。所以只要没走到「交回 rollback/cleanup」的那一步，就在返回
+	// 前删掉 —— 那些失败路径上目标目录原封不动，备份包纯属垃圾。
+	// keepBackup 置 true 后由 rollback（成功恢复时）或 cleanup（安装成功时）负责删除。
+	keepBackup := false
+	defer func() {
+		if !keepBackup {
+			m.removeUnusedBackup(backupPath, updateKindMarket)
+		}
+	}()
 
 	staging := targetDir + marketStagingSuffix + stamp
 	oldDir := targetDir + marketOldSuffix + stamp
@@ -961,6 +978,7 @@ func (m *UpdateManager) swapMarketDir(targetDir, srcDir, oldVersion string) (fun
 		}
 		if _, err := os.Stat(oldDir); err == nil {
 			if err := os.Rename(oldDir, targetDir); err == nil {
+				m.removeUnusedBackup(backupPath, updateKindMarket)
 				return nil
 			}
 		}
@@ -969,13 +987,18 @@ func (m *UpdateManager) swapMarketDir(targetDir, srcDir, oldVersion string) (fun
 			return err
 		}
 		if err := extractTarGz(backupPath, targetDir); err != nil {
+			// 解压失败：刻意**保留**备份包 —— 目标目录此时是坏的，它可能是旧版本唯一的副本。
 			return fmt.Errorf("从备份恢复失败: %w", err)
 		}
+		// 恢复成功后市场又回到旧版本，备份包不再需要。
+		m.removeUnusedBackup(backupPath, updateKindMarket)
 		return nil
 	}
 	cleanup := func() {
 		os.RemoveAll(oldDir)
+		m.removeUnusedBackup(backupPath, updateKindMarket)
 	}
+	keepBackup = true
 	return rollback, cleanup, nil
 }
 

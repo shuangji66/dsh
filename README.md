@@ -466,7 +466,8 @@ const onBlur = (event) => {
 - 安装阶段顺序：校验新包（包名/版本/`lib/`/`dsh.bundle.patch`/`exports["./client"]`，
   以及非 `@deepseek-ai/*` 依赖在目标位置可解析）→ **停止 dsh** → 备份当前目录到
   `TRIM_PKGVAR/backup/market-<旧版本>-<时间戳>.tar.gz` → staging + `rename` 原子替换 →
-  **自动拉起 dsh 并重新换取会话 token**（`startDshCaptured`）。
+  **自动拉起 dsh 并重新换取会话 token**（`startDshCaptured`）。这份备份包只在本次安装里
+  当回滚兜底，**收尾即删**（见下文「备份包的留存规则」）。
 - **停 dsh 之前先确认没有插件操作在跑**：插件的安装/卸载都在 dsh 进程内持有 profile
   写锁，而停 dsh 会把它连根拔掉并留下陈旧锁（安装本身也白做）。
   - 替换 `server/` 产物的三条路径（**更新 dsh 服务 / 更新市场 / 回滚 server 备份**）
@@ -491,7 +492,8 @@ const onBlur = (event) => {
   进程，包括市场正在跑的安装，杀完就留下陈旧写锁。启动 dsh 前与执行 `dsh plugin …`
   前会顺带清理「锁文件里的 PID 已不存在」的陈旧锁（`cleanStaleProfileLocks`），
   否则插件列表 / 安装会白等 120 秒再失败。
-- 备份前缀是 `market-`，不会出现在「dsh 服务回滚」列表里；它由每日清理任务按 30 天回收。
+- 备份前缀是 `market-`，不会出现在「dsh 服务回滚」列表里；这份包收尾即删，历史上留下的
+  那些由每日清理任务按 30 天回收。
 - 只在「当前生效的那份由 server 包提供」时才允许更新。若市场已按 dsh 官方方式装进
   profile（`$DSH_HOME/profiles/web/node_modules/dshmarket`），控制台会显示
   「由 profile 提供，请在市场面板内更新」并禁用按钮 —— 那种情况下改 server 目录里那份
@@ -501,6 +503,24 @@ const onBlur = (event) => {
 **与 server 包升级的关系**：升级 dsh 服务（或回滚 server 备份）会整目录替换 `server/`，
 因此会覆盖掉控制台就地更新过的那份市场 —— 这是预期行为（新 server 包自带它构建时的
 最新市场）。
+
+## 备份包的留存规则
+
+`TRIM_PKGVAR/backup/` 下按 `<类型>-<版本>-<时间戳>.tar.gz` 命名。**留不留只看「有没有回滚
+入口」**（`update.go` 的 `removeUnusedBackup`）：
+
+| 类型 | 谁生成 | 留存 | 原因 |
+|---|---|---|---|
+| `server-*` | 更新 dsh 服务（`applyServer`） | **保留** | 概览页有「dsh 服务回滚」，回滚后还要能再回滚到别的版本 |
+| `dsh-data-*` | 目录页「备份」（用户主动） | **保留** | 用户的数据备份，只能手动删；不参与自动清理 |
+| `harness-*` | 更新 harness 控制台（`applyHarness`） | **收尾即删** | 控制台没有回滚入口，包不会被任何代码读取 |
+| `market-*` | 更新插件市场（`swapMarketDir`） | **收尾即删** | 同上；回滚兜底只用本次安装内的旧目录，包一旦用不到就删 |
+
+唯一的例外是「回滚本身失败」：市场那次如果连备份包都解压不回去（目标目录已损坏），包会
+被刻意留下 —— 此刻它可能是旧版本唯一的副本。harness / market 老版本留下的包仍由每日清理
+任务按 30 天回收。
+
+**新增更新分支时沿用同一条规则**：没有回滚入口就别把备份包留在盘上。
 
 ---
 
@@ -608,14 +628,16 @@ const onBlur = (event) => {
    （保留半成品，续传）/ 可取消（删除半成品），代理与直连各 2 次机会，详见上文
    「更新下载：通路、重试与断点续传」；包存放在 `TRIM_PKGVAR/backup/pending/`，
    安装成功后删除。三条分支收尾方式不同：
-   - **dsh**：备份 → 替换 `server/` → 重启 dsh → 推送 `phase="done"`，前端据 SSE 收尾。
+   - **dsh**：备份 → 替换 `server/` → 重启 dsh → 推送 `phase="done"`，前端据 SSE 收尾；
+     备份包**保留**（概览页「dsh 服务回滚」要用）。
    - **插件市场**：校验 → 停 dsh → 备份并原子替换 `server/` 内那份 dshmarket → 自动拉起
      dsh 并换 token → 等就绪（失败自动回滚）→ 推送 `phase="done"`，详见上文
-     「插件市场（dshmarket）的更新」。
-   - **harness**：备份 → 替换自身二进制 → 停止 dsh → 删除更新包与临时目录 →
+     「插件市场（dshmarket）的更新」；备份包收尾即删。
+   - **harness**：备份 → 替换自身二进制 → 停止 dsh → 删除备份包、更新包与临时目录 →
      `syscall.Exec` 换新映像。`exec` 之后本进程的任何代码都不再执行（`defer` 也不触发），
      因此**成功状态无法经 SSE 推送**——推送进程已消亡，前端改为轮询新进程上报的版本号
      判定就绪。同理，任何清理动作都必须放在 `exec` 之前显式完成。
+   - 三条分支的备份包留不留，统一按上文「备份包的留存规则」（没有回滚入口就不留）。
    - 启动时会清理 `pending/` 下的残留更新包（`pending` 只存在于内存，进程重启即失效；
      上述 `exec` 路径尤其会留下孤儿文件）。
 6. **退出** — 收到 `SIGINT/SIGTERM/SIGQUIT` 或 `stopCh` 后停止 dsh、移除 socket。

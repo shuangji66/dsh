@@ -1086,6 +1086,10 @@ func (m *UpdateManager) harnessBinDir() string {
 	return "/var/apps/Harness/target/bin"
 }
 
+// harnessBinDirFn 是「控制台二进制装在哪」的唯一入口（与 serverDirFn 同一模式）：
+// 变量形式便于测试注入临时目录，否则测试会去写真实的 /var/apps/Harness/target/bin/harness。
+var harnessBinDirFn = func(m *UpdateManager) string { return m.harnessBinDir() }
+
 // serverDirFn 是「dsh server 目录在哪」的唯一入口：更新 dsh 服务、回滚 server 备份、
 // 以及市场定位 dshmarket 都走它。变量形式便于测试注入临时目录（否则测试会碰到真实
 // 的 /var/apps/Harness/target/server）。
@@ -1112,6 +1116,28 @@ func (m *UpdateManager) backupDir() string {
 	dir := filepath.Join(pkgvar, "backup")
 	os.MkdirAll(dir, 0755)
 	return dir
+}
+
+// removeUnusedBackup 删除一次更新留下的备份包（收尾动作）。
+//
+// 只有 dsh server 的备份（`server-<版本>-<时间戳>.tar.gz`）需要长期保留：概览页有
+// 「dsh 服务回滚」，回滚之后还要能再回滚到别的版本。**harness 控制台与插件市场都没有
+// 回滚入口**，两者生成的备份包不会被任何代码读取，因此收尾时必须删掉，否则只会在
+// backup/ 里堆积垃圾（老版本留下的那些仍由每日清理按 30 天回收）。
+// 新增更新分支时按同一条规则处理：没有回滚入口就不要留备份。
+//
+// 删除失败只记警告：「更新已经成功」不该因为备份目录不可写而变成失败。
+func (m *UpdateManager) removeUnusedBackup(path string, k updateKind) {
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logWarn("%s failed to remove update backup %s: %v", updateLogTag(k), path, err)
+		}
+		return
+	}
+	logInfo("%s update backup removed: %s", updateLogTag(k), path)
 }
 
 // --- 下载取消与进度 ---
@@ -2047,6 +2073,9 @@ func findExecutable(dir, name string) (string, error) {
 // applyHarness 备份并替换控制台二进制，并停止 dsh 服务；**不**重启控制台，而是
 // 返回新二进制路径交由调用方在收尾之后 exec。
 //
+// 备份包只在本函数内存在：harness 没有回滚入口，替换结束（无论成败）就删掉它
+// （见 removeUnusedBackup）。
+//
 // 之所以不在此处直接 exec：exec 会立刻用新映像替换当前进程，本进程的内存状态与
 // 后续语句（清理更新包、清理解压目录）全部消失——这正是此前“自我更新后更新包
 // 残留”的原因。所有收尾动作必须由调用方在 exec 之前完成。
@@ -2055,7 +2084,7 @@ func (m *UpdateManager) applyHarness(extractDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	binDir := m.harnessBinDir()
+	binDir := harnessBinDirFn(m)
 	dest := filepath.Join(binDir, "harness")
 
 	// 先做备份（压缩当前二进制）。用独立 staging 目录避免打包整棵临时树。
@@ -2079,6 +2108,10 @@ func (m *UpdateManager) applyHarness(extractDir string) (string, error) {
 	}
 	os.RemoveAll(stage)
 	logInfo("[harness] backed up current binary to %s", backupPath)
+	// harness 没有回滚入口（概览页只有「dsh 服务回滚」），这份备份包不会被任何路径读取：
+	// 替换成功或失败都删掉，别在 backup/ 里留垃圾。这里用 defer 是安全的 —— 本函数是
+	// 正常返回的，「永不返回」的是随后 exec 的 installHarness。
+	defer m.removeUnusedBackup(backupPath, updateKindHarness)
 
 	// 替换二进制：在目标同目录下先写入临时文件，再 atomic rename 替换。
 	// 不能用 copyFile 直接覆盖（os.Create 截断正在运行的可执行文件会报 "text file busy"）；
@@ -2610,6 +2643,9 @@ func (m *UpdateManager) startDailyCleanup() {
 }
 
 // runBackupCleanup 扫描 backupDir，删除超过 30 天的 harness/server/market 备份文件。
+//
+// 新版本安装成功时不再留下 harness / market 备份（见 removeUnusedBackup），这里的
+// harness-*/market-* 主要是给「老版本安装留下的包」和「失败路径的残留」兜底。
 func (m *UpdateManager) runBackupCleanup() {
 	dir := m.backupDir()
 	entries, err := os.ReadDir(dir)

@@ -16,9 +16,11 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ulikunitz/xz"
@@ -310,5 +312,159 @@ func TestExtractArchiveDispatchesBySuffix(t *testing.T) {
 		if body, rerr := os.ReadFile(filepath.Join(dest, "f.txt")); rerr != nil || string(body) != "hello" {
 			t.Errorf("%s: 内容不符（body=%q err=%v）", tc.name, body, rerr)
 		}
+	}
+}
+
+// --- .tar.xz 的解码通路：外部 xz 优先、纯 Go 兜底 ---
+
+// writeTarPlain 生成一个未压缩的 tar（假 xz 直接 cat 它即可冒充「解码结果」）。
+func writeTarPlain(t *testing.T, path string, entries []tarEntry) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTar(t, f, entries)
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// useFakeXz 注入「xz 命令解析」的结果（真实实现见 xzPathFn）。
+func useFakeXz(t *testing.T, fn func() (string, error)) {
+	t.Helper()
+	prev := xzPathFn
+	xzPathFn = fn
+	t.Cleanup(func() { xzPathFn = prev })
+}
+
+// writeFakeXz 造一个假 xz：执行时先把参数追加进 mark 文件（用于确认真的走了外部通路），
+// 再执行 body。
+func writeFakeXz(t *testing.T, dir, mark, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, "fake-xz.sh")
+	script := "#!/bin/sh\necho \"$@\" >> " + mark + "\n" + body + "\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// 外部 xz 可用时优先走它（liblzma 比纯 Go 快一个数量级），且按 `-dc <包>` 调用。
+func TestExtractTarXzPrefersExternalXz(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "server-x86-0.1.7.tar.xz")
+	// 内容无关紧要：假 xz 不读它（真实实现由 xz 自己解）。
+	if err := os.WriteFile(archive, []byte("not really xz"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(dir, "payload.tar")
+	writeTarPlain(t, payload, []tarEntry{
+		{name: "server/", isDir: true},
+		{name: "server/from-external.txt", body: "external"},
+	})
+	mark := filepath.Join(dir, "mark")
+	fake := writeFakeXz(t, dir, mark, "cat "+payload)
+	useFakeXz(t, func() (string, error) { return fake, nil })
+
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractArchive(archive, dest); err != nil {
+		t.Fatalf("外部 xz 通路应解压成功: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dest, "server/from-external.txt"))
+	if err != nil || string(body) != "external" {
+		t.Fatalf("解压内容应来自外部命令的输出（body=%q err=%v）", body, err)
+	}
+	got, err := os.ReadFile(mark)
+	if err != nil {
+		t.Fatalf("假 xz 未被调用: %v", err)
+	}
+	if !strings.Contains(string(got), "-dc "+archive) {
+		t.Fatalf("外部命令参数 = %q, want 含 `-dc %s`", strings.TrimSpace(string(got)), archive)
+	}
+}
+
+// 外部 xz 异常退出（吐了内容但退出码非 0）：必须回退纯 Go 重解，且**先清空**外部通路
+// 写下的那份，不能把两次结果混在一起。
+func TestExtractTarXzFallsBackAndWipesExternalOutput(t *testing.T) {
+	dir := t.TempDir()
+	// 真包（纯 Go 编码）：回退通路会读它。
+	archive := filepath.Join(dir, "server-x86-0.1.7.tar.xz")
+	writeTarXz(t, archive, []tarEntry{
+		{name: "server/", isDir: true},
+		{name: "server/real.txt", body: "real"},
+	})
+	// 假 xz：先吐一份「看起来解开了」的 tar（含诱饵文件），再以非零码退出。
+	decoy := filepath.Join(dir, "decoy.tar")
+	writeTarPlain(t, decoy, []tarEntry{
+		{name: "server/", isDir: true},
+		{name: "server/decoy.txt", body: "decoy"},
+	})
+	mark := filepath.Join(dir, "mark")
+	fake := writeFakeXz(t, dir, mark, "cat "+decoy+"\nexit 1")
+	useFakeXz(t, func() (string, error) { return fake, nil })
+
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractArchive(archive, dest); err != nil {
+		t.Fatalf("外部通路失败后应回退纯 Go 并成功: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "server/decoy.txt")); err == nil {
+		t.Fatal("回退前必须清空外部通路写下的内容（否则会留下半份/坏文件）")
+	}
+	body, err := os.ReadFile(filepath.Join(dest, "server/real.txt"))
+	if err != nil || string(body) != "real" {
+		t.Fatalf("回退后应由纯 Go 通路解出真内容（body=%q err=%v）", body, err)
+	}
+}
+
+// 设备上没有 xz（LookPath 失败）：直接走纯 Go，不报错。
+func TestExtractTarXzFallsBackWhenXzMissing(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "server-x86-0.1.7.tar.xz")
+	writeTarXz(t, archive, []tarEntry{
+		{name: "server/", isDir: true},
+		{name: "server/only-builtin.txt", body: "builtin"},
+	})
+	useFakeXz(t, func() (string, error) { return "", errors.New("exec: \"xz\": executable file not found in $PATH") })
+
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractArchive(archive, dest); err != nil {
+		t.Fatalf("没有 xz 命令时应回退纯 Go 并成功: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dest, "server/only-builtin.txt"))
+	if err != nil || string(body) != "builtin" {
+		t.Fatalf("纯 Go 通路内容不符（body=%q err=%v）", body, err)
+	}
+}
+
+// 外部通路本身没问题、是包坏了（乱字节）：报错，且不得留下半份目录内容。
+func TestExtractTarXzReportsBrokenPackage(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "server-broken.tar.xz")
+	if err := os.WriteFile(archive, []byte("这不是一个 xz 流"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractArchive(archive, dest); err == nil {
+		t.Fatal("坏包必须报错")
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("坏包不应留下任何内容，实际 %d 项", len(entries))
 	}
 }

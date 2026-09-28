@@ -154,6 +154,26 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 > （`backend/update.go` 的 `checksumURL`），改名会让校验静默退化成「不校验」。
 > 校验内容与失败处理见「更新包的 sha256 校验」一节。
 
+### dsh 服务包的解压：外部 `xz` 优先，纯 Go 兜底
+
+`.tar.xz` 有两条解码通路（`extractTarXz`），**优先用系统 `xz`（liblzma）**：
+
+| 通路 | 何时用 | 349 MB / 9654 文件的 server 包实测 |
+| --- | --- | --- |
+| `xz -dc`（liblzma，C 实现） | 设备上有 `xz` 命令（fnOS 基于 Debian，dpkg 依赖 xz-utils，通常都有） | **4.8 s** |
+| `github.com/ulikunitz/xz`（纯 Go） | 找不到 `xz`、启动失败、或它异常退出时自动回退 | 63.8 s |
+
+纯 Go 的 xz 解码器慢一个数量级（同机上纯解码就要 62.7 s，tar 遍历与落盘只占约 1 s），
+这是**解码器实现**的差距而不是 xz 格式本身：liblzma 解同一个包只要 4.2 s，而 gzip（纯 Go）
+解 93 MB 的 gz 包是 2.9 s。因此 `xz` 通路的任何失败都会**清空目标目录、回退纯 Go 重解一次**
+（回退时记一行 WARN，日志里能对上「这次安装为什么卡了一分钟」）——外部命令依赖设备上有
+`xz`、能 fork/exec、PATH 正常，任何一条不成立都不能让 dsh 更新直接失败。
+
+> 排障提示：更新 dsh 服务时若看到
+> `[update] external xz unusable (...) - falling back to the built-in xz decoder (much slower)`，
+> 说明设备缺 `xz`（或它坏了），安装会多花约一分钟；`apt install xz-utils` 即可恢复。
+> tar 遍历、路径越界与软链逃逸防护只有一份（`extractTar`），外部命令只负责「解压成 tar 流」。
+
 ---
 
 ## 运行 / 环境变量

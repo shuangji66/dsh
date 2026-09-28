@@ -182,6 +182,12 @@
    - **本地备份恒为 `.tar.gz`**（`tgzDir` / `tgzDirAs`）：下载包走 `extractArchive`
      按扩展名分流，回滚/恢复（server 回滚、dsh 数据恢复、市场回滚）仍直接调 `extractTarGz`。
      不要把备份也改成 xz，也不要让备份解压跟着下载格式走。
+   - **`.tar.xz` 必须优先走系统 `xz`（liblzma），纯 Go 只做兜底** —— `extractTarXz` 先用
+     `xz -dc` 管道进 `extractTar`，失败（找不到命令/启动失败/异常退出）才清空目标目录回退
+     `github.com/ulikunitz/xz`。纯 Go 解码器实测比 liblzma **慢一个数量级**（349 MB 的包：
+     63.8 s vs 4.8 s，其中纯解码 62.7 s），别把外部通路当成「可选优化」删掉 —— 也别反过来
+     只留外部通路（设备上没 `xz` 时更新会直接失败）。tar 遍历与越界/软链防护仍只有
+     `extractTar` 一份，外部命令只负责解压成 tar 流。
 
 ---
 

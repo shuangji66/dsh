@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1102,9 +1103,71 @@ func extractTarGz(src, dest string) error {
 }
 
 // extractTarXz 解压 .tar.xz 到目标目录（dsh 服务发布资产）。
-// xz 是纯 Go 解码（github.com/ulikunitz/xz）：不依赖设备上有没有 xz 命令，
-// 且与 gz 共用同一套 tar 遍历 / 越界防护（见 extractTar）。
+//
+// 两条解码通路，**优先外部 xz（liblzma）**：
+//  1. `xz -dc <包>` 管道进 extractTar —— liblzma 是 C 优化实现，实测比纯 Go 快一个数量级
+//     （349 MB / 9654 文件的 server 包，完整解压：4.8 s vs 63.8 s；纯 Go 那 63.8 s 里
+//     62.7 s 都花在解码上）；
+//  2. 找不到 xz、或它启动/解码失败时，清空目标目录改用纯 Go 解码（github.com/ulikunitz/xz）
+//     —— 慢但零依赖，保证任何设备都装得上。
+//
+// 回退不是「可选优化」：外部命令依赖设备上有 xz、能 fork/exec、PATH 正常，任何一条不成立
+// 都不能让 dsh 更新直接失败。
+//
+// 注意：回退前会**清空 dest**（外部通路可能已经写了一部分甚至写坏了）。调用方传的必须是
+// 本次专用的空目录 —— installUpdate 传的是刚建的临时目录。
 func extractTarXz(src, dest string) error {
+	extErr := extractTarXzExternal(src, dest)
+	if extErr == nil {
+		return nil
+	}
+	// 降级路径要记一行：它意味着这次安装会慢几十倍，日志里能对上用户看到的「卡了很久」。
+	logWarn("[update] external xz unusable (%v) - falling back to the built-in xz decoder (much slower)", extErr)
+	if err := os.RemoveAll(dest); err != nil {
+		return fmt.Errorf("清理解压目录失败: %w", err)
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return fmt.Errorf("重建解压目录失败: %w", err)
+	}
+	return extractTarXzBuiltin(src, dest)
+}
+
+// xzPathFn 解析外部 xz 可执行文件路径。变量而非常量：单测注入假 xz / 模拟「设备上没有 xz」。
+var xzPathFn = func() (string, error) { return exec.LookPath("xz") }
+
+// extractTarXzExternal 用系统 xz 解压：xz -dc <src> | extractTar(dest)。
+// tar 遍历与越界/软链防护仍是 extractTar 那一份，外部命令只负责「解压成 tar 流」。
+func extractTarXzExternal(src, dest string) error {
+	bin, err := xzPathFn()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, "-dc", src)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	extractErr := extractTar(stdout, dest)
+	if extractErr != nil {
+		// 提前失败（坏包、越界条目等）时不必再读 stdout：杀掉进程并回收，
+		// 否则它可能挂在写满的管道上不退出。
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("xz 解码失败: %w", extractErr)
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("xz 异常退出: %v (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// extractTarXzBuiltin 用纯 Go 解码器解压 .tar.xz（无外部依赖的兜底通路）。
+func extractTarXzBuiltin(src, dest string) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err

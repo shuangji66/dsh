@@ -2934,9 +2934,9 @@ func (m *UpdateManager) doRollbackServer(backupPath string) error {
 		return fmt.Errorf("启动 dsh 失败: %w", err)
 	}
 
-	// 6. 回滚完成后刷新 dsh 版本号状态（含重算「是否有更新」），前端 reload 后
-	//    版本行立即显示新版本并重新亮起更新红点。
-	m.refreshDshVersion()
+	// 6. 回滚完成后刷新 server 包提供的两个版本号（dsh 服务 + 自带的插件市场），
+	//    前端 reload 后两行版本都立即显示新值，红点也按新版本重算。
+	m.refreshServerPackageVersions()
 
 	logInfo("[rollback] server rollback finished")
 	return nil
@@ -2968,6 +2968,18 @@ func (m *UpdateManager) setDshLocalVersion(v string) {
 			st.HasUpdate = compareVersion(st.LatestVersion, v) > 0
 		}
 	})
+}
+
+// refreshServerPackageVersions 刷新「由 server 目录提供」的两个本地版本号：
+//   - dsh 服务版本（重新执行 `dsh -V`，见 refreshDshVersion）；
+//   - 插件市场版本（server 包自带的 dshmarket，见 market.go 的 resolveMarketTarget）。
+//
+// 更新 dsh 服务与回滚 server 备份都是**整目录替换** server 产物，两个版本号必须一起刷：
+// 只刷 dsh 版本会留下旧的市场版本号 —— 版本行显示旧版本，红点也按旧版本算错。
+// 市场那份只读盘不联网，先刷它；`dsh -V` 要加载 node 环境、可能较慢，放后面。
+func (m *UpdateManager) refreshServerPackageVersions() {
+	m.refreshMarketLocal()
+	m.refreshDshVersion()
 }
 
 // --- DSH 数据备份列表与恢复 ---

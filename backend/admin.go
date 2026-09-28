@@ -1646,14 +1646,15 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 				st.LatestVersion = harnessVersion
 			}
 		})
-		// dsh 版本号异步刷新：`dsh -V` 可能较慢（需加载 node 环境），不阻塞
-		// 上面这次“成功”推送；前端此时已可收起弹窗，刷新页面后拿到新版本。
-		if kind != updateKindHarness {
-			go upd.refreshDshVersion()
-		}
-		// 市场：安装完成后目录里的版本号已变，重新解析一次让版本行立刻正确
-		// （前端随后会刷新页面，这里只是让状态先对齐）。
-		if kind == updateKindMarket {
+		// server 目录里的产物换过了，随之变化的本地版本号都要重新解析：
+		//   - 更新 dsh 服务：整个 server 目录（含自带的 dshmarket）都换了，故一并刷新
+		//     dsh 与市场两个版本号（见 refreshServerPackageVersions）；
+		//   - 更新市场：只换了自带的那份 dshmarket，刷市场版本即可。
+		// `dsh -V` 可能较慢（需加载 node 环境），异步执行不阻塞上面这次“成功”推送；
+		// 前端此时已可收起弹窗，刷新页面后拿到新版本。
+		if kind == updateKindDsh {
+			go upd.refreshServerPackageVersions()
+		} else if kind == updateKindMarket {
 			upd.refreshMarketLocal()
 		}
 	}()

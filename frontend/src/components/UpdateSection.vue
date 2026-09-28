@@ -7,6 +7,7 @@ import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import MarkdownText from '@/components/MarkdownText.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
+import CheckUpdateButton from '@/components/CheckUpdateButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
 
 // 概览页「版本」卡片：三个版本（harness 控制台 / dsh 服务 / 插件市场）的当前版本、
@@ -722,12 +723,8 @@ watch(
             <!-- 有更新时右上角红点 -->
             <span v-if="hasUpdateDot('harness')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
-          <!-- 检查更新：SVG 刷新图标 -->
-          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" :title="t('update_check')" :disabled="checking.harness" @click="doCheck('harness')">
-            <svg :class="checking.harness ? 'animate-spin' : ''" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-            </svg>
-          </button>
+          <!-- 检查更新：与 dsh 回退图标成对（见 CheckUpdateButton.vue） -->
+          <CheckUpdateButton :checking="checking.harness" :label="t('update_check')" @check="doCheck('harness')" />
         </div>
       </div>
 
@@ -735,11 +732,14 @@ watch(
       <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
         <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_dsh_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
-          <!-- 有备份时显示回滚图标（版本号左侧） -->
+          <!-- 有备份时显示回滚图标（版本号左侧）：Lucide rotate-ccw（逆时针），
+               与三个「检查更新」按钮（CheckUpdateButton.vue，顺时针 rotate-cw）成对 ——
+               换图标时两个一起看，别只改一边导致风格不一致。 -->
           <button
             v-if="hasServerBackups"
             class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-brand dark:hover:text-brand transition-colors"
             :title="t('rollback_title')"
+            :aria-label="t('rollback_title')"
             @click="openRollback"
           >
             <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
@@ -748,11 +748,8 @@ watch(
             {{ versionText('dsh') }}
             <span v-if="hasUpdateDot('dsh')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
-          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" :title="t('update_check')" :disabled="checking.dsh" @click="doCheck('dsh')">
-            <svg :class="checking.dsh ? 'animate-spin' : ''" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-            </svg>
-          </button>
+          <!-- 检查更新：与 dsh 回退图标成对（见 CheckUpdateButton.vue） -->
+          <CheckUpdateButton :checking="checking.dsh" :label="t('update_check')" @check="doCheck('dsh')" />
         </div>
       </div>
 
@@ -773,11 +770,8 @@ watch(
           </button>
           <!-- 不可更新时的原因（本地化短文案） -->
           <span v-if="!marketUpdatable" class="text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ marketHint }}</span>
-          <button class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white transition-colors disabled:opacity-50" :title="t('update_check')" :disabled="checking.market" @click="doCheck('market')">
-            <svg :class="checking.market ? 'animate-spin' : ''" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-            </svg>
-          </button>
+          <!-- 检查更新：与 dsh 回退图标成对（见 CheckUpdateButton.vue） -->
+          <CheckUpdateButton :checking="checking.market" :label="t('update_check')" @check="doCheck('market')" />
         </div>
       </div>
     </div>

@@ -600,8 +600,8 @@ const waitingPageHTML = `<!DOCTYPE html>
   *{box-sizing:border-box}
   html,body{height:100%}
   body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    font-family:'DM Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,
-      'PingFang SC','Microsoft YaHei',sans-serif;
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,
+      'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif;
     background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
     padding:24px}
   .wrap{width:100%;max-width:400px}
@@ -612,7 +612,7 @@ const waitingPageHTML = `<!DOCTYPE html>
     animation:spin 1s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
   h1{margin:0 0 8px;font-size:22px;font-weight:600;
-    font-family:'General Sans','DM Sans',ui-sans-serif,system-ui,sans-serif;
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
     letter-spacing:-.02em;color:var(--ink)}
   .sub{margin:0;font-size:13px;color:var(--ink-soft);line-height:1.6}
   .sub .en{display:block;color:var(--ink-faint);margin-top:4px}

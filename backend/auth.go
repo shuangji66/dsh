@@ -451,8 +451,8 @@ const loginPageHTML = `<!DOCTYPE html>
   *{box-sizing:border-box}
   html,body{height:100%}
   body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    font-family:'DM Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,
-      'PingFang SC','Microsoft YaHei',sans-serif;
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,
+      'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif;
     background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
     padding:24px}
   .wrap{width:100%;max-width:380px}
@@ -463,7 +463,7 @@ const loginPageHTML = `<!DOCTYPE html>
     box-shadow:0 4px 12px rgba(99,102,241,.3)}
   .logo svg{width:22px;height:22px;display:block}
   h1{margin:0 0 6px;font-size:24px;font-weight:600;text-align:center;
-    font-family:'General Sans','DM Sans',ui-sans-serif,system-ui,sans-serif;
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
     letter-spacing:-.03em;color:var(--ink)}
   .sub{margin:0 0 28px;font-size:13px;color:var(--ink-soft);text-align:center}
   label{display:block;margin:0 0 8px;font-size:13px;font-weight:500;color:var(--ink)}

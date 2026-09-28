@@ -7,9 +7,11 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
+    /* 字体：与主控制台一致，统一用系统字体（原先的 DM Sans / General Sans 已移除）。
+       本页不引任何外链 Web 字体。 */
     html, body {
       height: 100%;
-      font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
       background: #fafafa;
       color: #0a0a0a;
       -webkit-font-smoothing: antialiased;
@@ -70,7 +72,7 @@
 
     /* 主文案 */
     h1 {
-      font-family: "General Sans", "DM Sans", ui-sans-serif, system-ui, sans-serif;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
       font-size: 22px;
       font-weight: 600;
       letter-spacing: -0.02em;

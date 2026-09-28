@@ -7,18 +7,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>DeepSeek Harness 控制台</title>
     <meta name="theme-color" content="#FAFAFA" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <!-- DM Sans 正文 + JetBrains Mono 代码（Google Fonts） -->
-    <link
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
-    <!-- General Sans 展示字体（Fontshare） -->
-    <link
-      href="https://api.fontshare.com/v2/css?f[]=general-sans@500,600,700&display=swap"
-      rel="stylesheet"
-    />
+    <!-- 字体：全站统一走系统字体（system-ui / ui-monospace，见 src/style.css 的 @theme）。
+         这里刻意不引入任何外链 Web 字体：原先的 DM Sans / General Sans / JetBrains Mono 来自
+         两个 CDN，来源与可用性各不相同，缺哪一套就按字符回退，同一页里会同时出现好几套字形；
+         而且外链字体是首屏的额外网络依赖（设备在代理后面或离线时会卡在字体请求上）。 -->
   </head>
   <body>
     <div id="app"></div>

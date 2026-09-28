@@ -30,10 +30,22 @@
   --color-ink-soft: #6B6B6B;
   --color-ink-faint: #9C9C9C;
 
-  /* ===== 字体 ===== */
-  --font-sans: 'DM Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-display: 'General Sans', 'DM Sans', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* ===== 字体：全站统一用系统字体 =====
+     不再加载任何 Web 字体（原先正文/展示标题/代码分别是 DM Sans、General Sans、
+     JetBrains Mono 三套外链字体，见 index.html）。原因有两条：
+       1. 三套字体的来源与可用性各不相同 —— 只要其中一套加载失败或字形缺失，浏览器就按
+          字符回退到别的字体，同一个页面里会同时出现好几套字形；
+       2. 外链字体是首屏的额外网络依赖（设备在代理后面或离线时会卡在字体请求上）。
+     现在正文与标题共用系统 UI 字体（--font-sans / --font-display 同一套），代码、路径、
+     日志与终端用系统等宽字体（--font-mono）。三个 token 保留，是因为大量模板在用
+     font-sans / font-display / font-mono 工具类，改 token 即可全站生效。
+     注意：终端里 xterm 的 fontFamily（TerminalView.vue）是 JS 字符串、且用 canvas 量字宽，
+     取不到这里的 CSS 变量，那边手写的是同一套等宽栈 —— 改这里时请一并改那边。 */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --font-display: var(--font-sans);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Cascadia Mono',
+    'Noto Sans Mono CJK SC', 'PingFang SC', 'Microsoft YaHei', 'WenQuanYi Micro Hei', monospace;
 
   /* ===== 阴影 ===== */
   --shadow-card: 0 8px 30px rgba(0, 0, 0, 0.08);
@@ -98,16 +110,16 @@ html {
 }
 
 body {
-  font-family: 'DM Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: var(--font-sans);
   background-color: #FAFAFA;
   color: #0A0A0A;
   font-size: 15px;
   line-height: 1.5;
 }
 
-/* 展示标题：General Sans，紧字距 */
+/* 展示标题：与正文同一套系统字体（原先的 General Sans 已移除），只保留紧字距 */
 h1, h2, h3, h4 {
-  font-family: 'General Sans', 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: -0.03em;
 }
@@ -132,9 +144,9 @@ h1, h2, h3, h4 {
   }
 }
 
-/* 代码/路径/键值：JetBrains Mono */
+/* 代码/路径/键值：系统等宽字体（原先的 JetBrains Mono 已移除） */
 .font-mono, code, kbd, pre, samp {
-  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 /* 暗色模式基础背景 */
@@ -171,7 +183,7 @@ h1, h2, h3, h4 {
   background: rgba(10, 10, 10, 0.78);
   color: #ffffff;
   font-size: 12px;
-  font-family: 'DM Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
   transition: opacity 200ms ease;
   pointer-events: none;

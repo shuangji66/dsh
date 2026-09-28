@@ -2934,22 +2934,40 @@ func (m *UpdateManager) doRollbackServer(backupPath string) error {
 		return fmt.Errorf("启动 dsh 失败: %w", err)
 	}
 
-	// 6. 回滚完成后刷新 dsh 版本号状态，前端 reload 后版本行立即显示新版本。
+	// 6. 回滚完成后刷新 dsh 版本号状态（含重算「是否有更新」），前端 reload 后
+	//    版本行立即显示新版本并重新亮起更新红点。
 	m.refreshDshVersion()
 
 	logInfo("[rollback] server rollback finished")
 	return nil
 }
 
-// refreshDshVersion 重新执行 `dsh -V` 并就地更新 dsh 的 LocalVersion 状态
+// refreshDshVersion 重新执行 `dsh -V` 并就地更新 dsh 的版本状态
 // （仅当取到非空版本号时更新，避免把版本号刷成空串）。用于回滚/安装完成后
 // 让前端刷新页面时立即显示新版本，而不是等到下一次自动检测。
 func (m *UpdateManager) refreshDshVersion() {
 	if v := m.localDshVersion(); v != "" {
-		m.updateStatus(updateKindDsh, func(st *UpdateStatus) {
-			st.LocalVersion = v
-		})
+		m.setDshLocalVersion(v)
 	}
+}
+
+// setDshLocalVersion 更新 dsh 的本地版本号，并据已知的仓库最新版本重算「是否有更新」
+// （与 market.go 的 refreshMarketLocal 同一约定：改本地版本就顺手重算结论）。
+//
+// 本地版本变了，HasUpdate 就必须跟着重算：它原本只在 checkOnce（每小时自动检测 /
+// 手动「检查更新」）里由 compareVersion(LatestVersion, LocalVersion) 得出，而回滚
+// （RollbackServer）后本地版本变旧、LatestVersion 仍是上一次检测到的仓库最新版 ——
+// 只改 LocalVersion 会把上一次检测留下的 HasUpdate=false 沿用下来，表现为版本行与
+// 弹窗里「本地 0.1.7 / 最新 0.1.9」却写着「已是最新」、右上角红点不亮（前端只看
+// hasUpdate），要等下一次自动检测（最长一小时）才纠正。
+// LatestVersion 为空（从未成功检测或拉取失败）时不臆造结论，保持原状。
+func (m *UpdateManager) setDshLocalVersion(v string) {
+	m.updateStatus(updateKindDsh, func(st *UpdateStatus) {
+		st.LocalVersion = v
+		if st.LatestVersion != "" {
+			st.HasUpdate = compareVersion(st.LatestVersion, v) > 0
+		}
+	})
 }
 
 // --- DSH 数据备份列表与恢复 ---

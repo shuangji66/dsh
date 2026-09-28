@@ -9,6 +9,7 @@ import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
+import GithubIconLink from '@/components/GithubIconLink.vue'
 import UpdateSection from '@/components/UpdateSection.vue'
 import AccessCard from '@/components/AccessCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -82,11 +83,6 @@ const aboutFeatureGroups = [
 // 打开 GitHub 用户主页（新标签页）
 function openGithubUser(user: string) {
   window.open(`https://github.com/${user}`, '_blank', 'noopener')
-}
-
-// 打开 GitHub 仓库（新标签页）
-function openGithub() {
-  window.open('https://github.com/shuangji66/dsh', '_blank', 'noopener')
 }
 
 // 停止/重启的二次确认弹窗：无论是否忙碌，每次点击都先弹窗确认
@@ -483,18 +479,11 @@ onBeforeUnmount(() => {
           <!-- 比默认弹窗略宽：特性按类别双列排布，窄了会大量折行 -->
           <div class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <DialogCloseButton :label="t('dialog_close')" @close="aboutVisible = false" />
-            <h3 class="g-dialog-title mb-4">{{ t('about_title') }}</h3>
-
-            <!-- Github 仓库按钮 -->
-            <button
-              class="w-full flex items-center justify-center gap-2 g-btn-secondary mb-5"
-              @click="openGithub"
-            >
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-1.7c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17.2 4.7 18.2 5 18.2 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.2c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/>
-              </svg>
-              {{ t('about_github') }}
-            </button>
+            <!-- 标题 + 本仓库的 GitHub 裸图标（紧靠标题；右侧留出 X 的位置） -->
+            <div class="flex items-center gap-2 pr-11 mb-5">
+              <h3 class="g-dialog-title !pr-0">{{ t('about_title') }}</h3>
+              <GithubIconLink href="https://github.com/shuangji66/dsh" :label="t('about_github')" />
+            </div>
 
             <!-- 特性介绍：按类别分组，条目双列排布（窄弹窗里省高度） -->
             <div class="mb-5">

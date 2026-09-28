@@ -7,6 +7,7 @@ import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import MarkdownText from '@/components/MarkdownText.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
+import GithubIconLink from '@/components/GithubIconLink.vue'
 
 // 概览页「版本」卡片：三个版本（harness 控制台 / dsh 服务 / 插件市场）的当前版本、
 // 检查更新入口与更新弹窗、dsh 服务的备份回滚，全部收敛在本组件内。
@@ -123,6 +124,19 @@ const dialogTitle = computed(() => {
   if (dialogKind.value === 'dsh') return t('update_dialog_title_dsh')
   return t('update_dialog_title_market')
 })
+
+// 三个更新目标各自的 GitHub 仓库（更新弹窗标题右侧那个裸图标外链指向的地址）：
+//   - harness 控制台 = 本仓库（harness-* 与 dsh-* 两类发布资产都在这里）；
+//   - dsh 服务 = 上游 deepseek-ai/deepseek-harness（server 包按上游 dsh 版本构建）；
+//   - 插件市场 = dsh-market/dsh-market。
+// 只作为展示用的常量，与后端更新链路用的仓库地址（update.go 的 updateRepoURL）无关。
+const repoSlugs: Record<UpdateKind, string> = {
+  harness: 'shuangji66/dsh',
+  dsh: 'deepseek-ai/deepseek-harness',
+  market: 'dsh-market/dsh-market',
+}
+const dialogRepoSlug = computed(() => repoSlugs[dialogKind.value])
+const dialogRepoURL = computed(() => `https://github.com/${dialogRepoSlug.value}`)
 
 // 版本号右上角红点：有更新时显示
 function hasUpdateDot(kind: UpdateKind): boolean {
@@ -782,7 +796,11 @@ watch(
           <div class="g-modal-mask" @click="closeDialog"></div>
           <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
             <DialogCloseButton :label="t('dialog_close')" :disabled="busy" @close="closeDialog" />
-            <h3 class="g-dialog-title mb-1">{{ dialogTitle }}</h3>
+            <!-- 标题 + 该目标对应的 GitHub 仓库裸图标（紧靠标题；右侧留出 X 的位置） -->
+            <div class="flex items-center gap-2 pr-11 mb-1">
+              <h3 class="g-dialog-title !pr-0">{{ dialogTitle }}</h3>
+              <GithubIconLink :href="dialogRepoURL" :label="dialogRepoSlug" />
+            </div>
 
             <div v-if="updatingDone" class="py-6 text-center">
               <div class="text-sm font-medium text-success dark:text-[#10B981] mb-1">{{ t('update_installed_done') }}</div>

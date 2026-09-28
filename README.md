@@ -41,9 +41,9 @@
   与辅助键条一起贴到键盘上沿，拖终端不会把整页带着上滚。
 - **目录授权** — 授权/查看已共享目录，并可将某已授权目录设为 dsh 主目录。
 - **插件管理** — 列出 / 移除 / 重置 dsh web profile 的插件依赖。
-- **快捷指令** — 持久化的终端快捷命令（`HARNESS_QUICK_CMDS_FILE`）；列表弹窗为紧凑卡片
+- **快捷指令** — 持久化的终端快捷命令（数据目录下的 `quickcmds.json`）；列表弹窗为紧凑卡片
   （新增/关闭为纯图标按钮，编辑/删除/上移/下移与命令名同一行）。
-- **日志** — 查看 / 下载 / SSE 实时流式输出 dsh 与主进程日志（`HARNESS_LOG_FILE`）。
+- **日志** — 查看 / 下载 / SSE 实时流式输出 dsh 与主进程日志（数据目录下的 `harness.log`）。
   后端日志统一走 `backend/logging.go` 这一个出口，分三级：`[INFO]`（白）/ `[WARN]`（黄）/
   `[ERROR]`（红）；终端（stdout 是 TTY）用 ANSI 着色，日志文件保持纯文本，由控制台日志页
   按 `[LEVEL]` 标记着色。连续重复的同一行只记一次、序列结束时汇总（如 `(previous message
@@ -159,14 +159,10 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 
 | 环境变量 | 说明 | 默认 |
 | --- | --- | --- |
-| `HARNESS_CONFIG_FILE` | 配置文件路径 | `$TRIM_PKGVAR/config.json` |
+| `HARNESS_DATA_DIR` | **统一的后端数据目录**：日志、PID、配置、会话密钥、终端会话镜像、更新备份与待安装包全部在其下派生（见下表）。单独的路径环境变量已移除 —— 要换位置只改这一个 | `$TRIM_PKGVAR`（缺失时退到当前工作目录） |
 | `HARNESS_ADMIN_SOCK` | Admin Unix socket 路径 | `$TRIM_APPDEST/app.sock` |
 | `HARNESS_ADMIN_BASEURL` | 前端资源 baseurl 前缀 | `$TRIM_APPDEST` |
-| `HARNESS_LOG_FILE` | 日志落盘路径（空则不落盘） | 空 |
-| `HARNESS_PID_FILE` | PID 文件路径（harness 控制台自身 PID，恒不变） | 空 |
-| `HARNESS_DSH_PID_FILE` | dsh 服务 PID 文件路径（随 dsh 启动/自重启刷新为实时 PID，dsh 停止时移除） | 空 |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
-| `HARNESS_QUICK_CMDS_FILE` | 终端快捷指令持久化文件 | `$TRIM_PKGVAR/quickcmds.json` |
 | `HARNESS_PROXY_SOCK` | 反向代理的子路径挂载 Unix socket（空或 `off` 关闭） | `$TRIM_APPDEST/dsh.sock` |
 | `HARNESS_PROXY_BASEURL` | 该 socket 对外占据的子路径（反代剥掉后再转发给 dsh） | `/app/Harness/dsh` |
 | `HARNESS_DSH_DIAG` | 设为 `1`/`true`/`yes` 时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
@@ -178,6 +174,23 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `password` | 登录密码 | 空 |
 | `auth_ttl_hours` | 登录鉴权有效期（小时） | `4` |
 | `TRIM_API_TOKEN` / `TRIM_APPNAME` | fnOS gateway 凭据 | — |
+
+数据目录下的内容（`backend/config.go` 的 `loadRuntimeEnv` 统一派生；要换位置改
+`HARNESS_DATA_DIR` 即可，不要再新增单独的路径环境变量）：
+
+| 路径 | 内容 |
+| --- | --- |
+| `<数据目录>/config.json` | 运行时配置（设置页保存的目标） |
+| `<数据目录>/harness.log` | 日志落盘文件（进程停止时删除） |
+| `<数据目录>/harness.pid` | harness 控制台自身 PID（恒不变） |
+| `<数据目录>/dsh.pid` | dsh 服务实时 PID（随 dsh 启动/自重启刷新，dsh 停止时移除） |
+| `<数据目录>/session.key` | 会话 cookie 签名密钥（0600，跨重启保住登录态） |
+| `<数据目录>/quickcmds.json` | 终端快捷指令持久化文件 |
+| `<数据目录>/terminal-sessions/` | 终端会话历史临时镜像（停止时整目录清除） |
+| `<数据目录>/backup/` | 更新备份包，`pending/` 子目录存放「已下载待安装」的包 |
+
+**例外**：pnpm 目录不在数据目录下，仍由 `PNPM_HOME` 单独指定（dsh 进程与终端都
+按它设置环境变量）。
 
 运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、`proxyUpdate`、
 `proxyAddr`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
@@ -497,7 +510,7 @@ const onBlur = (event) => {
   下载后校验 `dist.integrity`（SRI，缺失时退 `dist.shasum`）；**两个都没有则拒绝安装**。
 - 安装阶段顺序：校验新包（包名/版本/`lib/`/`dsh.bundle.patch`/`exports["./client"]`，
   以及非 `@deepseek-ai/*` 依赖在目标位置可解析）→ **停止 dsh** → 备份当前目录到
-  `TRIM_PKGVAR/backup/market-<旧版本>-<时间戳>.tar.gz` → staging + `rename` 原子替换 →
+  `<数据目录>/backup/market-<旧版本>-<时间戳>.tar.gz` → staging + `rename` 原子替换 →
   **自动拉起 dsh 并重新换取会话 token**（`startDshCaptured`）。这份备份包只在本次安装里
   当回滚兜底，**收尾即删**（见下文「备份包的留存规则」）。
 - **停 dsh 之前先确认没有插件操作在跑**：插件的安装/卸载都在 dsh 进程内持有 profile
@@ -538,7 +551,7 @@ const onBlur = (event) => {
 
 ## 备份包的留存规则
 
-`TRIM_PKGVAR/backup/` 下按 `<类型>-<版本>-<时间戳>.tar.gz` 命名。**留不留只看「有没有回滚
+`<数据目录>/backup/`（默认 `$TRIM_PKGVAR/backup`）下按 `<类型>-<版本>-<时间戳>.tar.gz` 命名。**留不留只看「有没有回滚
 入口」**（`update.go` 的 `removeUnusedBackup`）：
 
 | 类型 | 谁生成 | 留存 | 原因 |
@@ -685,7 +698,7 @@ harness 控制台与 dsh 服务的自我更新会一并取回它并用**实际�
    （仍在放行门禁内：此阶段即使端口已通也不放行）。
 5. **自我更新（harness / dsh / 插件市场）** — 分「下载 → 安装」两步：下载可暂停
    （保留半成品，续传）/ 可取消（删除半成品），代理与直连各 2 次机会，详见上文
-   「更新下载：通路、重试与断点续传」；包存放在 `TRIM_PKGVAR/backup/pending/`，
+   「更新下载：通路、重试与断点续传」；包存放在 `<数据目录>/backup/pending/`，
    安装成功后删除。三条分支收尾方式不同：
    - **dsh**：备份 → 替换 `server/` → 重启 dsh → 推送 `phase="done"`，前端据 SSE 收尾；
      备份包**保留**（概览页「dsh 服务回滚」要用）。

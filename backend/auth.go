@@ -136,17 +136,10 @@ func parseSessionCookie(raw string) (int64, string, string, bool) {
 	return expireTs, parts[1], parts[2], true
 }
 
-// sessionKeyFileFn 返回「会话随机密钥」的存放路径。变量而非常量：单测注入临时路径。
-// 默认放在应用数据目录（与 config.json 同级），0600。
+// sessionKeyFileFn 返回「会话随机密钥」的存放路径：统一数据目录下的 session.key
+// （与 config.json 同级），0600。变量而非常量：单测注入临时路径。
 var sessionKeyFileFn = func() string {
-	if p := os.Getenv("HARNESS_SESSION_KEY_FILE"); p != "" {
-		return p
-	}
-	if pkgvar := os.Getenv("TRIM_PKGVAR"); pkgvar != "" {
-		return filepath.Join(pkgvar, "session.key")
-	}
-	// 开发/测试环境没有 TRIM_PKGVAR：退到系统临时目录（重启后可能丢失，届时只需重登）。
-	return filepath.Join(os.TempDir(), "harness-session.key")
+	return dataPath("session.key")
 }
 
 // processSecret 是「密钥文件不可用」时的进程内兜底密钥：同一进程内的所有 Auth 实例

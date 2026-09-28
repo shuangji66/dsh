@@ -55,10 +55,10 @@ type DshManager struct {
 	livePid   int // 实际在运行的 dsh 进程 pid。dsh 装插件自重启后 m.cmd 的 pid 会失效，
 	// 此时用它记录在 /proc 中重新发现的实时 dsh pid（0 表示未知/未发现）。
 	pidCheckedAt time.Time // 上次扫描 /proc 发现 dsh pid 的时间（避免频繁扫描）
-	// dshPidFile 是 HARNESS_DSH_PID_FILE 指定的 dsh 服务 PID 文件路径（空表示不
-	// 维护）。它记录 dsh 进程的实时 PID（含 dsh-market 自重启后的新 PID），dsh
+	// dshPidFile 是数据目录下的 dsh.pid（RuntimeEnv.DshPidFile，空表示不维护）。
+	// 它记录 dsh 进程的实时 PID（含 dsh-market 自重启后的新 PID），dsh
 	// 启动/重新发现时写入、dsh 停止或自重启窗口移除；与记录 harness 控制台自身
-	// PID 的 HARNESS_PID_FILE 完全分离，互不影响。
+	// PID 的 harness.pid 完全分离，互不影响。
 	dshPidFile    string
 	dshPidFilePid int // 最近一次写入 dsh PID 文件的 PID，用于避免重复写入（0 表示未写过）
 	pidMu         sync.Mutex
@@ -498,10 +498,10 @@ func (m *DshManager) effectivePID() int {
 	return found
 }
 
-// writeDshPidFile 把 dsh 实时 PID 写入 HARNESS_DSH_PID_FILE（仅在路径配置且
+// writeDshPidFile 把 dsh 实时 PID 写入数据目录下的 dsh.pid（仅在路径配置且
 // PID 与上次写入不同时执行，避免高频调用反复写文件）。dsh 启动、自重启后重新
 // 发现新 PID 时调用；文件只记录 dsh 服务进程的 PID，与 harness 控制台的
-// HARNESS_PID_FILE 相互独立。
+// harness.pid 相互独立。
 func (m *DshManager) writeDshPidFile(pid int) {
 	m.pidMu.Lock()
 	defer m.pidMu.Unlock()
@@ -530,7 +530,7 @@ func (m *DshManager) removeDshPidFile() {
 	}
 }
 
-// readDshPidFile 读取 dsh 服务 PID 文件（HARNESS_DSH_PID_FILE，即「dsh.pid」）
+// readDshPidFile 读取 dsh 服务 PID 文件（数据目录下的 dsh.pid）
 // 中记录的 dsh 进程 PID。文件内容为纯数字（可能带首尾空白），返回记录的正整数；
 // 文件不存在、内容非法或未配置路径时返回 0。
 func (m *DshManager) readDshPidFile() int {
@@ -992,7 +992,7 @@ func (m *DshManager) Start() error {
 	m.cmd = cmd
 	m.startedAt = time.Now()
 	// dsh 启动成功：把 dsh 服务 PID 文件指向新进程（harness 控制台自身的
-	// HARNESS_PID_FILE 不受影响，仍记录控制台 PID）。
+	// harness.pid 不受影响，仍记录控制台 PID）。
 	m.writeDshPidFile(cmd.Process.Pid)
 	m.logInfo("dsh started pid=%d port=%d", cmd.Process.Pid, cfg.DshPort)
 	return nil
@@ -1069,7 +1069,7 @@ func (m *DshManager) Stop() error {
 
 	m.forgetDshProcessLocked()
 	// dsh 已停止：移除 dsh 服务 PID 文件（进程已不存在，文件不应残留旧 PID）；
-	// harness 控制台自身的 HARNESS_PID_FILE 保持不变。
+	// harness 控制台自身的 harness.pid 保持不变。
 	m.removeDshPidFile()
 	return nil
 }

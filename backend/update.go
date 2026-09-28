@@ -1245,7 +1245,7 @@ func tgzDir(srcDir, destFile string) error {
 // 一边写一边把自己读进去）。旧实现按「相对路径后缀 .tar.gz」排除，会把 srcDir 下
 // 用户自己的所有 .tar.gz（例如 `~/.dsh/backups/x.tar.gz`）静默漏掉 —— 用户以为备份
 // 完整，恢复时才发现少了数据。判断依据：dsh 数据备份的 destFile 来自
-// UpdateManager.backupDir()（$TRIM_PKGVAR/backup），而 srcDir 是 $HOME/.dsh，
+// UpdateManager.backupDir()（<数据目录>/backup），而 srcDir 是 $HOME/.dsh，
 // 两者正常部署下互不包含，因此「排除产物自身」这条规则在正常路径上根本不触发，
 // 它只是防御性的；真要防的也只有这一个文件。
 func tgzDirAs(srcDir, destFile, rootName string) error {
@@ -1371,15 +1371,21 @@ func (m *UpdateManager) serverDir() string {
 	return "/var/apps/Harness/target/server"
 }
 
-// backupDir 返回备份产物的存放目录（放在应用数据目录，避免写入只读的 target）。
+// backupDir 返回备份产物的存放目录（统一数据目录下的 backup/，避免写入只读的
+// target）。pending/ 待安装包也挂在它下面（见 pendingDir）。
 func (m *UpdateManager) backupDir() string {
-	pkgvar := os.Getenv("TRIM_PKGVAR")
-	if pkgvar == "" {
-		pkgvar = "/vol1/@appdata/Harness"
-	}
-	dir := filepath.Join(pkgvar, "backup")
+	dir := filepath.Join(m.dataDir(), "backup")
 	os.MkdirAll(dir, 0755)
 	return dir
+}
+
+// dataDir 返回统一的后端数据目录：优先用运行时解析结果；单测里构造的空
+// RuntimeEnv（只为碰临时目录）退回环境变量解析（HARNESS_DATA_DIR / TRIM_PKGVAR）。
+func (m *UpdateManager) dataDir() string {
+	if m.renv != nil && m.renv.DataDir != "" {
+		return m.renv.DataDir
+	}
+	return dataDirFromEnv()
 }
 
 // removeUnusedBackup 删除一次更新留下的备份包（收尾动作）。

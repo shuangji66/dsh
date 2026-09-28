@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,7 +29,7 @@ func TestAuthHasNoDeadValidateErrSwitch(t *testing.T) {
 
 // 强度不合规的密码仍然照常参与鉴权：未带 cookie 必须拒绝，用该密码登录后必须放行。
 func TestWeakPasswordStillEnforced(t *testing.T) {
-	t.Setenv("HARNESS_SESSION_KEY_FILE", filepath.Join(t.TempDir(), "session.key"))
+	t.Setenv("HARNESS_DATA_DIR", t.TempDir()) // 会话密钥落在临时数据目录，不碰真实路径
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
 	cfg := defaultConfig()

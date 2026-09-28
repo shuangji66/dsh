@@ -93,7 +93,7 @@
   vs profile 自带）、npm registry 取版本、完整性校验、原子替换与失败回滚。
 - `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
-- `quickcmds.go` — 终端快捷指令持久化（`HARNESS_QUICK_CMDS_FILE`）。
+- `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`）。
 - `fnos.go` — fnOS open-gateway 客户端（`/var/run/trim_open_gateway_apiscope.socket`）。
 
 **前端（Vue 3，`frontend/`）**
@@ -137,6 +137,12 @@
 2. **不要硬编码平台路径** —— 用环境变量（`TRIM_APPDEST`、`TRIM_PKGVAR`、
    `HARNESS_*`）而非写死 `/var/apps/Harness`（除非是 `install.go`/`fnos.go` 等
    明确约定平台常量的位置）。
+   - **后端自己产生的文件一律落在统一数据目录**（`HARNESS_DATA_DIR`，默认
+     `$TRIM_PKGVAR`）：日志、PID、`config.json`、`session.key`、终端会话镜像、
+     更新备份/待安装包都在 `RuntimeEnv` 里由它派生（`config.go` 的 `dataDirFromEnv` /
+     `dataPath`）。**不要再新增「单独设置某个文件路径」的环境变量**（`HARNESS_LOG_FILE`、
+     `HARNESS_SESSION_DIR` 等已全部移除），也不要另写一份路径拼接。pnpm 目录是唯一例外，
+     仍由 `PNPM_HOME` 单独指定。
 3. **反代端口改动必须“先绑新、再关旧”** —— 它是可持久化的配置项（`AppConfig.ProxyPort`，
    默认 `3079`，不再读 `PROXY_PORT`），保存时经 `startProxy` 同步绑定新端口：绑定失败
    （占用/无权限）必须整次拒绝保存且旧监听不动，成功后由 `startProxy` 关闭旧监听；

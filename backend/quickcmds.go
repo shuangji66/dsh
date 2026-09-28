@@ -10,8 +10,8 @@ import (
 )
 
 // QuickCmd is a user-defined terminal quick command persisted to a JSON file
-// whose path is resolved from an environment variable (HARNESS_QUICK_CMDS_FILE,
-// defaulting into TRIM_PKGVAR). The frontend manages the full list and saves it
+// under the unified backend data directory (RuntimeEnv.QuickCmdsFile, i.e.
+// <dataDir>/quickcmds.json). The frontend manages the full list and saves it
 // as a whole on each add/edit/delete.
 type QuickCmd struct {
 	ID      string `json:"id"`
@@ -30,12 +30,13 @@ type quickCmdsFile struct {
 // quickCmdsMu serializes concurrent reads/writes of the persisted file.
 var quickCmdsMu sync.Mutex
 
-// quickCmdsPath resolves the persistence file path from the environment.
+// quickCmdsPath resolves the persistence file path: 已解析的运行时路径优先，
+// 否则退回统一数据目录下的 quickcmds.json。
 func quickCmdsPath(renv *RuntimeEnv) string {
 	if renv != nil && renv.QuickCmdsFile != "" {
 		return renv.QuickCmdsFile
 	}
-	return envOr("HARNESS_QUICK_CMDS_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "quickcmds.json"))
+	return dataPath("quickcmds.json")
 }
 
 // handleGetQuickCmds returns the saved quick commands (or an empty list when

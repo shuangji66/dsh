@@ -26,7 +26,7 @@ import (
 //
 // 它同时是**历史文件的写入侧上限**（见 Session.trimHistoryLocked）：文件本身若不
 // 截断，读取侧的限制只能保证「一次不读太多」，磁盘占用仍随会话时长无限增长
-// —— 一个长跑会话 + 高频输出足以把 TRIM_PKGVAR 所在分区写满。
+// —— 一个长跑会话 + 高频输出足以把数据目录所在分区写满。
 const maxHistoryBytes = 4 * 1024 * 1024
 
 const (
@@ -407,12 +407,13 @@ func newID() string {
 	return strings.ReplaceAll(time.Now().Format("20060102150405.000000000"), ".", "")
 }
 
-// sessionDir returns the temporary mirror directory (from env, default in TRIM_PKGVAR).
+// sessionDir returns the temporary mirror directory: 已解析的运行时路径优先，
+// 否则退回统一数据目录下的 terminal-sessions。
 func (m *SessionManager) sessionDir() string {
 	if m.renv != nil && m.renv.SessionDir != "" {
 		return m.renv.SessionDir
 	}
-	return envOr("HARNESS_SESSION_DIR", filepath.Join(os.Getenv("TRIM_PKGVAR"), "terminal-sessions"))
+	return dataPath("terminal-sessions")
 }
 
 // create 新建会话：生成 id、创建临时历史文件、启动 PTY 与 pump 协程。创建失败时

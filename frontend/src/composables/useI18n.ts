@@ -288,7 +288,7 @@ const zh: Record<string, string> = {
   // SSE 连不上、一份快照都没收到：区分「没有日志」与「拉不到日志」
   log_stream_failed: '无法连接日志流，暂时拉取不到日志内容（将自动重连）',
   log_truncated: '…（日志过长，仅显示末尾）',
-  log_no_file: '（未配置日志文件，未设置 HARNESS_LOG_FILE）',
+  log_no_file: '（日志文件不可用，请检查数据目录 HARNESS_DATA_DIR 是否可写）',
   log_export: '导出',
   log_export_failed: '导出失败',
   log_not_configured: '日志文件未配置，无法导出',
@@ -688,7 +688,7 @@ const en: Record<string, string> = {
   // SSE never connected and no snapshot arrived: distinguishes "no logs" from "cannot fetch logs"
   log_stream_failed: 'Cannot connect to the log stream — log content is unavailable (will retry automatically)',
   log_truncated: '… (log too long, showing the tail only)',
-  log_no_file: '(No log file configured, HARNESS_LOG_FILE not set)',
+  log_no_file: '(Log file unavailable — check that the data dir (HARNESS_DATA_DIR) is writable)',
   log_export: 'Export',
   log_export_failed: 'Export failed',
   log_not_configured: 'Log file not configured, cannot export',

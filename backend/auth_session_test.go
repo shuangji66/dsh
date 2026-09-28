@@ -24,8 +24,9 @@ import (
 // authFixture 准备一份开启鉴权的配置 + Auth 实例（会话密钥写进临时文件，可跨实例共享）。
 func authFixture(t *testing.T) (*Auth, string) {
 	t.Helper()
-	keyFile := filepath.Join(t.TempDir(), "session.key")
-	t.Setenv("HARNESS_SESSION_KEY_FILE", keyFile)
+	dataDir := t.TempDir()
+	t.Setenv("HARNESS_DATA_DIR", dataDir)
+	keyFile := filepath.Join(dataDir, "session.key")
 
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
@@ -142,8 +143,9 @@ func TestRevokeIsolatesSessions(t *testing.T) {
 // 会话密钥落盘后必须跨实例（≈跨控制台重启）一致：否则每次重启都会把所有已登录的
 // 浏览器踢出登录。
 func TestSessionSecretPersistsAcrossInstances(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "session.key")
-	t.Setenv("HARNESS_SESSION_KEY_FILE", keyFile)
+	dataDir := t.TempDir()
+	t.Setenv("HARNESS_DATA_DIR", dataDir)
+	keyFile := filepath.Join(dataDir, "session.key")
 
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })

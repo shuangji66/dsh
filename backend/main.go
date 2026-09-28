@@ -87,9 +87,9 @@ func main() {
 	cleanupLog := setupLogFile(renv.LogFile)
 	defer cleanupLog()
 
-	// HARNESS_PID_FILE 记录的是 harness 控制台自身 PID（用于平台识别控制台
-	// 进程），dsh 服务 PID 单独由 HARNESS_DSH_PID_FILE 记录（见 DshManager，
-	// 随 dsh 启动/自重启/停止实时刷新），二者不要混用。
+	// 数据目录下的 harness.pid 记录的是 harness 控制台自身 PID（用于平台识别
+	// 控制台进程），dsh 服务 PID 单独由 dsh.pid 记录（见 DshManager，随 dsh
+	// 启动/自重启/停止实时刷新），二者不要混用。
 	pidFile := renv.PidFile
 	if pidFile != "" {
 		if err := writePidFile(pidFile, os.Getpid()); err != nil {

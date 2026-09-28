@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -25,7 +24,7 @@ const authNextPassword = "Next-Demo-1!"
 // 真实路径）。不依赖其它测试文件的 fixture，避免相互耦合。
 func authNextFixture(t *testing.T) *Auth {
 	t.Helper()
-	t.Setenv("HARNESS_SESSION_KEY_FILE", filepath.Join(t.TempDir(), "session.key"))
+	t.Setenv("HARNESS_DATA_DIR", t.TempDir()) // 会话密钥落在临时数据目录，不碰真实路径
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
 	cfg := defaultConfig()

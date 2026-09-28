@@ -86,15 +86,24 @@ type AppConfig struct {
 
 // RuntimeEnv 描述进程启动时的环境（环境变量来源，含路径与凭据）。
 // 注意：反向代理端口不在其中 —— 它是可变的用户配置（AppConfig.ProxyPort）。
+//
+// 所有「后端自己产生的文件」都统一落在 DataDir 下（见 dataDirFromEnv）：
+// 日志、PID、配置文件、会话密钥、终端会话镜像、更新备份与待安装包。单独设置这些
+// 路径的环境变量（HARNESS_CONFIG_FILE / HARNESS_LOG_FILE / HARNESS_PID_FILE /
+// HARNESS_DSH_PID_FILE / HARNESS_QUICK_CMDS_FILE / HARNESS_SESSION_DIR /
+// HARNESS_SESSION_KEY_FILE）已移除，要换位置就换 DataDir。
+// 例外：pnpm 目录由 PNPM_HOME 单独指定，不在数据目录下。
 type RuntimeEnv struct {
-	ConfigFile   string
+	// DataDir 是统一的后端数据目录（HARNESS_DATA_DIR，默认取平台变量 TRIM_PKGVAR）。
+	DataDir      string
+	ConfigFile   string // DataDir/config.json
 	AdminSock    string
 	AdminBaseURL string
-	LogFile      string // 日志文件输出路径（HARNESS_LOG_FILE），为空则不落盘
-	// PidFile 是 harness 控制台自身的 PID 文件路径（HARNESS_PID_FILE，为空则不
-	// 维护）；DshPidFile 是 dsh 服务进程的 PID 文件路径（HARNESS_DSH_PID_FILE，
-	// 为空则不维护）。二者用途不同：前者标识控制台进程，dsh 装插件自重启等场景
-	// 下保持不变；后者跟随 dsh 实时 PID，dsh 停止时移除。
+	LogFile      string // DataDir/harness.log
+	// PidFile 是 harness 控制台自身的 PID 文件路径（DataDir/harness.pid）；
+	// DshPidFile 是 dsh 服务进程的 PID 文件路径（DataDir/dsh.pid）。二者用途不同：
+	// 前者标识控制台进程，dsh 装插件自重启等场景下保持不变；后者跟随 dsh 实时
+	// PID，dsh 停止时移除。
 	PidFile       string
 	DshPidFile    string
 	TRIMApiToken  string
@@ -104,8 +113,8 @@ type RuntimeEnv struct {
 	Home          string
 	PnpmHome      string
 	Lang          string
-	QuickCmdsFile string // 终端快捷指令持久化文件路径（HARNESS_QUICK_CMDS_FILE）
-	SessionDir    string // 终端会话临时镜像目录（HARNESS_SESSION_DIR，停止时整目录清除）
+	QuickCmdsFile string // 终端快捷指令持久化文件路径（DataDir/quickcmds.json）
+	SessionDir    string // 终端会话临时镜像目录（DataDir/terminal-sessions，停止时整目录清除）
 	// ProxySock/ProxyBaseURL 是反代的「子路径挂载」监听：平台网关（fnOS
 	// open-gateway）把 http://<fnip>:<port>/app/Harness/dsh 整段转发到该 unix
 	// socket，反代剥掉前缀后再转发给 dsh，于是 dsh 前端按文档相对路径发起的
@@ -128,6 +137,29 @@ func envOr(k, def string) string {
 	return def
 }
 
+// dataDirFromEnv 解析统一的后端数据目录：HARNESS_DATA_DIR 优先，其次平台变量
+// TRIM_PKGVAR；两者都没有（开发/测试环境）时退回当前工作目录 —— 派生出的文件名
+// 于是仍是相对路径，与历史行为一致。
+//
+// 每个调用都会重读环境变量（单测用 t.Setenv 注入临时目录），因此不要在进程中途
+// 改这两个变量：路径会跟着漂移。
+func dataDirFromEnv() string {
+	if v := os.Getenv("HARNESS_DATA_DIR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("TRIM_PKGVAR"); v != "" {
+		return v
+	}
+	return "."
+}
+
+// dataPath 返回数据目录下的文件/子目录路径。给「拿不到 RuntimeEnv」的路径解析用
+// （包级默认值、单测构造的空 RuntimeEnv）；正常路径请直接用 RuntimeEnv 里已解析
+// 好的字段。
+func dataPath(elem ...string) string {
+	return filepath.Join(append([]string{dataDirFromEnv()}, elem...)...)
+}
+
 func loadRuntimeEnv() RuntimeEnv {
 	appDest := os.Getenv("TRIM_APPDEST")
 	appName := os.Getenv("TRIM_APPNAME")
@@ -138,13 +170,15 @@ func loadRuntimeEnv() RuntimeEnv {
 	if appDest != "" {
 		proxySock = filepath.Join(appDest, "dsh.sock")
 	}
+	dataDir := dataDirFromEnv()
 	return RuntimeEnv{
-		ConfigFile:    envOr("HARNESS_CONFIG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "config.json")),
-		AdminSock:     envOr("HARNESS_ADMIN_SOCK", filepath.Join(os.Getenv("TRIM_APPDEST"), "app.sock")),
+		DataDir:       dataDir,
+		ConfigFile:    filepath.Join(dataDir, "config.json"),
+		AdminSock:     envOr("HARNESS_ADMIN_SOCK", filepath.Join(appDest, "app.sock")),
 		AdminBaseURL:  envOr("HARNESS_ADMIN_BASEURL", "/app/Harness"),
-		LogFile:       envOr("HARNESS_LOG_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "harness.log")),
-		PidFile:       envOr("HARNESS_PID_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "harness.pid")),
-		DshPidFile:    envOr("HARNESS_DSH_PID_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "dsh.pid")),
+		LogFile:       filepath.Join(dataDir, "harness.log"),
+		PidFile:       filepath.Join(dataDir, "harness.pid"),
+		DshPidFile:    filepath.Join(dataDir, "dsh.pid"),
 		TRIMApiToken:  os.Getenv("TRIM_API_TOKEN"),
 		TRIMAppDest:   appDest,
 		TRIMAppName:   appName,
@@ -152,8 +186,8 @@ func loadRuntimeEnv() RuntimeEnv {
 		Home:          os.Getenv("HOME"),
 		PnpmHome:      os.Getenv("PNPM_HOME"),
 		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
-		QuickCmdsFile: envOr("HARNESS_QUICK_CMDS_FILE", filepath.Join(os.Getenv("TRIM_PKGVAR"), "quickcmds.json")),
-		SessionDir:    envOr("HARNESS_SESSION_DIR", filepath.Join(os.Getenv("TRIM_PKGVAR"), "terminal-sessions")),
+		QuickCmdsFile: filepath.Join(dataDir, "quickcmds.json"),
+		SessionDir:    filepath.Join(dataDir, "terminal-sessions"),
 		ProxySock:     envOr("HARNESS_PROXY_SOCK", proxySock),
 		// 默认挂在控制台 baseurl（/app/Harness）之下的一层：控制台 SPA 走 admin
 		// socket 占据 /app/Harness，dsh GUI 走 dsh.sock 占据 /app/Harness/dsh，

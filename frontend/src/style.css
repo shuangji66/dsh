@@ -406,12 +406,24 @@ html, body {
        - 普通操作：g-btn-secondary
        - 危险操作（删除/取消下载/丢弃等）：g-btn-danger
      不要再在弹窗里写 g-btn-primary（填充品牌色）或自创尺寸 —— 之前各弹窗的确认按钮
-     有的是填充色、有的是纯文字，看起来像两套 UI。 */
+     有的是填充色、有的是纯文字，看起来像两套 UI。
+
+     X 与标题「同一行居中」靠三个固定量达成，改任一处都要一起改：
+       - .g-dialog-title 行高固定 2rem（= 32px）→ 标题行就是一条 32px 的带；
+       - .g-dialog-close 32px 见方 → 与标题行同高；
+       - .g-dialog-close 的 top 取 1.5rem（= p-6 的 24px 内边距）→ 与标题行同顶。
+     为什么要凑这三个数：绝对定位的 top 以弹窗的**内边距盒**为基准，而标题（第一个在流内
+     的子元素）从**内容盒**起算，两者差着一个 padding —— 原来写 top-3 时 X 的中心比标题
+     中心高 10px（视觉上 X 明显偏上，与标题不在同一行）。
+     例外：标题栏式弹窗（标题自带 px-5 py-3 头部条、没有 p-6 内边距，如 QuickCmdsDialog）
+     要自己传 class="top-3" 把 X 对到那条 32px 头部条上 —— 见该组件的注释。 */
   .g-dialog-title {
     @apply font-display text-lg font-semibold text-ink dark:text-white pr-11;
+    /* 行高固定 2rem（= 32px），与 .g-dialog-close 同高，X 才好与标题同行居中 */
+    line-height: 2rem;
   }
   .g-dialog-close {
-    @apply absolute right-3 top-3 inline-flex items-center justify-center w-8 h-8 rounded-md
+    @apply absolute right-3 top-6 inline-flex items-center justify-center w-8 h-8 rounded-md
       bg-transparent text-ink-soft dark:text-[#A6A6AD]
       hover:text-ink dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5
       disabled:opacity-40 disabled:cursor-not-allowed transition-colors;

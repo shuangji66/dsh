@@ -72,8 +72,10 @@ function moveDown(idx: number) {
         <div
           class="relative w-full max-w-lg h-[90dvh] max-h-full bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card flex flex-col"
         >
-          <!-- 右上角 X：所有弹窗统一（见 DialogCloseButton.vue） -->
-          <DialogCloseButton :label="t('dialog_close')" @close="close" />
+          <!-- 右上角 X：所有弹窗统一（见 DialogCloseButton.vue）。这里多传 top-3 —— 本弹窗
+               是「标题栏式」布局（标题自带一条 px-5 py-3 的头部条、没有 p-6 内边距），X 要
+               对到那条 32px 头部条上，而不是默认的 .g-dialog-title 行（见 style.css）。 -->
+          <DialogCloseButton class="top-3" :label="t('dialog_close')" @close="close" />
           <!-- 顶部：标题 + 新增。
                新增与右上角的 X 同样是「32px 方形的边框图标按钮」（同尺寸、同边框、不填色，
                只是图标不同），右侧留出 pr-14 给绝对定位的 X，避免两个按钮叠在一起。 -->

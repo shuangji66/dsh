@@ -7,6 +7,13 @@
 //
 // 用法：放进弹窗容器（.relative）内即可，绝对定位到右上角；文案用 i18n 的 dialog_close，
 // 需要禁止关闭（如正在执行不可中断的操作）时传 :disabled。
+//
+// 与标题同一行居中：X 是 32px 见方、top-6（= 常规弹窗 p-6 的 24px 内边距，正好是标题行的
+// 顶边），标题（.g-dialog-title）行高固定 2rem —— 两者同顶同高，中心自然重合，常规 p-6
+// 弹窗不需要任何额外设置（绝对定位的 top 以内边距盒为基准、标题从内容盒起算，差的这一个
+// padding 就由 top-6 补上，别改回 top-3）。唯一的例外是**标题栏式**弹窗（标题自带一条
+// px-5 py-3 头部条、没有 p-6 内边距，如 QuickCmdsDialog）：传 class="top-3" 把 X 对到那条
+// 32px 头部条上。
 defineProps<{
   // 无障碍标签与悬停提示（一般传 t('dialog_close')）
   label: string

@@ -63,6 +63,8 @@ jobs:
           else
             PLATFORM="arm"
           fi
+          # harness 只用 .tar.gz（发布与自更新两侧都不变，assetURL 里 harness 也仍拼
+          # .tar.gz）。只有 dsh 服务的 server 包才额外发 .tar.xz，见 server-build.yaml。
           ARCHIVE="harness-${VERSION}-${PLATFORM}.tar.gz"
           tar czf "$ARCHIVE" harness
           # 校验文件与包同名 + .sha256 后缀（控制台自更新时按同一规则取回，

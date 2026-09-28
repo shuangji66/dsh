@@ -23,6 +23,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	// 纯 Go 的 xz 解码器：dsh 服务发布资产是 .tar.xz（见 assetURL / extractTarXz），
+	// Go 标准库只有 gzip。无传递依赖，也不需要设备上装 xz 命令。
+	"github.com/ulikunitz/xz"
 )
 
 // harnessVersion 是控制台自身的构建版本号。默认从 1.0.0 起；构建时可经
@@ -93,8 +97,9 @@ func updateLogTag(k updateKind) string {
 	}
 }
 
-// pendingKind 从待安装包文件名（`harness-1.2.6.tar.gz` / `dsh-…` / `market-…`）
+// pendingKind 从待安装包文件名（`harness-1.2.6.tar.gz` / `dsh-0.1.7.tar.xz` / `market-…`）
 // 反推更新目标；认不出时返回空串，日志退化为通用的 [update]。
+// 只看 `<kind>-` 前缀、不看扩展名：旧控制台留下的 `.tar.gz` 半成品同样要能认出来。
 func pendingKind(name string) updateKind {
 	for _, k := range []updateKind{updateKindHarness, updateKindDsh, updateKindMarket} {
 		if strings.HasPrefix(name, string(k)+"-") {
@@ -102,6 +107,17 @@ func pendingKind(name string) updateKind {
 		}
 	}
 	return ""
+}
+
+// pendingPkgName 返回待安装包在 pending 目录下的文件名（`<kind>-<版本><扩展名>`）。
+//
+// 扩展名必须与下载地址一致：dsh 是 `.tar.xz`（见 assetURL），harness 与插件市场是
+// `.tar.gz`。它同时决定安装时用哪个解压器 —— extractArchive 按扩展名分流。
+func pendingPkgName(k updateKind, version string) string {
+	if k == updateKindDsh {
+		return string(k) + "-" + version + ".tar.xz"
+	}
+	return string(k) + "-" + version + ".tar.gz"
 }
 
 // tagInfo 描述一个从仓库读取到的 tag 及其解析出的版本号。
@@ -152,7 +168,7 @@ type UpdateStatus struct {
 type PendingUpdate struct {
 	Kind    updateKind
 	Version string
-	PkgPath string // 已下载更新包的 .tar.gz 完整路径
+	PkgPath string // 已下载更新包的完整路径（dsh 为 .tar.xz，harness/市场为 .tar.gz）
 	// 仅市场使用：npm registry 给出的完整性值，安装前再复核一次（见 market.go）。
 	Integrity string
 	Shasum    string
@@ -867,6 +883,14 @@ func (m *UpdateManager) updateArch() string {
 }
 
 // assetURL 构造某个 kind/version/arch 对应的发布资源下载地址。
+//
+// 压缩格式按 kind 分流（**发布侧两种都要传**，见 .github/workflows/server-build.yaml）：
+//   - harness 控制台：只发 `.tar.gz`，控制台自更新也只取 `.tar.gz`；
+//   - dsh 服务：同时发布 `.tar.gz` 与 `.tar.xz`，**新版控制台只取 `.tar.xz`**。
+//     `.tar.gz` 纯粹为兼容旧版控制台（它们只会拼 `.tar.gz` 地址）而保留，
+//     两边的 `.sha256` 都要与各自包同名（见 checksumURL 与 AGENTS 的发布资产约定）。
+//
+// 注意：这里只决定「下载哪个」，与本地备份无关 —— 备份恒为 `.tar.gz`（tgzDir）。
 func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
 	tag := string(k) + "-" + version
 	var asset string
@@ -874,7 +898,7 @@ func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
 	case updateKindHarness:
 		asset = fmt.Sprintf("harness-%s-%s.tar.gz", version, arch)
 	case updateKindDsh:
-		asset = fmt.Sprintf("server-%s-%s.tar.gz", arch, version)
+		asset = fmt.Sprintf("server-%s-%s.tar.xz", arch, version)
 	}
 	return fmt.Sprintf("%s/releases/download/%s/%s", updateRepoURL, tag, asset)
 }
@@ -1032,8 +1056,37 @@ func verifyFileSHA256(path, want string) error {
 	return nil
 }
 
-// extractTarGz 解压 .tar.gz 到目标目录。保持 tar 内的相对路径不变（不剥离顶层目录）。
-// 既用于下载的发布包，也用于回滚时还原 server 备份。
+// extractArchive 按文件扩展名选择解压器，解压到目标目录。
+//
+// 扩展名决定一切（内容嗅探会让「坏包」被当成另一种格式重试，错误信息更难懂）：
+//   - `.tar.xz` / `.txz` → xz（dsh 服务发布资产，见 assetURL）
+//   - 其它（`.tar.gz` / `.tgz`）→ gzip（harness 发布资产、插件市场包与**所有备份**）
+//
+// 下载下来的更新包一律走这里；本地备份的还原路径（回滚 server / 恢复 dsh 数据 /
+// 市场回滚）刻意仍直接调 extractTarGz —— 备份恒为 gz，收窄入口能让「备份格式变了」
+// 当场暴露，而不是被自动适配悄悄带过。
+func extractArchive(src, dest string) error {
+	switch {
+	case hasArchiveSuffix(src, ".tar.xz", ".txz"):
+		return extractTarXz(src, dest)
+	default:
+		return extractTarGz(src, dest)
+	}
+}
+
+// hasArchiveSuffix 报告文件名是否以给定后缀之一结尾（大小写不敏感）。
+func hasArchiveSuffix(name string, suffixes ...string) bool {
+	lower := strings.ToLower(name)
+	for _, s := range suffixes {
+		if strings.HasSuffix(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractTarGz 解压 .tar.gz（.tgz 同理）到目标目录。用于发布资产（harness）、
+// 插件市场包，以及回滚时还原各版本备份。
 func extractTarGz(src, dest string) error {
 	f, err := os.Open(src)
 	if err != nil {
@@ -1045,7 +1098,29 @@ func extractTarGz(src, dest string) error {
 		return err
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	return extractTar(gz, dest)
+}
+
+// extractTarXz 解压 .tar.xz 到目标目录（dsh 服务发布资产）。
+// xz 是纯 Go 解码（github.com/ulikunitz/xz）：不依赖设备上有没有 xz 命令，
+// 且与 gz 共用同一套 tar 遍历 / 越界防护（见 extractTar）。
+func extractTarXz(src, dest string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	xzr, err := xz.NewReader(f)
+	if err != nil {
+		return err
+	}
+	return extractTar(xzr, dest)
+}
+
+// extractTar 解压一个已解压的 tar 流到目标目录。保持 tar 内的相对路径不变
+// （不剥离顶层目录）。gz / xz 两条通路共用，因此路径越界与软链逃逸的防护只有一份。
+func extractTar(rd io.Reader, dest string) error {
+	tr := tar.NewReader(rd)
 	// destRoot 用于「解析软链后仍在目标内」的判定；destLex 用于便宜的字符串前缀检查。
 	destLex := filepath.Clean(dest)
 	destRoot, rerr := filepath.EvalSymlinks(destLex)
@@ -1477,7 +1552,7 @@ func (m *UpdateManager) clearPending(k updateKind) {
 //
 // pending 只存在于内存，进程重启后即丢失：无论上次是安装前崩溃、安装过程被中断，
 // 还是 harness 自我更新（旧进程被 exec 换掉，内存中的 pending 随进程消亡），重启后
-// 磁盘上都会留下永远不会被 clearPending 回收的 .tar.gz。这些文件只用于“下载→安装”
+// 磁盘上都会留下永远不会被 clearPending 回收的更新包。这些文件只用于“下载→安装”
 // 两步之间传递，没有任何跨重启续用价值（版本号变化后也无法复用），因此在启动时
 // 整目录清理，避免每次自我更新都残留一个更新包。
 //
@@ -2054,7 +2129,8 @@ func drrLastN(dr *downloadReader) int64 {
 }
 
 // downloadUpdate 只下载更新包（第一步），不安装。可在下载过程中取消（CancelUpdate
-// 关闭 cancelCh 中断），下载成功后把 .tar.gz 放到持久的“待安装”目录并记入 pending，
+// 关闭 cancelCh 中断），下载成功后把包（dsh 为 .tar.xz，其余 .tar.gz）放到持久的
+// “待安装”目录并记入 pending，
 // 推送 phase=downloaded / readyToInstall=true，等待用户在弹窗里点“安装”。
 // 返回错误表示下载失败或被用户取消。
 //
@@ -2104,8 +2180,9 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	// 目标包持久保存在“待安装”目录，跨“下载→安装”两步保留。
 	// 文件名刻意「按 kind+版本固定」（不再带时间戳）：这样暂停后继续、或失败后重试
 	// 都能命中同一个半成品，断点续传才有意义（市场不续传，另有清理）。
-	// 同 kind 其它版本的残留会被清掉。
-	pkgPath := filepath.Join(m.pendingDir(), string(k)+"-"+version+".tar.gz")
+	// 同 kind 其它版本的残留会被清掉 —— 包括旧控制台留下的 `.tar.gz` 半成品
+	// （扩展名随下载地址变，见 pendingPkgName）。
+	pkgPath := filepath.Join(m.pendingDir(), pendingPkgName(k, version))
 	m.removeOtherPendingFiles(k, pkgPath)
 	resumeBytes := int64(0)
 	if plan.resume {
@@ -2249,7 +2326,8 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	return nil
 }
 
-// installUpdate 安装已下载的更新包（第二步）。读取 pending 中的 .tar.gz，解压后
+// installUpdate 安装已下载的更新包（第二步）。读取 pending 中的包（dsh 为 .tar.xz，
+// harness / 市场为 .tar.gz），按扩展名解压后
 // 调用 installHarness / installDsh / installMarket 执行“备份→替换→重启”。
 // 安装阶段耗时短、不可取消。
 // 安装失败时保留 pending（用户可重试安装）；成功时由各分支清 pending：
@@ -2294,7 +2372,9 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 		return fmt.Errorf("创建临时目录失败: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
-	if err := extractTarGz(p.PkgPath, tmpDir); err != nil {
+	// 按包的实际扩展名选解压器：dsh 是 .tar.xz，harness / 市场是 .tar.gz
+	// （旧控制台留下的 .tar.gz dsh 包也能照常安装）。
+	if err := extractArchive(p.PkgPath, tmpDir); err != nil {
 		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
 		return fmt.Errorf("解压更新包失败: %w", err)
 	}
@@ -2770,7 +2850,8 @@ func (m *UpdateManager) doRollbackServer(backupPath string) error {
 		return fmt.Errorf("删除 server 目录失败: %w", err)
 	}
 
-	// 3. 解压备份到 server 目录
+	// 3. 解压备份到 server 目录。备份恒为 .tar.gz（tgzDir），故直接用 gz 解压器：
+	//    与下载包那条通路（extractArchive，dsh 为 .tar.xz）刻意分开。
 	logInfo("[rollback] extracting backup to %s", serverDir)
 	if err := os.MkdirAll(serverDir, 0755); err != nil {
 		return fmt.Errorf("创建 server 目录失败: %w", err)
@@ -2961,7 +3042,8 @@ func (m *UpdateManager) doRestoreDshData(backupPath string) error {
 		return fmt.Errorf("删除 ~/.dsh 目录失败: %w", err)
 	}
 
-	// 3. 解压备份到 HOME（tar 中顶层为 .dsh/，解压后在 HOME 下还原 ~/.dsh）
+	// 3. 解压备份到 HOME（tar 中顶层为 .dsh/，解压后在 HOME 下还原 ~/.dsh）。
+	//    数据备份恒为 .tar.gz（tgzDirAs），故直接用 gz 解压器。
 	logInfo("[restore] extracting backup to %s", home)
 	if err := extractTarGz(backupPath, home); err != nil {
 		return fmt.Errorf("解压备份失败: %w", err)

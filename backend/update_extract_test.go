@@ -16,9 +16,12 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ulikunitz/xz"
 )
 
 type tarEntry struct {
@@ -28,14 +31,10 @@ type tarEntry struct {
 	isDir    bool
 }
 
-func writeTarGz(t *testing.T, path string, entries []tarEntry) {
+// writeTar 把条目写成一个（未压缩的）tar 流。
+func writeTar(t *testing.T, w io.Writer, entries []tarEntry) {
 	t.Helper()
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gz := gzip.NewWriter(f)
-	tw := tar.NewWriter(gz)
+	tw := tar.NewWriter(w)
 	for _, e := range entries {
 		hdr := &tar.Header{Name: e.name, Mode: 0o644}
 		switch {
@@ -61,7 +60,37 @@ func writeTarGz(t *testing.T, path string, entries []tarEntry) {
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeTarGz(t *testing.T, path string, entries []tarEntry) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	writeTar(t, gz, entries)
 	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeTarXz 生成 .tar.xz（dsh 服务发布资产的格式）。
+func writeTarXz(t *testing.T, path string, entries []tarEntry) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xw, err := xz.NewWriter(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTar(t, xw, entries)
+	if err := xw.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
@@ -184,5 +213,102 @@ func TestExtractKeepsOutOfTreeMirrorLinks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, ".dsh/profiles/web/package.json")); err != nil {
 		t.Fatalf("同包的普通文件应正常解压: %v", err)
+	}
+}
+
+// --- .tar.xz（dsh 服务发布资产）---
+
+// dsh 的 server 包是 .tar.xz：必须能解压，且内容/软链与 gz 通路一致。
+func TestExtractTarXzServerPackage(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "server-x86-0.1.7.tar.xz")
+	writeTarXz(t, archive, []tarEntry{
+		{name: "server/", isDir: true},
+		{name: "server/package.json", body: `{"name":"server"}`},
+		{name: "server/node_modules/.bin/", isDir: true},
+		{name: "server/node_modules/pkg/", isDir: true},
+		{name: "server/node_modules/pkg/cli.js", body: "#!/usr/bin/env node\n"},
+		{name: "server/node_modules/.bin/pkg", linkname: "../pkg/cli.js"},
+	})
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := extractArchive(archive, dest); err != nil {
+		t.Fatalf("解压 .tar.xz 失败: %v", err)
+	}
+	if body, err := os.ReadFile(filepath.Join(dest, "server/package.json")); err != nil || string(body) == "" {
+		t.Fatalf("包内文件缺失: %v", err)
+	}
+	if got, err := os.Readlink(filepath.Join(dest, "server/node_modules/.bin/pkg")); err != nil || got != "../pkg/cli.js" {
+		t.Fatalf("包内相对软链应保留（got=%q err=%v）", got, err)
+	}
+}
+
+// xz 通路必须与 gz 共用同一套越界防护（extractTar）：软链逃逸在 xz 包里同样被拒绝。
+func TestExtractTarXzRejectsSymlinkEscapeOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(dir, "evil.tar.xz")
+	writeTarXz(t, archive, []tarEntry{
+		{name: "link", linkname: outside},
+		{name: "link/evil.txt", body: "pwned"},
+	})
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := extractArchive(archive, dest); err == nil {
+		t.Fatal("xz 包里通过软链向 dest 之外写文件必须被拒绝")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "evil.txt")); statErr == nil {
+		t.Fatal("dest 之外出现了被写入的文件（zip-slip 逃逸）")
+	}
+}
+
+// 扩展名决定解压器：.tar.gz / .tgz 走 gzip，.tar.xz / .txz 走 xz。
+func TestExtractArchiveDispatchesBySuffix(t *testing.T) {
+	dir := t.TempDir()
+	entries := []tarEntry{{name: "f.txt", body: "hello"}}
+
+	cases := []struct {
+		name    string
+		write   func(t *testing.T, path string, entries []tarEntry)
+		wantErr bool
+	}{
+		{name: "a.tar.gz", write: writeTarGz},
+		{name: "b.tgz", write: writeTarGz},
+		{name: "c.tar.xz", write: writeTarXz},
+		{name: "d.txz", write: writeTarXz},
+		// 无扩展名的（旧控制台留下的 dsh 半成品没有别的可能）按 gzip 处理：
+		// 内容确实不是 gz，因此必须报错而不是静默产出空目录。
+		{name: "e.bin", write: writeTarXz, wantErr: true},
+	}
+	for _, tc := range cases {
+		archive := filepath.Join(dir, tc.name)
+		tc.write(t, archive, entries)
+		dest := filepath.Join(dir, "out-"+tc.name)
+		if err := os.MkdirAll(dest, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := extractArchive(archive, dest)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: 期望解压失败（按 gzip 处理 xz 字节）", tc.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: 解压失败: %v", tc.name, err)
+			continue
+		}
+		if body, rerr := os.ReadFile(filepath.Join(dest, "f.txt")); rerr != nil || string(body) != "hello" {
+			t.Errorf("%s: 内容不符（body=%q err=%v）", tc.name, body, rerr)
+		}
 	}
 }

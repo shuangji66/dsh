@@ -173,6 +173,15 @@
    两个 workflow 也按同一规则生成并上传。改资产命名（`assetURL`）却漏改一侧，**不会报错**，
    只会让校验静默退化成「不校验」（缺文件按策略只记 WARN）。新增发布资产时：
    ①`assetURL` 的命名 ②workflow 的 `sha256sum` ③artifact/Release 上传的路径清单，三处一起改。
+   - **压缩格式：harness 只有 `.tar.gz`；dsh server 同时发 `.tar.gz` 与 `.tar.xz`，而新版
+     控制台只下载 `.tar.xz`**（`assetURL` 按 kind 分流，`.tar.gz` 只为旧版控制台保留）。
+     改格式要五处一起改：`assetURL`、待安装包名 `pendingPkgName`（扩展名决定用哪个解压器）、
+     workflow 的打包命令、两处 `sha256sum`、artifact/Release 的上传清单；
+     `server-build.yaml` 的「是否已发布」检查也按 `.tar.xz` 是否存在判定，缺它就必须重建补传
+     （否则那一版永远升不上去）。
+   - **本地备份恒为 `.tar.gz`**（`tgzDir` / `tgzDirAs`）：下载包走 `extractArchive`
+     按扩展名分流，回滚/恢复（server 回滚、dsh 数据恢复、市场回滚）仍直接调 `extractTarGz`。
+     不要把备份也改成 xz，也不要让备份解压跟着下载格式走。
 
 ---
 

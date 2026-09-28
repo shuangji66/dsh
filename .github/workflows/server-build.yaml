@@ -33,15 +33,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.get_highest.outputs.version }}"
-          if gh release view "dsh-$VERSION" --repo "${{ github.repository }}" &>/dev/null; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "版本 $VERSION 已构建并发布，跳过本次构建"
-          else
+          if ! gh release view "dsh-$VERSION" --repo "${{ github.repository }}" &>/dev/null; then
             echo "skip=false" >> $GITHUB_OUTPUT
             echo "版本 $VERSION 尚未构建，继续"
+            exit 0
+          fi
+          # 已发布：还必须确认 .tar.xz 资产在。历史 Release 只有 .tar.gz（那时控制台也
+          # 只下载 gz），而新版控制台**只下载 .tar.xz** —— 缺 xz 就必须补建，否则那一版
+          # 永远升不上去（.tar.gz 只是留给旧版控制台的兼容资产）。
+          if gh release view "dsh-$VERSION" --repo "${{ github.repository }}" --json assets \
+               -q '.assets[].name' | grep -q '\.tar\.xz$'; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "版本 $VERSION 已构建并发布（含 .tar.xz），跳过本次构建"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "版本 $VERSION 的 Release 缺少 .tar.xz 资产，重新构建并补传"
           fi
 
-  # ========== 第二步：在 Debian 容器中构建 server.tar.gz（原第二步） ==========
+  # ========== 第二步：在 Debian 容器中构建 server.tar.gz + server.tar.xz ==========
   build-server:
     needs: fetch-version
     if: needs.fetch-version.outputs.skip != 'true'
@@ -215,26 +224,37 @@ jobs:
           node /tmp/patch-attachment-fsync.cjs \
             "/var/apps/Harness/target/server/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js"
 
-      - name: 压缩 server 目录，以版本号+平台命名（并生成 sha256 校验文件）
+      - name: 压缩 server 目录为 tar.gz 与 tar.xz（各自生成 sha256 校验文件）
         run: |
           VERSION="${{ needs.fetch-version.outputs.dsh_version }}"
           PLATFORM="${{ matrix.platform }}"
-          ARCHIVE_NAME="server-${PLATFORM}-${VERSION}.tar.gz"
-          tar czf "$GITHUB_WORKSPACE/$ARCHIVE_NAME" -C /var/apps/Harness/target server
-          # 校验文件与包同名 + .sha256 后缀（控制台更新 dsh 服务时按同一规则取回，
-          # 见 backend/update.go 的 checksumURL）。内容为 sha256sum 的标准输出：
-          # `<64 位十六进制>  <文件名>`。在 $GITHUB_WORKSPACE 下生成，记录的是文件名本身。
-          sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
-          cat "$ARCHIVE_NAME.sha256"
-          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+          GZ_NAME="server-${PLATFORM}-${VERSION}.tar.gz"
+          XZ_NAME="server-${PLATFORM}-${VERSION}.tar.xz"
+          # 两份内容相同，只是压缩格式不同：
+          #   - .tar.xz：新版控制台更新 dsh 服务时**只下载这一份**（体积小得多，
+          #     见 backend/update.go 的 assetURL）；
+          #   - .tar.gz：兼容旧版控制台（它们只会拼 .tar.gz 地址，也不会解 xz），
+          #     同时保底 —— 万一某次只传到一半，旧格式仍在。
+          tar czf "$GITHUB_WORKSPACE/$GZ_NAME" -C /var/apps/Harness/target server
+          tar cJf "$GITHUB_WORKSPACE/$XZ_NAME" -C /var/apps/Harness/target server
+          # 校验文件与包同名 + .sha256 后缀（控制台按同一规则取回，见 checksumURL）。
+          # 内容为 sha256sum 的标准输出：`<64 位十六进制>  <文件名>`。
+          # 两种格式各一份，缺一份就会让对应格式的下载退化成「不校验」。
+          sha256sum "$GZ_NAME" > "$GZ_NAME.sha256"
+          sha256sum "$XZ_NAME" > "$XZ_NAME.sha256"
+          cat "$GZ_NAME.sha256" "$XZ_NAME.sha256"
+          echo "GZ_NAME=$GZ_NAME" >> $GITHUB_ENV
+          echo "XZ_NAME=$XZ_NAME" >> $GITHUB_ENV
 
-      - name: 上传 server.tar.gz 与校验文件作为 Artifact（供发布用）
+      - name: 上传 server.tar.gz / server.tar.xz 与校验文件作为 Artifact（供发布用）
         uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.platform }}
           path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
+            ${{ env.GZ_NAME }}
+            ${{ env.GZ_NAME }}.sha256
+            ${{ env.XZ_NAME }}
+            ${{ env.XZ_NAME }}.sha256
           if-no-files-found: error
 
   # ========== 第三步：发布到当前仓库的 Release ==========
@@ -243,7 +263,7 @@ jobs:
     if: needs.fetch-version.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     steps:
-      - name: 下载所有平台的 server.tar.gz
+      - name: 下载所有平台的 server 包（gz 与 xz）
         uses: actions/download-artifact@v7
         with:
           path: artifacts
@@ -293,7 +313,9 @@ jobs:
               --notes-file /tmp/release_notes.txt
           fi
 
-          for file in artifacts/*.tar.gz artifacts/*.tar.gz.sha256; do
+          # 两种压缩格式及其校验文件都要上传：.tar.xz 给新版控制台，.tar.gz 给旧版。
+          for file in artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
+                      artifacts/*.tar.xz artifacts/*.tar.xz.sha256; do
             echo "上传 $file"
             gh release upload "$TAG" "$file" --repo "$REPO" --clobber
           done

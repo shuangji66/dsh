@@ -139,13 +139,20 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 - `harness-build.yaml` — 手动触发，构建 harness 并发布到 GitHub Release
   （压缩包 + 同名 `.sha256` 校验文件）。
 - `server-build.yaml` — 每 8 小时自动从 `@deepseek-ai/dsh` 打包 server（含
-  `dshmarket` 依赖并注入 `PROFILE_TEMPLATES.web.bundles`），发布 Release
-  （压缩包 + 同名 `.sha256` 校验文件）。
+  `dshmarket` 依赖并注入 `PROFILE_TEMPLATES.web.bundles`），发布 Release：
+  **`.tar.gz` 与 `.tar.xz` 两份**，各自带同名 `.sha256` 校验文件。
 
+> **dsh server 为什么发两份**：新版控制台更新 dsh 服务时**只下载 `.tar.xz`**
+> （体积小得多，`backend/update.go` 的 `assetURL`）；`.tar.gz` 只为兼容旧版控制台
+> （它们只会拼 `.tar.gz` 地址、也不会解 xz）而保留。harness 控制台则**只有 `.tar.gz`**，
+> 发布与自更新两侧都没变。本地备份（server / harness / market / dsh-data）**恒为 `.tar.gz`**，
+> 与下载格式无关 —— 解压按扩展名分流（`extractArchive`），备份那条路仍直接走 gz 解压器。
+>
 > 校验文件的命名就是「Release 资产名 + `.sha256` 后缀」
-> （`harness-<版本>-<x86|arm>.tar.gz.sha256`、`server-<x86|arm>-<版本>.tar.gz.sha256`）：
-> 控制台的更新链路按同一规则拼地址（`backend/update.go` 的 `checksumURL`），
-> 改名会让校验静默退化成「不校验」。校验内容与失败处理见「更新包的 sha256 校验」一节。
+> （`harness-<版本>-<x86|arm>.tar.gz.sha256`、`server-<x86|arm>-<版本>.tar.xz.sha256`
+> 与对应的 `.tar.gz.sha256`）：控制台的更新链路按同一规则拼地址
+> （`backend/update.go` 的 `checksumURL`），改名会让校验静默退化成「不校验」。
+> 校验内容与失败处理见「更新包的 sha256 校验」一节。
 
 ---
 
@@ -587,7 +594,8 @@ const onBlur = (event) => {
 - **失败归类**：所有通路都失败时返回 `errUpdateNetworkFailed`，状态里带
   `errorHint="network"`，前端用当前语言显示「请检查网络或代理设置后重试」；
   若其中任一次是败在本地磁盘（写不进去），则不给这个提示 —— 修网络没用。
-- **断点续传**（仅发布资产）：半成品文件名按 `<kind>-<版本>.tar.gz` 固定，失败/暂停后
+- **断点续传**（仅发布资产）：半成品文件名按 `<kind>-<版本><扩展名>` 固定
+  （dsh 为 `.tar.xz`，harness / 市场为 `.tar.gz`，见 `pendingPkgName`），失败/暂停后
   重试都命中同一个文件，用 `Range: bytes=<offset>-` 续传（代理断在 60% 时直连接着下）。
   - 服务器回 `200`（忽略 Range，如某些代理会剥掉）→ 截断重写，本次从零开始；
   - 回 `416`（本地字节比远端还长，多半是远端换了资产）→ **删除半成品**并重新完整下载，
@@ -609,6 +617,8 @@ const onBlur = (event) => {
 
 `harness-build.yaml` / `server-build.yaml` 打包后额外生成**同名 `.sha256` 文件**
 （`sha256sum` 的标准输出：`<64 位十六进制>  <文件名>`），与包一并上传到 Release 资产。
+server 包有 gz / xz 两种格式，因此有**两份**校验文件（`server-<x86|arm>-<版本>.tar.gz.sha256`
+与 `.tar.xz.sha256`）；控制台只下载 `.tar.xz`，也只会取回它那份校验文件。
 
 harness 控制台与 dsh 服务的自我更新会一并取回它并用**实际下载到的字节**复核摘要
 （`backend/update.go` 的 `releaseChecksum` / `verifyFileSHA256`）：

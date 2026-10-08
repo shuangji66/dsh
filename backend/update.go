@@ -780,7 +780,8 @@ func (m *UpdateManager) checkOnce() {
 		}
 	})
 
-	// dsh 服务版本：本地版本 = 选中的版本目录，最新版 = 镜像源的 dist-tags.latest。
+	// dsh 服务版本：本地版本 = 选中的版本目录，最新版 = 版本列表里**版本号最高**的一版
+	// （不看 dist-tags，见 server.go 的 refreshDshStatus）。
 	// force=true：这一趟本来就是联网检测，顺带刷新版本列表缓存（见 refreshVersions 注释）。
 	m.server.refreshVersions(true)
 
@@ -1698,9 +1699,23 @@ func (m *UpdateManager) PauseUpdate() bool {
 // updateRoute 是一条下载通路：要么走配置里的代理（仅当「代理更新」开关打开且地址可达），
 // 要么直连。
 // 按用户要求已移除 GitHub 加速源前缀分支 —— 只剩这两条。
+// label 是给用户看的通路名（中文，会进「下载失败」那类错误文案）；logLabel 是**日志**里的
+// 通路名（英文 direct / proxy）—— 日志一律英文（AGENTS 第 4 节规则 7），别把 label 打进日志。
+//
+// 日志侧统一走 logName()，不要在日志里直接写 logLabel：漏设时它会给出显式信号。
 type updateRoute struct {
-	label  string
-	client *http.Client
+	label    string
+	logLabel string
+	client   *http.Client
+}
+
+// logName 返回日志里使用的通路名。**刻意不回退到中文 label** —— 漏设 logLabel 时
+// 日志里会出现 "unnamed"（而不是悄悄又冒出中文），一眼就能看出哪里没配对。
+func (r updateRoute) logName() string {
+	if r.logLabel != "" {
+		return r.logLabel
+	}
+	return "unnamed"
 }
 
 // downloadPlan 描述一次下载的策略：走哪些通路、能否续传、能否暂停、属于哪个目标。
@@ -1740,8 +1755,9 @@ func (m *UpdateManager) updateClients() []updateRoute {
 	if cfg.ProxyUpdate && cfg.ProxyAddr != "" && proxyReachableFn(cfg.ProxyAddr) {
 		if proxyURL, err := url.Parse(cfg.ProxyAddr); err == nil {
 			routes = append(routes, updateRoute{
-				label:  "代理 " + cfg.ProxyAddr,
-				client: &http.Client{Transport: updateTransport(proxyURL)},
+				label:    "代理 " + cfg.ProxyAddr,
+				logLabel: "proxy " + cfg.ProxyAddr,
+				client:   &http.Client{Transport: updateTransport(proxyURL)},
 			})
 		} else {
 			logWarn("[update] proxy address unparsable, direct download only: %v", err)
@@ -1753,7 +1769,7 @@ func (m *UpdateManager) updateClients() []updateRoute {
 
 // directRoute 构造直连通路。
 func (m *UpdateManager) directRoute() updateRoute {
-	return updateRoute{label: "直连", client: &http.Client{Transport: updateTransport(nil)}}
+	return updateRoute{label: "直连", logLabel: "direct", client: &http.Client{Transport: updateTransport(nil)}}
 }
 
 // updateTransport 构造下载用的 Transport：proxyURL 为 nil 表示直连。
@@ -1809,11 +1825,11 @@ func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downlo
 				os.Remove(dest)
 			}
 			offset := partialSize(dest)
-			logInfo("%s download attempt via %s %d/%d (offset %d bytes)", updateLogTag(plan.kind), route.label, try, attemptsPerRoute, offset)
+			logInfo("%s download attempt via %s %d/%d (offset %d bytes)", updateLogTag(plan.kind), route.logName(), try, attemptsPerRoute, offset)
 
 			n, err := m.downloadOnce(route, rawURL, dest, progress, ctrl, plan.resume)
 			if err == nil {
-				logInfo("%s download finished via %s (%d bytes)", updateLogTag(plan.kind), route.label, n)
+				logInfo("%s download finished via %s (%d bytes)", updateLogTag(plan.kind), route.logName(), n)
 				return n, nil
 			}
 			if errors.Is(err, errUpdateCancelled) || errors.Is(err, errUpdatePaused) {
@@ -1827,7 +1843,7 @@ func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downlo
 				networkOnly = false
 			}
 			lastErr = fmt.Errorf("%s 第 %d 次: %w", route.label, try, err)
-			logWarn("%s download attempt failed via %s (%d/%d): %v", updateLogTag(plan.kind), route.label, try, attemptsPerRoute, err)
+			logWarn("%s download attempt failed via %s (%d/%d): %v", updateLogTag(plan.kind), route.logName(), try, attemptsPerRoute, err)
 			if try < attemptsPerRoute {
 				// 短暂退避再试，避免对同一故障点连续猛打。
 				time.Sleep(updateRetryBackoff)

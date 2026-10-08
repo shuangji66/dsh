@@ -49,7 +49,7 @@ func TestCancelInterruptsStalledBody(t *testing.T) {
 	m := &UpdateManager{}
 	dest := filepath.Join(t.TempDir(), "pkg.tar.gz")
 	ctrl := newDownloadControl(true, updateKindHarness)
-	route := updateRoute{label: "test", client: srv.Client()}
+	route := updateRoute{label: "test", logLabel: "test", client: srv.Client()}
 
 	done := make(chan error, 1)
 	go func() {
@@ -79,7 +79,7 @@ func TestPauseInterruptsStalledBody(t *testing.T) {
 	m := &UpdateManager{}
 	dest := filepath.Join(t.TempDir(), "pkg.tar.gz")
 	ctrl := newDownloadControl(true, updateKindHarness)
-	route := updateRoute{label: "test", client: srv.Client()}
+	route := updateRoute{label: "test", logLabel: "test", client: srv.Client()}
 
 	done := make(chan error, 1)
 	go func() {
@@ -112,7 +112,7 @@ func TestIdleWatchdogArmedBeforeFirstByte(t *testing.T) {
 	m := &UpdateManager{}
 	dest := filepath.Join(t.TempDir(), "pkg.tar.gz")
 	ctrl := newDownloadControl(true, updateKindHarness)
-	route := updateRoute{label: "test", client: srv.Client()}
+	route := updateRoute{label: "test", logLabel: "test", client: srv.Client()}
 
 	done := make(chan error, 1)
 	go func() {

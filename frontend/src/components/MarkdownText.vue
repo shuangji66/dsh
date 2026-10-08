@@ -33,7 +33,8 @@ const html = computed(() => renderMarkdown(props.source))
   margin: 0.4em 0;
 }
 
-/* 标题：在 text-xs 容器内按比例缩放的紧凑字号 */
+/* 标题：跟随容器字号（唯一使用方是更新弹窗的正文，text-sm）按比例缩放的紧凑字号。
+   h1 上限刻意压在弹窗标题（18px）之下，别让它比标题还大。 */
 .markdown-text :deep(h1),
 .markdown-text :deep(h2),
 .markdown-text :deep(h3),
@@ -45,7 +46,7 @@ const html = computed(() => renderMarkdown(props.source))
   line-height: 1.35;
 }
 .markdown-text :deep(h1) {
-  font-size: 1.35em;
+  font-size: 1.25em;
 }
 .markdown-text :deep(h2) {
   font-size: 1.2em;

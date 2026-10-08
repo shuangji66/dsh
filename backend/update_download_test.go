@@ -116,7 +116,7 @@ func useRoutes(t *testing.T, routes []updateRoute) {
 
 // directRoute 把「直连」指向测试服务。
 func directRoute(srv *httptest.Server) updateRoute {
-	return updateRoute{label: "直连", client: srv.Client()}
+	return updateRoute{label: "直连", logLabel: "direct", client: srv.Client()}
 }
 
 // failingTransport 永远失败，用来占住一条通路并统计尝试次数。
@@ -130,11 +130,11 @@ func (f *failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 // proxyRouteForTest / directRouteForTest 是两条「必定失败」的通路，用来验证
 // 重试次数与回退顺序。
 func proxyRouteForTest(calls *int32) updateRoute {
-	return updateRoute{label: "代理 127.0.0.1:7890", client: &http.Client{Transport: &failingTransport{calls: calls}}}
+	return updateRoute{label: "代理 127.0.0.1:7890", logLabel: "proxy 127.0.0.1:7890", client: &http.Client{Transport: &failingTransport{calls: calls}}}
 }
 
 func directRouteForTest(calls *int32) updateRoute {
-	return updateRoute{label: "直连", client: &http.Client{Transport: &failingTransport{calls: calls}}}
+	return updateRoute{label: "直连", logLabel: "direct", client: &http.Client{Transport: &failingTransport{calls: calls}}}
 }
 
 func testPayload(size int) []byte {

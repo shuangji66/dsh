@@ -3,9 +3,10 @@ package main
 // server_test.go —— dsh 多版本管理（列表 / 安装 / 取消 / 删除 / 切换）的回归测试。
 //
 // 这里钉住的都是「改一处就会静默出错」的契约：
-//   - 版本列表必须过滤掉 0.1.7-alpha.1 之前的版本（更早的 dsh 在子路径挂载下必然 404）；
+//   - 版本列表必须过滤掉 0.1.7-rc.1 之前的版本（用户要求；更早的 dsh 本来也跑不了子路径）；
 //   - 版本号会变成目录名、也会拼进 npm 参数，必须拒绝路径穿越字符；
-//   - 「有更新」的红点基准是镜像源的 dist-tags.latest，不是列表里的最高版本；
+//   - 「有更新」的红点**只按版本号大小**判：列表里最高的一版比选中的高就亮，
+//     不区分 dist-tags（标签只用作列表里的标注）；
 //   - 安装失败/取消都必须把半成品目录与 npm 缓存清干净（否则下次「重新下载」会命中坏树）；
 //   - 当前正在使用的版本不允许删除（否则控制台会显示「未安装」而 dsh 还在跑）。
 
@@ -126,9 +127,13 @@ func TestFilterDshVersions(t *testing.T) {
 	for _, e := range got {
 		versions = append(versions, e.Version)
 	}
-	want := []string{"0.2.1-alpha.1", "0.2.0-rc.2", "0.1.7-rc.1", "0.1.7-alpha.1"}
+	want := []string{"0.2.1-alpha.1", "0.2.0-rc.2", "0.1.7-rc.1"}
 	if strings.Join(versions, ",") != strings.Join(want, ",") {
-		t.Fatalf("版本列表 = %v, want %v（必须降序且隐藏 0.1.7-alpha.1 之前）", versions, want)
+		t.Fatalf("版本列表 = %v, want %v（必须降序且隐藏 0.1.7-rc.1 之前，含 alpha.1）", versions, want)
+	}
+	// 列表最高版本 = 「最新版本」与红点的判定基准
+	if got := newestOf(got); got != "0.2.1-alpha.1" {
+		t.Fatalf("列表最高版本 = %q, want 0.2.1-alpha.1", got)
 	}
 	// dist-tag 要挂在对应版本上（前端据此显示 latest/alpha/next 标注）。
 	tagOf := map[string][]string{}
@@ -141,8 +146,8 @@ func TestFilterDshVersions(t *testing.T) {
 	if strings.Join(tagOf["0.2.1-alpha.1"], ",") != "alpha" {
 		t.Errorf("0.2.1-alpha.1 的标签 = %v, want [alpha]", tagOf["0.2.1-alpha.1"])
 	}
-	if len(tagOf["0.1.7-alpha.1"]) != 0 {
-		t.Errorf("无 dist-tag 的版本不应带标签，实得 %v", tagOf["0.1.7-alpha.1"])
+	if len(tagOf["0.1.7-rc.1"]) != 0 {
+		t.Errorf("无 dist-tag 的版本不应带标签，实得 %v", tagOf["0.1.7-rc.1"])
 	}
 }
 
@@ -249,7 +254,8 @@ func TestSnapshotIncludesUnlistedInstalledVersion(t *testing.T) {
 	srv.mu.Lock()
 	srv.versions = []DshVersionEntry{{Version: "0.2.0-rc.2", Tags: []string{"latest"}}}
 	srv.tags = map[string]string{"latest": "0.2.0-rc.2"}
-	srv.latest = "0.2.0-rc.2"
+	srv.newest = "0.2.0-rc.2"
+	srv.latestTag = "0.2.0-rc.2"
 	srv.mu.Unlock()
 
 	snap := srv.snapshot()
@@ -267,9 +273,11 @@ func TestSnapshotIncludesUnlistedInstalledVersion(t *testing.T) {
 	}
 }
 
-// --- 「有更新」的红点：基准是 dist-tags.latest，而不是列表最高版本 ---
+// --- 「有更新」的红点：只看版本号大小，不区分 dist-tags ---
 
-func TestRefreshDshStatusUsesLatestTag(t *testing.T) {
+// 红点 = 列表里最高的一版比当前选中的高（用户要求）。
+// 刻意让 dist-tags.latest 与列表最高版本**不一致**，以此证明标签不参与判定。
+func TestRefreshDshStatusUsesNewestVersion(t *testing.T) {
 	dataDir := t.TempDir()
 	upd, srv := newServerTestManager(t, dataDir)
 	fakeInstalledVersion(t, dataDir, "0.2.0-rc.2")
@@ -280,23 +288,32 @@ func TestRefreshDshStatusUsesLatestTag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1) 选中的就是 latest：即使列表里存在更新的 alpha，也不该亮红点。
+	// 1) 列表里有比选中更高的 alpha（虽然 dist-tags.latest 仍指向选中的这一版）→ 必须亮红点，
+	//    并把「最新版本」显示为列表最高版本。
 	srv.mu.Lock()
 	srv.versions = []DshVersionEntry{{Version: "0.2.1-alpha.1"}, {Version: "0.2.0-rc.2"}}
-	srv.latest = "0.2.0-rc.2"
+	srv.newest = "0.2.1-alpha.1"
+	srv.latestTag = "0.2.0-rc.2" // 标签滞后：故意不跟着走
 	srv.mu.Unlock()
 	srv.refreshDshStatus()
-	if st := upd.getStatus(updateKindDsh); st.HasUpdate || st.LocalVersion != "0.2.0-rc.2" {
-		t.Fatalf("选中 latest 时不应报有更新: %+v", st)
+	if st := upd.getStatus(updateKindDsh); !st.HasUpdate || st.LatestVersion != "0.2.1-alpha.1" {
+		t.Fatalf("列表里有更高版本时应报有更新（且最新版本取列表最高），实得 %+v", st)
 	}
 
-	// 2) latest 走高了 → 亮红点。
+	// 2) 选中的就是列表最高版本 → 不亮（同一条 latest 标签也不再影响结论）。
 	srv.mu.Lock()
-	srv.latest = "0.3.0"
+	srv.versions = []DshVersionEntry{{Version: "0.2.1-alpha.1"}, {Version: "0.2.0-rc.2"}}
+	srv.newest = "0.2.1-alpha.1"
 	srv.mu.Unlock()
+	cfg = GetConfig()
+	cfg.DshVersion = "0.2.1-alpha.1"
+	if err := SaveConfig(srv.renv, &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	fakeInstalledVersion(t, dataDir, "0.2.1-alpha.1")
 	srv.refreshDshStatus()
-	if st := upd.getStatus(updateKindDsh); !st.HasUpdate || st.LatestVersion != "0.3.0" {
-		t.Fatalf("latest 升高后应报有更新: %+v", st)
+	if st := upd.getStatus(updateKindDsh); st.HasUpdate || st.LatestVersion != "0.2.1-alpha.1" {
+		t.Fatalf("选中最高版本时不应报有更新: %+v", st)
 	}
 
 	// 3) 未安装任何版本（选中为空）时不臆造「有更新」结论。
@@ -310,19 +327,35 @@ func TestRefreshDshStatusUsesLatestTag(t *testing.T) {
 		t.Fatalf("未安装时不应报有更新: %+v", st)
 	}
 
-	// 4) 预发布按 compareVersion 语义比较：alpha.2 落后于 alpha.5。
-	fakeInstalledVersion(t, dataDir, "0.1.7-alpha.2")
+	// 4) 版本列表为空（拉取失败 / 没有缓存）时也不报，且不留下上一次的「最新版本」。
+	srv.mu.Lock()
+	srv.versions = nil
+	srv.newest = ""
+	srv.mu.Unlock()
 	cfg = GetConfig()
-	cfg.DshVersion = "0.1.7-alpha.2"
+	cfg.DshVersion = "0.2.0-rc.2"
+	if err := SaveConfig(srv.renv, &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	srv.refreshDshStatus()
+	if st := upd.getStatus(updateKindDsh); st.HasUpdate || st.LatestVersion != "" {
+		t.Fatalf("列表为空时不应报有更新: %+v", st)
+	}
+
+	// 5) 预发布按 compareVersion 语义比较：rc.2 落后于 rc.5。
+	fakeInstalledVersion(t, dataDir, "0.1.7-rc.2")
+	cfg = GetConfig()
+	cfg.DshVersion = "0.1.7-rc.2"
 	if err := SaveConfig(srv.renv, &cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
-	srv.latest = "0.1.7-alpha.5"
+	srv.versions = []DshVersionEntry{{Version: "0.1.7-rc.5"}, {Version: "0.1.7-rc.2"}}
+	srv.newest = "0.1.7-rc.5"
 	srv.mu.Unlock()
 	srv.refreshDshStatus()
-	if st := upd.getStatus(updateKindDsh); !st.HasUpdate {
-		t.Fatalf("0.1.7-alpha.2 相对 latest 0.1.7-alpha.5 应判为有更新: %+v", st)
+	if st := upd.getStatus(updateKindDsh); !st.HasUpdate || st.LatestVersion != "0.1.7-rc.5" {
+		t.Fatalf("0.1.7-rc.2 相对 0.1.7-rc.5 应判为有更新: %+v", st)
 	}
 }
 
@@ -388,8 +421,15 @@ func TestInstallAllMirrorsFailedCleansUp(t *testing.T) {
 		t.Fatalf("启动安装失败: %v", err)
 	}
 	st := waitInstallPhase(t, srv, "error")
-	if !strings.Contains(st.Error, mirrorNames()) {
+	// 镜像源在错误里用**英文标识**（中文显示名只进界面）：这个错误会被写进日志，
+	// 中文镜像名混进去日志就不全是英文了（见 mirror_log_language_test.go）。
+	if !strings.Contains(st.Error, mirrorLogNames()) {
 		t.Fatalf("错误信息应说明三个镜像源都失败、不试官方源，实际: %v", st.Error)
+	}
+	for _, m := range npmMirrors {
+		if strings.Contains(st.Error, m.Name) {
+			t.Fatalf("错误里不应出现中文镜像名 %q（会随日志漏出去）: %v", m.Name, st.Error)
+		}
 	}
 	if _, err := os.Stat(srv.versionDir("0.4.0")); !os.IsNotExist(err) {
 		t.Fatal("全部失败后不应留下半成品目录")

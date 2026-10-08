@@ -467,9 +467,10 @@ onBeforeUnmount(() => {
             <DialogCloseButton :label="t('dialog_close')" @close="closeBackupDialog()" />
             <h3 class="g-dialog-title mb-3">{{ t('confirm_backup_title') }}</h3>
 
-            <!-- 进行中：进度条 + 进度文案。总量未知时用不确定进度条（不伪造百分比）。 -->
+            <!-- 进行中：进度条 + 进度文案。总量未知时用不确定进度条（不伪造百分比）。
+                 字号与「更新弹窗」同一档：主状态行 / 提示句 text-sm，字节数 / 文件数等元信息 text-xs。 -->
             <div v-if="backupRunning" class="py-2">
-              <div class="flex items-center justify-between text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">
+              <div class="flex items-center justify-between text-sm text-ink-soft dark:text-[#A6A6AD] mb-1">
                 <span>{{ t('backup_running') }}</span>
                 <span v-if="backupTotalKnown">{{ backupPercent }}%</span>
               </div>
@@ -484,7 +485,7 @@ onBeforeUnmount(() => {
                 {{ t('backup_progress_size', { done: fmtRestoreSize(backupStatus?.bytes || 0), total: fmtRestoreSize(backupStatus?.totalBytes || 0) }) }}
                 · {{ t('backup_progress_files', { done: backupStatus?.files || 0, total: backupStatus?.totalFiles || 0 }) }}
               </div>
-              <p class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-3 leading-relaxed">{{ t('backup_keep_hint') }}</p>
+              <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mt-3 leading-relaxed">{{ t('backup_keep_hint') }}</p>
               <p v-if="backupCancelling" class="text-xs text-[#EF4444] mt-1">{{ t('backup_cancelling') }}</p>
             </div>
 

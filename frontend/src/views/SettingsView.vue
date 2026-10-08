@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -8,6 +8,31 @@ import { useTheme } from '@/composables/useTheme'
 import { useConsolePrefs, type DefaultPage } from '@/composables/useConsolePrefs'
 import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
+
+// 设置页的字段分**两类**，动之前先看清属于哪一类（新增字段时同样要归到某一类）：
+//
+// ① 即时保存 —— 改动/增删立刻 store.save() 落盘，不需要点「保存配置」：
+//    · 「代理dsh」开关 —— 重启 dsh 生效（代理是 dsh 启动时下发的环境变量）
+//    · 「代理harness更新」开关 —— 立即生效（只影响 harness 自身的更新探测/下载）
+//    · 「浏览器兼容模式」开关 —— 刷新页面生效
+//    · node 版本下拉 —— 重启 dsh 生效
+//    · 「自动设置」（堆内存）开关 —— 重启 dsh 生效
+//    · 「启用登录鉴权」开关 —— 立即生效
+//    · 快捷访问地址的添加/删除 —— 立即生效
+//    · 控制台设置（主题/语言/默认页面）—— 只写浏览器 localStorage，连后端都不过
+//    这些项各自弹的提示见下面各 on* 处理函数。
+//
+// ② 需点「保存配置」才落盘 —— 只改本地 config，改动后**不生效也不落盘**：
+//    · 代理地址（proxyAddr）—— 保存后落盘；dsh 需重启才用上新地址
+//    · dsh 端口（dshPort）—— 保存后落盘；dsh 运行中时该输入框禁用（后端保存时保留旧值）
+//    · 反代监听端口（proxyPort）—— 保存时**即时重绑**监听（绑定失败则整次拒绝保存）
+//    · node 堆内存上限（dshMemLimit）—— 保存后落盘；重启 dsh 生效
+//    · 访问密码（password）—— 保存后落盘；下次登录校验用新密码
+//    · 登录有效期（authTTLHours）—— 保存后落盘；立即影响后续签发/校验
+//    这一类统一走 onPendingChange()：改动后在标题栏显示「未保存」，并弹一次「保存后生效」。
+//
+// 注意：即时保存提交的是**整份配置**，所以它会把②类里未点保存的改动一并写下去 ——
+// 因此任何一次保存成功都要清掉「未保存」状态（见下面 watch store.savedSeq）。
 
 const store = useSettingsStore()
 const { config, runtime, locked, loading, memLimitLevel } = storeToRefs(store)
@@ -94,8 +119,37 @@ function submit() {
     toast.show(t('settings_port_same'), 'error')
     return
   }
+  // 保存成功的「已保存 / 需重启」提示由 store.save() 内置（这里不传 false）
   store.save()
 }
+
+// --- ② 类字段（需点保存）的统一提示 ---
+//
+// 这类字段（代理地址 / 两个端口 / 堆内存上限 / 密码 / 登录有效期）只改本地 config，
+// 必须点右上角「保存配置」才落盘生效，因此改动后统一提示一次「保存后生效」，
+// 并在标题栏挂一个「未保存」标记（toast 只停几秒，标题栏标记会一直留到保存成功）。
+//
+// 只绑 @change（失焦/回车/下拉提交时触发），不绑 @input —— 否则边打字边弹，既吵也会
+// 把提示消费掉（同一次未保存期间只提示一次，靠 saveHintShown 去重）。
+const unsaved = ref(false)
+let saveHintShown = false
+
+function onPendingChange() {
+  unsaved.value = true
+  if (saveHintShown) return
+  saveHintShown = true
+  toast.show(t('settings_need_save'), 'info', 5000)
+}
+
+// 任何一次保存成功（含①类那些即时保存 —— 它们提交整份配置，会把这些字段一并落盘）
+// 都清掉「未保存」：store.savedSeq 在 store.save() 成功返回前自增。
+watch(
+  () => store.savedSeq,
+  () => {
+    unsaved.value = false
+    saveHintShown = false
+  }
+)
 
 onMounted(() => store.load())
 
@@ -200,8 +254,10 @@ async function onAuthToggle() {
 
 <template>
   <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
-    <!-- 页头（图标 + 标题 + 保存按钮；标题栏按钮统一样式：小一号字号 + 细边框 + 不填充底色） -->
+    <!-- 页头（图标 + 标题 + 未保存标记 + 保存按钮；标题栏按钮统一样式：小一号字号 + 细边框 + 不填充底色） -->
     <PageHeader class="mb-3" :title="t('settings_title')" :icon="icons.settings">
+      <!-- ② 类字段（需点保存才生效）改动后的常驻标记：toast 只停几秒，这个留到保存成功 -->
+      <span v-if="unsaved" class="text-xs text-warning flex-shrink-0">{{ t('settings_unsaved') }}</span>
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
@@ -239,7 +295,7 @@ async function onAuthToggle() {
         <!-- 代理地址：两个开关共用，任一开启即显示 -->
         <div v-if="config.proxyEnabled || config.proxyUpdate" class="mt-4">
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
-          <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" />
+          <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" @change="onPendingChange" />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>
         </div>
       </section>
@@ -261,6 +317,7 @@ async function onAuthToggle() {
               autocomplete="off"
               :disabled="locked"
               class="g-input disabled:cursor-not-allowed"
+              @change="onPendingChange"
             />
             <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_dsh_port_hint') }}</p>
           </div>
@@ -275,6 +332,7 @@ async function onAuthToggle() {
               :max="PORT_MAX"
               autocomplete="off"
               class="g-input"
+              @change="onPendingChange"
             />
             <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_port_hint') }}</p>
           </div>
@@ -328,6 +386,7 @@ async function onAuthToggle() {
               autocomplete="off"
               :disabled="config.dshMemAuto"
               class="g-input disabled:cursor-not-allowed"
+              @change="onPendingChange"
             />
             <!-- 输入框下的说明/告警（两者互斥）：
                  - 手动设置且过低：「<800」黄字提醒但不阻止保存，「<500」红字并阻止保存
@@ -383,6 +442,7 @@ async function onAuthToggle() {
               :placeholder="t('settings_password_placeholder')"
               autocomplete="new-password"
               class="g-input pr-10"
+              @change="onPendingChange"
             />
             <button
               type="button"
@@ -409,6 +469,7 @@ async function onAuthToggle() {
             step="1"
             autocomplete="off"
             class="g-input"
+            @change="onPendingChange"
           />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
             {{ t('settings_auth_ttl_hint') }}

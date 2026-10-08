@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,11 +50,12 @@ import (
 const (
 	// dshPackageName 是 dsh 在 npm 上的包名。
 	dshPackageName = "@deepseek-ai/dsh"
-	// dshMinVersion 是控制台允许下载/切换的最低 dsh 版本。0.1.7-alpha.1 起 dsh 前端
-	// 全走文档相对路径（靠 <base href="./"> 自己拼出挂载前缀），才能在控制台的子路径
-	// 挂载（HARNESS_PROXY_BASEURL，默认 /app/Harness/dsh）下正常工作；更早的版本在
-	// 子路径下必然 404，因此列表里直接隐藏（见 filterDshVersions）。
-	dshMinVersion = "0.1.7-alpha.1"
+	// dshMinVersion 是控制台允许下载/切换的最低 dsh 版本：**列表里更早的版本一律隐藏**
+	// （用户要求从 0.1.7-rc.1 起，见 filterDshVersions）。
+	// 技术背景：0.1.7-alpha.1 起 dsh 前端才全部走文档相对路径（靠 <base href="./"> 自己
+	// 拼出挂载前缀），更早的版本在控制台的子路径挂载（HARNESS_PROXY_BASEURL，默认
+	// /app/Harness/dsh）下必然 404；这条底线现在抬到 rc.1，比「能跑」的最低要求更严。
+	dshMinVersion = "0.1.7-rc.1"
 	// dshMirrorTimeout 是单次镜像源请求的超时（「5 秒没反应就换下一个」）。
 	dshMirrorTimeout = 5 * time.Second
 	// dshInstallCancelGrace 是取消安装时先 SIGTERM、再 SIGKILL 的宽限时间。
@@ -67,27 +69,48 @@ const (
 )
 
 // npmMirror 是一个 npm 镜像源。
+//
+// **显示名与日志标识是两回事，别混用**：
+//   - Name 中文显示名：只进界面（进度文案「正在从 阿里云 下载 …」、安装状态里的源标签）；
+//   - Slug 英文标识：只进日志与错误链（日志一律英文，见 AGENTS 第 4 节规则 7）。
+//
+// 为什么错误链也用 Slug 而不是中文名：这些错误会被 `logError(..., err)` 原样打进日志
+// （插件市场操作失败那条就是），中文名一旦混进去，日志里就又出现了中文镜像名。
 type npmMirror struct {
-	Name string // 显示名（日志/界面用）
+	Name string // 显示名（仅界面）
+	Slug string // 日志/错误链里的英文标识（aliyun / tencent / huawei）
 	URL  string // registry 地址（不带尾斜杠）
+}
+
+// mirrorLogName 返回该镜像源在日志/错误链里的英文标识：优先 Slug，Slug 为空时退回
+// URL 主机名（单测里临时构造的镜像源就是这种，不必为每个假源补 Slug）。
+func (m npmMirror) mirrorLogName() string {
+	if s := strings.TrimSpace(m.Slug); s != "" {
+		return s
+	}
+	if u, err := url.Parse(m.URL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return m.URL
 }
 
 // npmMirrors 是 dsh 与插件市场的镜像源候选，顺序固定为阿里云 → 腾讯云 → 华为云。
 // 刻意不含官方 registry.npmjs.org：国内设备直连官方源普遍不可用，混进去只会让
 // 「都失败就报错」这个结论变得不可信。
 var npmMirrors = []npmMirror{
-	{Name: "阿里云", URL: "https://registry.npmmirror.com"},
-	{Name: "腾讯云", URL: "https://mirrors.cloud.tencent.com/npm"},
-	{Name: "华为云", URL: "https://repo.huaweicloud.com/repository/npm"},
+	{Name: "阿里云", Slug: "aliyun", URL: "https://registry.npmmirror.com"},
+	{Name: "腾讯云", Slug: "tencent", URL: "https://mirrors.cloud.tencent.com/npm"},
+	{Name: "华为云", Slug: "huawei", URL: "https://repo.huaweicloud.com/repository/npm"},
 }
 
-// mirrorNames 返回镜像源的显示名列表（错误信息里用）。
-func mirrorNames() string {
+// mirrorLogNames 返回全部镜像源的日志标识（英文，逗号分隔）。
+// 日志、以及**可能被日志打印的错误链**一律用它；中文显示名只进界面文案。
+func mirrorLogNames() string {
 	names := make([]string, 0, len(npmMirrors))
 	for _, m := range npmMirrors {
-		names = append(names, m.Name)
+		names = append(names, m.mirrorLogName())
 	}
-	return strings.Join(names, "、")
+	return strings.Join(names, ", ")
 }
 
 // versionArgRe 校验版本号字符集：只允许 semver 字符，绝不允许路径分隔符或 ".."
@@ -183,7 +206,8 @@ type ServerVersions struct {
 	Installed []string `json:"installed"`
 	// Versions 是可选版本列表（镜像源 + 本地独有版本，版本号降序，已过滤 0.1.7-alpha.1 之前）。
 	Versions []DshVersionEntry `json:"versions"`
-	// Latest 是镜像源上 dist-tags.latest 指向的版本（「有更新」的判定基准）。
+	// Latest 是列表里**版本号最高**的一版（= 界面上的「最新版本」与红点判定基准；
+	// 刻意不看 dist-tags，见 refreshDshStatus）。
 	Latest string `json:"latest,omitempty"`
 	// Tags 是镜像源的 dist-tags（原样透出，前端可用作诊断）。
 	Tags      map[string]string `json:"tags,omitempty"`
@@ -202,9 +226,13 @@ type ServerManager struct {
 
 	// mu 保护下面的缓存字段与 install 状态。
 	mu        sync.Mutex
-	versions  []DshVersionEntry
-	tags      map[string]string
-	latest    string
+	versions []DshVersionEntry
+	tags     map[string]string
+	// newest 是列表里版本号最高的一版（红点与「最新版本」的唯一基准）。
+	newest string
+	// latestTag 是镜像源的 dist-tags.latest，**只用于日志诊断**，不参与任何判定：
+	// 标签可能滞后或指向另一条线（见 refreshDshStatus 的说明）。
+	latestTag string
 	checkedAt time.Time
 	verErr    string
 	install   *DshInstallState
@@ -283,7 +311,7 @@ func (m *ServerManager) snapshot() ServerVersions {
 	for k, v := range m.tags {
 		tags[k] = v
 	}
-	latest, checkedAt, verErr := m.latest, m.checkedAt, m.verErr
+	newest, checkedAt, verErr := m.newest, m.checkedAt, m.verErr
 	install := m.install
 	if install != nil {
 		cp := *install
@@ -321,7 +349,7 @@ func (m *ServerManager) snapshot() ServerVersions {
 		Selected:  selected,
 		Installed: installed,
 		Versions:  versions,
-		Latest:    latest,
+		Latest:    newest,
 		Tags:      tags,
 		CheckedAt: checkedAt,
 		Error:     verErr,
@@ -398,6 +426,7 @@ func fetchMirrorPackument(client *http.Client, registry, pkg string) (map[string
 }
 
 // filterDshVersions 把镜像源上的版本号过滤成可用列表（隐藏 dshMinVersion 之前的，降序）。
+// 列表里的**最高版本**就是「最新版本」与红点的判定基准（见 refreshDshStatus）。
 func filterDshVersions(versions map[string]json.RawMessage, tags map[string]string) []DshVersionEntry {
 	byVersion := make(map[string][]string)
 	for tag, ver := range tags {
@@ -422,6 +451,18 @@ func filterDshVersions(versions map[string]json.RawMessage, tags map[string]stri
 		return compareVersion(out[i].Version, out[j].Version) > 0
 	})
 	return out
+}
+
+// newestOf 取已过滤版本列表里**版本号最高**的一版（空列表返回空串）。
+// 逐项比较，不依赖调用方是否排过序。
+func newestOf(list []DshVersionEntry) string {
+	best := ""
+	for _, e := range list {
+		if best == "" || compareVersion(e.Version, best) > 0 {
+			best = e.Version
+		}
+	}
+	return best
 }
 
 // newestVersion 从 packument 的版本集合里挑出**版本号最高**的那一版（semver 语义，
@@ -468,16 +509,18 @@ func (m *ServerManager) refreshVersions(force bool) error {
 	for _, mirror := range npmMirrors {
 		versions, tags, err := fetchMirrorPackument(client, mirror.URL, dshPackageName)
 		if err != nil {
-			lastErr = fmt.Errorf("%s: %w", mirror.Name, err)
-			logWarn("[dsh] version list from %s failed: %v", mirror.Name, err)
+			lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
+			logWarn("[dsh] version list from %s failed: %v", mirror.mirrorLogName(), err)
 			continue
 		}
 		list := filterDshVersions(versions, tags)
-		latest := tags["latest"]
+		newest := newestOf(list)
+		latestTag := tags["latest"]
 		m.mu.Lock()
-		m.versions, m.tags, m.latest, m.checkedAt, m.verErr = list, tags, latest, time.Now(), ""
+		m.versions, m.tags, m.newest, m.latestTag, m.checkedAt, m.verErr = list, tags, newest, latestTag, time.Now(), ""
 		m.mu.Unlock()
-		logInfo("[dsh] version list updated from %s: %d available versions, latest=%s", mirror.Name, len(list), latest)
+		logInfo("[dsh] version list updated from %s: %d available versions, newest=%s (dist-tags.latest=%s)",
+			mirror.mirrorLogName(), len(list), newest, latestTag)
 		m.refreshDshStatus()
 		m.notify(true)
 		return nil
@@ -486,7 +529,7 @@ func (m *ServerManager) refreshVersions(force bool) error {
 		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
 	}
 	m.mu.Lock()
-	m.verErr = fmt.Sprintf("获取 dsh 版本列表失败（%s 均不可用）: %v", mirrorNames(), lastErr)
+	m.verErr = fmt.Sprintf("获取 dsh 版本列表失败（%s 均不可用）: %v", mirrorLogNames(), lastErr)
 	m.checkedAt = time.Now()
 	m.mu.Unlock()
 	logWarn("[dsh] version list unavailable: %v", lastErr)
@@ -495,25 +538,27 @@ func (m *ServerManager) refreshVersions(force bool) error {
 	return lastErr
 }
 
-// refreshDshStatus 把「选中的版本 + 镜像源上的 latest」写进 dsh 更新状态，
+// refreshDshStatus 把「选中的版本 + 列表里最高的一版」写进 dsh 更新状态，
 // 供概览页版本行显示与红点判定。
 //
-// 红点的判定基准是 dist-tags.latest（推荐版本），不是「列表里的最高版本」：
-// 后者会把 alpha 也算成「有更新」，让跟进稳定版的用户一直看到红点。
+// 红点**只按版本号大小**判：列表里最高的一版比当前选中的高就亮，不区分 dist-tags
+// （用户要求）。理由是标签只是发布者手动移动的元数据 —— 用它当基准会出现
+// 「明明有更高版本却不提示」（标签滞后）或「换了条线就不提示」（标签指向另一条线）；
+// 而标签仍然照常展示在版本列表里（latest / alpha / next…），只是不参与判定。
 func (m *ServerManager) refreshDshStatus() {
 	if m.upd == nil {
 		return
 	}
 	m.mu.Lock()
-	latest, verErr := m.latest, m.verErr
+	newest, verErr := m.newest, m.verErr
 	m.mu.Unlock()
 	selected := m.selectedVersion()
 	m.upd.updateStatus(updateKindDsh, func(st *UpdateStatus) {
 		st.Kind = updateKindDsh
 		st.LocalVersion = selected
 		st.CheckedAt = time.Now()
-		st.LatestVersion = latest
-		st.HasUpdate = selected != "" && latest != "" && compareVersion(latest, selected) > 0
+		st.LatestVersion = newest
+		st.HasUpdate = selected != "" && newest != "" && compareVersion(newest, selected) > 0
 		st.Error = verErr
 		st.ReleaseNotes = ""
 	})
@@ -680,11 +725,13 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 			break
 		}
 		m.updateInstall(func(s *DshInstallState) {
+			// 这两处是**界面**文案（版本弹窗里的源标签与进度行），刻意用中文显示名；
+			// 日志一律用下面的 mirrorLogName()（英文标识）。
 			s.Mirror = mirror.Name
 			s.Phase = "downloading"
 			s.Message = fmt.Sprintf("正在从 %s 下载 %s@%s", mirror.Name, dshPackageName, version)
 		})
-		logInfo("[dsh] installing %s from %s", version, mirror.Name)
+		logInfo("[dsh] installing %s from %s", version, mirror.mirrorLogName())
 		err := npmInstallFn(m, ctx, dir, version, mirror)
 		if ctx.Err() != nil {
 			// 用户取消：清干净（目录 + 下载缓存）后退出，错误文本由前端按「已取消」呈现。
@@ -694,8 +741,8 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 		if err == nil {
 			if verr := m.verifyInstall(ctx, version); verr != nil {
 				os.RemoveAll(dir)
-				lastErr = fmt.Errorf("%s: %w", mirror.Name, verr)
-				logWarn("[dsh] %s install from %s verified failed: %v", version, mirror.Name, verr)
+				lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), verr)
+				logWarn("[dsh] %s install from %s verified failed: %v", version, mirror.mirrorLogName(), verr)
 				continue
 			}
 			m.updateInstall(func(s *DshInstallState) {
@@ -704,12 +751,12 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 				s.Cancelled = false
 				s.Message = fmt.Sprintf("dsh %s 安装完成", version)
 			})
-			logInfo("[dsh] %s installed to %s (%s)", version, dir, mirror.Name)
+			logInfo("[dsh] %s installed to %s (%s)", version, dir, mirror.mirrorLogName())
 			m.refreshDshStatus()
 			return nil
 		}
-		lastErr = fmt.Errorf("%s: %w", mirror.Name, err)
-		logWarn("[dsh] install %s from %s failed: %v", version, mirror.Name, err)
+		lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
+		logWarn("[dsh] install %s from %s failed: %v", version, mirror.mirrorLogName(), err)
 		// 换下一个镜像源前清掉这次的半成品：npm 会在残缺树上续装，跨源混装不可信。
 		os.RemoveAll(dir)
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -723,7 +770,7 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
 	}
 	os.RemoveAll(dir)
-	return fmt.Errorf("从 %s 下载 dsh %s 均失败（不重试、不使用官方源）: %v", mirrorNames(), version, lastErr)
+	return fmt.Errorf("从 %s 下载 dsh %s 均失败（不重试、不使用官方源）: %v", mirrorLogNames(), version, lastErr)
 }
 
 // cleanCancelledInstall 删除取消留下的安装目录与 npm 下载缓存。

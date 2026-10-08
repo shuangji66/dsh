@@ -36,6 +36,9 @@ const zh: Record<string, string> = {
   // 设置页
   settings_title: '设置',
   settings_save: '保存配置',
+  // ② 类字段（改完必须点保存才落盘/生效）改动后的统一提示：toast + 标题栏常驻标记
+  settings_need_save: '修改后需点击右上角「保存配置」才生效',
+  settings_unsaved: '有未保存的修改',
   settings_enable_proxy: '代理dsh',
   settings_enable_proxy_hint: 'dsh 使用 git 等工具超时时可开启代理',
   settings_proxy_addr: '代理地址',
@@ -468,6 +471,9 @@ const en: Record<string, string> = {
 
   settings_title: 'Settings',
   settings_save: 'Save',
+  // Fields that only persist after clicking Save: unified prompt (toast + header marker)
+  settings_need_save: 'Click "Save" at the top right for this change to take effect',
+  settings_unsaved: 'Unsaved changes',
   settings_enable_proxy: 'Proxy dsh',
   settings_enable_proxy_hint: 'Enable this when dsh times out using git and other tools',
   settings_proxy_addr: 'Proxy address',

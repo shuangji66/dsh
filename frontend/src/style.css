@@ -420,6 +420,15 @@ html, body {
      不要再在弹窗里写 g-btn-primary（填充品牌色）或自创尺寸 —— 之前各弹窗的确认按钮
      有的是填充色、有的是纯文字，看起来像两套 UI。
 
+     弹窗**正文只分两档**（别在 text-xs / text-sm 之外再自创第三档，也别把正文写小一号）：
+       - 主要信息（状态行、说明句、正文段落、更新内容）：text-sm + text-ink-soft
+         dark:text-[#A6A6AD]（多行正文配 leading-relaxed）；
+       - 次要信息（版本号/字节数等元信息、小标题、标签）：text-xs + text-ink-faint
+         dark:text-[#8A8A92]。
+     错误/提示框仍用 text-xs + 语义色底与边框（见 MarketDialog / ServerVersionsDialog）。
+     踩过的坑：更新弹窗把 release 正文写在 text-xs 容器里（"紧凑"），同一屏里版本行却是
+     text-sm，于是正文比元信息还小 —— 它现在和其它弹窗的正文同档（见 UpdateSection.vue）。
+
      X 与标题「同一行居中」靠三个固定量达成，改任一处都要一起改：
        - .g-dialog-title 行高固定 2rem（= 32px）→ 标题行就是一条 32px 的带；
        - .g-dialog-close 32px 见方 → 与标题行同高；

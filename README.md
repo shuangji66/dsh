@@ -545,8 +545,9 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
   镜像源同步时也可能只更新了版本集合而没更新标签。因此检测与安装都按版本号排序取最高
   （`newestVersion`），安装命令带**精确版本号**（`add dshmarket@<该版本>`，不是 `@latest`）。
   副产物：某个镜像源还没同步到这一版时，那次尝试会失败并自动换下一个镜像源。
-  （dsh 服务版本行不同：那里的红点基准仍是镜像源的 `dist-tags.latest` —— 列表里能同时看到
-  latest / alpha / next 标注，避免跟进稳定版的用户被 alpha 一直点亮红点。）
+  （dsh 服务版本行也是同一套语义：红点只看**版本号大小** —— 版本列表里最高的一版比当前
+  选中的高就亮，不区分 `dist-tags`；列表里仍标注 latest / alpha / next，但标签不参与判定，
+  见 `server.go` 的 `refreshDshStatus`。）
 - **没有备份 / 回滚**：安装失败就是把错误推给弹窗，不生成备份包，也没有回滚入口。
 - **不自己下载 tarball、也不做完整性校验**：pnpm 会按 registry 元数据里的 `integrity`
   校验它下载的字节，控制台再下一份只是重复劳动。
@@ -618,7 +619,7 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 
 | 环节 | 做法 |
 | --- | --- |
-| 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.1.7-alpha.1` 之前的所有版本**（更早的 dsh 前端不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」与后台自动检测 / 手动「检查更新」会重拉（见下） |
+| 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.1.7-rc.1` 之前的所有版本**（用户要求；更早的 dsh 前端也不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**「有更新」的红点/「最新版本」取列表里版本号最高的一版**，标签只作展示、不参与判定（`refreshDshStatus`）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」与后台自动检测 / 手动「检查更新」会重拉（见下） |
 | 镜像源 | 阿里云 `registry.npmmirror.com` → 腾讯云 `mirrors.cloud.tencent.com/npm` → 华为云 `repo.huaweicloud.com/repository/npm`；**不试官方源** |
 | 换源时机 | `npm install --fetch-timeout=5000 --fetch-retries=0`：任意一次 HTTP 请求 5 秒拿不到响应即失败 → 换下一个镜像源**整包重跑**；同一个源**不重试**，三个都失败就报错（错误里列出尝试过的镜像源） |
 | 安装命令 | `npm install --prefix <版本目录> @deepseek-ai/dsh@<版本> --save-exact --registry=<镜像源>`，用与 dsh 相同 node 版本自带的 npm；缓存在 `<数据目录>/npm-cache`（不写用户的 HOME） |

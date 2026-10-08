@@ -830,12 +830,12 @@ watch(
 
             <div v-if="updatingDone" class="py-6 text-center">
               <div class="text-sm font-medium text-success dark:text-[#10B981] mb-1">{{ t('update_installed_done') }}</div>
-              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-2">{{ t('update_manual_refresh') }}</div>
             </div>
 
             <!-- 下载中：进度条 + 暂停（保留已下载字节）/ 取消（放弃已下载字节） -->
             <div v-else-if="downloading" class="py-4">
-              <div class="flex items-center justify-between text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">
+              <div class="flex items-center justify-between text-sm text-ink-soft dark:text-[#A6A6AD] mb-1">
                 <span>{{ t('update_downloading') }}</span>
                 <span v-if="downloadTotalKnown">{{ downloadPct }}%</span>
               </div>
@@ -865,7 +865,7 @@ watch(
 
             <!-- 已暂停：显示暂停位置 + 继续下载（断点续传）/ 取消 -->
             <div v-else-if="paused" class="py-4">
-              <div class="flex items-center justify-between text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">
+              <div class="flex items-center justify-between text-sm text-ink-soft dark:text-[#A6A6AD] mb-1">
                 <span>{{ t('update_paused') }}</span>
                 <span v-if="downloadTotalKnown">{{ downloadPct }}%</span>
               </div>
@@ -873,7 +873,7 @@ watch(
                 <div class="h-full rounded-full bg-brand/50" :style="progressBarStyle"></div>
               </div>
               <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ downloadSizeText }}</div>
-              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-3 leading-relaxed">{{ t('update_paused_hint') }}</div>
+              <div class="text-sm text-ink-soft dark:text-[#A6A6AD] mt-3 leading-relaxed">{{ t('update_paused_hint') }}</div>
 
               <div class="flex items-center justify-center gap-3 mt-4">
                 <button
@@ -887,7 +887,7 @@ watch(
             <!-- 已下载待安装：提示 + “删除更新包”按钮，底部为“安装更新”按钮 -->
             <div v-else-if="downloaded" class="py-4 text-center">
               <div class="text-sm text-ink dark:text-white mb-1">{{ t('update_wait_install') }}</div>
-              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-2">{{ t('update_manual_refresh') }}</div>
 
               <!-- 删除更新包（清除下载，重置为待更新） -->
               <div class="text-center mt-4">
@@ -902,7 +902,7 @@ watch(
             <div v-else-if="installing" class="py-6 text-center">
               <div class="inline-block animate-spin h-6 w-6 border-2 border-brand border-t-transparent rounded-full mb-2"></div>
               <div class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_installing') }}</div>
-              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-2">{{ t('update_manual_refresh') }}</div>
             </div>
 
             <template v-else>
@@ -933,16 +933,17 @@ watch(
               </div>
 
               <template v-else>
-                <!-- 更新内容（release 正文，不含标题）：Markdown 渲染，超长可滚动，不撑破弹窗 -->
+                <!-- 更新内容（release 正文，不含标题）：Markdown 渲染，超长可滚动，不撑破弹窗。
+                     正文与其它弹窗同一档：text-sm + ink-soft + leading-relaxed（小标题用次要小字）。 -->
                 <div v-if="dialogStatus.hasUpdate && dialogStatus.releaseNotes" class="mt-3">
-                  <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mb-1">{{ t('update_release_notes') }}</div>
-                  <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] max-h-44 overflow-y-auto leading-relaxed">
+                  <div class="text-xs text-ink-faint dark:text-[#8A8A92] mb-1">{{ t('update_release_notes') }}</div>
+                  <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-sm text-ink-soft dark:text-[#A6A6AD] max-h-44 overflow-y-auto leading-relaxed">
                     <MarkdownText :source="dialogStatus.releaseNotes" />
                   </div>
                 </div>
 
                 <!-- 无更新提示 -->
-                <div v-else-if="!dialogStatus.hasUpdate" class="mt-3 text-sm text-ink-soft dark:text-[#A6A6AD]">
+                <div v-else-if="!dialogStatus.hasUpdate" class="mt-3 text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed">
                   {{ t('update_no_update') }}
                 </div>
               </template>

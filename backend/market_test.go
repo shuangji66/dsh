@@ -214,8 +214,11 @@ func TestMarketLatestFallsBackAcrossMirrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("最新版检测不应报错: %v", err)
 	}
-	if ver != "1.66.11" || mirror != "镜像二" {
-		t.Fatalf("最新版 = (%q, %q), want (1.66.11, 镜像二)", ver, mirror)
+	// 第二个返回值是**日志标识**（英文，供调用方写日志用），不是中文显示名；
+	// 这里构造的假镜像没有 Slug，按 URL 主机名兜底。
+	wantMirror := npmMirror{Name: "镜像二", URL: good.URL}.mirrorLogName()
+	if ver != "1.66.11" || mirror != wantMirror {
+		t.Fatalf("最新版 = (%q, %q), want (%q, %q)", ver, mirror, "1.66.11", wantMirror)
 	}
 
 	// 全部失败：错误信息必须点出「都不试官方源」这个语义。
@@ -391,10 +394,18 @@ func TestMarketPluginCmdTriesMirrorsInOrder(t *testing.T) {
 	}
 
 	// 三个都失败 → 报错，且错误里点明镜像源。
+	//
+	// 这里刻意断言「是**英文标识**、且不含中文显示名」：这条错误会被 runMarketOp 的
+	// logError 原样打进日志，中文镜像名一旦混进来，日志里就又出现中文了。
 	writeFakeDsh(t, dataDir, "0.2.0-rc.2", "", "exit 1\n")
 	err = upd.runMarketPluginCmd([]string{"remove", marketPackageName})
-	if err == nil || !strings.Contains(err.Error(), mirrorNames()) {
-		t.Fatalf("全部镜像失败时应报错并列出镜像源，实得 %v", err)
+	if err == nil || !strings.Contains(err.Error(), mirrorLogNames()) {
+		t.Fatalf("全部镜像失败时应报错并列出镜像源（英文标识 %q），实得 %v", mirrorLogNames(), err)
+	}
+	for _, m := range npmMirrors {
+		if strings.Contains(err.Error(), m.Name) {
+			t.Fatalf("错误里不应出现中文镜像名 %q（会随日志漏出去）: %v", m.Name, err)
+		}
 	}
 	if !strings.Contains(err.Error(), "不重试") {
 		t.Fatalf("错误信息应说明不重试，实得 %v", err)

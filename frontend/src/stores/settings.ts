@@ -43,6 +43,11 @@ export const useSettingsStore = defineStore('settings', () => {
     appliedProxy.value = { enabled: cfg.proxyEnabled, addr: cfg.proxyAddr }
   }
 
+  // savedSeq 每次**成功**保存后自增（含设置页那些「即时保存」的开关 —— 它们提交的同样是
+  // 整份配置）。设置页据此清掉「有未保存的修改」的提示状态：即时保存会把页面上其它只改了
+  // 本地 config 的字段（端口/密码/内存上限等）一并写下去，此时它们已无需再点保存。
+  const savedSeq = ref(0)
+
   const toast = useToastStore()
   const { t } = useI18n()
 
@@ -109,6 +114,7 @@ export const useSettingsStore = defineStore('settings', () => {
         }
       }
       await load()
+      savedSeq.value++
       return true
     } catch (e) {
       toast.show((e as Error).message, 'error')
@@ -154,5 +160,5 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  return { config, runtime, status, locked, loading, memLimitLevel, load, save, startDsh, stopDsh, restartDsh }
+  return { config, runtime, status, locked, loading, memLimitLevel, savedSeq, load, save, startDsh, stopDsh, restartDsh }
 })

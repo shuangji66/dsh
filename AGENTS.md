@@ -101,9 +101,11 @@
   **dsh 服务更新与插件市场更新都不再走这里**（没有可下载的压缩包）。
 - `server.go` — **dsh 服务的多版本管理**：`${TRIM_PKGVAR}/server/<版本>/` 下的
   `npm install --prefix` 安装产物；镜像源取自 `npmMirrors`（阿里云 → 腾讯云 → 华为云，
-  不试官方源），版本列表按 `dshMinVersion`（0.1.7-alpha.1）过滤，下载/删除/切换与
+  不试官方源），版本列表按 `dshMinVersion`（**0.1.7-rc.1**）过滤，下载/删除/切换与
   「未安装」状态都在这里。**版本号会变成目录名与 npm 参数**，一律先过
   `validVersionArg`（与市场版本共用；`newestVersion` 取「版本号最高的一版」，见 market.go）。
+  **「有更新」的红点只看版本号大小**（列表里最高的一版比选中的高就亮），不区分 `dist-tags`
+  —— 基准是列表最高版本（`newestOf`），标签只作为列表里的标注展示，见 `refreshDshStatus`。
   启动与 CLI 用选中版本的**绝对路径**（`DshManager.dshBinPath`）。
 - `market.go` — **插件市场（dshmarket）**：它是普通的 profile 插件（不是 dsh 包自带的
   bundle），检测靠 `dsh plugin --profile web list`，安装/更新/卸载靠
@@ -135,6 +137,10 @@
   「带边框 + 不填充底色 + 同档字号」—— 普通操作用 `g-btn-secondary`、危险操作用
   `g-btn-danger`、警告用 `g-btn-warning`，**不要在弹窗里用 `g-btn-primary`**（填充色）或
   自创尺寸。新增弹窗时照这套来（列表行内的纯图标按钮仍用 `g-btn-ghost`，那是列表操作）。
+  **弹窗正文只分两档，别自创第三档**：主要信息（状态行 / 说明句 / 正文段落 / 更新内容）用
+  `text-sm` + `text-ink-soft dark:text-[#A6A6AD]`（多行配 `leading-relaxed`）；次要信息
+  （字节数、版本号等元信息、小标题、标签）用 `text-xs` + `text-ink-faint dark:text-[#8A8A92]`。
+  更新弹窗的 release 正文曾写成 `text-xs`（比同屏的版本行还小），现已与其它弹窗同档。
 - **全局禁选 / 禁原生拖拽 / 输入框禁自动填充**（`style.css` + `App.vue`）：
   `html { user-select: none }` 全局禁止文本选择，需要拖选的地方必须显式加 Tailwind 的
   `select-text` —— 现在只有两处：`LogView` 的日志 `<pre>`、`TerminalView` 整页；日志路径与
@@ -206,10 +212,19 @@
      逐个尝试。**`remove` 绝对不能带 `--registry`** —— pnpm 的 remove 没有这个选项，带上
      会以 `Unknown option: 'registry'` 失败，而错误信息还会误导成「镜像源都失败了」；
      卸载走 `runMarketPluginCmdOnce`（执行一次、不带 registry、不回退）。
+   - **镜像源的中文名只进界面，日志与错误链一律用英文标识**（`npmMirror.Slug`：
+     aliyun / tencent / huawei，取用入口 `mirrorLogName()` / `mirrorLogNames()`）——
+     日志必须全英文（规则 7），而中文显示名（阿里云/腾讯云/华为云）过去既进界面也进日志，
+     还会顺着「插件市场操作失败（…均失败）」这类错误被 `logError(..., err)` 原样打出去。
+     因此 `Name` 只用于进度文案与 `DshInstallState.Mirror` 这类界面字段，日志/错误里用 Slug；
+     回归测试见 `backend/mirror_log_language_test.go`（含一条「日志调用不得引用
+     `mirror.Name`」的源码守卫）。
    - **插件市场装的是「版本号最高的一版」，不是 `dist-tags.latest`**：`latest` 是手动标签，
      会滞后或指向另一条线。检测与安装都走 `newestVersion`（版本号排序取最高），安装命令是
-     `add dshmarket@<精确版本号>`（**不要写回 `@latest`**）。dsh 版本行的红点基准则仍是
-     `dist-tags.latest`（列表里同时标注 latest/alpha/next），两者刻意不同，别顺手统一。
+     `add dshmarket@<精确版本号>`（**不要写回 `@latest`**）。**dsh 版本行的红点现在也是同一套
+     语义**（用户要求「不区分标签通道，版本号大就提示」）：基准改成列表里最高的一版
+     （`newestOf`），列表里仍标注 latest/alpha/next，但标签不参与判定 —— 别再改回
+     `dist-tags.latest`。
    - **版本列表 / 市场本地检测是「缓存优先」，不要顺手加回 TTL 或改成每次都查**：
      `refreshVersions(force)` 与 `detectMarketLocal(force)` 在 `force=false` 时只要有缓存就
      直接返回（不联网、不起子进程）；刷新的入口只有「弹窗里的刷新」「后台自动检测 / 手动检查」

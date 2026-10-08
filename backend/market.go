@@ -145,7 +145,8 @@ func (m *UpdateManager) refreshMarketLocal(force bool) marketLocalSnapshot {
 // --- 版本检测：npm 镜像源 ---
 
 // marketLatest 依次尝试各镜像源的 dshmarket 元数据，返回**版本号最高**的那一版
-// （`newestVersion`）与命中的镜像名。
+// （`newestVersion`）与命中的镜像源日志标识（英文标识；界面文案要用 npmMirror.Name，
+// 别在这里返回中文显示名 —— 它会被调用方写进日志）。
 //
 // 刻意不看 `dist-tags.latest`：市场装的是「实际发布的最新版本号」那一版，而不是发布者
 // 手动指到哪一版的标签（标签可能滞后、可能指向稳定线而版本集合里已有更新的预览版）。
@@ -156,18 +157,18 @@ func (m *UpdateManager) marketLatest() (string, string, error) {
 	for _, mirror := range npmMirrors {
 		versions, _, err := fetchMirrorPackument(client, mirror.URL, marketPackageName)
 		if err != nil {
-			lastErr = fmt.Errorf("%s: %w", mirror.Name, err)
+			lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
 			continue
 		}
 		if v := newestVersion(versions); v != "" {
-			return v, mirror.Name, nil
+			return v, mirror.mirrorLogName(), nil
 		}
-		lastErr = fmt.Errorf("%s: 元数据里没有可用版本", mirror.Name)
+		lastErr = fmt.Errorf("%s: no usable version in metadata", mirror.mirrorLogName())
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
 	}
-	return "", "", fmt.Errorf("获取 %s 最新版本失败（已尝试镜像源：%s）: %v", marketPackageName, mirrorNames(), lastErr)
+	return "", "", fmt.Errorf("获取 %s 最新版本失败（已尝试镜像源：%s）: %v", marketPackageName, mirrorLogNames(), lastErr)
 }
 
 // refreshMarketStatus 做一次完整的市场检测：本地检测 + 镜像源最新版。
@@ -234,20 +235,21 @@ func (m *UpdateManager) runMarketPluginCmd(args []string) error {
 	for _, mirror := range npmMirrors {
 		full := append(marketCommand(args), "--registry="+mirror.URL)
 		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+			// 界面进度文案用中文显示名；日志用下面的 mirrorLogName()（英文标识）。
 			st.Message = fmt.Sprintf("正在从 %s 处理 %s", mirror.Name, marketPackageName)
 		})
-		logInfo("[market] running dsh %s (via %s)", strings.Join(full, " "), mirror.Name)
+		logInfo("[market] running dsh %s (via %s)", strings.Join(full, " "), mirror.mirrorLogName())
 		out, err := m.dsh.runDshCmdTimeout(marketCmdTimeout, full...)
 		if err == nil {
 			return nil
 		}
-		lastErr = fmt.Errorf("%s: %v", mirror.Name, tailLines(out, 3))
-		logWarn("[market] dsh plugin command via %s failed: %v", mirror.Name, err)
+		lastErr = fmt.Errorf("%s: %v", mirror.mirrorLogName(), tailLines(out, 3))
+		logWarn("[market] dsh plugin command via %s failed: %v", mirror.mirrorLogName(), err)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
 	}
-	return fmt.Errorf("插件市场操作失败（%s 均失败，不重试、不使用官方源）: %v", mirrorNames(), lastErr)
+	return fmt.Errorf("插件市场操作失败（%s 均失败，不重试、不使用官方源）: %v", mirrorLogNames(), lastErr)
 }
 
 // runMarketPluginCmdOnce 执行一次**与 registry 无关**的市场命令（`remove` 等）：
@@ -299,12 +301,12 @@ func (m *UpdateManager) resolveMarketVersion() (string, error) {
 
 // InstallMarket 安装插件市场的最新版本号那一版。异步执行，进度经市场状态推送。
 func (m *UpdateManager) InstallMarket() error {
-	return m.runMarketOp("安装", m.addNewestMarketCmd)
+	return m.runMarketOp("安装", "market install", m.addNewestMarketCmd)
 }
 
 // UpdateMarket 把插件市场更新到最新版本号那一版（语义上就是再装一次那个精确版本）。
 func (m *UpdateManager) UpdateMarket() error {
-	return m.runMarketOp("更新", m.addNewestMarketCmd)
+	return m.runMarketOp("更新", "market update", m.addNewestMarketCmd)
 }
 
 // addNewestMarketCmd 组装「装到最新版本号」这条命令：先解析出精确版本号，再交给
@@ -329,13 +331,16 @@ func (m *UpdateManager) addNewestMarketCmd() error {
 // 卸载走 runMarketPluginCmdOnce：**不带 `--registry`**（pnpm 的 remove 没有这个选项）、
 // 也不按镜像源回退 —— 「装的是哪个源」与卸载无关。
 func (m *UpdateManager) RemoveMarket() error {
-	return m.runMarketOp("卸载", func() error {
+	return m.runMarketOp("卸载", "market remove", func() error {
 		return m.runMarketPluginCmdOnce([]string{"remove", marketPackageName})
 	})
 }
 
 // runMarketOp 串行执行一次市场操作：置阶段 → 跑命令 → 重启 dsh → 刷新状态。
-func (m *UpdateManager) runMarketOp(action string, run func() error) error {
+//
+// action 是给用户看的中文动作名（拒绝并发操作时的提示、状态里用），actionLog 是**日志**
+// 里的英文动作名 —— 日志一律英文（见 AGENTS 第 4 节规则 7），别把 action 传进日志。
+func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) error {
 	if !m.applying.TryLock() {
 		return fmt.Errorf("正在执行其它更新/插件操作，请等它结束后再%s插件市场", action)
 	}
@@ -358,7 +363,7 @@ func (m *UpdateManager) runMarketOp(action string, run func() error) error {
 			err = m.restartDshForMarket()
 		}
 		if err != nil {
-			logError("[market] %s failed: %v", action, err)
+			logError("[market] %s failed: %v", actionLog, err)
 			m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 				st.Phase = ""
 				st.Error = err.Error()
@@ -366,7 +371,7 @@ func (m *UpdateManager) runMarketOp(action string, run func() error) error {
 			})
 			return
 		}
-		logInfo("[market] %s finished", action)
+		logInfo("[market] %s finished", actionLog)
 		// force=true：刚装/卸完市场，本地版本确实变了，必须重查（不能吃缓存）。
 		snap := m.refreshMarketLocal(true)
 		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {

@@ -173,24 +173,19 @@ export interface UpdateStatus {
   // 后端给错误的结构化归类：目前只有 'network'（代理与直连各 2 次均失败），
   // 前端据此显示本地化的“请检查网络或代理”提示。
   errorHint?: string
-  // 仅市场：当前生效的那份 dshmarket 由谁提供（见后端 market.go）
-  // server = 由 server 包提供，控制台可就地更新；profile = 由 profile 提供，
-  // 应在市场面板内更新；external = 位置在 server 目录之外；missing = 未找到。
-  marketScope?: MarketScope
-  // 仅市场：当前生效的安装目录（诊断用）
+  // 当前阶段的说明/实时尾行（仅市场：`dsh plugin …` 的输出尾行与「正在重启 dsh」等）。
+  message?: string
+  // 仅市场：`dsh plugin --profile web list` 的检测诊断（解释「为什么检测不到」）。
   marketDir?: string
 }
 
 export type UpdateKind = 'harness' | 'dsh' | 'market'
 
-// 市场安装位置的归属
-export type MarketScope = 'server' | 'profile' | 'external' | 'missing'
-
 // 市场诊断信息（GET /api/market/info）
 export interface MarketInfo {
   ok: boolean
-  scope: MarketScope
-  dir: string
+  // installed 为 false 时前端显示「未安装」并提供安装入口。
+  installed: boolean
   version: string
   latest: string
   updatable: boolean
@@ -198,27 +193,58 @@ export interface MarketInfo {
   error?: string
 }
 
-// 自我更新 SSE 推送与 REST 接口的载荷
+// --- dsh 服务多版本（见后端 server.go） ---
+
+// 版本列表里的一行：镜像源上的一个版本（也可能是本地已装、镜像上已下架的那份）。
+export interface DshVersionEntry {
+  version: string
+  // 命中的 npm dist-tag（latest / alpha / next …）
+  tags?: string[]
+  installed?: boolean
+  active?: boolean
+}
+
+// 一次 dsh 版本下载/安装的进行中状态（同一时刻只有一个）。
+export interface DshInstallState {
+  version: string
+  mirror?: string
+  // ''(空闲) / downloading(下载中) / installing(处理依赖包) / verifying(校验) / done / error
+  phase?: string
+  // 已完成的包获取次数（依赖总量 npm 不预先给出，因此不显示百分比）
+  fetched?: number
+  message?: string
+  error?: string
+  cancelled?: boolean
+}
+
+// dsh 版本快照（列表 + 选中 + 安装进度）
+export interface ServerVersions {
+  // 空串 = 未安装（控制台版本行显示「未安装」）
+  selected: string
+  installed: string[]
+  versions: DshVersionEntry[]
+  latest?: string
+  tags?: Record<string, string>
+  checkedAt: string
+  error?: string
+  install?: DshInstallState
+}
+
+// 自我更新 SSE 推送与 REST 接口的载荷（server 是 dsh 版本快照，见 server.go）
 export interface UpdatePayload {
   harness: UpdateStatus
   dsh: UpdateStatus
   market: UpdateStatus
+  server?: ServerVersions
 }
 
-// dsh server 备份条目
-export interface ServerBackup {
-  name: string
-  size: number
-  modified: string
-  path: string
-}
-
-// dsh server 回滚状态
-export interface RollbackStatus {
-  running: boolean
-  done: boolean
+// /api/update/status 与 /api/update/check 的响应：多个 ok 字段 + 四份状态。
+export interface UpdateStatusPayload {
   ok: boolean
-  error?: string
+  harness: UpdateStatus
+  dsh: UpdateStatus
+  market: UpdateStatus
+  server: ServerVersions
 }
 
 // dsh 数据备份条目（~/.dsh 备份）
@@ -354,9 +380,9 @@ export const api = {
     }),
   // 自我更新：版本检测状态 / 手动检查 / 下载更新（可取消） / 安装更新 / 取消下载 / SSE 推送
   updateStatus: () =>
-    request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus; market: UpdateStatus }>('/api/update/status'),
+    request<UpdateStatusPayload>('/api/update/status'),
   updateCheck: () =>
-    request<{ ok: boolean; harness: UpdateStatus; dsh: UpdateStatus; market: UpdateStatus }>('/api/update/check', {
+    request<UpdateStatusPayload>('/api/update/check', {
       method: 'POST'
     }),
   // 市场诊断：当前生效的那份 dshmarket 在哪、由谁提供、能否由控制台更新
@@ -388,19 +414,38 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ kind })
     }),
-  // dsh server 回滚：备份列表 / 删除备份 / 回滚 / 回滚状态
-  listBackups: () => request<{ ok: boolean; backups: ServerBackup[] }>('/api/dsh/backups'),
-  deleteBackup: (name: string) =>
-    request<{ ok: boolean; deleted: string }>('/api/dsh/backups', {
-      method: 'DELETE',
-      body: JSON.stringify({ name })
-    }),
-  rollback: (name: string) =>
-    request<{ ok: boolean; started: boolean }>('/api/dsh/rollback', {
+  // dsh 服务多版本：列表（refresh=1 强制联网刷新） / 下载安装 / 取消 / 删除 / 切换
+  dshVersions: (refresh = false) =>
+    request<{ ok: boolean; server: ServerVersions; refreshed: boolean }>(
+      '/api/dsh/versions' + (refresh ? '?refresh=1' : '')
+    ),
+  dshVersionInstall: (version: string) =>
+    request<{ ok: boolean; started: boolean; version: string }>('/api/dsh/versions/install', {
       method: 'POST',
-      body: JSON.stringify({ name })
+      body: JSON.stringify({ version })
     }),
-  rollbackStatus: () => request<{ ok: boolean; status: RollbackStatus }>('/api/dsh/rollback/status'),
+  dshVersionCancel: () =>
+    request<{ ok: boolean; cancelled: boolean }>('/api/dsh/versions/cancel', { method: 'POST' }),
+  // 收起上一次安装的结果（成功提示已 toast / 弹窗已关闭）：避免切回概览页时重复提示。
+  dshVersionAck: () => request<{ ok: boolean }>('/api/dsh/versions/ack', { method: 'POST' }),
+  dshVersionDelete: (version: string) =>
+    request<{ ok: boolean; deleted: string }>('/api/dsh/versions/delete', {
+      method: 'POST',
+      body: JSON.stringify({ version })
+    }),
+  dshVersionSwitch: (version: string) =>
+    request<{ ok: boolean; switched: string }>('/api/dsh/versions/switch', {
+      method: 'POST',
+      body: JSON.stringify({ version })
+    }),
+  // 插件市场（dshmarket）：安装 / 更新 / 卸载 / 收起结果提示
+  marketInstall: () =>
+    request<{ ok: boolean; started: boolean; action: string }>('/api/market/install', { method: 'POST' }),
+  marketUpdate: () =>
+    request<{ ok: boolean; started: boolean; action: string }>('/api/market/update', { method: 'POST' }),
+  marketRemove: () =>
+    request<{ ok: boolean; started: boolean; action: string }>('/api/market/remove', { method: 'POST' }),
+  marketDone: () => request<{ ok: boolean }>('/api/market/done', { method: 'POST' }),
   // 终端页：快捷指令列表 / 整体保存
   listQuickCmds: () => request<{ ok: boolean; path: string; commands: QuickCmd[] }>('/api/quickcmds'),
   saveQuickCmds: (commands: QuickCmd[]) =>

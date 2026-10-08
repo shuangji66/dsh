@@ -45,6 +45,13 @@ type AppConfig struct {
 	// 默认 "node24"（系统默认 node）。当宿主机存在 /var/apps/nodejs_v26/target/bin/node
 	// 时，用户可切换到 "node26"，dsh 启动时会把对应版本的 bin 目录前置到 PATH。
 	NodeVersion string `json:"nodeVersion"`
+	// DshVersion 是**当前选中的 dsh 服务版本**，即 `${TRIM_PKGVAR}/server/<版本>`
+	// 的那个目录名（如 "0.2.0-rc.2"）。空串表示未选中任何版本：控制台版本行显示
+	// 「未安装」，dsh 也无法启动（见 server.go）。
+	//
+	// 这是本应用唯一的 dsh 版本来源 —— 不再有「server 包内置在 fpk 里」这一形态，
+	// 也没有压缩包备份/回退：换版本 = 换一个已安装的版本目录（见 SwitchVersion）。
+	DshVersion string `json:"dshVersion,omitempty"`
 	// 主目录（dsh 的 HOME）**不可配置**：它恒为本应用的 shares 目录
 	// （/var/apps/<AppName>/shares/<AppName> 的实际路径），见 DshManager.effectiveHome。
 	// 曾经存在的 homeDir 配置项与资源页的「设置为主目录」功能已整体移除 —— 目标目录的

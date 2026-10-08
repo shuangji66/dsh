@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -176,7 +177,13 @@ func main() {
 	// 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
 	if os.Getenv("HARNESS_AUTOSTART") != "0" {
 		boot.set(phaseStarting, "")
-		if err := dsh.Start(); err != nil {
+		// 先判断「有没有装 dsh 版本」：没装时不是故障，而是还没装（控制台概览页要
+		// 用户去版本列表里下载 + 切换），因此用专门的 not-installed 阶段 —— 反代
+		// 的等待页会显示「尚未安装 dsh 服务」并给出下一步，而不是一条启动失败报错。
+		if dsh.selectedDshVersion() == "" {
+			boot.set(phaseNotInstalled, fmt.Sprintf("请在控制台「概览」页的 dsh 版本列表里下载一个版本并点「切换」（安装目录 %s）", serverRootFor(&renv)))
+			logWarn("dsh is not installed: no version selected under %s", serverRootFor(&renv))
+		} else if err := dsh.Start(); err != nil {
 			boot.set(phaseFailed, err.Error())
 			logError("autostart dsh failed: %v", err)
 		} else {

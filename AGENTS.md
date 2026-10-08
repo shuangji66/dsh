@@ -37,7 +37,8 @@
 
 - `main.go` — 入口。顺序：解析环境 → 建日志 → 写 PID → 查 socket 占用 → 读配置 →
   校验密码 → 起 Admin socket → **起反代**（早于 dsh：先监听、先鉴权，未就绪给等待页）
-  → 起 dsh（非 `HARNESS_AUTOSTART=0`）→ 换 Cookie → 装 node-pty → 标记就绪 → 等信号退出。
+  → 起 dsh（非 `HARNESS_AUTOSTART=0`；**先查有没有选中的 dsh 版本**，没有就进
+  `not-installed` 而不是报「启动失败」）→ 换 Cookie → 装 node-pty → 标记就绪 → 等信号退出。
 - `logging.go` — **唯一的日志出口**：`logInfo` / `logWarn` / `logError` 三个等级
   （`[INFO]` 白 / `[WARN]` 黄 / `[ERROR]` 红），行格式
   `[Harness] <时间> [LEVEL] message`；终端（stdout 是 TTY）额外用 ANSI 着色，日志文件
@@ -46,9 +47,13 @@
   **原样透传**（不加前缀、不做抑制），终端固定黄色。更新类日志按**目标分开打标签**：
   `[harness]`（控制台）/ `[dsh]`（dsh 服务）/ `[market]`（插件市场），见
   `updateLogTag` —— 新增加更新步骤时不要再用通用的 `[update]`，否则升级日志又会混在一起。
-- `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled`）+ `proxyState`。
-  反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
+- `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled/not-installed`）
+  + `proxyState`。反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
+  `not-installed` 表示「本机没有选中的 dsh 版本」，等待页据此提示去概览页下载 + 切换
+  （`userActionPhase` 是「需要用户动手」的唯一判定入口，新增阶段时一起改）。
 - `config.go` — `AppConfig`（前端可改，含反代端口 `ProxyPort`）与 `RuntimeEnv`（环境变量）。
+  `AppConfig.DshVersion` 是**当前选中的 dsh 版本**（`${TRIM_PKGVAR}/server/` 下的目录名，
+  空 = 未安装）：由概览页的版本列表写入，设置页不暴露；这是全应用唯一的 dsh 版本来源。
   **反代端口是持久化配置项**（`proxyPort`，默认 `3079`），不再读 `PROXY_PORT`。
   **手动设置的 node 堆内存上限**（`dshMemLimit`，`dshMemAuto` 关闭时）低于
   `minDshMemLimitMB`（500）会让整次保存被拒（`handleSaveSettings`）；前端同阈值
@@ -76,21 +81,28 @@
   （单挂载点）**：`Session.attach` 换主并返回被顶掉的旧连接，handler 用 `kickDetached`
   通知旧端（`\x1b]detached\x07` + close 4001）；被顶掉端的输入 / 尺寸请求在服务端丢弃
   （`writeInput` / `resize` 走 `isOwner`，非操作端返回 `errNotOwner`，上层静默忽略）。
-- `update.go` — 更新 harness / dsh 服务与插件市场：版本检测、下载、备份与回滚；
-  `harnessVersion` 由 `-ldflags -X` 注入。下载策略按类型分开（`downloadPlanFor`）：
-  发布资产（harness/dsh）走「代理+直连各 2 次 + HTTP Range 断点续传 + 暂停/取消」，
-  插件市场**只直连、不支持续传/暂停**（包小、registry 通常不需要代理）。
-  **是否「先从代理更新」由 `AppConfig.ProxyUpdate`（设置页「代理更新」）控制** ——
+- `update.go` — **harness 控制台自更新**（版本检测、下载、备份与替换）+ dsh 数据备份/
+  恢复；`harnessVersion` 由 `-ldflags -X` 注入。下载只有「发布资产」一种策略
+  （`downloadPlanFor`）：代理+直连各 2 次 + HTTP Range 断点续传 + 暂停/取消；
+  **是否「先从代理更新」由 `AppConfig.ProxyUpdate`（设置页「代理harness更新」）控制** ——
   代理地址探测不通或代理通路失败回退直连；它与 `ProxyEnabled`（设置页「代理dsh」，
   只管 dsh 进程自身的出网环境变量，见 `dsh.go` 的 `buildEnv`）**相互独立**，别混用。
-  **备份包留不留只看有没有回滚入口**：只有 `server-*`（概览页有「dsh 服务回滚」）与
-  用户主动的 `dsh-data-*` 需要留存；harness 与插件市场的备份包收尾即删
-  （`removeUnusedBackup`）—— 新增更新分支时没有回滚入口就别把包留在盘上。
-  发布资产还要过 **sha256 校验**（`releaseChecksum` / `verifyFileSHA256`）：校验文件是
-  Release 里与包同名的 `.sha256`（由两个 workflow 生成），**静默校验**（不写更新状态、
-  不记成功日志），失败才进更新弹窗并删掉坏包；**缺失/取不到只记 WARN、不阻塞更新**。
-- `market.go` — 插件市场（dshmarket）就地更新：解析实际生效的安装位置（server 包内置
-  vs profile 自带）、npm registry 取版本、完整性校验、原子替换与失败回滚。
+  **备份包留不留只看有没有回滚入口**：现在只有用户主动的 `dsh-data-*` 要留存，
+  harness 的备份包收尾即删（`removeUnusedBackup`）—— 新增更新分支时没有回滚入口就别把
+  包留在盘上。发布资产还要过 **sha256 校验**（`releaseChecksum` / `verifyFileSHA256`）：
+  校验文件是 Release 里与包同名的 `.sha256`，**静默校验**（不写更新状态、不记成功日志），
+  失败才进更新弹窗并删掉坏包；**缺失/取不到只记 WARN、不阻塞更新**。
+  **dsh 服务更新与插件市场更新都不再走这里**（没有可下载的压缩包）。
+- `server.go` — **dsh 服务的多版本管理**：`${TRIM_PKGVAR}/server/<版本>/` 下的
+  `npm install --prefix` 安装产物；镜像源取自 `npmMirrors`（阿里云 → 腾讯云 → 华为云，
+  不试官方源），版本列表按 `dshMinVersion`（0.1.7-alpha.1）过滤，下载/删除/切换与
+  「未安装」状态都在这里。**版本号会变成目录名与 npm 参数**，一律先过
+  `validVersionArg`（与市场版本共用；`newestVersion` 取「版本号最高的一版」，见 market.go）。
+  启动与 CLI 用选中版本的**绝对路径**（`DshManager.dshBinPath`）。
+- `market.go` — **插件市场（dshmarket）**：它是普通的 profile 插件（不是 dsh 包自带的
+  bundle），检测靠 `dsh plugin --profile web list`，安装/更新/卸载靠
+  `dsh plugin --profile web add|remove`，镜像源与 `server.go` 同一套；没有备份/回滚。
+  这里还放着所有「停 dsh 前」共用的忙守卫（`replaceBusyGuard` / `stopDshForReplacement`）。
 - `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
 - `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`）。
@@ -168,26 +180,42 @@
    宽度是 768/834/1024px，会被判成桌面而丢掉整条辅助键（触屏上再没有 ESC/Tab/Ctrl/Alt/
    方向键）。一律走 `composables/useMobileLayout.ts`（触屏 **或** 窄视口），**不要写回
    `md:hidden`**；「平板档（两页并排）」用同文件的 `useWideLayout()`（就是 md 断点，别另发明数值）。
-11. **发布资产的名字不能随便改，`.sha256` 必须与包同名** —— harness / dsh 的更新链路按
-   「资产地址 + `.sha256`」拼校验文件地址（`backend/update.go` 的 `checksumURL`），
-   两个 workflow 也按同一规则生成并上传。改资产命名（`assetURL`）却漏改一侧，**不会报错**，
-   只会让校验静默退化成「不校验」（缺文件按策略只记 WARN）。新增发布资产时：
-   ①`assetURL` 的命名 ②workflow 的 `sha256sum` ③artifact/Release 上传的路径清单，三处一起改。
-   - **压缩格式：harness 只有 `.tar.gz`；dsh server 同时发 `.tar.gz` 与 `.tar.xz`，而新版
-     控制台只下载 `.tar.xz`**（`assetURL` 按 kind 分流，`.tar.gz` 只为旧版控制台保留）。
-     改格式要五处一起改：`assetURL`、待安装包名 `pendingPkgName`（扩展名决定用哪个解压器）、
-     workflow 的打包命令、两处 `sha256sum`、artifact/Release 的上传清单；
-     `server-build.yaml` 的「是否已发布」检查也按 `.tar.xz` 是否存在判定，缺它就必须重建补传
-     （否则那一版永远升不上去）。
-   - **本地备份恒为 `.tar.gz`**（`tgzDir` / `tgzDirAs`）：下载包走 `extractArchive`
-     按扩展名分流，回滚/恢复（server 回滚、dsh 数据恢复、市场回滚）仍直接调 `extractTarGz`。
-     不要把备份也改成 xz，也不要让备份解压跟着下载格式走。
-   - **`.tar.xz` 必须优先走系统 `xz`（liblzma），纯 Go 只做兜底** —— `extractTarXz` 先用
-     `xz -dc` 管道进 `extractTar`，失败（找不到命令/启动失败/异常退出）才清空目标目录回退
-     `github.com/ulikunitz/xz`。纯 Go 解码器实测比 liblzma **慢一个数量级**（349 MB 的包：
-     63.8 s vs 4.8 s，其中纯解码 62.7 s），别把外部通路当成「可选优化」删掉 —— 也别反过来
-     只留外部通路（设备上没 `xz` 时更新会直接失败）。tar 遍历与越界/软链防护仍只有
-     `extractTar` 一份，外部命令只负责解压成 tar 流。
+11. **发布资产的名字不能随便改，`.sha256` 必须与包同名（现在只对 harness 生效）** ——
+   harness 的自更新按「资产地址 + `.sha256`」拼校验文件地址（`backend/update.go` 的
+   `checksumURL`），`harness-build.yaml` 也按同一规则生成并上传。改资产命名（`assetURL`）
+   却漏改一侧，**不会报错**，只会让校验静默退化成「不校验」（缺文件按策略只记 WARN）。
+   新增发布资产时：①`assetURL` 的命名 ②workflow 的 `sha256sum` ③artifact/Release 的
+   上传清单，三处一起改。harness 的格式只有 `.tar.gz`。
+   - **dsh 服务与插件市场都没有发布资产了**：dsh 由控制台 `npm install` 官方 npm 包
+     （`server.go`），市场由 `dsh plugin add`（`market.go`）。旧版本的 `server-*` 压缩包与
+     `.tar.xz` 解码通路已整体删除（`extractTarXz` / `github.com/ulikunitz/xz` 都不在了，
+     设备上不再需要 `xz-utils`）；`server-build.yaml` 只是留着未动，**新版控制台不读它**。
+   - **本地备份恒为 `.tar.gz`**（`tgzDir` / `tgzDirAs`），解压走 `extractTarGz`
+     （`extractArchive` 只是「下载包用哪个解压器」的唯一判定点）。不要把备份改成别的格式。
+12. **dsh 版本安装 / 插件市场安装的三条硬约束（改这两条链路前必读）** ——
+   - **镜像源顺序与「不重试」**：`npmMirrors` 是阿里云 → 腾讯云 → 华为云，同一个源失败就换
+     下一个（整包重跑），三个都失败才报错，**不试官方 registry.npmjs.org**。dsh 安装用
+     `--fetch-timeout=5000 --fetch-retries=0`（「5 秒没反应就换下一个」就是这个语义：
+     单请求 5 秒拿不到响应即失败）；插件市场的**安装/更新**（`add`）用 `--registry=<镜像源>`
+     逐个尝试。**`remove` 绝对不能带 `--registry`** —— pnpm 的 remove 没有这个选项，带上
+     会以 `Unknown option: 'registry'` 失败，而错误信息还会误导成「镜像源都失败了」；
+     卸载走 `runMarketPluginCmdOnce`（执行一次、不带 registry、不回退）。
+   - **插件市场装的是「版本号最高的一版」，不是 `dist-tags.latest`**：`latest` 是手动标签，
+     会滞后或指向另一条线。检测与安装都走 `newestVersion`（版本号排序取最高），安装命令是
+     `add dshmarket@<精确版本号>`（**不要写回 `@latest`**）。dsh 版本行的红点基准则仍是
+     `dist-tags.latest`（列表里同时标注 latest/alpha/next），两者刻意不同，别顺手统一。
+   - **版本列表 / 市场本地检测是「缓存优先」，不要顺手加回 TTL 或改成每次都查**：
+     `refreshVersions(force)` 与 `detectMarketLocal(force)` 在 `force=false` 时只要有缓存就
+     直接返回（不联网、不起子进程）；刷新的入口只有「弹窗里的刷新」「后台自动检测 / 手动检查」
+     与「市场装/卸完成」三处。这两个查询一个要打三个镜像源、一个要起 1~3 秒的
+     `dsh plugin list` 子进程，被状态重算/页面打开这些高频场合反复触发过。
+   - **附件 fsync 补丁必须在 `npm install` 之后由控制台补上**（`patchAttachmentFsync`）：
+     dsh 的 attachment-local 会逐级上溯 fsync 到 `/`，而 fnOS 的 `/vol1`、
+     `/vol1/@appshare` 是 mode 000（trim_acl 只给穿越），非 root 读不了 → `EACCES` →
+     **WEB 端上传文件/图片整体失败**。锚点缺失时只记 WARN（不阻塞安装），但绝不会静默通过。
+   - **顺序**：市场安装/卸载是 pnpm 在 profile 里跑并持有 profile 写锁，**绝不能在它跑的时候
+     停 dsh**（会留下陈旧锁）。所以是「先跑完插件命令 → 过忙守卫 → 重启 dsh 让 bundle 生效」；
+     切换 dsh 版本同样是「过忙守卫 → 停 dsh → 用新版本启动」。
 
 ---
 
@@ -233,8 +261,11 @@
   3. **dsh 侧不需要 baseurl**：0.1.7-alpha.1 起其前端全走文档相对路径（`<base href="./">`），
      浏览器自己拼出 `<prefix>/api`；不要试图去改写 dsh 的产物，也不要为了“兼容子路径”
      给 dsh 传前缀参数。此机制的前提是 **dsh ≥ 0.1.7-alpha.1**，更早版本在子路径下必然 404。
-- **`PROFILE_TEMPLATES.web.bundles` 注入** —— 只在 `server-build.yaml` 的 CI 中对
-  `dsh-app-boot` 做，本地不涉及。
+- **`PROFILE_TEMPLATES.web.bundles` 注入已成历史** —— 旧流程在 `server-build.yaml` 的 CI 里
+  把 `dshmarket` 塞进 server 包的 `dependencies` 与 profile 模板；现在 dsh 是控制台原样装的
+  官方 npm 包，**不再有任何注入**，市场就是一个普通 profile 插件（装它 = `dsh plugin add`）。
+  别再把「市场由 server 包提供」当成前提 —— 老设备上 profile 里可能还留着 `dshmarket` 在
+  `dsh.profile.bundles` 里但没有依赖，那种状态在控制台里就是「未安装」，装上依赖即可。
 - **反代端口默认 `3079`（设置页可改，持久化在 `config.json` 的 `proxyPort`）、
   dsh 端口默认 `13080`** —— 冲突排查先看这两个；两者不可相同（设置页与后端都校验）。
 - **dsh 的跨进程写锁会因「持有者被杀」而残留，代价是 120 秒白等** ——
@@ -253,19 +284,20 @@
   2. **凡是会停 dsh（或删 ~/.dsh）的操作，动手前必须过忙守卫**：插件的安装/卸载
      （不论市场面板发起还是控制台插件页发起）都在 dsh 进程内持有那把锁，停 dsh 会连带
      终止它的进程组，把持有者一起带走 —— 安装白做，还留下陈旧锁。
-     - `UpdateManager.stopDshForReplacement()`：替换 `server/` 产物的三条路径
-       （更新 dsh 服务 / 更新市场 / 回滚 server 备份）统一走它 —— 先 `replaceBusyGuard()`，
-       再停 dsh 并等端口释放；被拒绝时不产生任何停机、不改盘。
-     - `replaceBusyGuard()` 也用在**更新 harness 控制台**与**恢复 dsh 数据**（会删 `~/.dsh`）
-       的入口，动手之前先挡。
+     - `replaceBusyGuard()` 是所有「停 dsh 之前」的统一前置检查（先挡、再停），当前的调用点：
+       **更新 harness 控制台**（`installHarness`）、**恢复 dsh 数据**（会删 `~/.dsh`，
+       经 `stopDshForReplacement`）、**切换 dsh 版本**（`ServerManager.Switch`）、
+       **市场安装/卸载后重启 dsh**（`restartDshForMarket`）。被拒绝时不产生任何停机、不改盘。
      - 守卫来源：市场 `/dsh-market/status` 的 busy + `DshManager.PluginCmdRunning()`；
        市场不回答视为不忙（回滚/恢复这类抢修不被挡）。
      - 唯一例外是概览页的「停止/重启 dsh」按钮：那是用户的即时意图，**不挡**；改为在确认
        弹窗里提示 —— 弹窗打开时查 `GET /api/dsh/busy`（`AdminMux.dshBusySnapshot()`），
        有插件操作在跑就显示风险提示。这个端点刻意不塞进高频轮询的 `/api/dsh/status`。
-  3. **「server 目录在哪」只有一个入口**：`serverDirFn` —— 更新 dsh 服务、回滚备份、
-     市场定位 dshmarket 都用它，测试也因此能注入临时目录（否则会碰到真实的
-     `/var/apps/Harness/target/server`）。
+  3. **「dsh 装在哪」只有两个入口**（`server.go` 顶部的两个函数）：`serverRootFor(renv)`
+     给出 `${数据目录}/server`，`versionDirFor/versionBinDirFor/versionDshBinFor` 给出某个
+     版本的目录与可执行文件。`DshManager`（PATH 注入、启动）与 `ServerManager`
+     （列表/安装/删除/切换）都走它们，**不要再各拼一份路径**；测试靠 `renv.DataDir`
+     指向临时目录，因此不会碰到真实的装盘目录。
 - **主目录（dsh 的 HOME）不可切换，别再把这个功能加回来** —— 资源页曾经可以把某个
   「已授权目录」设为 dsh 的 HOME，现已整体移除（`AppConfig.HomeDir`、
   `/api/dsh/set-home`、`handleSetHome` 都没有了；`DshManager.effectiveHome()` 恒返回

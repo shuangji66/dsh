@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -24,10 +24,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	// 纯 Go 的 xz 解码器：dsh 服务发布资产是 .tar.xz（见 assetURL / extractTarXz），
-	// Go 标准库只有 gzip。无传递依赖，也不需要设备上装 xz 命令。
-	"github.com/ulikunitz/xz"
 )
 
 // harnessVersion 是控制台自身的构建版本号。默认从 1.0.0 起；构建时可经
@@ -110,14 +106,11 @@ func pendingKind(name string) updateKind {
 	return ""
 }
 
-// pendingPkgName 返回待安装包在 pending 目录下的文件名（`<kind>-<版本><扩展名>`）。
+// pendingPkgName 返回待安装包在 pending 目录下的文件名（`<kind>-<版本>.tar.gz`）。
 //
-// 扩展名必须与下载地址一致：dsh 是 `.tar.xz`（见 assetURL），harness 与插件市场是
-// `.tar.gz`。它同时决定安装时用哪个解压器 —— extractArchive 按扩展名分流。
+// 现在只有 harness 控制台会下载更新包（见 downloadUpdate），扩展名恒为 `.tar.gz`；
+// 保留这个函数是为了让「待安装包叫什么」在下载与安装两侧只有一个来源。
 func pendingPkgName(k updateKind, version string) string {
-	if k == updateKindDsh {
-		return string(k) + "-" + version + ".tar.xz"
-	}
 	return string(k) + "-" + version + ".tar.gz"
 }
 
@@ -127,25 +120,33 @@ type tagInfo struct {
 	version string // 去掉前缀后的版本号，如 1.0.1 / 0.1.2-alpha.5
 }
 
-// UpdateStatus 是一次更新检测的状态（harness 与 dsh 各自一份）。
+// UpdateStatus 是一次更新检测的状态（harness / dsh / 市场各一份）。
+//
+// 三条链路的**状态字段同构，数据来源完全不同**：
+//   - harness：GitHub Release 的 tag 与资产（可下载、可安装、可暂停/取消）；
+//   - dsh：本地已安装版本目录 + npm 镜像源的 dist-tags（只有版本号与「有更新」，
+//     下载/切换走 server.go 自己的进度状态，不再经这里）；
+//   - 市场：`dsh plugin --profile web list` 的检测结果 + npm 镜像源（安装/卸载/更新
+//     走 market.go，进度用 Phase/Message 表达）。
 type UpdateStatus struct {
 	Kind          updateKind `json:"kind"`
 	LocalVersion  string     `json:"localVersion"`           // 本地版本号
-	LatestVersion string     `json:"latestVersion"`          // 仓库最新 tag 版本号（空表示未获取到）
+	LatestVersion string     `json:"latestVersion"`          // 最新版本号（空表示未获取到）
 	HasUpdate     bool       `json:"hasUpdate"`              // 是否有可用更新
 	CheckedAt     time.Time  `json:"checkedAt"`              // 最近检测时间
 	Error         string     `json:"error,omitempty"`        // 最近一次检测/拉取失败原因
 	ReleaseNotes  string     `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
 
-	// 下载进度（仅更新包下载期间有值；下载完成后清空）。
+	// 下载进度（仅 harness 更新包下载期间有值；下载完成后清空）。
 	Downloading     bool  `json:"downloading,omitempty"`     // 是否正在下载更新包
 	DownloadPct     int   `json:"downloadPct,omitempty"`     // 下载进度百分比（0-100）
 	DownloadedBytes int64 `json:"downloadedBytes,omitempty"` // 已下载字节数
 	TotalBytes      int64 `json:"totalBytes,omitempty"`      // 总字节数（未知为 0）
 
-	// 流程阶段：""(空闲) / downloading(下载中) / downloaded(已下载待安装) / installing(安装中)。
+	// 流程阶段：""(空闲) / downloading(下载中) / downloaded(已下载待安装) / installing(安装中)
+	// / removing(卸载中，仅市场)。dsh 版本安装的进度不走这里（见 ServerVersions.Install）。
 	Phase string `json:"phase,omitempty"`
-	// ReadyToInstall 表示更新包已下载就绪，等待用户点击“安装”。
+	// ReadyToInstall 表示更新包已下载就绪，等待用户点击“安装”（仅 harness）。
 	ReadyToInstall bool `json:"readyToInstall,omitempty"`
 	// Cancelled 表示最近一次更新被用户主动取消（仅失败推送时置位）。
 	Cancelled bool `json:"cancelled,omitempty"`
@@ -154,28 +155,25 @@ type UpdateStatus struct {
 	// ErrorHint 是给前端的结构化错误归类（目前只有 "network"：代理与直连均失败），
 	// 前端据此显示本地化的“请检查网络或代理”提示；Error 里则是原始错误文本。
 	ErrorHint string `json:"errorHint,omitempty"`
-
-	// 以下两个字段仅市场（kind=market）使用，见 market.go：
-	// MarketScope 说明当前生效的那份 dshmarket 由谁提供 ——
-	// server（由 server 包提供，控制台可就地更新）/ profile（由 profile 提供，
-	// 应在市场面板内更新）/ external（位置在 server 目录之外）/ missing（未找到）。
-	MarketScope string `json:"marketScope,omitempty"`
-	// MarketDir 是当前生效的 dshmarket 安装目录（诊断用）。
+	// Message 是当前阶段的说明/实时尾行（仅市场使用：`dsh plugin …` 的输出尾行）。
+	Message string `json:"message,omitempty"`
+	// 市场安装位置诊断（仅 kind=market）：`dsh plugin --profile web list` 的原始输出，
+	// 用于解释「没检测到市场」这类情况。
 	MarketDir string `json:"marketDir,omitempty"`
 }
 
 // PendingUpdate 记录某个 kind 已下载完成、等待用户确认安装的更新包。
 // 只会保留一个 kind 的一份待安装包；重新下载或安装完成后即被清理。
+// PendingUpdate 记录某个 kind 已下载完成、等待用户确认安装的更新包。
+// 只会保留一个 kind 的一份待安装包；重新下载或安装完成后即被清理。
+// 目前只有 harness 控制台会用到它（dsh 与插件市场都不再下载压缩包）。
 type PendingUpdate struct {
 	Kind    updateKind
 	Version string
-	PkgPath string // 已下载更新包的完整路径（dsh 为 .tar.xz，harness/市场为 .tar.gz）
-	// 仅市场使用：npm registry 给出的完整性值，安装前再复核一次（见 market.go）。
-	Integrity string
-	Shasum    string
-	// 仅 harness / dsh 发布资产使用：下载阶段校验通过过的 sha256（64 位小写十六进制）。
+	PkgPath string // 已下载更新包的完整路径（.tar.gz）
+	// harness 发布资产使用：下载阶段校验通过过的 sha256（64 位小写十六进制）。
 	// 空表示该版本没有校验文件（退化为不校验，见 releaseChecksum）。安装前再复核一次，
-	// 防止「下载 → 安装」两步之间文件被截断或替换（与市场那两个字段同理）。
+	// 防止「下载 → 安装」两步之间文件被截断或替换。
 	SHA256 string
 }
 
@@ -188,12 +186,9 @@ type UpdateManager struct {
 	// applying 用于防止并发执行自我更新（同一时刻只允许一个更新任务）。
 	applying sync.Mutex
 	renv     *RuntimeEnv
-	dsh      *DshManager // 用于执行 `dsh -V` 等命令（复用其运行环境）
-	// rollback 状态跟踪
-	rollbackMu   sync.Mutex
-	rollbackDone bool
-	rollbackOk   bool
-	rollbackErr  string
+	dsh      *DshManager // 用于执行 `dsh plugin …` / `dsh -V` 等命令（复用其运行环境）
+	// server 管理 dsh 服务的多版本（列表/安装/删除/切换），见 server.go。
+	server *ServerManager
 
 	// ctrlMu 保护 ctrl：ctrl 非 nil 表示正在下载更新包。中断原因决定半成品的
 	// 去留：取消（cancel）删除，暂停（pause）保留以便续传（见 downloadControl）。
@@ -207,7 +202,13 @@ type UpdateManager struct {
 	pendingMu sync.Mutex
 	pending   map[updateKind]*PendingUpdate
 
-	// checkLogMu 保护 lastCheckSig：按更新目标分别记录「上次检测结论」，
+	// marketLocalMu 保护 marketLocalCache：市场「本机装的是哪一版」的本地检测结果。
+	// 那次检测要起一个 `dsh plugin --profile web list` 子进程（1~3 秒），因此像版本列表
+	// 一样缓存起来，只在显式刷新时重跑（见 market.go 的 detectMarketLocal）。
+	marketLocalMu    sync.Mutex
+	marketLocalCache *marketLocalSnapshot
+
+	// checkLogMu 保护 lastCheckSig：按目标分别记录「上次检测结论」，
 	// 只在某个目标的结论发生变化时才记一行，避免每小时自动检测重复输出同样的内容。
 	checkLogMu   sync.Mutex
 	lastCheckSig map[updateKind]string
@@ -223,13 +224,21 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 		dsh:      dsh,
 	}
 	m.statuses[updateKindHarness] = &UpdateStatus{Kind: updateKindHarness, LocalVersion: harnessVersion}
-	// 本地 dsh 版本立即通过 `dsh -V` 获取（原 /api/dsh/version 端点已移除，
-	// 改由更新状态统一提供 dsh 版本号）。
-	m.statuses[updateKindDsh] = &UpdateStatus{Kind: updateKindDsh, LocalVersion: m.localDshVersion()}
-	// 市场（dshmarket）先做一次本地解析：不联网，只把「当前生效的那份在哪、什么
-	// 版本、由谁提供」填进状态；最新版等 checkOnce/手动检查时才查 registry。
+	// dsh 的本地版本号 = 当前选中版本的目录名（server.go），不联网、不执行命令：
+	// 「哪个版本装着」是磁盘上的事实，`dsh -V` 只用于安装完成后的校验。
+	m.server = newServerManager(renv, dsh, m)
+	m.statuses[updateKindDsh] = &UpdateStatus{Kind: updateKindDsh}
+	// 市场（dshmarket）的本地检测要起一个 `dsh plugin --profile web list` 子进程
+	// （约 1~3 秒），因此**异步**做：控制台启动路径不能被它拖住。检测结果经 SSE 推给
+	// 前端；最新版等 checkOnce/手动检查时才查镜像源。
 	m.statuses[updateKindMarket] = &UpdateStatus{Kind: updateKindMarket}
-	m.refreshMarketLocal()
+	go func() {
+		// 稍等一会再检测：让启动流水线（含 dsh 自身的启动）先走完，避免与它抢 profile。
+		// force=true：缓存此时是空的（或上一轮的旧值），启动这一次要拿到当下的真实安装情况。
+		time.Sleep(5 * time.Second)
+		m.refreshMarketLocal(true)
+	}()
+	m.server.refreshDshStatus()
 	// 启动时清理上次未能回收的更新包（自我更新 exec、异常退出等场景的残留）。
 	m.clearOrphanPending()
 	return m
@@ -713,28 +722,19 @@ func proxyReachable(proxyAddr string) bool {
 
 // --- 检测主流程 ---
 
-// checkOnce 执行一次完整的版本检测（harness 与 dsh 各自拉取最新 tag 并比对）。
+// checkOnce 执行一次完整的版本检测：harness 走 GitHub tag，dsh 走 npm 镜像源的
+// dist-tags，市场走 `dsh plugin list` + 镜像源的 dist-tags（三条独立链路）。
 func (m *UpdateManager) checkOnce() {
 	tags, err := m.fetchGitTags()
 	now := time.Now()
 
-	// 无论 tag 拉取是否成功，都尝试更新 dsh 本地版本（dsh -V）。
-	dshLocal := m.localDshVersion()
-
-	m.mu.Lock()
-	dshStatus := m.statuses[updateKindDsh]
-	dshStatus.LocalVersion = dshLocal
-	m.mu.Unlock()
-
 	if err != nil {
 		logWarn("[update] failed to fetch tags: %v", err)
 		m.mu.Lock()
-		for k, st := range m.statuses {
-			// 市场的版本来自 npm registry，与 GitHub tag 拉取无关；把 tag 的错误
-			// 覆盖到市场状态上只会误导（它的错误由 refreshMarketStatus 负责写）。
-			if k == updateKindMarket {
-				continue
-			}
+		// 只把 tag 拉取失败写进 harness：dsh 的版本来自 npm 镜像源、市场来自
+		// `dsh plugin list` + 镜像源，与 GitHub tag 无关，把 tag 的错误盖上去只会误导
+		// （它们的错误由 refreshVersions / refreshMarketStatus 各自负责写）。
+		if st, ok := m.statuses[updateKindHarness]; ok {
 			st.LatestVersion = ""
 			st.HasUpdate = false
 			st.CheckedAt = now
@@ -743,22 +743,20 @@ func (m *UpdateManager) checkOnce() {
 		}
 		m.mu.Unlock()
 		m.notify()
+		// 自动检测同时负责刷新版本列表缓存（force=true）：它就是「后台发现有没有新版本」
+		// 的那个时机，顺手把列表更新掉，之后用户打开弹窗看到的就是这一次的结果。
+		m.server.refreshVersions(true)
 		m.refreshMarketStatus()
 		return
 	}
 
 	h := pickLatest(tags, "harness-")
-	d := pickLatest(tags, "dsh-")
 
 	// 更新内容：只取最新 release 的正文（不含标题），失败时保持空串。
 	notesClient := m.httpClientForUpdate()
 	harnessNotes := ""
 	if h != nil {
 		harnessNotes = fetchReleaseNotes(notesClient, harnessReleaseRepo, h.name)
-	}
-	dshNotes := ""
-	if d != nil {
-		dshNotes = fetchReleaseNotes(notesClient, harnessReleaseRepo, d.name)
 	}
 
 	// 用 updateStatus 就地修改（而非 setStatus 全量替换），保留 Phase / ReadyToInstall
@@ -778,22 +776,11 @@ func (m *UpdateManager) checkOnce() {
 		}
 	})
 
-	m.updateStatus(updateKindDsh, func(st *UpdateStatus) {
-		st.Kind = updateKindDsh
-		st.LocalVersion = dshLocal
-		st.CheckedAt = now
-		st.Error = ""
-		st.ReleaseNotes = dshNotes
-		if d != nil {
-			st.LatestVersion = d.version
-			st.HasUpdate = compareVersion(d.version, dshLocal) > 0
-		} else {
-			st.LatestVersion = ""
-			st.HasUpdate = false
-		}
-	})
+	// dsh 服务版本：本地版本 = 选中的版本目录，最新版 = 镜像源的 dist-tags.latest。
+	// force=true：这一趟本来就是联网检测，顺带刷新版本列表缓存（见 refreshVersions 注释）。
+	m.server.refreshVersions(true)
 
-	// 市场检测：版本来自 npm registry，与 GitHub tag 是两条独立链路。
+	// 市场：版本来自 `dsh plugin list` + 镜像源，与 GitHub tag 是两条独立链路。
 	m.refreshMarketStatus()
 
 	// harness、dsh、市场各自一行，且只有**自己**的结论变化时才打印（三者的
@@ -826,11 +813,11 @@ func (m *UpdateManager) checkOnce() {
 	}
 	if showDsh && ds.HasUpdate {
 		logInfo("%s update available: %s -> %s",
-			updateLogTag(updateKindDsh), dshLocal, ds.LatestVersion)
+			updateLogTag(updateKindDsh), ds.LocalVersion, ds.LatestVersion)
 	}
 	if showMarket && ms.HasUpdate {
-		logInfo("%s update available: %s -> %s (%s)",
-			updateLogTag(updateKindMarket), ms.LocalVersion, ms.LatestVersion, ms.MarketScope)
+		logInfo("%s update available: %s -> %s",
+			updateLogTag(updateKindMarket), ms.LocalVersion, ms.LatestVersion)
 	}
 }
 
@@ -847,23 +834,6 @@ func (m *UpdateManager) startAutoCheck() {
 		}
 	}()
 }
-
-// localDshVersion 执行 `dsh -V` 获取本地 dsh 版本号；失败返回空串。
-// 复用 DshManager 的运行环境（PATH/HOME/代理等），与原先 /api/dsh/version 行为一致。
-func (m *UpdateManager) localDshVersion() string {
-	if m.dsh == nil {
-		return ""
-	}
-	// 带超时：`dsh -V` 在 newUpdateManager 里是**同步**调用的（控制台启动路径），
-	// 一旦 dsh 侧卡住会把整个控制台启动拖死，这里必须兜住。
-	out, err := m.dsh.runDshCmdTimeout(30*time.Second, "-V")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(out)
-}
-
-// --- 下载与自我更新 ---
 
 // updateArch 返回用于文件名的架构后缀：x86 / arm。优先读 TRIM_SYS_ARCH，否则
 // 按 runtime.GOARCH 推断。
@@ -885,22 +855,13 @@ func (m *UpdateManager) updateArch() string {
 
 // assetURL 构造某个 kind/version/arch 对应的发布资源下载地址。
 //
-// 压缩格式按 kind 分流（**发布侧两种都要传**，见 .github/workflows/server-build.yaml）：
-//   - harness 控制台：只发 `.tar.gz`，控制台自更新也只取 `.tar.gz`；
-//   - dsh 服务：同时发布 `.tar.gz` 与 `.tar.xz`，**新版控制台只取 `.tar.xz`**。
-//     `.tar.gz` 纯粹为兼容旧版控制台（它们只会拼 `.tar.gz` 地址）而保留，
-//     两边的 `.sha256` 都要与各自包同名（见 checksumURL 与 AGENTS 的发布资产约定）。
-//
-// 注意：这里只决定「下载哪个」，与本地备份无关 —— 备份恒为 `.tar.gz`（tgzDir）。
+// 现在只有 harness 控制台从这里下载：dsh 服务与插件市场都不再用「预构建压缩包」这条
+// 通路 —— dsh 由控制台 `npm install` 官方包（见 server.go），市场由 `dsh plugin add`
+// 安装（见 market.go）。因此这里只有 harness 一种资产，形如
+// `harness-<版本>-<架构>.tar.gz`，且与同名 `.sha256` 成对（见 checksumURL）。
 func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
 	tag := string(k) + "-" + version
-	var asset string
-	switch k {
-	case updateKindHarness:
-		asset = fmt.Sprintf("harness-%s-%s.tar.gz", version, arch)
-	case updateKindDsh:
-		asset = fmt.Sprintf("server-%s-%s.tar.xz", arch, version)
-	}
+	asset := fmt.Sprintf("harness-%s-%s.tar.gz", version, arch)
 	return fmt.Sprintf("%s/releases/download/%s/%s", updateRepoURL, tag, asset)
 }
 
@@ -1044,9 +1005,8 @@ func parseChecksumFile(text string) (string, error) {
 }
 
 // verifyFileSHA256 校验文件的实际 sha256 是否等于期望值（都是小写十六进制）。
-// 复用 fileHash（与插件市场的完整性校验同一份实现）。
 func verifyFileSHA256(path, want string) error {
-	sum, err := fileHash(path, "sha256")
+	sum, err := fileHash(path)
 	if err != nil {
 		return err
 	}
@@ -1057,22 +1017,27 @@ func verifyFileSHA256(path, want string) error {
 	return nil
 }
 
-// extractArchive 按文件扩展名选择解压器，解压到目标目录。
-//
-// 扩展名决定一切（内容嗅探会让「坏包」被当成另一种格式重试，错误信息更难懂）：
-//   - `.tar.xz` / `.txz` → xz（dsh 服务发布资产，见 assetURL）
-//   - 其它（`.tar.gz` / `.tgz`）→ gzip（harness 发布资产、插件市场包与**所有备份**）
-//
-// 下载下来的更新包一律走这里；本地备份的还原路径（回滚 server / 恢复 dsh 数据 /
-// 市场回滚）刻意仍直接调 extractTarGz —— 备份恒为 gz，收窄入口能让「备份格式变了」
-// 当场暴露，而不是被自动适配悄悄带过。
-func extractArchive(src, dest string) error {
-	switch {
-	case hasArchiveSuffix(src, ".tar.xz", ".txz"):
-		return extractTarXz(src, dest)
-	default:
-		return extractTarGz(src, dest)
+// fileHash 计算文件的 sha256 摘要（发布资产校验用）。
+func fileHash(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
+}
+
+// extractArchive 解压一个下载下来的更新包到目标目录。
+//
+// 现在只剩 harness 控制台一条下载链路（`.tar.gz`），因此这里等价于 extractTarGz；
+// 保留这个入口是为了让「待安装包是什么格式」在安装路径上仍然只有一个判定点 ——
+// 将来若真的引入另一种格式（如 xz），改这里一处即可，不用去翻安装流程。
+func extractArchive(src, dest string) error {
+	return extractTarGz(src, dest)
 }
 
 // hasArchiveSuffix 报告文件名是否以给定后缀之一结尾（大小写不敏感）。
@@ -1100,84 +1065,6 @@ func extractTarGz(src, dest string) error {
 	}
 	defer gz.Close()
 	return extractTar(gz, dest)
-}
-
-// extractTarXz 解压 .tar.xz 到目标目录（dsh 服务发布资产）。
-//
-// 两条解码通路，**优先外部 xz（liblzma）**：
-//  1. `xz -dc <包>` 管道进 extractTar —— liblzma 是 C 优化实现，实测比纯 Go 快一个数量级
-//     （349 MB / 9654 文件的 server 包，完整解压：4.8 s vs 63.8 s；纯 Go 那 63.8 s 里
-//     62.7 s 都花在解码上）；
-//  2. 找不到 xz、或它启动/解码失败时，清空目标目录改用纯 Go 解码（github.com/ulikunitz/xz）
-//     —— 慢但零依赖，保证任何设备都装得上。
-//
-// 回退不是「可选优化」：外部命令依赖设备上有 xz、能 fork/exec、PATH 正常，任何一条不成立
-// 都不能让 dsh 更新直接失败。
-//
-// 注意：回退前会**清空 dest**（外部通路可能已经写了一部分甚至写坏了）。调用方传的必须是
-// 本次专用的空目录 —— installUpdate 传的是刚建的临时目录。
-func extractTarXz(src, dest string) error {
-	extErr := extractTarXzExternal(src, dest)
-	if extErr == nil {
-		return nil
-	}
-	// 降级路径要记一行：它意味着这次安装会慢几十倍，日志里能对上用户看到的「卡了很久」。
-	logWarn("[update] external xz unusable (%v) - falling back to the built-in xz decoder (much slower)", extErr)
-	if err := os.RemoveAll(dest); err != nil {
-		return fmt.Errorf("清理解压目录失败: %w", err)
-	}
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return fmt.Errorf("重建解压目录失败: %w", err)
-	}
-	return extractTarXzBuiltin(src, dest)
-}
-
-// xzPathFn 解析外部 xz 可执行文件路径。变量而非常量：单测注入假 xz / 模拟「设备上没有 xz」。
-var xzPathFn = func() (string, error) { return exec.LookPath("xz") }
-
-// extractTarXzExternal 用系统 xz 解压：xz -dc <src> | extractTar(dest)。
-// tar 遍历与越界/软链防护仍是 extractTar 那一份，外部命令只负责「解压成 tar 流」。
-func extractTarXzExternal(src, dest string) error {
-	bin, err := xzPathFn()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(bin, "-dc", src)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	extractErr := extractTar(stdout, dest)
-	if extractErr != nil {
-		// 提前失败（坏包、越界条目等）时不必再读 stdout：杀掉进程并回收，
-		// 否则它可能挂在写满的管道上不退出。
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("xz 解码失败: %w", extractErr)
-	}
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("xz 异常退出: %v (%s)", err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
-// extractTarXzBuiltin 用纯 Go 解码器解压 .tar.xz（无外部依赖的兜底通路）。
-func extractTarXzBuiltin(src, dest string) error {
-	f, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	xzr, err := xz.NewReader(f)
-	if err != nil {
-		return err
-	}
-	return extractTar(xzr, dest)
 }
 
 // extractTar 解压一个已解压的 tar 流到目标目录。保持 tar 内的相对路径不变
@@ -1492,23 +1379,6 @@ func (m *UpdateManager) harnessBinDir() string {
 // 变量形式便于测试注入临时目录，否则测试会去写真实的 /var/apps/Harness/target/bin/harness。
 var harnessBinDirFn = func(m *UpdateManager) string { return m.harnessBinDir() }
 
-// serverDirFn 是「dsh server 目录在哪」的唯一入口：更新 dsh 服务、回滚 server 备份、
-// 以及市场定位 dshmarket 都走它。变量形式便于测试注入临时目录（否则测试会碰到真实
-// 的 /var/apps/Harness/target/server）。
-var serverDirFn = func(m *UpdateManager) string { return m.serverDir() }
-
-// serverDir 返回 dsh server 目录。优先 /var/apps/Harness/target/server。
-func (m *UpdateManager) serverDir() string {
-	if fi, err := os.Stat("/var/apps/Harness/target/server"); err == nil && fi.IsDir() {
-		return "/var/apps/Harness/target/server"
-	}
-	app := m.renv.TRIMAppDest
-	if app != "" {
-		return filepath.Join(app, "server")
-	}
-	return "/var/apps/Harness/target/server"
-}
-
 // backupDir 返回备份产物的存放目录（统一数据目录下的 backup/，避免写入只读的
 // target）。pending/ 待安装包也挂在它下面（见 pendingDir）。
 func (m *UpdateManager) backupDir() string {
@@ -1762,33 +1632,24 @@ type updateRoute struct {
 
 // downloadPlan 描述一次下载的策略：走哪些通路、能否续传、能否暂停、属于哪个目标。
 //
-// 目前有两种组合，差异是刻意的：
-//   - harness / dsh 的发布资产：代理+直连各 2 次，支持 Range 续传与暂停（包大、网络差）；
-//   - 插件市场 tarball：**只直连、不走代理**，失败重试，不支持暂停与续传
-//     （包只有几百 KB，续传带来的复杂度不值得；registry 通常也不需要代理）。
+// harness 控制台的发布资产（当前唯一的下载目标）：代理+直连各 2 次，支持 Range
+// 续传与暂停（包几十 MB、网络可能很差，值得这些复杂度）。
 type downloadPlan struct {
 	routes   []updateRoute
 	resume   bool
 	pausable bool
 	// kind 只用于日志标签：底层下载函数拿不到更新目标，靠它把日志归到
-	// [harness] / [dsh] / [market] 之下（见 updateLogTag）。
+	// [harness] 之下（见 updateLogTag）。
 	kind updateKind
 }
 
-// downloadPlanFor 按更新类型给出下载策略。
+// downloadPlanFor 给出下载策略（当前只有 harness 一种目标）。
 func (m *UpdateManager) downloadPlanFor(k updateKind) downloadPlan {
-	if k == updateKindMarket {
-		return downloadPlan{routes: marketRoutesFn(m), resume: false, pausable: false, kind: k}
-	}
 	return downloadPlan{routes: updateRoutesFn(m), resume: true, pausable: true, kind: k}
 }
 
 // updateRoutesFn 便于测试注入发布资产的通路列表；生产实现见 updateClients。
 var updateRoutesFn = func(m *UpdateManager) []updateRoute { return m.updateClients() }
-
-// marketRoutesFn 给出插件市场的通路：**只有直连**（用户要求：市场不走代理）。
-// 同样是变量，便于测试注入。
-var marketRoutesFn = func(m *UpdateManager) []updateRoute { return []updateRoute{m.directRoute()} }
 
 // updateClients 构造发布资产的下载通路序列：代理（「代理更新」开关打开且地址可达时）
 // 在前，直连兜底 —— 开关关闭或代理地址探测不通时只剩直连，即「不通回退直连」。
@@ -2203,41 +2064,24 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	m.applying.Lock()
 	defer m.applying.Unlock()
 
-	st := m.getStatus(k)
-	// 版本与下载地址的来源按 kind 分流：harness/dsh 用 GitHub tag + release 资产，
-	// 市场用 npm registry 的 /dshmarket/latest（顺带拿到 integrity，见 market.go）。
-	var (
-		version string
-		rawURL  string
-		rel     *marketRelease
-		// wantSHA 是发布资产期望的 sha256（空表示这次不校验，见 releaseChecksum）。
-		wantSHA string
-	)
-	if k == updateKindMarket {
-		// 先确认这份市场确实归控制台管：由 profile 提供的那份改了也不生效
-		// （profile 条目优先于安装闭包，见 market.go），没必要白下一份。
-		if target := m.resolveMarketTarget(); target.Scope != marketScopeServer {
-			return fmt.Errorf("当前市场由 %s 提供（%s），控制台不更新这份安装", target.Scope, target.Reason)
-		}
-		r, err := m.marketLatest()
-		if err != nil {
-			return fmt.Errorf("获取市场最新版本失败: %w", err)
-		}
-		rel = r
-		version = r.Version
-		rawURL = r.Tarball
-	} else {
-		if st.LatestVersion == "" {
-			return fmt.Errorf("尚未获取到最新版本号，请先执行检查更新")
-		}
-		version = st.LatestVersion
-		rawURL = assetURLFn(m, k, version, m.updateArch())
+	// 只有 harness 控制台还走「下载压缩包 → 安装」这条两步链路：dsh 服务由控制台
+	// `npm install` 官方 npm 包（见 server.go），插件市场由 `dsh plugin add` 安装
+	// （见 market.go），两者都不再存在「可下载的更新包」。
+	if k != updateKindHarness {
+		return fmt.Errorf("%s 不再使用更新包，请在控制台对应的入口操作", k)
 	}
+	st := m.getStatus(k)
+	if st.LatestVersion == "" {
+		return fmt.Errorf("尚未获取到最新版本号，请先执行检查更新")
+	}
+	version := st.LatestVersion
+	rawURL := assetURLFn(m, k, version, m.updateArch())
+	// wantSHA 是发布资产期望的 sha256（空表示这次不校验，见 releaseChecksum）。
+	var wantSHA string
 	arch := m.updateArch()
 	logInfo("%s downloading %s (arch=%s)", updateLogTag(k), version, arch)
 
-	// 下载策略：harness/dsh = 代理+直连各 2 次 + Range 续传 + 可暂停；
-	// 插件市场 = 只直连重试，不续传、不暂停（见 downloadPlanFor）。
+	// 下载策略：代理+直连各 2 次 + Range 续传 + 可暂停（见 downloadPlanFor）。
 	plan := m.downloadPlanFor(k)
 
 	// 目标包持久保存在“待安装”目录，跨“下载→安装”两步保留。
@@ -2289,26 +2133,17 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		}
 		m.setDownloadProgress(k, true, pct, downloaded, total)
 	}
-	var n int64
-	var err error
-	if rel != nil {
-		// 市场包从 npm registry 下载（只直连），并在下载后立刻校验完整性
-		// （元数据与字节的绑定关系）；不通过就当场失败，不进入“已下载待安装”。
-		// 安装阶段会再复核一次。
-		n, err = m.downloadMarketTarball(rel, pkgPath, progress, ctrl, plan)
-	} else {
-		// 发布资产：先把 sha256 校验文件一并取回（取不到即退化为不校验，只记 WARN），
-		// 包下载完成后用实际字节复核摘要。校验全程静默，只有失败才进弹窗。
-		wantSHA = m.releaseChecksum(k, rawURL, plan, ctrl)
-		// GitHub release 资产：代理 / 直连各 2 次机会，支持 Range 续传。
-		n, err = m.downloadToFile(rawURL, pkgPath, progress, ctrl, plan)
-		if err == nil && wantSHA != "" {
-			if verr := verifyFileSHA256(pkgPath, wantSHA); verr != nil {
-				// 摘要不符：这份字节既不可信、也不该留着续传（会从错误位置接，或直接撞
-				// 416 白跑一轮），删掉让用户“重新下载”时从零开始。
-				os.Remove(pkgPath)
-				err = fmt.Errorf("更新包 sha256 校验失败（%v）：下载到的字节与校验文件不一致，可能被中间代理或缓存损坏，请重新下载", verr)
-			}
+	// 发布资产：先把 sha256 校验文件一并取回（取不到即退化为不校验，只记 WARN），
+	// 包下载完成后用实际字节复核摘要。校验全程静默，只有失败才进弹窗。
+	wantSHA = m.releaseChecksum(k, rawURL, plan, ctrl)
+	// GitHub release 资产：代理 / 直连各 2 次机会，支持 Range 续传。
+	n, err := m.downloadToFile(rawURL, pkgPath, progress, ctrl, plan)
+	if err == nil && wantSHA != "" {
+		if verr := verifyFileSHA256(pkgPath, wantSHA); verr != nil {
+			// 摘要不符：这份字节既不可信、也不该留着续传（会从错误位置接，或直接撞
+			// 416 白跑一轮），删掉让用户“重新下载”时从零开始。
+			os.Remove(pkgPath)
+			err = fmt.Errorf("更新包 sha256 校验失败（%v）：下载到的字节与校验文件不一致，可能被中间代理或缓存损坏，请重新下载", verr)
 		}
 	}
 
@@ -2340,16 +2175,11 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		})
 		return fmt.Errorf("下载失败: %w", err)
 	default:
-		// 失败：可续传的下载保留半成品（下次重试接着下）；市场这类不续传的
-		// 下载已被 downloadToFile 清空。退出“下载中”状态并带上错误归类。
+		// 失败：失败位置之后会被删掉续传文件，保留半成品等下次重试。
 		m.updateStatus(k, func(s *UpdateStatus) {
 			s.Phase = ""
 			s.Paused = false
 			s.Downloading = false
-			if !plan.resume {
-				s.DownloadedBytes = 0
-				s.TotalBytes = 0
-			}
 			if errors.Is(err, errUpdateNetworkFailed) {
 				s.ErrorHint = "network"
 			}
@@ -2358,14 +2188,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 	}
 
 	// 下载成功：记录待安装包，推送“已下载待安装”。
-	pending := &PendingUpdate{Kind: k, Version: version, PkgPath: pkgPath}
-	if rel != nil {
-		pending.Integrity = rel.Integrity
-		pending.Shasum = rel.Shasum
-	} else {
-		pending.SHA256 = wantSHA
-	}
-	m.setPending(pending)
+	m.setPending(&PendingUpdate{Kind: k, Version: version, PkgPath: pkgPath, SHA256: wantSHA})
 	m.updateStatus(k, func(s *UpdateStatus) {
 		s.Phase = "downloaded"
 		s.ReadyToInstall = true
@@ -2379,28 +2202,24 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		}
 		s.Error = ""
 		s.Cancelled = false
-		if rel != nil {
-			// 让“仓库最新版本”与刚下载到的这份保持一致（检测与下载之间可能
-			// 刚好有新版发布）。
-			s.LatestVersion = version
-		}
 	})
 	logInfo("%s package downloaded to %s (%d bytes), waiting to install", updateLogTag(k), pkgPath, n)
 	return nil
 }
 
-// installUpdate 安装已下载的更新包（第二步）。读取 pending 中的包（dsh 为 .tar.xz，
-// harness / 市场为 .tar.gz），按扩展名解压后
-// 调用 installHarness / installDsh / installMarket 执行“备份→替换→重启”。
+// installUpdate 安装已下载的更新包（第二步，目前只有 harness 控制台）。
+// 读取 pending 中的包（.tar.gz）解压后调用 installHarness 执行“备份→替换→重启”。
 // 安装阶段耗时短、不可取消。
-// 安装失败时保留 pending（用户可重试安装）；成功时由各分支清 pending：
-//   - dsh / 市场：清 pending 并正常返回，由调用方推送 phase=done。
-//   - harness：先清 pending 再 exec 换新映像，本函数永不返回（故不会有 phase=done 推送，
-//     前端以轮询新进程版本号判定就绪——见 UpdateSection.vue 的 startHarnessReadyPoll）。
+// 安装失败时保留 pending（用户可重试安装）；成功路径先清 pending 再 exec 换新映像，
+// 本函数永不返回（故不会有 phase=done 推送，前端以轮询新进程版本号判定就绪 ——
+// 见 UpdateSection.vue 的 startHarnessReadyPoll）。
 func (m *UpdateManager) installUpdate(k updateKind) error {
 	m.applying.Lock()
 	defer m.applying.Unlock()
 
+	if k != updateKindHarness {
+		return fmt.Errorf("%s 不再使用更新包，请在控制台对应的入口操作", k)
+	}
 	p := m.getPending(k)
 	if p == nil {
 		return fmt.Errorf("尚未下载 %s 更新包，请先下载更新", k)
@@ -2409,9 +2228,9 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 		m.clearPending(k)
 		return fmt.Errorf("待安装更新包已不存在（可能被清理），请重新下载: %w", err)
 	}
-	// 下载阶段校验过摘要的（harness / dsh 发布资产）在安装前再复核一次：这份文件要跨
-	// 「下载 → 安装」两步留在盘上，期间可能被截断或替换（同理见市场的 Integrity 复核）。
-	// 校验静默执行，不通过才把错误推给弹窗；文件保留，用户可删除后重新下载。
+	// 下载阶段校验过摘要的在安装前再复核一次：这份文件要跨「下载 → 安装」两步留在盘上，
+	// 期间可能被截断或替换。校验静默执行，不通过才把错误推给弹窗；文件保留，用户可
+	// 删除后重新下载。
 	if p.SHA256 != "" {
 		if err := verifyFileSHA256(p.PkgPath, p.SHA256); err != nil {
 			m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
@@ -2435,24 +2254,12 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 		return fmt.Errorf("创建临时目录失败: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
-	// 按包的实际扩展名选解压器：dsh 是 .tar.xz，harness / 市场是 .tar.gz
-	// （旧控制台留下的 .tar.gz dsh 包也能照常安装）。
 	if err := extractArchive(p.PkgPath, tmpDir); err != nil {
 		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
 		return fmt.Errorf("解压更新包失败: %w", err)
 	}
 
-	var installErr error
-	switch k {
-	case updateKindHarness:
-		installErr = m.installHarness(tmpDir)
-	case updateKindDsh:
-		installErr = m.installDsh(tmpDir)
-	case updateKindMarket:
-		installErr = m.installMarket(p, tmpDir)
-	default:
-		installErr = fmt.Errorf("未知的更新类型 %s", k)
-	}
+	installErr := m.installHarness(tmpDir)
 	if installErr != nil {
 		// 安装失败：保留待安装包（可重试安装），退出“安装中”状态。
 		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
@@ -2487,16 +2294,6 @@ func (m *UpdateManager) installHarness(extractDir string) error {
 	m.restartHarness(newBin)
 	// 仅当 exec 失败时才会走到这里。
 	return fmt.Errorf("重启控制台失败（新二进制已就位，手动重启后生效）")
-}
-
-// installDsh 完成 dsh 服务更新的最后阶段：替换 server 目录并（异步）重启 dsh，
-// 随后删除待安装更新包。返回 nil 表示安装成功；调用方负责推送成功状态。
-func (m *UpdateManager) installDsh(extractDir string) error {
-	if err := m.applyServer(extractDir); err != nil {
-		return err
-	}
-	m.clearPending(updateKindDsh)
-	return nil
 }
 
 // DiscardUpdate 删除已下载待安装的更新包（前端“删除更新包”按钮触发），
@@ -2551,6 +2348,36 @@ func findExecutable(dir, name string) (string, error) {
 		return "", fmt.Errorf("解压包中未找到 %s 二进制", name)
 	}
 	return found, nil
+}
+
+// ensureNodePtyAfterBoot 在 dsh 启动后校正 node-pty 的 profile 配置（固定版本 overrides
+// 与旧 patch 清理，见 install.go）；需要重建依赖时停/起一次 dsh 让它生效。返回是否重启过。
+//
+// 为什么需要它：主流程的那次校正发生在「控制台启动且 dsh 启动成功」之后。而「未安装 →
+// 下载 → 切换」这条路径上，控制台启动时 dsh 根本没起来（`boot.go` 的 not-installed），
+// 校正就没跑；切换成功后补这一次，避免用户装的插件按未固定的 node-pty 1.1.0 解析。
+func (m *UpdateManager) ensureNodePtyAfterBoot() bool {
+	if m.renv == nil {
+		return false
+	}
+	restartNeeded, err := ensureNodePty(m.renv, "")
+	if err != nil {
+		logWarn("[node-pty] setup failed: %v, dsh may not work", err)
+		return false
+	}
+	if !restartNeeded {
+		return false
+	}
+	logInfo("[node-pty] workspace changed by setup, restarting dsh")
+	if err := dshStopFn(m); err != nil {
+		logError("[node-pty] restart dsh (stop) failed: %v", err)
+		return false
+	}
+	if err := startDshCapturedFn(m); err != nil {
+		logError("[node-pty] restart dsh (start) failed: %v", err)
+		return false
+	}
+	return true
 }
 
 // applyHarness 备份并替换控制台二进制，并停止 dsh 服务；**不**重启控制台，而是
@@ -2646,99 +2473,6 @@ func (m *UpdateManager) startDshCaptured() error {
 	return nil
 }
 
-// applyServer 备份并替换 dsh server 目录。
-// 顺序：找到 server 根 → 先停止 dsh 服务 → 再备份替换 → 最后启动 dsh。
-func (m *UpdateManager) applyServer(extractDir string) error {
-	// 找到解压包中的 server 目录。可能为：
-	//   a) 顶层 server/ 目录（未被剥离）—— extractDir/server
-	//   b) 剥离开顶层后的 server 内容直接位于 extractDir（含 package.json）—— extractDir 即根
-	//   c) 其它位置含 package.json 的 server 目录——递归查找
-	srcServer := filepath.Join(extractDir, "server")
-	if fi, err := os.Stat(srcServer); err == nil && fi.IsDir() {
-		// 情况 a
-	} else if _, err := os.Stat(filepath.Join(extractDir, "package.json")); err == nil {
-		// 情况 b：extractDir 即 server 根
-		srcServer = extractDir
-	} else {
-		// 情况 c：递归查找含 package.json 的 server 目录
-		var found string
-		filepath.Walk(extractDir, func(p string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			if info.IsDir() {
-				if _, err := os.Stat(filepath.Join(p, "package.json")); err == nil {
-					found = p
-					return filepath.SkipAll
-				}
-			}
-			return nil
-		})
-		if found == "" {
-			return fmt.Errorf("解压包中未找到 server 目录")
-		}
-		srcServer = found
-	}
-
-	serverDir := serverDirFn(m)
-	parent := filepath.Dir(serverDir)
-
-	// 下载已成功；先停止 dsh 服务，再执行备份替换，确保备份一致、替换不冲突。
-	//
-	// 走统一入口：先过忙守卫（有插件操作在跑就拒绝，避免把它连根拔掉并留下陈旧
-	// profile 写锁），再停止并等端口释放；被拒绝时不产生任何停机、也不会改盘。
-	logInfo("[dsh] stopping dsh service")
-	if err := m.stopDshForReplacement("更新 dsh 服务", updateKindDsh); err != nil {
-		return err
-	}
-
-	// 备份当前 server 目录（文件名带上当前 dsh 版本号）
-	dshVer := m.localDshVersion()
-	if dshVer == "" {
-		dshVer = "unknown"
-	}
-	backupName := fmt.Sprintf("server-%s-%s.tar.gz", dshVer, time.Now().Format("20060102150405"))
-	backupPath := filepath.Join(m.backupDir(), backupName)
-	if err := tgzDir(serverDir, backupPath); err != nil {
-		// 更新失败，尽量恢复 dsh（重启后需重新捕获会话凭据）
-		if serr := m.startDshCaptured(); serr != nil {
-			logError("[dsh] failed to restart dsh: %v", serr)
-		}
-		return fmt.Errorf("备份 server 目录失败: %w", err)
-	}
-	logInfo("[dsh] server backed up to %s", backupPath)
-
-	// 替换：把旧的 server 移到临时位置，放入新的，再删除临时旧目录。
-	oldTmp := filepath.Join(parent, ".server-old-"+time.Now().Format("20060102150405"))
-	if err := os.Rename(serverDir, oldTmp); err != nil {
-		// 更新失败，尽量恢复 dsh（重启后需重新捕获会话凭据）
-		if serr := m.startDshCaptured(); serr != nil {
-			logError("[dsh] failed to restart dsh: %v", serr)
-		}
-		return fmt.Errorf("移动旧 server 目录失败: %w", err)
-	}
-	if err := copyDir(srcServer, serverDir); err != nil {
-		// 回滚：把旧目录放回去，并恢复 dsh（重启后需重新捕获会话凭据）
-		os.Rename(oldTmp, serverDir)
-		if serr := m.startDshCaptured(); serr != nil {
-			logError("[dsh] failed to restart dsh: %v", serr)
-		}
-		return fmt.Errorf("复制新 server 失败: %w", err)
-	}
-	os.RemoveAll(oldTmp)
-
-	logInfo("[dsh] server dir replaced, starting dsh service")
-	// 启动 dsh（fire-and-forget）：解压+备份替换已完成，安装流程立即返回成功，
-	// 不等待 dsh 完全启动（会话 cookie 由异步 captureDshSession 后台换取）。
-	// 若 dsh 启动失败，只记录日志，不阻塞“安装成功”的返回。
-	go func() {
-		if err := m.startDshCaptured(); err != nil {
-			logWarn("[dsh] start failed (async, install finished): %v", err)
-		}
-	}()
-	return nil
-}
-
 // copyFile 复制单个文件（保留权限）。
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
@@ -2765,14 +2499,6 @@ func copyFile(src, dst string) error {
 
 // --- Server 备份列表与回滚 ---
 
-// ServerBackup 描述一个 dsh server 的备份条目。
-type ServerBackup struct {
-	Name     string `json:"name"`     // 文件名，如 server-0.1.2-alpha.5-20260903154421.tar.gz
-	Size     int64  `json:"size"`     // 文件大小（字节）
-	Modified string `json:"modified"` // 修改时间（RFC3339）
-	Path     string `json:"path"`     // 完整路径
-}
-
 // backupTimestampRe 匹配新格式备份文件名尾部的 -<YYYYMMDDHHMMSS>.tar.gz 时间戳后缀。
 // 新格式：<类型>-<版本号>-<时间戳>.tar.gz，如 harness-1.0.0-20260903154421.tar.gz。
 var backupTimestampRe = regexp.MustCompile(`-\d{14}\.tar\.gz$`)
@@ -2781,208 +2507,6 @@ var backupTimestampRe = regexp.MustCompile(`-\d{14}\.tar\.gz$`)
 func isBackupFile(name, prefix string) bool {
 	return strings.HasPrefix(name, prefix) && backupTimestampRe.MatchString(name)
 }
-
-// ListServerBackups 列出 backupDir 中所有 server-<版本>-<时间戳>.tar.gz 文件，按修改时间倒序。
-func (m *UpdateManager) ListServerBackups() ([]ServerBackup, error) {
-	dir := m.backupDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var backups []ServerBackup
-	for _, e := range entries {
-		name := e.Name()
-		if !isBackupFile(name, "server-") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		fullPath := filepath.Join(dir, name)
-		backups = append(backups, ServerBackup{
-			Name:     name,
-			Size:     info.Size(),
-			Modified: info.ModTime().Format(time.RFC3339),
-			Path:     fullPath,
-		})
-	}
-	// 按修改时间倒序（最新在前）
-	sort.Slice(backups, func(i, j int) bool {
-		return backups[i].Modified > backups[j].Modified
-	})
-	return backups, nil
-}
-
-// DeleteServerBackup 删除一个 server 备份文件（仅限 backupDir 下的 server-<版本>-<时间戳>.tar.gz）。
-func (m *UpdateManager) DeleteServerBackup(name string) error {
-	dir := m.backupDir()
-	target := filepath.Join(dir, name)
-	// 安全校验：文件必须在 backupDir 下且符合命名规范
-	if filepath.Dir(target) != dir || !isBackupFile(name, "server-") {
-		return fmt.Errorf("非法的备份文件名: %s", name)
-	}
-	return os.Remove(target)
-}
-
-// RollbackServerStatus 是回滚状态的返回结构。
-type RollbackServerStatus struct {
-	Running bool   `json:"running"`
-	Done    bool   `json:"done"`
-	Ok      bool   `json:"ok"`
-	Error   string `json:"error,omitempty"`
-}
-
-// GetRollbackStatus 返回当前回滚状态快照。
-func (m *UpdateManager) GetRollbackStatus() RollbackServerStatus {
-	m.rollbackMu.Lock()
-	defer m.rollbackMu.Unlock()
-	return RollbackServerStatus{
-		Running: !m.rollbackDone && !m.rollbackOk,
-		Done:    m.rollbackDone,
-		Ok:      m.rollbackOk,
-		Error:   m.rollbackErr,
-	}
-}
-
-// RollbackServer 执行 dsh server 回滚：停止 dsh → 删除当前 server 目录 →
-// 解压备份到 server 目录 → 删除备份文件 → 启动 dsh。异步执行。
-func (m *UpdateManager) RollbackServer(backupPath string) error {
-	// 安全校验：路径必须在 backupDir 下
-	dir := m.backupDir()
-	if filepath.Dir(backupPath) != dir {
-		return fmt.Errorf("非法的备份路径: %s", backupPath)
-	}
-	name := filepath.Base(backupPath)
-	if !isBackupFile(name, "server-") {
-		return fmt.Errorf("非法的备份文件名: %s", name)
-	}
-	// 检查文件存在
-	if _, err := os.Stat(backupPath); err != nil {
-		return fmt.Errorf("备份文件不存在: %w", err)
-	}
-	// 互斥与重入保护：回滚会 RemoveAll(server) 再解压备份，必须与「下载/安装更新」
-	// 以及其它回滚/恢复串行 —— 交错执行会得到半新半旧的 server 目录（两条路径都以为
-	// 自己成功）。用 TryLock 而不是 Lock：拿不到锁说明别的更新正在跑，直接拒绝，
-	// 不要把请求线程阻塞到网关超时。
-	if !m.applying.TryLock() {
-		return fmt.Errorf("正在执行其它更新/回滚操作，请等它结束后再回滚 dsh 服务")
-	}
-
-	// 重置回滚状态
-	m.rollbackMu.Lock()
-	m.rollbackDone = false
-	m.rollbackOk = false
-	m.rollbackErr = ""
-	m.rollbackMu.Unlock()
-
-	// 异步执行
-	go func() {
-		defer m.applying.Unlock()
-		err := m.doRollbackServer(backupPath)
-		m.rollbackMu.Lock()
-		m.rollbackDone = true
-		if err != nil {
-			m.rollbackOk = false
-			m.rollbackErr = err.Error()
-		} else {
-			m.rollbackOk = true
-		}
-		m.rollbackMu.Unlock()
-	}()
-	return nil
-}
-
-// doRollbackServer 执行实际的回滚步骤。
-func (m *UpdateManager) doRollbackServer(backupPath string) error {
-	logInfo("[rollback] rolling back server from backup %s", backupPath)
-	serverDir := serverDirFn(m)
-
-	// 1. 停止 dsh 服务。同样是「替换 server 产物」，走统一入口：先过忙守卫，
-	//    避免在插件安装进行中杀 dsh（那会留下陈旧的 profile 写锁）。
-	//    守卫只在市场/控制台的插件操作**确实在跑**时拒绝，且市场不回答时视为不忙，
-	//    所以「dsh 已经坏了要回滚」这种场景不会被挡。
-	logInfo("[rollback] stopping dsh service")
-	if err := m.stopDshForReplacement("回滚 dsh 服务", updateKindDsh); err != nil {
-		return err
-	}
-
-	// 2. 删除当前 server 目录
-	logInfo("[rollback] removing current server dir %s", serverDir)
-	if err := os.RemoveAll(serverDir); err != nil {
-		return fmt.Errorf("删除 server 目录失败: %w", err)
-	}
-
-	// 3. 解压备份到 server 目录。备份恒为 .tar.gz（tgzDir），故直接用 gz 解压器：
-	//    与下载包那条通路（extractArchive，dsh 为 .tar.xz）刻意分开。
-	logInfo("[rollback] extracting backup to %s", serverDir)
-	if err := os.MkdirAll(serverDir, 0755); err != nil {
-		return fmt.Errorf("创建 server 目录失败: %w", err)
-	}
-	if err := extractTarGz(backupPath, serverDir); err != nil {
-		return fmt.Errorf("解压备份失败: %w", err)
-	}
-
-	// 4. 保留备份压缩包（不做删除）：回退后用户仍可再次回滚到其它版本，
-	//   备份文件仅由用户手动删除或每日清理任务按 30 天过期清理。
-
-	// 5. 启动 dsh 服务（并异步捕获新 token 换取会话 cookie，供反代转发）。
-	//   注：不在此处等待 dsh 完全启动成功——启动动作发出即可，会话 cookie
-	//   由异步 captureDshSession 在后台换取，前端无需等待。
-	logInfo("[rollback] starting dsh service")
-	if err := m.startDshCaptured(); err != nil {
-		return fmt.Errorf("启动 dsh 失败: %w", err)
-	}
-
-	// 6. 回滚完成后刷新 server 包提供的两个版本号（dsh 服务 + 自带的插件市场），
-	//    前端 reload 后两行版本都立即显示新值，红点也按新版本重算。
-	m.refreshServerPackageVersions()
-
-	logInfo("[rollback] server rollback finished")
-	return nil
-}
-
-// refreshDshVersion 重新执行 `dsh -V` 并就地更新 dsh 的版本状态
-// （仅当取到非空版本号时更新，避免把版本号刷成空串）。用于回滚/安装完成后
-// 让前端刷新页面时立即显示新版本，而不是等到下一次自动检测。
-func (m *UpdateManager) refreshDshVersion() {
-	if v := m.localDshVersion(); v != "" {
-		m.setDshLocalVersion(v)
-	}
-}
-
-// setDshLocalVersion 更新 dsh 的本地版本号，并据已知的仓库最新版本重算「是否有更新」
-// （与 market.go 的 refreshMarketLocal 同一约定：改本地版本就顺手重算结论）。
-//
-// 本地版本变了，HasUpdate 就必须跟着重算：它原本只在 checkOnce（每小时自动检测 /
-// 手动「检查更新」）里由 compareVersion(LatestVersion, LocalVersion) 得出，而回滚
-// （RollbackServer）后本地版本变旧、LatestVersion 仍是上一次检测到的仓库最新版 ——
-// 只改 LocalVersion 会把上一次检测留下的 HasUpdate=false 沿用下来，表现为版本行与
-// 弹窗里「本地 0.1.7 / 最新 0.1.9」却写着「已是最新」、右上角红点不亮（前端只看
-// hasUpdate），要等下一次自动检测（最长一小时）才纠正。
-// LatestVersion 为空（从未成功检测或拉取失败）时不臆造结论，保持原状。
-func (m *UpdateManager) setDshLocalVersion(v string) {
-	m.updateStatus(updateKindDsh, func(st *UpdateStatus) {
-		st.LocalVersion = v
-		if st.LatestVersion != "" {
-			st.HasUpdate = compareVersion(st.LatestVersion, v) > 0
-		}
-	})
-}
-
-// refreshServerPackageVersions 刷新「由 server 目录提供」的两个本地版本号：
-//   - dsh 服务版本（重新执行 `dsh -V`，见 refreshDshVersion）；
-//   - 插件市场版本（server 包自带的 dshmarket，见 market.go 的 resolveMarketTarget）。
-//
-// 更新 dsh 服务与回滚 server 备份都是**整目录替换** server 产物，两个版本号必须一起刷：
-// 只刷 dsh 版本会留下旧的市场版本号 —— 版本行显示旧版本，红点也按旧版本算错。
-// 市场那份只读盘不联网，先刷它；`dsh -V` 要加载 node 环境、可能较慢，放后面。
-func (m *UpdateManager) refreshServerPackageVersions() {
-	m.refreshMarketLocal()
-	m.refreshDshVersion()
-}
-
-// --- DSH 数据备份列表与恢复 ---
 
 // DshDataBackup 描述一个 dsh 数据备份条目。
 type DshDataBackup struct {

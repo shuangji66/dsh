@@ -101,11 +101,6 @@ func releasePlan(routes ...updateRoute) downloadPlan {
 	return downloadPlan{routes: routes, resume: true, pausable: true}
 }
 
-// marketPlan 造一份「插件市场」下载策略：只直连、失败重试，不续传、不可暂停。
-func marketPlan(routes ...updateRoute) downloadPlan {
-	return downloadPlan{routes: routes, resume: false, pausable: false}
-}
-
 // useRoutes 注入下载通路（绕开真实代理探测）并缩短重试退避。
 func useRoutes(t *testing.T, routes []updateRoute) {
 	t.Helper()
@@ -398,10 +393,11 @@ func TestDownloadLocalIOFailureIsNotReportedAsNetwork(t *testing.T) {
 	}
 }
 
-// --- 插件市场的独立策略：只直连、不续传、不暂停 ---
+// --- 下载策略：现在只剩「发布资产」一种（harness 控制台） ---
 
-// 即使开了代理，市场也必须只走直连（用户要求：市场不走代理）。
-func TestMarketPlanIsDirectOnlyEvenWithProxy(t *testing.T) {
+// 开了代理时发布资产走「代理在前、直连在后」，且支持续传与暂停；这是现在唯一
+// 还会走「下载压缩包」这条链路的目标（dsh 走 npm install、市场走 dsh plugin add）。
+func TestReleasePlanUsesProxyThenDirect(t *testing.T) {
 	prevCfg := GetConfig()
 	prevProbe := proxyReachableFn
 	initConfig(&AppConfig{ProxyEnabled: true, ProxyUpdate: true, ProxyAddr: "http://127.0.0.1:7890"})
@@ -412,78 +408,12 @@ func TestMarketPlanIsDirectOnlyEvenWithProxy(t *testing.T) {
 	})
 	m := &UpdateManager{}
 
-	market := m.downloadPlanFor(updateKindMarket)
-	if len(market.routes) != 1 || market.routes[0].label != "直连" {
-		t.Fatalf("市场只应有直连通路，实际 %+v", market.routes)
-	}
-	if market.resume || market.pausable {
-		t.Fatalf("市场不应支持续传/暂停，实际 resume=%v pausable=%v", market.resume, market.pausable)
-	}
-
-	// 对照：发布资产（harness/dsh）仍然是「代理 + 直连」且支持续传/暂停。
 	release := m.downloadPlanFor(updateKindHarness)
 	if len(release.routes) != 2 || release.routes[0].label == "直连" || release.routes[1].label != "直连" {
 		t.Fatalf("发布资产应为「代理在前、直连在后」，实际 %+v", release.routes)
 	}
 	if !release.resume || !release.pausable {
 		t.Fatalf("发布资产应支持续传与暂停，实际 resume=%v pausable=%v", release.resume, release.pausable)
-	}
-	if dshPlan := m.downloadPlanFor(updateKindDsh); !dshPlan.resume || !dshPlan.pausable {
-		t.Fatal("dsh 应走与 harness 相同的策略")
-	}
-}
-
-// 市场不续传：本地即使有残留，也必须从头下（不发 Range），且最终内容与源一致。
-func TestMarketDownloadDoesNotResume(t *testing.T) {
-	data := testPayload(128 << 10)
-	stats := &pkgServer{data: data}
-	srv := httptest.NewServer(http.HandlerFunc(stats.handler))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "market.tar.gz")
-	// 造一份「上一轮的残留」（内容不对，长度也不对）。
-	if err := os.WriteFile(dest, testPayload(40<<10), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	n, err := (&UpdateManager{}).downloadToFile(srv.URL+"/market.tar.gz", dest, nil, nil,
-		marketPlan(directRoute(srv)))
-	if err != nil {
-		t.Fatalf("下载失败: %v", err)
-	}
-	if n != int64(len(data)) {
-		t.Fatalf("下载字节 = %d, want %d", n, len(data))
-	}
-	got, _ := os.ReadFile(dest)
-	if !bytes.Equal(got, data) {
-		t.Fatal("不续传时必须从头覆盖，文件内容应与源一致")
-	}
-	attempts, ranges := stats.stats()
-	if len(ranges) != 0 {
-		t.Fatalf("市场下载不应发送 Range，实际 %v", ranges)
-	}
-	if attempts != 1 {
-		t.Fatalf("一次就该成功，实际请求 %d 次", attempts)
-	}
-}
-
-// 市场下载失败后不留半成品（没有「下次续传」这回事）。
-func TestMarketDownloadLeavesNoPartialOnFailure(t *testing.T) {
-	var calls int32
-	dest := filepath.Join(t.TempDir(), "market.tar.gz")
-	_, err := (&UpdateManager{}).downloadToFile("https://example.invalid/market.tgz", dest, nil, nil,
-		marketPlan(directRouteForTest(&calls)))
-	if err == nil {
-		t.Fatal("应当返回错误")
-	}
-	if !errors.Is(err, errUpdateNetworkFailed) {
-		t.Fatalf("错误应可识别为网络失败: %v", err)
-	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Fatalf("市场每条通路仍应重试 2 次，实际 %d", got)
-	}
-	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
-		t.Fatalf("失败后不应留下半成品，stat err = %v", statErr)
 	}
 }
 

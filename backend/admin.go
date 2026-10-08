@@ -870,8 +870,8 @@ func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 	// 确保备份目录存在
 	bkpDir := m.update.backupDir()
 	os.MkdirAll(bkpDir, 0755)
-	// 文件名带上当前 dsh 版本号
-	dshVer := m.update.localDshVersion()
+	// 文件名带上当前 dsh 版本号（= 选中的版本目录名；没装版本时为 unknown）
+	dshVer := m.update.server.selectedVersion()
 	if dshVer == "" {
 		dshVer = "unknown"
 	}
@@ -1157,14 +1157,28 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handlePauseUpdate(w, r)
 		case p == "/api/update/stream" && r.Method == http.MethodGet:
 			m.handleUpdateStream(w, r)
-		case p == "/api/dsh/backups" && r.Method == http.MethodGet:
-			m.handleListBackups(w, r)
-		case p == "/api/dsh/backups" && r.Method == http.MethodDelete:
-			m.handleDeleteBackup(w, r)
-		case p == "/api/dsh/rollback" && r.Method == http.MethodPost:
-			m.handleRollback(w, r)
-		case p == "/api/dsh/rollback/status" && r.Method == http.MethodGet:
-			m.handleRollbackStatus(w, r)
+		// dsh 服务多版本：列表 / 下载安装 / 取消 / 删除 / 切换（见 server.go）
+		case p == "/api/dsh/versions" && r.Method == http.MethodGet:
+			m.handleDshVersions(w, r)
+		case p == "/api/dsh/versions/install" && r.Method == http.MethodPost:
+			m.handleDshVersionInstall(w, r)
+		case p == "/api/dsh/versions/cancel" && r.Method == http.MethodPost:
+			m.handleDshVersionCancel(w, r)
+		case p == "/api/dsh/versions/ack" && r.Method == http.MethodPost:
+			m.handleDshVersionAck(w, r)
+		case p == "/api/dsh/versions/delete" && r.Method == http.MethodPost:
+			m.handleDshVersionDelete(w, r)
+		case p == "/api/dsh/versions/switch" && r.Method == http.MethodPost:
+			m.handleDshVersionSwitch(w, r)
+		// 插件市场（dshmarket）：安装 / 更新 / 卸载 / 收起结果（见 market.go）
+		case p == "/api/market/install" && r.Method == http.MethodPost:
+			m.handleMarketInstall(w, r)
+		case p == "/api/market/update" && r.Method == http.MethodPost:
+			m.handleMarketUpdate(w, r)
+		case p == "/api/market/remove" && r.Method == http.MethodPost:
+			m.handleMarketRemove(w, r)
+		case p == "/api/market/done" && r.Method == http.MethodPost:
+			m.handleMarketDone(w, r)
 		case p == "/api/quickcmds" && r.Method == http.MethodGet:
 			m.handleGetQuickCmds(w, r)
 		case p == "/api/quickcmds" && r.Method == http.MethodPost:
@@ -1312,13 +1326,22 @@ func (m *AdminMux) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		"harness": snap[updateKindHarness],
 		"dsh":     snap[updateKindDsh],
 		"market":  snap[updateKindMarket],
+		// server 是 dsh 服务多版本的快照（列表 + 选中 + 安装进度），见 server.go。
+		"server": m.update.server.snapshot(),
 	})
 }
 
 // handleUpdateCheck 执行一次手动检查更新（“检查更新”按钮）并返回最新结果。
 // 同步执行：前端在拿到响应后即可依据结果提示“暂无更新”或显示红点。
-// 市场一并检测：版本来自 npm registry（见 market.go 的 refreshMarketStatus）。
+// 三条链路一起检测：harness 走 GitHub Release tag，dsh 与市场走 npm 镜像源
+// （见 server.go 的 refreshVersions 与 market.go 的 refreshMarketStatus）。
+//
+// 手动检查一律强制刷新 dsh 版本列表：用户点「检查更新」时看到的是缓存里那份
+// 可能已过期的列表（TTL 5 分钟），而 dsh 的发布节奏很快。
 func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if err := m.update.server.refreshVersions(true); err != nil {
+		logWarn("[dsh] version list refresh failed during manual check: %v", err)
+	}
 	m.update.checkOnce()
 	snap := m.update.snapshot()
 	writeJSON(w, map[string]interface{}{
@@ -1326,6 +1349,7 @@ func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		"harness": snap[updateKindHarness],
 		"dsh":     snap[updateKindDsh],
 		"market":  snap[updateKindMarket],
+		"server":  m.update.server.snapshot(),
 	})
 }
 
@@ -1335,7 +1359,8 @@ func (m *AdminMux) handleMarketInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, m.update.marketInfo())
 }
 
-// handleUpdateDownload 执行“下载更新包”（第一步，可取消）。body 中 kind 为 harness、dsh 或 market。
+// handleUpdateDownload 执行“下载更新包”（第一步，可取消）。body 中 kind 为 harness
+// （dsh 与市场都不再下载压缩包，见 server.go / market.go）。
 // 下载进度经 SSE 推送；下载成功后推送 phase=downloaded，弹窗按钮变为“安装”。
 func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -1348,6 +1373,12 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 	kind := updateKind(body.Kind)
 	if !validUpdateKind(kind) {
 		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
+		return
+	}
+	// 只有 harness 还有「下载更新包」这一步：dsh 走 npm install（server.go）、
+	// 市场走 dsh plugin add（market.go），同步拒绝比让前端先看到进度再收到错误更清楚。
+	if kind != updateKindHarness {
+		writeErr(w, fmt.Sprintf("%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", kind), http.StatusGone)
 		return
 	}
 	// 同步置“下载中”状态：在返回 HTTP 响应前后端状态即已就绪（downloadUpdate
@@ -1395,10 +1426,9 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleUpdateInstall 执行“安装更新包”（第二步，不可取消）。读取待安装包并执行
-// 备份替换+重启。对 dsh：成功后推送最新状态，前端刷新；对 harness：成功即 exec
-// 换新进程，由新进程重启 dsh，前端靠页面刷新兜底；对 market：安装阶段会先停 dsh，
-// 替换 server 目录里那份 dshmarket，再自动拉起 dsh 并重新换取会话 token
-// （见 market.go 的 installMarket），成功后同样推送最新状态。
+// 备份替换+重启。目前只有 harness 控制台会走到这里（dsh 版本与插件市场都不再下载
+// 压缩包，见 server.go / market.go）。harness：安装成功即 exec 换新进程，由新进程
+// 重启 dsh，前端靠轮询新进程版本号兜底。
 func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Kind string `json:"kind"`
@@ -1410,6 +1440,10 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 	kind := updateKind(body.Kind)
 	if !validUpdateKind(kind) {
 		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
+		return
+	}
+	if kind != updateKindHarness {
+		writeErr(w, fmt.Sprintf("%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", kind), http.StatusGone)
 		return
 	}
 	go func() {
@@ -1441,22 +1475,9 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 			st.HasUpdate = false
 			st.Phase = "done"
 			st.ReadyToInstall = false
-			if kind == updateKindHarness {
-				st.LocalVersion = harnessVersion
-				st.LatestVersion = harnessVersion
-			}
+			st.LocalVersion = harnessVersion
+			st.LatestVersion = harnessVersion
 		})
-		// server 目录里的产物换过了，随之变化的本地版本号都要重新解析：
-		//   - 更新 dsh 服务：整个 server 目录（含自带的 dshmarket）都换了，故一并刷新
-		//     dsh 与市场两个版本号（见 refreshServerPackageVersions）；
-		//   - 更新市场：只换了自带的那份 dshmarket，刷市场版本即可。
-		// `dsh -V` 可能较慢（需加载 node 环境），异步执行不阻塞上面这次“成功”推送；
-		// 前端此时已可收起弹窗，刷新页面后拿到新版本。
-		if kind == updateKindDsh {
-			go upd.refreshServerPackageVersions()
-		} else if kind == updateKindMarket {
-			upd.refreshMarketLocal()
-		}
 	}()
 	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始安装更新"})
 }
@@ -1505,6 +1526,9 @@ func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 			"harness": m.update.getStatus(updateKindHarness),
 			"dsh":     m.update.getStatus(updateKindDsh),
 			"market":  m.update.getStatus(updateKindMarket),
+			// dsh 版本列表与安装进度（server.go）：下载/安装 dsh 版本时前端靠这一帧
+			// 实时刷新对应行的进度，不额外开一条 SSE 通道。
+			"server": m.update.server.snapshot(),
 		}))
 	}
 	send() // 初始快照
@@ -1529,60 +1553,125 @@ func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// --- Server 备份与回滚 API ---
+// --- dsh 服务版本管理 API（见 server.go） ---
 
-// handleListBackups 返回 dsh server 备份列表（server-<版本>-<时间戳>.tar.gz）。
-func (m *AdminMux) handleListBackups(w http.ResponseWriter, r *http.Request) {
-	backups, err := m.update.ListServerBackups()
-	if err != nil {
-		writeErr(w, "读取备份列表失败: "+err.Error(), http.StatusInternalServerError)
-		return
+// handleDshVersions 返回 dsh 版本快照：可选版本列表（镜像源，已过滤 0.1.7-alpha.1
+// 之前的）、本地已安装版本、当前选中版本、以及正在进行的安装进度。
+//
+// refresh=1 时强制联网刷新版本列表（弹窗里的「刷新」按钮）；默认只在缓存过期时拉。
+func (m *AdminMux) handleDshVersions(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("refresh") == "1"
+	if force {
+		if err := m.update.server.refreshVersions(true); err != nil {
+			// 列表拉取失败不算致命：下面照常返回本地已安装版本 + Error 字段。
+			logWarn("[dsh] refresh versions failed: %v", err)
+		}
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "backups": backups})
+	writeJSON(w, map[string]interface{}{
+		"ok":        true,
+		"server":    m.update.server.snapshot(),
+		"refreshed": force,
+	})
 }
 
-type deleteBackupReq struct {
-	Name string `json:"name"`
-}
-
-// handleDeleteBackup 删除一个 server 备份文件。
-func (m *AdminMux) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
-	var body deleteBackupReq
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		writeErr(w, "缺少 name", http.StatusBadRequest)
+// handleDshVersionInstall 启动下载并安装某个 dsh 版本（异步，进度经 SSE 推送）。
+func (m *AdminMux) handleDshVersionInstall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Version == "" {
+		writeErr(w, "缺少 version", http.StatusBadRequest)
 		return
 	}
-	if err := m.update.DeleteServerBackup(body.Name); err != nil {
+	if err := m.update.server.Install(body.Version); err != nil {
 		writeErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "deleted": body.Name})
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "version": body.Version})
 }
 
-type rollbackReq struct {
-	Name string `json:"name"`
+// handleDshVersionCancel 取消正在进行的 dsh 版本下载/安装，并清除安装目录与下载缓存。
+func (m *AdminMux) handleDshVersionCancel(w http.ResponseWriter, r *http.Request) {
+	cancelled := m.update.server.CancelInstall()
+	writeJSON(w, map[string]interface{}{"ok": true, "cancelled": cancelled})
 }
 
-// handleRollback 触发 dsh server 回滚（异步执行，前端通过 /api/dsh/rollback/status 轮询结果）。
-func (m *AdminMux) handleRollback(w http.ResponseWriter, r *http.Request) {
-	var body rollbackReq
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		writeErr(w, "缺少 name", http.StatusBadRequest)
+// handleDshVersionAck 收起「上一次安装的结果」（前端已把成功提示成 toast，或已关闭弹窗）。
+//
+// 为什么需要它：安装结果（done / error / cancelled）会作为终态留在内存里给前端显示，
+// 而概览页切走会卸载、切回会重新挂载 —— 状态还在，前端就会把同一条成功提示再弹一次。
+// 前端确认收到后调一次这个接口，终态即被清掉。
+func (m *AdminMux) handleDshVersionAck(w http.ResponseWriter, r *http.Request) {
+	m.update.server.clearInstallState()
+	writeJSON(w, map[string]interface{}{"ok": true})
+}
+
+// handleDshVersionDelete 删除一个已安装的 dsh 版本目录（当前选中的版本不允许删除）。
+func (m *AdminMux) handleDshVersionDelete(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Version == "" {
+		writeErr(w, "缺少 version", http.StatusBadRequest)
 		return
 	}
-	dir := m.update.backupDir()
-	fullPath := filepath.Join(dir, body.Name)
-	if err := m.update.RollbackServer(fullPath); err != nil {
+	if err := m.update.server.Delete(body.Version); err != nil {
 		writeErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "started": true})
+	writeJSON(w, map[string]interface{}{"ok": true, "deleted": body.Version})
 }
 
-// handleRollbackStatus 返回当前 dsh server 回滚状态。
-func (m *AdminMux) handleRollbackStatus(w http.ResponseWriter, r *http.Request) {
-	status := m.update.GetRollbackStatus()
-	writeJSON(w, map[string]interface{}{"ok": true, "status": status})
+// handleDshVersionSwitch 切换到某个已安装的 dsh 版本：写配置 → 停 dsh → 用新版本启动。
+// 后端不等 dsh 就绪（会话凭据由异步 captureDshSession 换取），前端刷新后即可看到选中标记。
+func (m *AdminMux) handleDshVersionSwitch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Version == "" {
+		writeErr(w, "缺少 version", http.StatusBadRequest)
+		return
+	}
+	if err := m.update.server.Switch(body.Version); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "switched": body.Version})
+}
+
+// --- 插件市场（dshmarket）API（见 market.go） ---
+
+// handleMarketInstall 安装插件市场的最新版（异步，进度经 SSE 推送）。
+func (m *AdminMux) handleMarketInstall(w http.ResponseWriter, r *http.Request) {
+	if err := m.update.InstallMarket(); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "install"})
+}
+
+// handleMarketUpdate 把插件市场更新到最新版（异步）。
+func (m *AdminMux) handleMarketUpdate(w http.ResponseWriter, r *http.Request) {
+	if err := m.update.UpdateMarket(); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "update"})
+}
+
+// handleMarketRemove 卸载插件市场（异步）。
+func (m *AdminMux) handleMarketRemove(w http.ResponseWriter, r *http.Request) {
+	if err := m.update.RemoveMarket(); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "remove"})
+}
+
+// handleMarketDone 清掉一次市场操作的终态（前端收起「已完成」提示时调用）。
+func (m *AdminMux) handleMarketDone(w http.ResponseWriter, r *http.Request) {
+	m.update.DoneMarket()
+	writeJSON(w, map[string]interface{}{"ok": true})
 }
 
 // --- dsh 数据备份与恢复 API ---

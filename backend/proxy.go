@@ -632,10 +632,9 @@ const waitingPageHTML = `<!DOCTYPE html>
     </p>
     <div class="err" id="detail"></div>
     <div class="hint" id="hint">
-      已等待 <b id="elapsed">0</b> 秒仍未就绪。若长时间没有进展，请到控制台查看日志，
-      必要时卸载不兼容的插件后重试。
+      已等待 <b id="elapsed">0</b> 秒仍未就绪。若长时间没有进展，请到控制台查看日志。
       <span class="en">Still not ready after <b id="elapsed-en">0</b>s. Check the console
-        logs if this persists; uninstall incompatible plugins and retry if needed.</span>
+        logs if this persists.</span>
     </div>
   </div>
 </div>
@@ -661,11 +660,14 @@ window.__DSH_WAIT__=__WAIT_STATE__;
       '可在控制台「概览」页重新启动 dsh 服务，启动后本页会自动跳转。',
       'Restart dsh from the console overview page; this page jumps once it is up.'],
     failed:['dsh 服务启动失败','Failed to start the dsh service',
-      '请检查控制台日志，必要时卸载不兼容的插件后重试。',
-      'Check the console logs; uninstall incompatible plugins and retry if needed.'],
+      '请检查控制台日志。',
+      'Check the console logs.'],
     disabled:['未自动启动 dsh 服务','dsh auto-start is disabled',
       '控制台以 HARNESS_AUTOSTART=0 启动；请在控制台「概览」页手动启动 dsh。',
       'The console started with HARNESS_AUTOSTART=0; start dsh from the console overview page.'],
+    'not-installed':['尚未安装 dsh 服务','The dsh service is not installed',
+      '请先在控制台「概览」页的版本列表里下载一个 dsh 版本，然后点「切换」启动它。',
+      'Download a dsh version from the console overview page, then switch to it.'],
     ready:['服务已就绪，正在跳转…','Ready, redirecting…',
       '正在进入 dsh 界面。','Entering the dsh interface.']
   };
@@ -687,9 +689,11 @@ window.__DSH_WAIT__=__WAIT_STATE__;
     var t=TEXT[(s&&s.phase)||'starting']||TEXT.starting;
     titleEl.textContent=t[0]+' / '+t[1];
     subEl.innerHTML=t[2]+'<span class="en">'+t[3]+'</span>';
-    var broken=s&&(s.phase==='failed'||s.phase==='stopped'||s.phase==='disabled');
+    var broken=s&&(s.phase==='failed'||s.phase==='stopped'||s.phase==='disabled'||s.phase==='not-installed');
     spinnerEl.style.display=broken?'none':'';
-    if(s&&s.phase==='failed'&&s.detail){ detailEl.textContent=s.detail; detailEl.style.display='block'; }
+    // failed / not-installed 的 detail 都要显示：前者是启动失败原因，后者是
+    // 「该去哪里装版本」的指引（后端下发的是本地化后的安装目录路径）。
+    if(s&&(s.phase==='failed'||s.phase==='not-installed')&&s.detail){ detailEl.textContent=s.detail; detailEl.style.display='block'; }
     else { detailEl.style.display='none'; }
   }
 
@@ -1017,7 +1021,7 @@ func (p *reverseProxy) state() (proxyState, *BackendChecker) {
 		// 端口未监听。流水线之外只有几种情况要区分：显式说明（启动失败 / 未自动
 		// 启动）原样保留；进程还在（自重启、更新后拉起）显示“启动中”；进程不在
 		// （用户手动停止）显示“已停止”。
-		if phase != phaseFailed && phase != phaseDisabled {
+		if !userActionPhase(phase) {
 			if p.dshAliveCached() {
 				phase = phaseStarting
 			} else {
@@ -1029,7 +1033,7 @@ func (p *reverseProxy) state() (proxyState, *BackendChecker) {
 		// 端口通了但凭据还没换到：继续等凭据。只在不处于 failed/disabled 时改写
 		// 阶段 —— dsh 启动失败（或未自动启动）而端口恰好被旧进程占着时，必须原样
 		// 保留 phase 与 detail，否则等待页只剩转圈、看不到失败原因。
-		if phase != phaseFailed && phase != phaseDisabled {
+		if !userActionPhase(phase) {
 			phase = phaseAuth
 			detail = ""
 		}

@@ -194,8 +194,6 @@ onMounted(() => {
       </button>
     </PageHeader>
 
-    <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-4">{{ t('plugin_desc') }}</p>
-
     <!-- 启用需重启的插件后的内联提示条（右对齐的重启生效按钮） -->
     <div
       v-if="needsRestartPlugin"

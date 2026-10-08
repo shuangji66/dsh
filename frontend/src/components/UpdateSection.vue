@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, sseUrl, type UpdateKind, type UpdateStatus, type ServerBackup } from '@/serverapi'
+import { api, sseUrl, type UpdateKind, type ServerVersions, type UpdateStatus } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
 import { useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
@@ -9,11 +9,21 @@ import MarkdownText from '@/components/MarkdownText.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import CheckUpdateButton from '@/components/CheckUpdateButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
+import ServerVersionsDialog from '@/components/ServerVersionsDialog.vue'
+import MarketDialog from '@/components/MarketDialog.vue'
 
 // 概览页「版本」卡片：三个版本（harness 控制台 / dsh 服务 / 插件市场）的当前版本、
-// 检查更新入口与更新弹窗、dsh 服务的备份回滚，全部收敛在本组件内。
-// 快捷访问地址原先也渲染在这里，现已拆成独立的 AccessCard（概览页三卡片分栏），
-// 因此本组件不再需要 accessUrls / fnosEntry 入参。
+// 检查更新入口与各自的弹窗。
+//
+// 三条链路的**形态各不相同**，因此弹窗也分成三个：
+//   - harness：GitHub Release 资产（下载 → 安装两步，可暂停/取消）—— 弹窗在本组件内；
+//   - dsh 服务：本机多版本（npm install 到 `<数据目录>/server/<版本>`，可下载/删除/切换）
+//     —— 弹窗见 ServerVersionsDialog.vue；
+//   - 插件市场：普通 profile 插件（未安装 → 安装 latest，已安装 → 更新/卸载）
+//     —— 弹窗见 MarketDialog.vue。
+//
+// 本组件是这三者的**唯一数据源**：它持有 /api/update/stream 的 SSE 快照并按 kind 分发，
+// 子弹窗只收 props、只发意图事件。
 const toast = useToastStore()
 const { t } = useI18n()
 
@@ -21,9 +31,10 @@ const { t } = useI18n()
 // `/api/update/status` 统一提供（dsh 版本原 `/api/dsh/version` 端点已移除）。
 const harnessStatus = ref<UpdateStatus>({ kind: 'harness', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
 const dshStatus = ref<UpdateStatus>({ kind: 'dsh', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
-// 市场（dshmarket）：它是 server 包自带的 bundle，不是 profile 依赖，因此控制台
-// 提供就地更新入口（后端 market.go）。marketScope 说明当前生效的那份由谁提供。
+// 市场（dshmarket）：普通 profile 插件，localVersion 为空即「未安装」。
 const marketStatus = ref<UpdateStatus>({ kind: 'market', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '' })
+// dsh 服务版本快照（可选版本列表 + 已安装 + 选中 + 安装进度）。
+const serverVersions = ref<ServerVersions | null>(null)
 
 // 各目标是否正在“检查更新”
 const checking = ref<Record<UpdateKind, boolean>>({ harness: false, dsh: false, market: false })
@@ -42,22 +53,119 @@ function patchStatus(kind: UpdateKind, patch: Partial<UpdateStatus>) {
   else marketStatus.value = { ...marketStatus.value, ...patch }
 }
 
-// 市场能否由控制台更新：只有 profile 接管、位置在 server 目录之外或压根找不到时
-// 才禁用（scope 未知时先放行，真有问题后端会拒绝并给出原因）。
-const marketUpdatable = computed(() => {
-  const scope = marketStatus.value.marketScope
-  return scope === undefined || scope === 'server'
-})
+// --- dsh 服务版本弹窗 / 插件市场弹窗 ---
+const serverDialogVisible = ref(false)
+const serverLoading = ref(false)
+const marketDialogVisible = ref(false)
 
-// 市场不可更新时的说明文案（按 scope 本地化，reason 作为 title 显示诊断细节）。
-const marketHint = computed(() => {
-  switch (marketStatus.value.marketScope) {
-    case 'profile': return t('update_market_scope_profile')
-    case 'external': return t('update_market_scope_external')
-    case 'missing': return t('update_market_scope_missing')
-    default: return ''
+// openServerDialog 打开 dsh 版本列表：先用后端快照兜底显示，再拉一次（避免显示别人
+// 刷新前的旧列表）；加载期间按钮禁用，不阻塞已装版本的切换/删除。
+async function openServerDialog() {
+  serverDialogVisible.value = true
+  if (serverVersions.value) return
+  await refreshServerVersions(false)
+}
+
+// refreshServerVersions 拉取版本列表；force 为 true 时强制联网刷新镜像源列表。
+async function refreshServerVersions(force: boolean) {
+  serverLoading.value = true
+  try {
+    const res = await api.dshVersions(force)
+    serverVersions.value = res.server
+    // dsh 版本与选中状态同时影响版本行与红点，这里顺带同步一次状态。
+    const snap = await api.updateStatus()
+    merge(snap)
+  } catch (e) {
+    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+  } finally {
+    serverLoading.value = false
   }
-})
+}
+
+// onInstallVersion / onCancelVersion / onRemoveVersion / onSwitchVersion 是弹窗发上来的
+// 意图：这里只负责调接口 + 提示，实际状态变化由后端 SSE 推回 serverVersions。
+async function onInstallVersion(version: string) {
+  try {
+    await api.dshVersionInstall(version)
+  } catch (e) {
+    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+  }
+}
+
+async function onCancelVersion() {
+  try {
+    await api.dshVersionCancel()
+    toast.show(t('dsh_ver_cancelled'), 'info')
+  } catch (e) {
+    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+  }
+}
+
+// 关闭版本弹窗：如果停在终态（成功/失败/已取消），顺手把结果收起 —— 概览页切走会卸载、
+// 切回会重新挂载，状态留着就会把同一条提示再弹一次。
+function closeServerDialog() {
+  serverDialogVisible.value = false
+  const ph = serverVersions.value?.install?.phase || ''
+  const cancelled = serverVersions.value?.install?.cancelled
+  if (ph === 'done' || ph === 'error' || cancelled) {
+    api.dshVersionAck().catch(() => { /* 只是清状态，失败不影响用户 */ })
+  }
+}
+
+async function onRemoveVersion(version: string) {
+  try {
+    await api.dshVersionDelete(version)
+    toast.show(t('dsh_ver_deleted', { v: version }), 'success')
+  } catch (e) {
+    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+  }
+}
+
+async function onSwitchVersion(version: string) {
+  try {
+    await api.dshVersionSwitch(version)
+    toast.show(t('dsh_ver_switched', { v: version }), 'success')
+    // 切换会停 dsh 并用新版本重启：稍等片刻再刷新，避免刷新出启动等待页。
+    setTimeout(() => window.location.reload(), 3000)
+  } catch (e) {
+    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+  }
+}
+
+// 市场三动作：安装（未安装 → 最新版本）/ 更新（已安装 → 最新版本）/ 卸载。
+// pendingMarketAction 记下这次点的是哪个动作：结果（成功或失败）经 SSE 异步到达，
+// 而弹窗可能已经被关掉，所以结果统一用 toast 通知（文案里的动词按动作区分）。
+const pendingMarketAction = ref<'install' | 'update' | 'remove' | null>(null)
+
+async function runMarketAction(action: 'install' | 'update' | 'remove') {
+  pendingMarketAction.value = action
+  try {
+    if (action === 'install') await api.marketInstall()
+    else if (action === 'update') await api.marketUpdate()
+    else await api.marketRemove()
+  } catch (e) {
+    pendingMarketAction.value = null
+    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+  }
+}
+
+// marketActionLabel 把动作翻成两字动词（直接复用弹窗按钮文案，避免再维护一份）。
+function marketActionLabel(action: 'install' | 'update' | 'remove'): string {
+  if (action === 'update') return t('market_update_btn')
+  if (action === 'remove') return t('market_remove_btn')
+  return t('market_install_btn')
+}
+
+// 收起市场操作的终态（成功提示已 toast / 失败详情已看过 / 弹窗已关闭）。
+async function onMarketAck() {
+  try {
+    await api.marketDone()
+  } catch { /* 忽略：只是清状态，失败不影响用户 */ }
+}
+
+function closeMarketDialog() {
+  marketDialogVisible.value = false
+}
 
 // 弹窗状态
 const dialogVisible = ref(false)
@@ -84,18 +192,7 @@ const cancelling = ref(false) // 取消请求是否已发出、等待后端中�
 // 安装二次确认
 const installConfirmVisible = ref(false)
 
-// dsh server 回滚状态
-const serverBackups = ref<ServerBackup[]>([]) // 可用备份列表
-const backupsLoaded = ref(false)
-const rollbackVisible = ref(false) // 回滚选择弹窗
-const rollbackRunning = ref(false) // 回滚是否进行中
-const rollbackError = ref('') // 回滚错误
-const selectedRollback = ref<string | null>(null) // 选中的备份名
-const confirmRollbackVisible = ref(false) // 回滚二次确认
-const deleteConfirmName = ref<string | null>(null) // 待删除的备份名
-
 let reloadTimer: ReturnType<typeof setTimeout> | null = null
-let rollbackPollTimer: ReturnType<typeof setInterval> | null = null
 // 进度兜底轮询计时器（见 startProgressPoll）：SSE 不可用时仍能显示真实进度。
 let progressPollTimer: ReturnType<typeof setInterval> | null = null
 // 安装前的控制台版本号与就绪轮询计时器（harness 自我更新专用，见
@@ -104,7 +201,7 @@ let preInstallVersion = ''
 let readyPollTimer: ReturnType<typeof setInterval> | null = null
 
 // 从后端快照合并到本地响应式状态（允许只带部分 kind 的快照）
-function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus }) {
+function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus; server?: ServerVersions }) {
   if (snap.harness) {
     harnessStatus.value = { ...snap.harness, localVersion: snap.harness.localVersion || '' }
   }
@@ -113,6 +210,11 @@ function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus; market?: Upda
   }
   if (snap.market) {
     marketStatus.value = { ...snap.market, localVersion: snap.market.localVersion || '' }
+  }
+  // dsh 版本快照（列表 + 安装进度）也随同一条 SSE 推送更新 —— 版本弹窗里那一行的
+  // 下载/包处理进度就来自这里，不需要额外开一条通道。
+  if (snap.server) {
+    serverVersions.value = snap.server
   }
 }
 
@@ -156,8 +258,8 @@ function latestText(kind: UpdateKind): string {
 // onerror 里 close() 会让浏览器永久放弃该连接，下载进度再也送不到页面。
 const updateStream = useEventStream(() => sseUrl('/api/update/stream'), {
   update: (data) => {
-    const d = data as { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus }
-    if (d && (d.harness || d.dsh || d.market)) merge(d)
+    const d = data as { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus; server?: ServerVersions }
+    if (d && (d.harness || d.dsh || d.market || d.server)) merge(d)
   }
 })
 
@@ -165,7 +267,7 @@ const updateStream = useEventStream(() => sseUrl('/api/update/stream'), {
 async function doCheck(kind: UpdateKind) {
   checking.value[kind] = true
   try {
-    // 后端同步执行检测并返回最新结果
+    // 后端同步执行检测并返回最新结果（含 dsh 版本列表快照）
     const snap = await api.updateCheck()
     merge(snap)
     const st = statusOf(kind)
@@ -181,8 +283,16 @@ async function doCheck(kind: UpdateKind) {
   }
 }
 
-// 打开更新弹窗
+// 打开对应目标的弹窗：harness 用本组件内的更新弹窗，dsh / 市场各有自己的弹窗。
 function openDialog(kind: UpdateKind) {
+  if (kind === 'dsh') {
+    openServerDialog()
+    return
+  }
+  if (kind === 'market') {
+    marketDialogVisible.value = true
+    return
+  }
   dialogKind.value = kind
   dialogVisible.value = true
 }
@@ -282,11 +392,8 @@ function applyLocalReset() {
   })
 }
 
-// 安装二次确认的正文：市场这次会在安装阶段停 dsh、替换文件、再自动拉起 dsh
-// （并重新换取会话 token），所以文案要单独说清，不能只说“重启服务”。
-const installConfirmMsg = computed(() =>
-  dialogKind.value === 'market' ? t('update_market_install_confirm_msg') : t('update_install_confirm_msg')
-)
+// 安装二次确认的正文（现在只有 harness 会走到这个弹窗）。
+const installConfirmMsg = computed(() => t('update_install_confirm_msg'))
 
 // 第二步：安装更新包（不可取消）。先弹二次确认，再调 /api/update/install。
 function openInstallConfirm() {
@@ -303,20 +410,10 @@ async function doInstall() {
   preInstallVersion = versionText(kind)
   try {
     await api.updateInstall(kind)
-    if (kind === 'harness') {
-      // harness 自我更新会用新二进制 exec 替换当前进程映像：推送 phase="done" 的
-      // 那个进程随即消失，前端**永远**收不到成功推送（此前只能干等 60 秒兜底计时器，
-      // 即“等待弹窗时间太久”）。改为轮询新进程上报的版本号，进程一就绪立刻收尾。
-      startHarnessReadyPoll()
-    } else {
-      // dsh / 市场安装都不换 harness 进程，成功状态经 SSE 推送（市场还要等 dsh
-      // 重启并就绪后才推 done：后端上限 10 秒 + 2 秒确认，进程退出则立即判定失败），
-      // 这里只做兜底刷新：市场给足余量，避免 dsh 尚未就绪时刷新出启动等待页。
-      const fallbackMs = kind === 'market' ? 30000 : 60000
-      reloadTimer = setTimeout(() => {
-        window.location.reload()
-      }, fallbackMs)
-    }
+    // harness 自我更新会用新二进制 exec 替换当前进程映像：推送 phase="done" 的那个
+    // 进程随即消失，前端**永远**收不到成功推送（此前只能干等 60 秒兜底计时器，即
+    // “等待弹窗时间太久”）。改为轮询新进程上报的版本号，进程一就绪立刻收尾。
+    startHarnessReadyPoll()
   } catch (e) {
     installing.value = false
     toast.show((e as Error).message || t('update_failed'), 'error')
@@ -408,6 +505,13 @@ const progressBarStyle = computed(() =>
 )
 // 未知总量时用不确定进度动画（来回滑动的窄条）表示“进行中”
 const progressBarClass = computed(() => (downloadTotalKnown.value ? '' : 'progress-indeterminate'))
+// 格式化字节数（下载进度文案用）
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+}
+
 // 已下载 / 总量文字
 const downloadSizeText = computed(() => {
   const d = dialogStatus.value
@@ -468,19 +572,74 @@ async function doCancelUpdate() {
   }
 }
 
+// --- 安装/操作结果的一次性提示 ---
+//
+// 弹窗现在可以在下载/安装过程中关闭（关掉不会中断后台任务），因此**结果必须能到达用户**：
+// 完成或失败都以 toast 提示一次（成功不再常驻在弹窗里）。
+//
+// 只提示一次的机制有两层：①组件内按「签名」去重，SSE 重复推同一份快照不会重复弹；
+// ②成功提示发出后立刻调 `dshVersionAck` 把后端那份终态收起 —— 概览页切走会卸载、切回会
+// 重新挂载，状态留着就会把同一条成功提示再弹一次。失败不清（错误详情要留在弹窗里）。
+let announcedServerInstall = ''
+let announcedMarketOp = ''
+
+const serverInstallSig = computed(() => {
+  const st = serverVersions.value?.install
+  return st ? `${st.version}|${st.phase || ''}|${st.cancelled ? 'c' : ''}` : ''
+})
+
+watch(serverInstallSig, () => {
+  const st = serverVersions.value?.install
+  if (!st) return
+  const sig = serverInstallSig.value
+  if (sig === announcedServerInstall) return
+  if (st.phase === 'done') {
+    announcedServerInstall = sig
+    toast.show(t('dsh_ver_toast_done', { v: st.version }), 'success')
+    // 成功只提示一次：立刻把后端那份终态收起，避免切回概览页又弹一次。
+    api.dshVersionAck().catch(() => { /* 忽略：只是清状态 */ })
+  } else if (st.phase === 'error' && st.error) {
+    announcedServerInstall = sig
+    toast.show(st.error, 'error')
+    // 失败不在这里清：错误详情要留在弹窗里给用户看，等用户关闭弹窗时再收起。
+  }
+})
+
+const marketOpSig = computed(() => `${marketStatus.value.phase || ''}|${marketStatus.value.error || ''}`)
+
+watch(marketOpSig, () => {
+  const st = marketStatus.value
+  const sig = marketOpSig.value
+  if (sig === announcedMarketOp) return
+  if (st.phase === 'done') {
+    announcedMarketOp = sig
+    const action = pendingMarketAction.value
+    pendingMarketAction.value = null
+    toast.show(
+      action ? t('market_toast_done', { action: marketActionLabel(action) }) : t('market_toast_done_generic'),
+      'success'
+    )
+    // 与 dsh 版本安装同一条约定：成功只提示一次，立刻收起后端那份终态。
+    api.marketDone().catch(() => { /* 忽略：只是清状态 */ })
+  } else if (st.error) {
+    announcedMarketOp = sig
+    pendingMarketAction.value = null
+    toast.show(st.error, 'error')
+    // 失败不清：错误详情留在弹窗里，等用户关闭弹窗时再收起。
+  }
+})
+
 // --- 删除已下载的更新包 ---
 const discardConfirmVisible = ref(false) // 删除更新包二次确认
 
-// 任一弹窗打开期间锁定页面滚动（弹窗会叠加：更新弹窗之上还有取消/安装/回滚等二次确认）
+// 任一弹窗打开期间锁定页面滚动（弹窗会叠加：更新弹窗之上还有取消/安装等二次确认；
+// dsh 版本弹窗与市场弹窗也各自可能叠加确认框，但它们自己也会锁滚动）。
 const anyDialogOpen = computed(
   () =>
     dialogVisible.value ||
     cancelConfirmVisible.value ||
     installConfirmVisible.value ||
-    discardConfirmVisible.value ||
-    rollbackVisible.value ||
-    confirmRollbackVisible.value ||
-    deleteConfirmName.value !== null
+    discardConfirmVisible.value
 )
 useBodyScrollLock(anyDialogOpen)
 
@@ -573,126 +732,15 @@ function closeDialog() {
   dialogVisible.value = false
 }
 
-// --- dsh server 回滚 ---
-
-// 拉取 server 备份列表
-async function fetchBackups() {
-  try {
-    const res = await api.listBackups()
-    serverBackups.value = res.backups || []
-  } catch { /* ignore */ }
-  backupsLoaded.value = true
-}
-
-// 回滚是否有可用备份（用于显示回滚图标）
-const hasServerBackups = computed(() => serverBackups.value.length > 0)
-
-// 格式化文件大小
-function fmtSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
-}
-// 格式化备份时间
-function fmtBackupDate(iso: string): string {
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
-// 打开回滚弹窗
-function openRollback() {
-  rollbackError.value = ''
-  rollbackRunning.value = false
-  selectedRollback.value = null
-  fetchBackups() // 每次打开都刷新列表
-  rollbackVisible.value = true
-}
-
-// 选中一个备份
-function selectBackup(name: string) {
-  selectedRollback.value = name
-}
-
-// 选中备份后点击"回滚到"按钮 → 弹出二次确认
-function openConfirmRollback() {
-  if (!selectedRollback.value) return
-  confirmRollbackVisible.value = true
-}
-
-// 执行回滚（二次确认后）
-async function doRollback() {
-  const name = selectedRollback.value
-  if (!name) return
-  confirmRollbackVisible.value = false
-  rollbackRunning.value = true
-  rollbackError.value = ''
-  try {
-    await api.rollback(name)
-    // 轮询回滚状态直到完成
-    pollRollbackStatus()
-  } catch (e) {
-    rollbackError.value = (e as Error).message || t('rollback_failed')
-    rollbackRunning.value = false
-  }
-}
-
-// 轮询回滚状态
-function pollRollbackStatus() {
-  if (rollbackPollTimer) clearInterval(rollbackPollTimer)
-  rollbackPollTimer = setInterval(async () => {
-    try {
-      const res = await api.rollbackStatus()
-      const st = res.status
-      if (st.done) {
-        clearInterval(rollbackPollTimer!)
-        rollbackPollTimer = null
-        rollbackRunning.value = false
-        if (st.ok) {
-          toast.show(t('rollback_success'), 'success')
-          rollbackVisible.value = false
-          // 回滚成功后刷新页面（dsh 已重启）
-          setTimeout(() => window.location.reload(), 1000)
-        } else {
-          rollbackError.value = st.error || t('rollback_failed')
-        }
-      }
-    } catch {
-      // 网络错误时继续轮询
-    }
-  }, 2000)
-}
-
-// 删除备份
-function openDeleteConfirm(name: string) {
-  deleteConfirmName.value = name
-}
-
-async function doDeleteBackup() {
-  const name = deleteConfirmName.value
-  if (!name) return
-  try {
-    await api.deleteBackup(name)
-    toast.show(t('rollback_deleted'), 'success')
-    deleteConfirmName.value = null
-    fetchBackups()
-  } catch (e) {
-    toast.show((e as Error).message, 'error')
-  }
-}
-
 onMounted(() => {
-  // 拉取一次后端状态快照作为初始值
+  // 拉取一次后端状态快照作为初始值（含 dsh 版本快照），随后交给 SSE 增量更新
   api.updateStatus().then(merge).catch(() => {})
   updateStream.start()
-  fetchBackups()
 })
 
 onBeforeUnmount(() => {
   // SSE 连接由 useEventStream 自行释放（其内部注册了 onBeforeUnmount）。
   if (reloadTimer) clearTimeout(reloadTimer)
-  if (rollbackPollTimer) clearInterval(rollbackPollTimer)
   stopProgressPoll()
   stopHarnessReadyPoll()
 })
@@ -732,20 +780,10 @@ watch(
       <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
         <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_dsh_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
-          <!-- 有备份时显示回滚图标（版本号左侧）：Lucide rotate-ccw（逆时针），
-               与三个「检查更新」按钮（CheckUpdateButton.vue，顺时针 rotate-cw）成对 ——
-               换图标时两个一起看，别只改一边导致风格不一致。 -->
-          <button
-            v-if="hasServerBackups"
-            class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-brand dark:hover:text-brand transition-colors"
-            :title="t('rollback_title')"
-            :aria-label="t('rollback_title')"
-            @click="openRollback"
-          >
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-          </button>
+          <!-- 版本号：点击打开 dsh 版本列表（下载 / 删除 / 切换）。「未安装」时同样
+               可点 —— 那正是用户需要去装一个版本的入口。 -->
           <button class="relative font-mono text-sm font-semibold text-ink dark:text-white underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50" @click="openDialog('dsh')">
-            {{ versionText('dsh') }}
+            {{ versionText('dsh') || t('not_installed') }}
             <span v-if="hasUpdateDot('dsh')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <!-- 检查更新：与 dsh 回退图标成对（见 CheckUpdateButton.vue） -->
@@ -753,24 +791,18 @@ watch(
         </div>
       </div>
 
-      <!-- 插件市场版本（dshmarket）：server 包自带的那份，控制台可就地更新 -->
+      <!-- 插件市场版本（dshmarket）：普通 profile 插件，未安装时可在这里装上 -->
       <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
         <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_market_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
-          <!-- 版本号：可更新时点击打开弹窗；由 profile 提供/找不到时置灰并说明原因 -->
+          <!-- 版本号：点击打开市场弹窗（未安装 → 安装最新版；已安装 → 更新 / 卸载） -->
           <button
-            class="relative font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50"
-            :class="marketUpdatable ? 'text-ink dark:text-white' : 'text-ink-soft dark:text-[#A6A6AD] cursor-not-allowed'"
-            :title="marketUpdatable ? '' : (marketStatus.marketDir || marketStatus.marketScope || '')"
-            :disabled="!marketUpdatable"
+            class="relative font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50 text-ink dark:text-white"
             @click="openDialog('market')"
           >
-            {{ versionText('market') || '—' }}
+            {{ versionText('market') || t('not_installed') }}
             <span v-if="hasUpdateDot('market')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
-          <!-- 不可更新时的原因（本地化短文案） -->
-          <span v-if="!marketUpdatable" class="text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ marketHint }}</span>
-          <!-- 检查更新：与 dsh 回退图标成对（见 CheckUpdateButton.vue） -->
           <CheckUpdateButton :checking="checking.market" :label="t('update_check')" @check="doCheck('market')" />
         </div>
       </div>
@@ -798,7 +830,7 @@ watch(
 
             <div v-if="updatingDone" class="py-6 text-center">
               <div class="text-sm font-medium text-success dark:text-[#10B981] mb-1">{{ t('update_installed_done') }}</div>
-              <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
             </div>
 
             <!-- 下载中：进度条 + 暂停（保留已下载字节）/ 取消（放弃已下载字节） -->
@@ -816,12 +848,9 @@ watch(
               </div>
               <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ downloadSizeText }}</div>
 
-              <!-- 暂停（保留半成品，可继续）+ 取消（删除半成品）。
-                   市场包只有几百 KB，且后端对市场下载明确不支持暂停/续传，
-                   所以市场不显示暂停按钮 —— 避免按了没反应。 -->
+              <!-- 暂停（保留半成品，可继续）+ 取消（删除半成品）。 -->
               <div class="flex items-center justify-center gap-3 mt-4">
                 <button
-                  v-if="dialogKind !== 'market'"
                   class="g-btn-secondary"
                   :disabled="pausing"
                   @click="doPause"
@@ -858,7 +887,7 @@ watch(
             <!-- 已下载待安装：提示 + “删除更新包”按钮，底部为“安装更新”按钮 -->
             <div v-else-if="downloaded" class="py-4 text-center">
               <div class="text-sm text-ink dark:text-white mb-1">{{ t('update_wait_install') }}</div>
-              <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
 
               <!-- 删除更新包（清除下载，重置为待更新） -->
               <div class="text-center mt-4">
@@ -873,7 +902,7 @@ watch(
             <div v-else-if="installing" class="py-6 text-center">
               <div class="inline-block animate-spin h-6 w-6 border-2 border-brand border-t-transparent rounded-full mb-2"></div>
               <div class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_installing') }}</div>
-              <div v-if="dialogKind === 'harness'" class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
+              <div class="text-xs text-ink-soft dark:text-[#A6A6AD] mt-2">{{ t('update_manual_refresh') }}</div>
             </div>
 
             <template v-else>
@@ -910,12 +939,6 @@ watch(
                   <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] max-h-44 overflow-y-auto leading-relaxed">
                     <MarkdownText :source="dialogStatus.releaseNotes" />
                   </div>
-                </div>
-
-                <!-- 市场：更新日志取自 dsh-market/dsh-market 的 Release（后端按 npm 版本拼 tag 拉取）。
-                     拉不到（限流/无此 tag）时回退到说明「这次更新会发生什么」 -->
-                <div v-else-if="dialogKind === 'market' && dialogStatus.hasUpdate" class="mt-3 rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-xs text-ink dark:text-[#EDEDF0] leading-relaxed">
-                  {{ t('update_market_notice') }}
                 </div>
 
                 <!-- 无更新提示 -->
@@ -1022,129 +1045,28 @@ watch(
       </Transition>
     </Teleport>
 
-    <!-- 回滚选择弹窗 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="rollbackVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="rollbackRunning ? null : (rollbackVisible = false)"></div>
-          <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <DialogCloseButton :label="t('dialog_close')" :disabled="rollbackRunning" @close="rollbackVisible = false" />
-            <h3 class="g-dialog-title mb-2">{{ t('rollback_title') }}</h3>
-            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mb-4">{{ t('rollback_desc') }}</p>
+    <!-- dsh 服务版本列表弹窗（下载 / 删除 / 切换，行内显示下载与包处理进度） -->
+    <ServerVersionsDialog
+      :visible="serverDialogVisible"
+      :status="serverVersions"
+      :loading="serverLoading"
+      @close="closeServerDialog"
+      @refresh="refreshServerVersions(true)"
+      @install="onInstallVersion"
+      @cancel="onCancelVersion"
+      @remove="onRemoveVersion"
+      @switch="onSwitchVersion"
+    />
 
-            <div v-if="rollbackRunning" class="py-8 text-center">
-              <div class="inline-block animate-spin h-6 w-6 border-2 border-brand border-t-transparent rounded-full mb-2"></div>
-              <div class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('rollback_running') }}</div>
-            </div>
-
-            <template v-else>
-              <div v-if="rollbackError" class="mb-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-[#EF4444] break-words">{{ rollbackError }}</div>
-
-              <div v-if="serverBackups.length === 0 && backupsLoaded" class="py-6 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
-                {{ t('rollback_empty') }}
-              </div>
-
-              <div v-else class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32] max-h-64 overflow-auto">
-                <label
-                  v-for="b in serverBackups"
-                  :key="b.name"
-                  class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                >
-                  <input
-                    type="radio"
-                    name="rollback"
-                    :value="b.name"
-                    :checked="selectedRollback === b.name"
-                    class="accent-brand flex-shrink-0"
-                    @change="selectBackup(b.name)"
-                  />
-                  <div class="flex-1 min-w-0">
-                    <div class="text-sm font-mono text-ink dark:text-[#EDEDF0] truncate">{{ b.name }}</div>
-                    <div class="text-xs text-ink-faint dark:text-[#8A8A92]">
-                      {{ t('rollback_date') }}: {{ fmtBackupDate(b.modified) }} · {{ t('rollback_size') }}: {{ fmtSize(b.size) }}
-                    </div>
-                  </div>
-                  <!-- 删除备份 -->
-                  <button
-                    type="button"
-                    class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger dark:hover:text-[#EF4444] transition-colors"
-                    :title="t('rollback_delete')"
-                    @click.prevent="openDeleteConfirm(b.name)"
-                  >
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  </button>
-                </label>
-              </div>
-            </template>
-
-            <!-- 底部操作行：只有「回滚到该版本」这一个动作；关闭走右上角 X -->
-            <div v-if="selectedRollback && !rollbackRunning" class="g-dialog-actions">
-              <button
-                class="g-btn-secondary"
-                :disabled="!selectedRollback"
-                @click="openConfirmRollback"
-              >{{ t('rollback_to') }}</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- 回滚二次确认弹窗 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="confirmRollbackVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="confirmRollbackVisible = false"></div>
-          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <DialogCloseButton :label="t('dialog_close')" @close="confirmRollbackVisible = false" />
-            <h3 class="g-dialog-title mb-3">{{ t('rollback_confirm_title') }}</h3>
-            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('rollback_confirm_msg', { name: selectedRollback || '' }) }}</p>
-            <div class="g-dialog-actions">
-              <button class="g-btn-secondary" @click="confirmRollbackVisible = false">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-secondary" @click="doRollback">{{ t('rollback_confirm_ok') }}</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- 删除备份确认弹窗 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="deleteConfirmName" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="deleteConfirmName = null"></div>
-          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
-            <DialogCloseButton :label="t('dialog_close')" @close="deleteConfirmName = null" />
-            <h3 class="g-dialog-title mb-3">{{ t('rollback_delete_confirm_title') }}</h3>
-            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('rollback_delete_confirm_msg', { name: deleteConfirmName || '' }) }}</p>
-            <div class="g-dialog-actions">
-              <button class="g-btn-secondary" @click="deleteConfirmName = null">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-danger" @click="doDeleteBackup">{{ t('rollback_delete') }}</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- 插件市场弹窗（安装 / 更新 / 卸载） -->
+    <MarketDialog
+      :visible="marketDialogVisible"
+      :status="marketStatus"
+      @close="closeMarketDialog"
+      @install="runMarketAction('install')"
+      @update="runMarketAction('update')"
+      @remove="runMarketAction('remove')"
+      @ack="onMarketAck"
+    />
   </section>
 </template>

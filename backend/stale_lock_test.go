@@ -208,28 +208,47 @@ func TestStopWithoutAnyDshIsSafe(t *testing.T) {
 
 // --- 市场「忙」守卫 ---
 
-func TestMarketInstallBusyGuard(t *testing.T) {
-	m, _, serverDir, targetDir, calls := setupMarketTest(t)
-	extractDir, _ := stagedMarketPackage(t, "2.0.0", nil)
-	// 依赖可解析，确保走到「停 dsh 之前」的最后一道守卫（市场忙）。
-	writeResolvableDeps(t, targetDir, serverDir)
+// 市场操作（安装/卸载）跑完后的「重启 dsh」这一步仍要过忙守卫：重启会停 dsh，
+// 若此刻市场面板正在装别的插件，那次操作会被连带杀掉并留下陈旧写锁。
+// 守卫拒绝时：报错、不停 dsh；插件命令本身已经跑完（其结果保留在盘上）。
+func TestMarketOpRestartRespectsBusyGuard(t *testing.T) {
+	prevBusy, prevCmd := marketBusyFn, marketPluginCmdFn
+	prevStop, prevFree, prevStart := dshStopFn, dshPortFreeFn, startDshCapturedFn
+	t.Cleanup(func() {
+		marketBusyFn, marketPluginCmdFn = prevBusy, prevCmd
+		dshStopFn, dshPortFreeFn, startDshCapturedFn = prevStop, prevFree, prevStart
+	})
 
-	prevBusy := marketBusyFn
-	t.Cleanup(func() { marketBusyFn = prevBusy })
+	calls := []string{}
+	marketPluginCmdFn = func(*UpdateManager, []string) error { calls = append(calls, "cmd"); return nil }
+	dshStopFn = func(*UpdateManager) error { calls = append(calls, "stop"); return nil }
+	dshPortFreeFn = func(*UpdateManager, time.Duration) { calls = append(calls, "portfree") }
+	startDshCapturedFn = func(*UpdateManager) error { calls = append(calls, "start"); return nil }
+
 	marketBusyFn = func(*UpdateManager) (bool, string) { return true, "dsh-mobile@0.4.4" }
-
-	err := m.installMarket(&PendingUpdate{Kind: updateKindMarket, Version: "2.0.0"}, extractDir)
-	if err == nil {
-		t.Fatal("市场正忙时应拒绝更新")
+	m := &UpdateManager{dsh: newTestDshManager("", "")}
+	m.statuses = map[updateKind]*UpdateStatus{updateKindMarket: {Kind: updateKindMarket}}
+	if err := m.InstallMarket(); err != nil {
+		t.Fatalf("启动异步市场操作不应报错: %v", err)
 	}
-	if !strings.Contains(err.Error(), "写锁") || !strings.Contains(err.Error(), "市场") {
-		t.Fatalf("错误信息应说明原因（市场忙 → 会留下陈旧写锁），实际: %v", err)
+	// 等异步收尾：命令跑完了但重启被守卫拒绝。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st := m.getStatus(updateKindMarket)
+		if st.Error != "" || st.Phase == "done" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if len(*calls) != 0 {
-		t.Fatalf("拒绝时不应停/起 dsh: %v", *calls)
+	st := m.getStatus(updateKindMarket)
+	if st.Error == "" {
+		t.Fatalf("市场忙时应把重启失败报给用户，实际状态 %+v", st)
 	}
-	if v, _ := readMarketManifest(targetDir); v != "1.0.0" {
-		t.Fatalf("拒绝后目录不应被改动: %q", v)
+	if !strings.Contains(st.Error, "写锁") || !strings.Contains(st.Error, "市场") {
+		t.Fatalf("错误信息应说明原因（市场忙 → 会留下陈旧写锁），实际: %v", st.Error)
+	}
+	if strings.Join(calls, ",") != "cmd" {
+		t.Fatalf("被守卫拒绝时不应停/起 dsh，实际调用: %v", calls)
 	}
 }
 
@@ -291,43 +310,35 @@ func TestStopDshForReplacementRespectsGuard(t *testing.T) {
 	}
 }
 
-// applyServer 在忙时必须「拒绝且一个字节都不改」：不备份、不动 server 目录。
-func TestApplyServerRefusesWhenBusy(t *testing.T) {
+// Switch 在忙时必须「拒绝且不停 dsh、不改配置」：切版本要停 dsh，会打断插件操作。
+func TestSwitchVersionRefusesWhenBusy(t *testing.T) {
 	home := t.TempDir()
-	serverDir := filepath.Join(home, "server")
-	if err := os.MkdirAll(filepath.Join(serverDir, "node_modules"), 0o755); err != nil {
+	root := filepath.Join(home, "server", "1.2.3", "node_modules", ".bin")
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(serverDir, "marker.txt"), []byte("old"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// 解压出来的「新 server 目录」
-	extractDir := t.TempDir()
-	packed := filepath.Join(extractDir, "server")
-	if err := os.MkdirAll(packed, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(packed, "package.json"), []byte(`{"name":"server"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "dsh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	prevServerDir := serverDirFn
 	prevBusy := marketBusyFn
 	prevStop := dshStopFn
-	serverDirFn = func(*UpdateManager) string { return serverDir }
+	t.Cleanup(func() { marketBusyFn, dshStopFn = prevBusy, prevStop })
 	marketBusyFn = func(*UpdateManager) (bool, string) { return true, "dsh-better-sidebar@0.19.1" }
 	stopped := false
 	dshStopFn = func(*UpdateManager) error { stopped = true; return nil }
-	t.Setenv("TRIM_PKGVAR", filepath.Join(home, "var"))
-	t.Cleanup(func() {
-		serverDirFn, marketBusyFn, dshStopFn = prevServerDir, prevBusy, prevStop
-	})
 
-	m := &UpdateManager{renv: &RuntimeEnv{}, dsh: newTestDshManager(home, "")}
-	err := m.applyServer(extractDir)
+	prevCfg := GetConfig()
+	initConfig(&AppConfig{})
+	t.Cleanup(func() { initConfig(&prevCfg) })
+
+	renv := &RuntimeEnv{DataDir: home}
+	upd := &UpdateManager{renv: renv, dsh: newTestDshManager(home, "")}
+	upd.server = newServerManager(renv, upd.dsh, upd)
+
+	err := upd.server.Switch("1.2.3")
 	if err == nil {
-		t.Fatal("市场忙时 applyServer 应当拒绝")
+		t.Fatal("市场忙时切换 dsh 版本应当被拒绝")
 	}
 	if !strings.Contains(err.Error(), "插件市场") || !strings.Contains(err.Error(), "写锁") {
 		t.Fatalf("错误信息应说明原因，实际: %v", err)
@@ -335,16 +346,8 @@ func TestApplyServerRefusesWhenBusy(t *testing.T) {
 	if stopped {
 		t.Fatal("被拒绝时不应停止 dsh")
 	}
-	raw, readErr := os.ReadFile(filepath.Join(serverDir, "marker.txt"))
-	if readErr != nil || string(raw) != "old" {
-		t.Fatalf("被拒绝时 server 目录不应被改动: %q err=%v", raw, readErr)
-	}
-	// 也不应生成任何备份
-	entries, _ := os.ReadDir(filepath.Join(home, "var", "backup"))
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "server-") {
-			t.Fatalf("被拒绝时不应产生 server 备份: %s", e.Name())
-		}
+	if v := GetConfig().DshVersion; v != "" {
+		t.Fatalf("被拒绝时不应写入选中版本，实际 %q", v)
 	}
 }
 

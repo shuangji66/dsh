@@ -208,7 +208,7 @@ async function onAuthToggle() {
     <!-- 六个卡片自适应分栏：代理 / 端口与兼容 / node 版本与内存 / 登录鉴权 / 快捷访问 / 控制台设置。
          列数由容器宽度自动决定（见 style.css 的 .g-card-grid），窄屏自动降为单列。 -->
     <div class="g-card-grid g-fade-in">
-      <!-- ① 代理：「代理dsh」与「代理更新」两个开关 + 共用的代理地址（任一开启时显示） -->
+      <!-- ① 代理：「代理dsh」与「代理harness更新」两个开关 + 共用的代理地址（任一开启时显示） -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_proxy') }}
@@ -224,8 +224,9 @@ async function onAuthToggle() {
         </label>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_enable_proxy_hint') }}</p>
 
-        <!-- 代理更新：只控制 harness 与 dsh 服务更新是否先从代理走（探测不通回退直连），
-             与上面的「代理dsh」相互独立；插件市场下载始终直连。 -->
+        <!-- 代理harness更新：只控制 **harness 控制台自身** 的更新是否先从代理走
+             （探测不通自动回退直连），与上面的「代理dsh」相互独立。
+             dsh 版本安装与插件市场安装都是直连 npm 镜像源，不受这个开关影响。 -->
         <label class="mt-4 flex items-center justify-between gap-3 cursor-pointer select-none">
           <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_proxy_update') }}</span>
           <span class="relative inline-flex items-center flex-shrink-0">
@@ -234,7 +235,6 @@ async function onAuthToggle() {
             <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
           </span>
         </label>
-        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_update_hint') }}</p>
 
         <!-- 代理地址：两个开关共用，任一开启即显示 -->
         <div v-if="config.proxyEnabled || config.proxyUpdate" class="mt-4">
@@ -439,7 +439,7 @@ async function onAuthToggle() {
             <button
               type="button"
               class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger dark:hover:text-[#EF4444] transition-colors"
-              :title="t('rollback_delete')"
+              :title="t('access_urls_remove')"
               @click="removeAccessUrl(i)"
             >
               <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>

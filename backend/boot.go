@@ -37,7 +37,21 @@ const (
 	phaseFailed = "failed"
 	// phaseDisabled：未自动启动 dsh（HARNESS_AUTOSTART=0）。
 	phaseDisabled = "disabled"
+	// phaseNotInstalled：本机没有任何可用的 dsh 版本（`<数据目录>/server/` 下没有
+	// 选中的版本目录）。它不是「故障」而是「还没装」：等待页会提示去控制台概览页
+	// 下载并切换一个版本（见 proxy.go 的等待页文案）。
+	phaseNotInstalled = "not-installed"
 )
+
+// userActionPhase 报告某个启动阶段是否需要用户动手（等待页显示说明、不再转圈，
+// 且反代不会把它改写成 starting/stopped/auth）。
+func userActionPhase(phase string) bool {
+	switch phase {
+	case phaseFailed, phaseDisabled, phaseNotInstalled:
+		return true
+	}
+	return false
+}
 
 // proxyState 是反代对外呈现的就绪状态：phase 供等待页显示文案，ready 表示可以
 // 放行（转发给 dsh）。同一份值同时用于等待页的首屏渲染与 /_ready 轮询响应，

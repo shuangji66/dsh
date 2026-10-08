@@ -878,6 +878,13 @@ func (m *DshManager) buildEnv() []string {
 		if prefix := nodeVersionBinPrefix(cfg.NodeVersion); prefix != "" {
 			pathVal = prefix + ":" + pathVal
 		}
+		// 当前选中的 dsh 版本自带的 node_modules/.bin 前置到 PATH：dsh 本体与它派生
+		// 的 CLI 子进程（`dsh plugin …`）都按 PATH 解析可执行文件，插件安装时 pnpm
+		// 也要靠这条路径找到 dsh 的 CLI。没有选中版本（未安装）时不前置，PATH 保持
+		// 平台原样（这种状态下 Start() 会直接拒绝启动，见 Start）。
+		if v := m.selectedDshVersion(); v != "" {
+			pathVal = versionBinDirFor(m.renv, v) + ":" + pathVal
+		}
 		set("PATH=", pathVal)
 	}
 	// HOME 使用“当前主目录”（可能已在资源页被切换为某个已授权目录的实际路径），
@@ -958,8 +965,14 @@ func (m *DshManager) Start() error {
 	if m.cmd != nil && m.cmd.Process != nil && m.stopped() {
 		m.reapCmd(m.cmd)
 	}
-	// dsh 可执行文件统一按 PATH 解析（node_modules/.bin/dsh），不再用额外覆盖。
-	bin := "dsh"
+	// dsh 可执行文件必须用**选中版本的绝对路径**（见 dshBinPath）。
+	// 不能用 exec.Command("dsh")：它按 harness 自己的 PATH 做 LookPath，而不是我们要
+	// 下发给子进程的 PATH —— 旧形态靠 fpk 注入的 target/server/node_modules/.bin 才能
+	// 解析到，那条路径在新形态（版本装在数据目录下）里并不存在。
+	bin, err := m.dshBinPath()
+	if err != nil {
+		return err
+	}
 	// 启动前自愈：清掉持有者已不存在的 profile 写锁。上一次 dsh 被停掉/被杀死时，
 	// plugin-manager 可能来不及删除它的 `package.json.lock`，那份陈旧锁会让之后
 	// 所有插件操作白等 120 秒再失败（见 cleanStaleProfileLocks）。
@@ -1254,8 +1267,37 @@ func (m *DshManager) cleanStaleProfileLocks() int {
 	return cleaned
 }
 
+// selectedDshVersion 返回当前选中的 dsh 版本（配置里的版本号，且该版本确实装着）；
+// 未安装/未选中任何版本时返回空串。
+func (m *DshManager) selectedDshVersion() string {
+	v := strings.TrimSpace(GetConfig().DshVersion)
+	if v == "" || !validVersionArg(v) {
+		return ""
+	}
+	if !dshVersionInstalled(versionDirFor(m.renv, v)) {
+		return ""
+	}
+	return v
+}
+
+// dshBinPath 返回当前选中版本里 dsh 可执行文件的绝对路径；未安装任何版本时报错。
+//
+// 这是 dsh 侧唯一的可执行文件解析入口：启动 dsh、执行 `dsh plugin …`、`dsh -V` 都走它，
+// 保证「控制台操作的是哪个版本」与「启动的是哪个版本」永远是同一个（见 server.go）。
+func (m *DshManager) dshBinPath() (string, error) {
+	v := m.selectedDshVersion()
+	if v == "" {
+		return "", fmt.Errorf("尚未安装 dsh 服务：请在控制台概览页的 dsh 版本列表里下载并切换一个版本（安装目录 %s）", serverRootFor(m.renv))
+	}
+	bin := versionDshBinFor(m.renv, v)
+	if fi, err := os.Stat(bin); err != nil || !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("dsh %s 的可执行文件不存在（%s），请重新下载该版本", v, bin)
+	}
+	return bin, nil
+}
+
 // runDshCmd 以 dsh 的运行环境执行 `dsh <args...>`（如 `dsh -V` 获取版本号），
-// 返回合并后的 stdout/stderr 输出。dsh 可执行文件统一按 PATH 解析。
+// 返回合并后的 stdout/stderr 输出。dsh 可执行文件取当前选中版本的绝对路径。
 func (m *DshManager) runDshCmd(args ...string) (string, error) {
 	return m.runDshCmdTimeout(0, args...)
 }
@@ -1263,7 +1305,11 @@ func (m *DshManager) runDshCmd(args ...string) (string, error) {
 // runDshCmdTimeout 与 runDshCmd 相同，但 timeout > 0 时到点终止子进程并返回错误，
 // 避免命令挂死时把调用方（控制台 HTTP 请求）一起拖住、并不断堆积 dsh 子进程。
 func (m *DshManager) runDshCmdTimeout(timeout time.Duration, args ...string) (string, error) {
-	cmd := exec.Command("dsh", args...)
+	bin, err := m.dshBinPath()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Env = m.buildEnv()
 	var out bytes.Buffer
 	cmd.Stdout = &out

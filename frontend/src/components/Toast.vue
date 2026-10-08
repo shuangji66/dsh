@@ -35,7 +35,7 @@ const typeIcon = computed(() => {
   >
     <div
       v-if="toast.visible"
-      class="fixed top-5 left-1/2 -translate-x-1/2 z-50 w-auto max-w-[90%] sm:max-w-sm shadow-card rounded-xl pointer-events-auto flex items-center p-3 sm:p-4 text-white"
+      class="fixed top-5 left-1/2 -translate-x-1/2 z-[100] w-auto max-w-[90%] sm:max-w-sm shadow-card rounded-xl pointer-events-auto flex items-center p-3 sm:p-4 text-white"
       :class="typeClass"
       role="alert"
     >

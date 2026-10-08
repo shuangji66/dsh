@@ -40,28 +40,36 @@ func pluginGuardFixture(t *testing.T) (*AdminMux, string, string, string) {
 		t.Fatal(err)
 	}
 
-	prev := GetConfig()
-	t.Cleanup(func() { initConfig(&prev) })
-	cfg := defaultConfig()
-	// 端口取一个不会命中本机真实 dsh 进程的值（Stop/扫描 /proc 时会用到）。
-	cfg.DshPort = 65535
-	initConfig(&cfg)
-
-	// 把 PATH 换成只含假 dsh 的目录：即便某个入口漏了校验（旧代码），也只会执行
-	// 我们的假脚本并留下标记文件，而不会真的去动宿主机上的 dsh 安装。
-	binDir := t.TempDir()
+	// 造一个「已安装并选中」的假 dsh 版本：控制台现在按选中版本的**绝对路径**执行
+	// `dsh plugin …`（见 server.go / dshBinPath），不再依赖 PATH 里恰好有一份 dsh。
+	// 即便某个入口漏了校验（旧代码），也只会执行我们的假脚本并留下标记文件，
+	// 而不会真的去动宿主机上的 dsh 安装。
+	dataDir := t.TempDir()
+	binDir := filepath.Join(dataDir, "server", "1.2.3", "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(t.TempDir(), "dsh-ran")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + marker + "\n"
 	if err := os.WriteFile(filepath.Join(binDir, "dsh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", binDir)
 
+	prev := GetConfig()
+	t.Cleanup(func() { initConfig(&prev) })
+	cfg := defaultConfig()
+	// 端口取一个不会命中本机真实 dsh 进程的值（Stop/扫描 /proc 时会用到）。
+	cfg.DshPort = 65535
+	cfg.DshVersion = "1.2.3"
+	initConfig(&cfg)
+
+	renv := &RuntimeEnv{Home: home, Path: binDir, DataDir: dataDir, ConfigFile: filepath.Join(t.TempDir(), "config.json")}
 	dsh := newTestDshManager(home, "")
+	dsh.renv = renv
 	m := &AdminMux{
-		renv:   &RuntimeEnv{Home: home, Path: binDir, ConfigFile: filepath.Join(t.TempDir(), "config.json")},
+		renv:   renv,
 		dsh:    dsh,
-		update: &UpdateManager{dsh: dsh},
+		update: &UpdateManager{renv: renv, dsh: dsh},
 	}
 	return m, statePath, marker, profileWeb
 }

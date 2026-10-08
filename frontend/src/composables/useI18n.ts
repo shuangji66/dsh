@@ -441,6 +441,8 @@ const zh: Record<string, string> = {
   market_removing: '正在卸载插件市场…',
   market_busy_hint: '安装/卸载由 dsh 的插件命令完成，完成后会自动重启 dsh 服务使变更生效（期间服务短暂中断）。',
   market_not_installed_desc: '尚未安装插件市场。安装后即可在市场里浏览、安装与管理插件。',
+  // dsh 未就绪时查不到「装没装」：不能说成「未安装」，等 dsh 起来后后端会自动重查。
+  market_detect_unavailable: '暂时查不到插件市场版本：dsh 服务还没就绪（启动中或已停止）。dsh 起来后会自动重新检测。',
   market_install_target: '将安装最新版本：{v}',
   // 「检查更新」按钮在这个弹窗的被遮住的版本行上，弹窗内点不到 —— 文案要指向能做的事。
   market_latest_unknown: '暂时取不到最新版本号。可先关闭本弹窗，在概览页点「检查更新」重试。',
@@ -961,6 +963,8 @@ const en: Record<string, string> = {
   market_removing: 'Removing the plugin market…',
   market_busy_hint: "Install and removal run through the dsh plugin command; dsh restarts afterwards so the change takes effect (a short service interruption).",
   market_not_installed_desc: 'The plugin market is not installed yet. Install it to browse, install and manage plugins from the market.',
+  // The dsh service is not ready, so whether the market is installed is unknown — not "not installed".
+  market_detect_unavailable: 'The plugin market version is not known right now: the dsh service is not ready yet (starting or stopped). It is re-checked automatically once dsh is up.',
   market_install_target: 'The latest version will be installed: {v}',
   market_latest_unknown:
     'The latest version is not known right now. Close this dialog and press "Check" on the overview page to retry.',

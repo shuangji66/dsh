@@ -128,6 +128,15 @@
   bundle），检测靠 `dsh plugin --profile web list`，安装/更新/卸载靠
   `dsh plugin --profile web add|remove`，镜像源与 `server.go` 同一套；没有备份/回滚。
   这里还放着所有「停 dsh 前」共用的忙守卫（`replaceBusyGuard` / `stopDshForReplacement`）。
+  **「查不到」不等于「未安装」**：那条检测命令在 dsh 就绪前必然失败，失败时置
+  `UpdateStatus.Unavailable`（前端版本行显示「—」、市场弹窗不给安装入口），**保留**上一次
+  已知的版本号，并且只有命令成功退出才写 `LocalVersion`（空 = 真没装 →「未安装」）。
+  本地检测结果**只能**经 `applyMarketLocalResult` 写进状态（别在各处再写一遍
+  `st.LocalVersion = snap.Version`，那会把「查不了」写成「未安装」）；检测失败的结果
+  不进缓存。既然「查不到」是常态，每个「dsh 就绪」的时刻都要经
+  `RefreshMarketAfterDshStart()` 补查一次（启动流水线收尾 / 概览页启动·重启 dsh /
+  切换 dsh 版本），否则「—」会挂到下一次小时级检测。回归测试见
+  `backend/market_unavailable_test.go`。
 - `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
 - `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`）。
@@ -287,6 +296,8 @@
      直接返回（不联网、不起子进程）；刷新的入口只有「弹窗里的刷新」「后台自动检测 / 手动检查」
      与「市场装/卸完成」三处。这两个查询一个要打三个镜像源、一个要起 1~3 秒的
      `dsh plugin list` 子进程，被状态重算/页面打开这些高频场合反复触发过。
+     市场本地检测有两个**刻意**的例外（见上面 `market.go` 那条）：检测**失败**的结果不写进
+     缓存，且每个「dsh 刚就绪」的时刻补查一次 —— 否则「查不了」会被缓存住、界面一直显示「—」。
    - **附件 fsync 补丁必须在 `npm install` 之后由控制台补上**（`patchAttachmentFsync`）：
      dsh 的 attachment-local 会逐级上溯 fsync 到 `/`，而 fnOS 的 `/vol1`、
      `/vol1/@appshare` 是 mode 000（trim_acl 只给穿越），非 root 读不了 → `EACCES` →

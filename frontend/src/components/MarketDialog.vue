@@ -33,6 +33,10 @@ const { t } = useI18n()
 const installed = computed(() => !!props.status.localVersion)
 const latest = computed(() => props.status.latestVersion || '')
 const hasUpdate = computed(() => props.status.hasUpdate)
+// 「查不了」：dsh 服务未就绪（启动中 / 已停止 / 没选中版本）时 `dsh plugin list` 跑不了，
+// 这时 localVersion 为空**不等于「未安装」**—— 弹窗只能说「暂时查不到」，也不能给安装入口
+// （装过没装过都不知道）。见后端 UpdateStatus.Unavailable。
+const unknown = computed(() => !!props.status.unavailable)
 
 // 进行中（安装/卸载）：禁用关闭与一切动作按钮；进度只能等它跑完（后端不支持取消）。
 const phase = computed(() => props.status.phase || '')
@@ -108,13 +112,18 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
             </div>
             <!-- 未安装：说明用正文档（text-sm + ink-soft，见 style.css 的弹窗字号约定），
                  要装的版本号是元信息，用 text-xs + ink-faint。 -->
+            <!-- 查不到（dsh 未就绪）：不能断言「未安装」，也不给安装入口 —— 只说清原因，
+                 等 dsh 起来后后端会自动重查（见 RefreshMarketAfterDshStart）。 -->
+            <p v-else-if="unknown" class="text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
+              {{ t('market_detect_unavailable') }}
+            </p>
             <p v-else class="text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
               {{ t('market_not_installed_desc') }}
             </p>
-            <p v-if="!installed && latest" class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">
+            <p v-if="!installed && !unknown && latest" class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">
               {{ t('market_install_target', { v: latest }) }}
             </p>
-            <p v-if="!installed && !latest" class="mt-2 text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
+            <p v-if="!installed && !unknown && !latest" class="mt-2 text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
               {{ t('market_latest_unknown') }}
             </p>
 
@@ -124,20 +133,21 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
               class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]"
             >{{ uiText(status.error, status.errorRef) }}</div>
 
-            <!-- 已安装但检测不到更新信息（检测失败）：给出诊断原因 -->
+            <!-- 检测诊断：已安装但查不到更新信息（镜像源失败）、或本地检测本身查不了
+                 （dsh 未就绪）时，给出去不掉的原因。 -->
             <div
-              v-if="installed && !latest && !status.error && status.marketDir"
+              v-if="!status.error && status.marketDir && (unknown || (installed && !latest))"
               class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] text-ink-soft dark:text-[#A6A6AD]"
             >{{ status.marketDir }}</div>
           </template>
 
-          <!-- 底部动作：未安装 → 安装；已安装 → 更新（有新版时）/ 卸载 -->
+          <!-- 底部动作：未安装 → 安装；已安装 → 更新（有新版时）/ 卸载；查不到 → 不给动作 -->
           <div v-if="!busy" class="g-dialog-actions">
             <template v-if="installed">
               <button v-if="hasUpdate" class="g-btn-warning" @click="emit('update')">{{ t('market_update_btn') }}</button>
               <button class="g-btn-danger" @click="removeConfirm = true">{{ t('market_remove_btn') }}</button>
             </template>
-            <button v-else class="g-btn-secondary" @click="emit('install')">{{ t('market_install_btn') }}</button>
+            <button v-else-if="!unknown" class="g-btn-secondary" @click="emit('install')">{{ t('market_install_btn') }}</button>
           </div>
         </div>
       </div>

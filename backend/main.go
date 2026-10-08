@@ -227,6 +227,12 @@ func main() {
 		logInfo("HARNESS_AUTOSTART=0, dsh not auto-started, skipping node-pty installation")
 	}
 
+	// 启动流水线收尾（或明确不自动启动）之后，重查一次插件市场版本：市场版本只能靠
+	// `dsh plugin --profile web list` 查，而启动初期那次探测（见 newUpdateManager）很可能
+	// 撞上「dsh 还没起来」而以「查不了」收场（界面显示「—」）。这里才是能查的时刻
+	// （dsh 已启动 + 依赖已装好）；异步执行，不拖慢启动。
+	upd.RefreshMarketAfterDshStart()
+
 	// 等待退出信号
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)

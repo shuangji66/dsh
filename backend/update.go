@@ -177,6 +177,12 @@ type UpdateStatus struct {
 	// 市场安装位置诊断（仅 kind=market）：`dsh plugin --profile web list` 的原始输出，
 	// 用于解释「没检测到市场」这类情况。
 	MarketDir string `json:"marketDir,omitempty"`
+	// Unavailable（仅 kind=market）表示**这次没能查到**本机装的市场是哪一版：dsh 服务
+	// 未就绪（启动中 / 已停止 / 没选中任何版本）或 `dsh plugin --profile web list` 报错。
+	// 这时 LocalVersion 为空**不代表「未安装」**—— 前端据此显示「—」而不是「未安装」，
+	// 否则用户在 dsh 还没起来时会以为市场没装。
+	// 首帧（进程刚起、还没检测过）也是这个状态：没检测过 = 不知道。
+	Unavailable bool `json:"unavailable,omitempty"`
 	// Seq 是「第几次操作」的序号（目前只有插件市场写它，见 runMarketOp）：前端用它给
 	// 「操作结果只提示一次」去重 —— 只按 phase/error 去重时，第二次同样的结果
 	// （装成功后再卸成功，phase 都是 done/error 都为空）会被静默吞掉。
@@ -263,9 +269,14 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	// 市场（dshmarket）的本地检测要起一个 `dsh plugin --profile web list` 子进程
 	// （约 1~3 秒），因此**异步**做：控制台启动路径不能被它拖住。检测结果经 SSE 推给
 	// 前端；最新版等 checkOnce/手动检查时才查镜像源。
-	m.statuses[updateKindMarket] = &UpdateStatus{Kind: updateKindMarket}
+	// 初始 Unavailable=true：这一刻还没检测过，界面显示「—」（而不是「未安装」）；
+	// 第一次检测出结论后由 applyMarketLocalResult 改掉。
+	m.statuses[updateKindMarket] = &UpdateStatus{Kind: updateKindMarket, Unavailable: true}
 	go func() {
 		// 稍等一会再检测：让启动流水线（含 dsh 自身的启动）先走完，避免与它抢 profile。
+		// 这一次**只是尽早拿到结果**：它很可能撞上「dsh 还没起来」而失败，那时状态是
+		// 「查不了」（界面「—」）；启动流水线收尾时 main.go 会再查一次（见
+		// RefreshMarketAfterDshStart）。
 		// force=true：缓存此时是空的（或上一轮的旧值），启动这一次要拿到当下的真实安装情况。
 		time.Sleep(5 * time.Second)
 		m.refreshMarketLocal(true)
@@ -923,6 +934,25 @@ func (m *UpdateManager) checkOnce() {
 		logInfo("%s update available: %s -> %s",
 			updateLogTag(updateKindMarket), ms.LocalVersion, ms.LatestVersion)
 	}
+}
+
+// RefreshMarketAfterDshStart 在 dsh 刚（重新）启动起来之后重查一次「本机装的市场是哪一版」。
+//
+// 为什么需要它：市场版本只能靠 `dsh plugin --profile web list` 查，而这条命令在 dsh 起来
+// 之前必然失败；失败的结论是「查不了」（UpdateStatus.Unavailable → 界面「—」）。因此每一个
+// 「dsh 就绪」的时刻都要跟一次重查，否则「—」会一直挂到下一次小时级检测或用户手动检查：
+//   - 控制台启动流水线收尾（dsh 起来 + 依赖装好，见 main.go）；
+//   - 概览页的「启动 / 重启 dsh」（见 admin.go）；
+//   - 切换 dsh 版本（见 server.go 的 Switch）。
+//
+// 异步执行：探测要起 1~3 秒的只读子进程，调用方（HTTP handler / 启动流水线）不该等它。
+func (m *UpdateManager) RefreshMarketAfterDshStart() {
+	go func() {
+		// 稍等一小段：dsh 刚启动时还在装配 profile / 插件树，立刻查容易撞上「还没写好」
+		// 的假失败（与市场变更后重启 dsh 那条路径等 marketReadySettle 同一个理由）。
+		time.Sleep(marketReadySettle)
+		m.refreshMarketLocal(true)
+	}()
 }
 
 // startAutoCheck 启动每小时一次的自动检测后台任务。

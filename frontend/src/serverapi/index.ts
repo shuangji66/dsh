@@ -187,6 +187,10 @@ export interface UpdateStatus {
   messageRef?: UIRef
   // 仅市场：`dsh plugin --profile web list` 的检测诊断（解释「为什么检测不到」）。
   marketDir?: string
+  // 仅市场：这次**没查到**本机装的是哪一版（dsh 服务未就绪 / 没选中版本 / 命令报错）。
+  // 为真时 localVersion 为空**不代表「未安装」**—— 界面上显示「—」而不是「未安装」。
+  // 首帧（还没检测过）也是 true：没检测过 = 不知道。
+  unavailable?: boolean
   // 仅市场：第几次市场操作（后端每次安装/更新/卸载自增）。前端「结果只提示一次」用它
   // 做去重键 —— 只按 phase+error 去重时，「装成功」之后「卸载成功」的结果会被吞掉。
   seq?: number

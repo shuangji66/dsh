@@ -614,6 +614,8 @@ func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 	// 换取 dsh 会话 cookie（反代转发时携带该 cookie），并标记本代凭据已落定，
 	// 否则反代会一直停在等待页（见 DshManager.SessionSettled）。
 	go captureDshSession(m.dsh)
+	// dsh 起来了才查得到插件：让市场版本从「—」变成实际值（见 RefreshMarketAfterDshStart）。
+	m.update.RefreshMarketAfterDshStart()
 	writeJSON(w, m.dsh.Status())
 }
 
@@ -637,6 +639,8 @@ func (m *AdminMux) restartDsh() error {
 	// 重启后等待并捕获新的访问 token（每次启动 dsh 都会生成新的 token），用 token
 	// 换取 dsh 会话 cookie，并标记本代凭据已落定（反代据此放行等待页）。
 	go captureDshSession(m.dsh)
+	// dsh 起来了才查得到插件：让市场版本从「—」变成实际值（见 RefreshMarketAfterDshStart）。
+	m.update.RefreshMarketAfterDshStart()
 	return nil
 }
 

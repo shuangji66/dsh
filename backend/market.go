@@ -94,6 +94,10 @@ func (m *UpdateManager) marketInstalled() (version string, ok bool, err error) {
 }
 
 // marketLocalSnapshot 是「本地检测」的结果（不联网）。
+//
+// Err 非空表示**查不了**（dsh 未就绪 / 没选中版本 / 命令报错），与「查到了，没装」
+// （Err == nil 且 Version == ""）是两件事 —— 界面上前者显示「—」、后者显示「未安装」，
+// 见 applyMarketLocalResult。
 type marketLocalSnapshot struct {
 	Version string
 	Diag    string // 检测失败/未安装的原因（诊断用，进 MarketDir 字段）
@@ -107,7 +111,7 @@ type marketLocalSnapshot struct {
 // 每次都跑一遍既慢又容易和 profile 写锁打架。
 //
 // 重跑的入口（force=true）：市场安装/卸载完成（结果变了，必须重查）、后台自动检测、
-// 手动「检查更新」。缓存为空时（控制台刚启动）也会先跑一次。
+// 手动「检查更新」，以及「dsh 刚就绪」的时刻（见 RefreshMarketAfterDshStart）。
 func (m *UpdateManager) detectMarketLocal(force bool) marketLocalSnapshot {
 	if !force {
 		m.marketLocalMu.Lock()
@@ -120,7 +124,14 @@ func (m *UpdateManager) detectMarketLocal(force bool) marketLocalSnapshot {
 	}
 	snap := m.probeMarketLocal()
 	m.marketLocalMu.Lock()
-	m.marketLocalCache = &snap
+	if snap.Err != nil {
+		// 「查不了」的结果不进缓存：缓存只装**确定的结论**（装了哪一版 / 没装）。把失败
+		// 缓存住，界面上的「—」就会一直挂到下一次触发（最坏一小时）；而重新探测很便宜 ——
+		// 没选中版本时立刻返回，否则也只是一个 1~3 秒的只读子进程。
+		m.marketLocalCache = nil
+	} else {
+		m.marketLocalCache = &snap
+	}
 	m.marketLocalMu.Unlock()
 	return snap
 }
@@ -137,17 +148,36 @@ func (m *UpdateManager) probeMarketLocal() marketLocalSnapshot {
 	return marketLocalSnapshot{Version: v}
 }
 
+// applyMarketLocalResult 把一次本地检测结果写进市场状态。
+//
+// 两条铁律（错了界面就会说谎）：
+//   - **查不了 ≠ 没装**：snap.Err != nil（dsh 未就绪、没选中版本、命令报错）时置
+//     Unavailable，前端据此显示「—」；只有**确定**查到了（Err == nil）才写 LocalVersion
+//     —— 否则「查不到」会退化成「未安装」，正是 dsh 还没起来时最容易看到的错话。
+//   - **查不了时保留上一次已知的版本号**：已经知道装的是 1.66.11，就不该因为一次探测失败
+//     把它清成空 —— 那比留着旧值更像谎话（插件不会因为 dsh 重启就消失）。
+//
+// HasUpdate（红点）也在这里统一算：只有「已知本地版本」且「最新版更高」时才亮。
+func applyMarketLocalResult(st *UpdateStatus, snap marketLocalSnapshot) {
+	st.Unavailable = snap.Err != nil
+	if snap.Err == nil {
+		st.LocalVersion = snap.Version
+	}
+	// 诊断文本照写（含清空）：查不到是「为什么查不到」，查到了就该把上一次的原因抹掉，
+	// 否则弹窗里会挂着一条已经过时的解释。
+	st.MarketDir = snap.Diag
+	st.HasUpdate = st.LocalVersion != "" && st.LatestVersion != "" &&
+		compareVersion(st.LatestVersion, st.LocalVersion) > 0
+}
+
 // refreshMarketLocal 刷新本地检测并把「当前装的是哪一版」写进市场状态。
 // force=false 时吃缓存（启动时先让界面有版本号可用，不额外起子进程）。
-// 保留 LatestVersion/HasUpdate 的既有值。
+// 保留 LatestVersion 的既有值（HasUpdate 由 applyMarketLocalResult 统一算）。
 func (m *UpdateManager) refreshMarketLocal(force bool) marketLocalSnapshot {
 	snap := m.detectMarketLocal(force)
 	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 		st.Kind = updateKindMarket
-		st.LocalVersion = snap.Version
-		st.MarketDir = snap.Diag
-		st.HasUpdate = snap.Version != "" && st.LatestVersion != "" &&
-			compareVersion(st.LatestVersion, snap.Version) > 0
+		applyMarketLocalResult(st, snap)
 	})
 	return snap
 }
@@ -191,31 +221,37 @@ func (m *UpdateManager) refreshMarketStatus() {
 	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 		st.Kind = updateKindMarket
 		st.CheckedAt = now
-		st.LocalVersion = snap.Version
-		st.MarketDir = snap.Diag
+		// 本地那一半走同一个入口：查不了 → Unavailable（界面「—」）并保留旧版本号。
+		applyMarketLocalResult(st, snap)
 		st.ReleaseNotes = ""
 		if err != nil {
 			st.LatestVersion = ""
+			// 镜像源没答上时无法比较版本，红点必须熄掉（本地状态仍由上面维护）。
 			st.HasUpdate = false
 			setErrFields(&st.Error, &st.ErrorRef, err)
 			return
 		}
 		setErrFields(&st.Error, &st.ErrorRef, nil)
 		st.LatestVersion = latest
-		st.HasUpdate = snap.Version != "" && compareVersion(latest, snap.Version) > 0
+		st.HasUpdate = st.LocalVersion != "" && compareVersion(latest, st.LocalVersion) > 0
 	})
 }
 
 // marketInfo 返回供 /api/market/info 使用的诊断快照：只读、不联网、不起子进程
 // （本地检测吃缓存；没有缓存时才会真的查一次）。
+//
+// available=false 表示**没查到**（dsh 未就绪 / 命令报错），此时 installed=false 只表示
+// 「不知道」，不是「没装」—— 调用方别把它当否命题用。
 func (m *UpdateManager) marketInfo() map[string]interface{} {
 	snap := m.detectMarketLocal(false)
 	st := m.getStatus(updateKindMarket)
-	updatable := snap.Version != "" && st.LatestVersion != "" &&
+	available := snap.Err == nil
+	updatable := available && snap.Version != "" && st.LatestVersion != "" &&
 		compareVersion(st.LatestVersion, snap.Version) > 0
 	return map[string]interface{}{
 		"ok":        true,
-		"installed": snap.Version != "",
+		"available": available,
+		"installed": available && snap.Version != "",
 		"version":   snap.Version,
 		"latest":    st.LatestVersion,
 		"updatable": updatable,
@@ -390,16 +426,15 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 		}
 		logInfo("[market] %s finished", actionLog)
 		// force=true：刚装/卸完市场，本地版本确实变了，必须重查（不能吃缓存）。
-		snap := m.refreshMarketLocal(true)
+		// 这次重查已经把 LocalVersion/Unavailable/HasUpdate 都写好了（含「查不了时保留
+		// 上一次已知版本」的语义）—— 这里只补终态字段，别再用 snap.Version 覆盖一遍：
+		// 那会把一次失败重查的结果当成「未安装」写回去（见 applyMarketLocalResult）。
+		m.refreshMarketLocal(true)
 		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 			st.Seq = seq
 			st.Phase = "done"
 			setErrFields(&st.Error, &st.ErrorRef, nil)
 			setMsgFields(&st.Message, &st.MessageRef, "", "")
-			st.LocalVersion = snap.Version
-			if st.LatestVersion != "" {
-				st.HasUpdate = compareVersion(st.LatestVersion, snap.Version) > 0
-			}
 		})
 	}()
 	return nil

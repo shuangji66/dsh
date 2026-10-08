@@ -255,6 +255,16 @@ function hasUpdateDot(kind: UpdateKind): boolean {
 function versionText(kind: UpdateKind): string {
   return statusOf(kind).localVersion
 }
+// 版本行的显示文本（dsh 服务行与插件市场行用）。空版本号有两种含义，必须分开：
+//   - 「查不了」（unavailable，目前只有市场会置位：dsh 服务未就绪 / 没选中版本 /
+//     `dsh plugin list` 报错）→ 显示「—」：这时我们**不知道**装没装，写「未安装」
+//     就是在说假话（dsh 还没起来时最容易看到）；
+//   - 明确查到了、只是没装 → 「未安装」。
+function versionLabel(kind: UpdateKind): string {
+  const st = statusOf(kind)
+  if (st.localVersion) return st.localVersion
+  return st.unavailable ? '—' : t('not_installed')
+}
 function latestText(kind: UpdateKind): string {
   return statusOf(kind).latestVersion
 }
@@ -802,7 +812,7 @@ watch(
           <!-- 版本号：点击打开 dsh 版本列表（下载 / 删除 / 切换）。「未安装」时同样
                可点 —— 那正是用户需要去装一个版本的入口。 -->
           <button class="relative font-mono text-sm font-semibold text-ink dark:text-white underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50" @click="openDialog('dsh')">
-            {{ versionText('dsh') || t('not_installed') }}
+            {{ versionLabel('dsh') }}
             <span v-if="hasUpdateDot('dsh')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <!-- 检查更新：与 dsh 回退图标成对（见 CheckUpdateButton.vue） -->
@@ -814,12 +824,13 @@ watch(
       <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
         <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_market_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
-          <!-- 版本号：点击打开市场弹窗（未安装 → 安装最新版；已安装 → 更新 / 卸载） -->
+          <!-- 版本号：点击打开市场弹窗（未安装 → 安装最新版；已安装 → 更新 / 卸载）。
+               dsh 未就绪时查不到装没装，显示「—」（见 versionLabel）—— 那不是「未安装」。 -->
           <button
             class="relative font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50 text-ink dark:text-white"
             @click="openDialog('market')"
           >
-            {{ versionText('market') || t('not_installed') }}
+            {{ versionLabel('market') }}
             <span v-if="hasUpdateDot('market')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <CheckUpdateButton :checking="checking.market" :label="t('update_check')" @check="doCheck('market')" />

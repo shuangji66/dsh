@@ -1206,6 +1206,9 @@ func (m *ServerManager) Switch(version string) error {
 			// 补一次 node-pty 校正：控制台启动时若处于「未安装」，主流程那次校正被跳过了
 			// （dsh 压根没起来），这里一起补上；需要重建依赖时会再重启一次 dsh。
 			m.upd.ensureNodePtyAfterBoot()
+			// 换版本前若因「没装 dsh」而查不到市场版本（界面「—」），换完之后必须重查一次，
+			// 否则「—」会一直挂着（见 RefreshMarketAfterDshStart）。
+			m.upd.RefreshMarketAfterDshStart()
 		}()
 	}
 	return nil

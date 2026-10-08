@@ -57,7 +57,8 @@
 }
 
 /* 移动端底部导航的占用高度 = 内容高度 3.5rem + iOS 底部安全区（Home Indicator）。
-   App.vue 的导航条按同一式子增高、主内容区按它预留底部空间，终端页高度也按它扣减，
+   App.vue 的导航条按同一式子增高、main 的高度按它扣减（移动端 main 就是「底栏上沿以上
+   的那块滚动区」，滚动条因此止于底栏上方、不会压到 fixed 底栏上），终端页高度也按它扣减，
    几处必须保持一致。
    注意 env(safe-area-inset-*) 需要 index.html 里 viewport-fit=cover 才返回非零值。
    --kb-inset / --vv-h 由 useKeyboardInset 在键盘弹起时写入（分别是键盘遮挡高度与可视
@@ -83,18 +84,26 @@ html[data-kb] .mobile-bottom-nav {
 html[data-kb] .terminal-page {
   height: var(--vv-h);
 }
-/* 键盘弹起 + 终端页在场时，连文档的滚动一起锁死。
+/* 键盘弹起 + 终端页在场时，连滚动一起锁死。
    终端页自身高度已经是可视视口高度（--vv-h），但 App 根节点的 min-h-screen 与 main 给
-   键盘预留的 padding-bottom（--kb-inset）仍让文档比可视视口高出一大截 —— 手指在终端上
-   拖拽时浏览器会顺着祖先链滚到文档上，整个终端页（含底部辅助键栏）被拖着上移，键栏就
-   不再贴着键盘顶边。html/body 一起设 overflow:hidden，超出的那截直接裁掉、不参与滚动。
+   键盘预留的 padding-bottom（--kb-inset）仍可能让外层比可视视口高出一截 —— 手指在终端上
+   拖拽时浏览器会顺着祖先链滚到外层容器上，整个终端页（含底部辅助键栏）被拖着上移，键栏
+   就不再贴着键盘顶边。html/body 一起设 overflow:hidden，超出的那截直接裁掉、不参与滚动。
    用 :has(.terminal-page) 限定范围：终端页被 KeepAlive 切走后其 DOM 不在文档里，选择器
    自然不匹配；其它页面键盘弹起时仍需正常滚动（要能滚到被键盘挡住的输入框）。
-   overscroll-behavior 阻断「滚到边界继续传给上层容器」的链式滚动。 */
+   overscroll-behavior 阻断「滚到边界继续传给上层容器」的链式滚动。
+
+   另外把 main（移动端唯一的滚动容器，见 App.vue）退回内容高度：文档锁死之后，能滚的
+   就只剩它了。刻意用 height: auto 而不是 overflow: hidden —— 某些机型上「--vv-h 比
+   main 的内容盒（100dvh − --kb-inset）略大」，裁剪会把底部辅助键栏切掉，而 h-auto 下
+   main 的 scrollHeight 恒等于 clientHeight，本来就没有可滚动区域。 */
 html[data-kb]:has(.terminal-page),
 html[data-kb]:has(.terminal-page) body {
   overflow: hidden;
   overscroll-behavior: none;
+}
+html[data-kb]:has(.terminal-page) main {
+  height: auto;
 }
 
 html, body, #app {

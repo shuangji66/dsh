@@ -633,7 +633,7 @@ watch(marketOpSig, () => {
 const discardConfirmVisible = ref(false) // 删除更新包二次确认
 
 // 任一弹窗打开期间锁定页面滚动（弹窗会叠加：更新弹窗之上还有取消/安装等二次确认；
-// dsh 版本弹窗与市场弹窗也各自可能叠加确认框，但它们自己也会锁滚动）。
+// dsh 版本弹窗与市场弹窗不在这里 —— 它们自己锁，见 ServerVersionsDialog / MarketDialog）。
 const anyDialogOpen = computed(
   () =>
     dialogVisible.value ||

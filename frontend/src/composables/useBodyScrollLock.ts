@@ -10,6 +10,12 @@
 // 用模块级引用计数而不是单个组件直接写死样式：控制台里的弹窗会叠加（如“更新”
 // 弹窗之上再弹“取消二次确认”），必须等最后一个弹窗关闭才解锁，否则先关掉的
 // 那层会提前把页面滚动放回来。
+//
+// 移动端（<md）的页面滚动**不在文档上**，而在 App.vue 的 <main>（高度 = 100dvh − 底栏高，
+// 这样滚动条止于底栏上沿、不会压在 fixed 底栏上，见 App.vue 的说明）。锁文档那套对
+// 元素级滚动容器无效 —— 弹窗遮罩本身不可滚动，手指在上面拖动会顺着祖先链滚动 <main>。
+// 因此这里连带冻结标了 [data-scroll-lock] 的那个容器（桌面端 main 是 overflow: visible，
+// 不是滚动容器，会自动跳过）。
 import { getCurrentScope, onScopeDispose, toRef, watch } from 'vue'
 import type { MaybeRefOrGetter } from 'vue'
 
@@ -24,6 +30,42 @@ let savedBodyLeft = ''
 let savedBodyRight = ''
 let savedBodyWidth = ''
 let savedBodyPaddingRight = ''
+
+// 元素级滚动容器（移动端 main）的锁定状态
+let scroller: HTMLElement | null = null
+let savedScrollerTop = 0
+let savedScrollerOverflow = ''
+let savedScrollerPaddingRight = ''
+
+// 冻结 [data-scroll-lock] 指定的滚动容器。只处理真正的滚动容器：桌面端该元素是
+// overflow: visible（滚动在文档上），此时什么也不做，交给上面的 html/body 那套。
+function lockScroller() {
+  const el = document.querySelector<HTMLElement>('[data-scroll-lock]')
+  if (!el) return
+  const overflowY = getComputedStyle(el).overflowY
+  if (overflowY !== 'auto' && overflowY !== 'scroll') return
+  // 先量自己的滚动条宽度：设置 overflow 之后滚动条消失，量不到差值
+  const gap = el.offsetWidth - el.clientWidth
+  scroller = el
+  savedScrollerTop = el.scrollTop
+  savedScrollerOverflow = el.style.overflow
+  savedScrollerPaddingRight = el.style.paddingRight
+  // overflow: hidden 下该元素仍是滚动容器（位置保留），但用户无法再滚动它
+  el.style.overflow = 'hidden'
+  // 滚动条消失会让内容变宽，用等宽 padding 补回来（与上面 body 的处理同理；
+  // 手机上的 overlay 滚动条量出来是 0，不影响）
+  if (gap > 0) el.style.paddingRight = `${gap}px`
+}
+
+function unlockScroller() {
+  const el = scroller
+  if (!el) return
+  el.style.overflow = savedScrollerOverflow
+  el.style.paddingRight = savedScrollerPaddingRight
+  // 还原滚动位置（overflow 变化只可能把它夹小，不会自己跳回原位）
+  el.scrollTop = savedScrollerTop
+  scroller = null
+}
 
 function acquire() {
   const html = document.documentElement
@@ -48,9 +90,11 @@ function acquire() {
   body.style.width = '100%'
   // 滚动条消失会让页面变宽，用等宽 padding 补回来，避免内容横向跳动
   if (scrollbarGap > 0) body.style.paddingRight = `${scrollbarGap}px`
+  lockScroller()
 }
 
 function release() {
+  unlockScroller()
   const html = document.documentElement
   const body = document.body
   html.style.overflow = savedHtmlOverflow

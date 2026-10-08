@@ -75,15 +75,22 @@ function navigate(name: string) {
 }
 
 let appliedDefault = false
-// 配置加载完成后，若 URL 未指定子页面，则跳转到默认页面
+// URL 未指定子页面时，写入配置的默认页面（让 ?view= 始终反映当前子页面）。
+function applyDefaultView() {
+  if (appliedDefault) return
+  appliedDefault = true
+  if (!route.query.view) {
+    router.replace({ path: '/', query: { view: defaultView() } })
+  }
+}
+// 配置加载完成后触发；且必须等 `router.isReady()` 再判断：初始导航（含子页面懒加载 chunk）
+// 解析完成之前 `route.query` 还是 START_LOCATION 的空 Query —— 那时判断会把 `?view=logs`
+// 这类直达链接（含 /logs、/terminal 旧路径的 302 目标）覆盖成默认页。
+// isReady() 在初始导航失败时会 reject（chunk 取不到等），那种情况下保持现状即可，别抛未处理拒绝。
 watch(
   () => settings.config,
-  (c) => {
-    if (appliedDefault) return
-    appliedDefault = true
-    if (!route.query.view) {
-      router.replace({ path: '/', query: { view: defaultView() } })
-    }
+  () => {
+    router.isReady().then(applyDefaultView, () => {})
   },
   { immediate: true }
 )
@@ -242,11 +249,24 @@ onMounted(() => {
     </nav>
 
     <!-- ===== 主内容区域（使用 KeepAlive 缓存终端组件） =====
-         底部预留 = 底部导航高度（含安全区）+ 键盘遮挡高度。键盘弹起时 --bottom-nav-h
-         被归零（底栏同时隐藏），这里就只剩键盘遮挡高度，尾部内容不会被键盘盖住。
+         移动端（<md）这里是**页面唯一的滚动容器**：高度 = 可视视口高 − 底栏占用高度、
+         `overflow-y: auto`。原因是滚动条归属滚动容器 —— 若仍让文档滚动，滚动条贯穿整个
+         视口，滑到底时（overlay 滚动条同样）会压在 fixed 底栏上；把滚动收进底栏上沿后，
+         滚动条自然止于底栏上方。配套约束：
+           · `100dvh` 与 LogView / TerminalView 自算高度的式子保持一致（键盘弹起时
+             --bottom-nav-h 归零，main 随之变成整屏）；
+           · 底部预留只剩键盘遮挡高度（--kb-inset）—— 移动端内容不再压在底栏下面，
+             不需要再为底栏留白；
+           · [data-scroll-lock] 是给 useBodyScrollLock 的锚点：弹窗打开时要连它一起冻住
+             （锁文档对元素级滚动容器无效）；桌面端 main 是 overflow: visible，会被跳过；
+           · 桌面端（md 起）恢复文档滚动：h-auto + overflow-visible。
          左侧留白 = 侧边栏左边距(0.75rem) + 侧边栏宽度 + 间隙(0.75rem)：展开 13.5rem、
          折叠 5.5rem，与 aside 的 w-48 / w-16 严格对应，两侧必须同步改。 -->
-    <main class="pl-0 pb-[calc(var(--bottom-nav-h)_+_var(--kb-inset,0px))] md:pb-0 transition-all duration-300" :class="collapsed ? 'md:pl-[5.5rem]' : 'md:pl-[13.5rem]'">
+    <main
+      data-scroll-lock
+      class="pl-0 h-[calc(100dvh_-_var(--bottom-nav-h))] overflow-y-auto pb-[var(--kb-inset,0px)] md:h-auto md:overflow-visible md:pb-0 transition-all duration-300"
+      :class="collapsed ? 'md:pl-[5.5rem]' : 'md:pl-[13.5rem]'"
+    >
       <KeepAlive>
         <RouterView />
       </KeepAlive>

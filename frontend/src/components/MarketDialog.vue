@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import type { UpdateStatus } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
@@ -56,6 +57,10 @@ function close() {
   if (phase.value === 'done' || phase.value === 'error') emit('ack')
   emit('close')
 }
+
+// 弹窗打开期间锁定背景页面滚动（叠加的卸载确认框由 ConfirmDialog 自己再锁一层，
+// 引用计数归零才解锁），否则移动端能拖拽弹窗背后的控制台页面。
+useBodyScrollLock(() => props.visible || removeConfirm.value)
 </script>
 
 <template>

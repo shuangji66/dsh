@@ -120,7 +120,10 @@
 
 - **强制 Composition API + `<script setup>` + TypeScript**（Vue 3，SSR 下用 Volar / vue-tsc）。
 - 子页面统一经 `/` 下的 `?view=xxx` 查询参数切换（`router/index.ts`），避免真实历史
-  记录；旧 `/directory` 等路径做 302 重定向。
+  记录；旧 `/directory` 等路径做 302 重定向。**默认页跳转（`App.vue` 的 `applyDefaultView`）
+  必须等 `router.isReady()` 再读 `route.query`** —— 初始导航（含懒加载子页面 chunk）解析
+  完成前 query 还是空的，那时判断会把 `?view=logs` 这类直达链接（含旧路径 302 的目标）
+  覆盖成默认页。
 - 状态用 **Pinia**（`stores/`）；主题 / i18n / 偏好用 `composables/`。
 - 终端视图被 `<KeepAlive>` 缓存，切换标签不销毁会话。
 - `views/TerminalView.vue` + `components/KeypadBar.vue` — Web 终端页：xterm + `/terminal`
@@ -141,6 +144,32 @@
   `text-sm` + `text-ink-soft dark:text-[#A6A6AD]`（多行配 `leading-relaxed`）；次要信息
   （字节数、版本号等元信息、小标题、标签）用 `text-xs` + `text-ink-faint dark:text-[#8A8A92]`。
   更新弹窗的 release 正文曾写成 `text-xs`（比同屏的版本行还小），现已与其它弹窗同档。
+  **弹窗打开时必须锁背景滚动**：`useBodyScrollLock(可见性)`（`composables/useBodyScrollLock.ts`，
+  模块级引用计数 —— 叠加的弹窗/二次确认各加一层，全部关闭才解锁），否则移动端能拖拽弹窗
+  背后的控制台页面。实现是「body 固定定位 + 负 top 抵消」，**别退化成给 html/body 加
+  `overflow: hidden`**（本项目是 height:100% 布局，那样背景会跳回顶部）。`ServerVersionsDialog`
+  与 `MarketDialog` 曾漏接（`UpdateSection` 的注释还误以为它们自己会锁），现已补上。
+  **弹窗里的长信息要按「组合」换行**：dsh 版本行是「版本号 + dist-tags + 安装/使用状态」，
+  窄屏放不下时要求**版本号独占一行、标签与状态整组落到下一行** —— 做法是版本号加
+  `whitespace-nowrap`（否则会在连字符处折断成两行），并把标签+状态包进**同一个 flex 项**
+  （父级 `flex-wrap` 只按整项换行，不会出现版本号与某个标签各占半行）；容器的 `min-w-0`
+  必须保留，否则撑不下时不会换行而是横向溢出。极窄（如 375px 且同时有「切换 + 删除」
+  两个按钮、两个标签）时标签与状态自身仍可能再折一行 —— 空间确实不够，不是排版 bug。
+- **移动端（<md）页面滚动在 `main` 上，不在文档上** —— `main` 高度 = `100dvh − var(--bottom-nav-h)`、
+  `overflow-y: auto`（`App.vue`）。原因是**滚动条归属滚动容器**：文档滚动时它贯穿整个视口，
+  滑到底（overlay 滚动条也一样）会压在 fixed 底栏上。改这块要连带三处：
+  1. `main` 上的 `data-scroll-lock` 是 `useBodyScrollLock` 的锚点 —— 锁文档那套对元素级滚动
+     容器无效（弹窗遮罩不可滚动，手指在上面拖会滚动 `main`），所以锁定时会一起冻住它并还原
+     滚动位置；桌面端 `main` 是 `overflow: visible`，composable 会自动跳过。
+  2. 终端页 / 日志页自带 `h-[calc(100dvh_-_var(--bottom-nav-h))]`，与 `main` 等高，因此移动端
+     **不需要**再为底栏留底部空白（原来那句 `pb-[calc(var(--bottom-nav-h)_+_var(--kb-inset))]`
+     已去掉，只剩 `pb-[var(--kb-inset)]` 给键盘让位）。
+  3. 键盘弹起 + 终端页在场时 `html[data-kb]:has(.terminal-page) main { height: auto }`
+     （见 `style.css`）。**用 `height: auto` 而不是 `overflow: hidden`** —— 某些机型上
+     `--vv-h` 比 `main` 的内容盒（`100dvh − --kb-inset`）略大，裁剪会把底部辅助键栏切掉。
+  桌面端维持文档滚动：`md:h-auto md:overflow-visible md:pb-0`。验证脚本量三件事即可：
+  文档 `scrollHeight === innerHeight`（不滚）、`main` 底边 === 底栏顶边、弹窗打开时
+  `main` 的 `overflow` 变 `hidden` 且滚动位置不变（关闭后还原）。
 - **全局禁选 / 禁原生拖拽 / 输入框禁自动填充**（`style.css` + `App.vue`）：
   `html { user-select: none }` 全局禁止文本选择，需要拖选的地方必须显式加 Tailwind 的
   `select-text` —— 现在只有两处：`LogView` 的日志 `<pre>`、`TerminalView` 整页；日志路径与
@@ -406,14 +435,18 @@
      上的 `touch-action: none` 则在触摸起始就关掉浏览器的平移/缩放手势。**三条缺一不可**：删掉
      preventDefault 或 touch-action 都会让拖拽重新升级成「滚文档」，改用原生滚动则永远不会生效。
      长按粘贴菜单（600ms）与它的「位移 >10px 取消」判定必须共存：滚动判定只看竖向主导的位移。
-  2. **键盘弹起时要锁文档**：`html[data-kb]` 下终端页高度已是可视视口高度（`--vv-h`），但 App 根节点
-     的 `min-h-screen` 与 `main` 给键盘预留的 `padding-bottom`（`--kb-inset`）让文档仍比可视视口
-     高出一大截，手指一拖照样把整页带走、辅助键栏随即离开键盘顶边。`style.css` 用
-     `html[data-kb]:has(.terminal-page)` 把 html/body 的 `overflow` 锁成 `hidden`
-     （外加 `overscroll-behavior: none` 断链式滚动）。`:has()` 限定范围很重要：终端页被 `KeepAlive`
-     切走后其 DOM 不在文档里、选择器自然不匹配，其它页面键盘弹起时**仍然要能滚动**到被键盘挡住的输入框。
+  2. **键盘弹起时要连文档带 `main` 一起锁**：`html[data-kb]` 下终端页高度已是可视视口高度
+     （`--vv-h`），但 App 根节点的 `min-h-screen`、`main` 的高度式与给键盘预留的
+     `padding-bottom`（`--kb-inset`）仍可能让外层比可视视口高出一截，手指一拖照样把整页带走、
+     辅助键栏随即离开键盘顶边。`style.css` 对 `html[data-kb]:has(.terminal-page)` 做两件事：
+     把 html/body 的 `overflow` 锁成 `hidden`（外加 `overscroll-behavior: none` 断链式滚动），
+     并把 `main` 退回 `height: auto`（移动端滚动在 `main` 上，见前面那条；用 h-auto 而不是
+     overflow:hidden，否则 `--vv-h` 略大于内容盒的机型会把键栏裁掉）。`:has()` 限定范围很重要：
+     终端页被 `KeepAlive` 切走后其 DOM 不在文档里、选择器自然不匹配，其它页面键盘弹起时
+     **仍然要能滚动**到被键盘挡住的输入框。
      验证（无头 Chrome + CDP 触摸事件即可复现）：手机视口下沿终端上下拖动，`.xterm-rows` 文本要变化
-     且 `window.scrollY` 恒为 0；注入 `data-kb` + `--vv-h` 后键栏底边必须正好落在 `--vv-h` 处，
+     且 `window.scrollY` 恒为 0；注入 `data-kb` + `--vv-h` 后键栏底边必须正好落在 `--vv-h` 处、
+     `main` 无滚动余量（`scrollHeight === clientHeight`），
      `document.scrollingElement.scrollTop` 强设为 200 也要被钳回 0。
 - **单挂载点（一个终端会话只在一台设备上进行）** —— `Session.attach()` 回放历史 + 发 ready 后
   在 `connMu` 内**原子换主**并返回旧连接；`kickDetached()` 给旧连接发 `\x1b]detached\x07`（先）

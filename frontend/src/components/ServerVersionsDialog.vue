@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import type { DshVersionEntry, ServerVersions } from '@/serverapi'
 import { useI18n } from '@/composables/useI18n'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
@@ -91,6 +92,10 @@ function confirmDelete() {
 function confirmCancel() {
   emit('cancel')
 }
+
+// 弹窗打开期间锁定背景页面滚动（引用计数，叠加的二次确认框由 ConfirmDialog 自己再锁一层，
+// 全部关掉才解锁）—— 否则在移动端可以拖拽弹窗背后的控制台页面。
+useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.value || switchConfirm.value)
 </script>
 
 <template>
@@ -137,22 +142,27 @@ function confirmCancel() {
           <div v-else class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32] max-h-80 overflow-auto">
             <div v-for="row in rows" :key="row.version" class="px-3 py-2.5">
               <div class="flex items-center justify-between gap-3">
-                <!-- 版本号 + 标注：dist-tag（latest/alpha/next…）+ 本地状态 -->
-                <div class="flex items-center gap-2 min-w-0 flex-wrap">
-                  <span class="font-mono text-sm font-semibold text-ink dark:text-white">{{ row.version }}</span>
-                  <span
-                    v-for="tag in row.tags || []"
-                    :key="tag"
-                    class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
-                  >{{ tag }}</span>
-                  <span
-                    v-if="row.active"
-                    class="g-status bg-success/10 text-success"
-                  >{{ t('dsh_ver_active') }}</span>
-                  <span
-                    v-else-if="row.installed"
-                    class="g-status bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]"
-                  >{{ t('dsh_ver_installed') }}</span>
+                <!-- 版本号 + 标注：dist-tag（latest/alpha/next…）+ 本地状态。
+                     窄屏（移动端）放不下时，要求「版本号独占一行、标签与状态整组换到下一行」——
+                     因此标签与状态包成同一个 flex 项：它要么贴着版本号同一行，要么整组下移，
+                     不会出现版本号和某一个标签各占半行。 -->
+                <div class="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+                  <span class="font-mono text-sm font-semibold text-ink dark:text-white whitespace-nowrap">{{ row.version }}</span>
+                  <div class="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+                    <span
+                      v-for="tag in row.tags || []"
+                      :key="tag"
+                      class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
+                    >{{ tag }}</span>
+                    <span
+                      v-if="row.active"
+                      class="g-status bg-success/10 text-success"
+                    >{{ t('dsh_ver_active') }}</span>
+                    <span
+                      v-else-if="row.installed"
+                      class="g-status bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]"
+                    >{{ t('dsh_ver_installed') }}</span>
+                  </div>
                 </div>
 
                 <!-- 行内操作：未安装 → 下载；已安装且非当前 → 切换 + 删除；安装中 → 取消 -->

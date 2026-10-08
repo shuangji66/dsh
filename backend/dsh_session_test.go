@@ -34,7 +34,7 @@ func tokenExchangeFixture(t *testing.T, handler http.HandlerFunc) *DshManager {
 	}
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
-	initConfig(&AppConfig{DshPort: port, HomeDir: t.TempDir()})
+	initConfig(&AppConfig{DshPort: port})
 
 	dsh := newTestDshManager(t.TempDir(), "")
 	dsh.tokenMu.Lock()
@@ -109,7 +109,7 @@ func TestExchangeTokenWithoutTokenIsNoop(t *testing.T) {
 func TestMarkSessionSettledIsGenerationScoped(t *testing.T) {
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
-	initConfig(&AppConfig{DshPort: 65535, HomeDir: t.TempDir()})
+	initConfig(&AppConfig{DshPort: 65535})
 	dsh := newTestDshManager(t.TempDir(), "")
 
 	dsh.bumpSessionGen() // 第 1 代（模拟 Start）
@@ -145,7 +145,7 @@ func TestMarkSessionSettledIsGenerationScoped(t *testing.T) {
 func TestCaptureDshSessionSettlesWithoutToken(t *testing.T) {
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
-	initConfig(&AppConfig{DshPort: 65535, HomeDir: t.TempDir()})
+	initConfig(&AppConfig{DshPort: 65535})
 	dsh := newTestDshManager(t.TempDir(), "")
 	dsh.bumpSessionGen()
 
@@ -169,7 +169,7 @@ func TestCaptureDshSessionSettlesWithoutToken(t *testing.T) {
 func TestCaptureDshSessionOutdatedGenerationCannotSettle(t *testing.T) {
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
-	initConfig(&AppConfig{DshPort: 65535, HomeDir: t.TempDir()})
+	initConfig(&AppConfig{DshPort: 65535})
 	dsh := newTestDshManager(t.TempDir(), "")
 
 	dsh.bumpSessionGen()

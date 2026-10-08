@@ -43,7 +43,6 @@ func pluginGuardFixture(t *testing.T) (*AdminMux, string, string, string) {
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
 	cfg := defaultConfig()
-	cfg.HomeDir = home
 	// 端口取一个不会命中本机真实 dsh 进程的值（Stop/扫描 /proc 时会用到）。
 	cfg.DshPort = 65535
 	initConfig(&cfg)

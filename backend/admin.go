@@ -380,10 +380,10 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			// 折算）。它就是「自动设置」时 dsh 实际拿到的上限，前端在开关打开时用它
 			// 展示，不再展示持久化的手动值。探测不到时为 0，前端显示空。
 			"nodeHeapLimitMB": detectNodeHeapLimitMB(cfg.NodeVersion),
-			// 默认主目录语义路径及其实际系统路径，与当前主目录（dsh 的 HOME）。
+			// 主目录（即 dsh 的 HOME）的语义路径与实际系统路径。主目录固定为本应用的
+			// shares 目录，**不可切换**（见 DshManager.effectiveHome 的说明）。
 			"defaultHomeSemantic": m.defaultHomeSemantic(),
-			"defaultHomeDir":      m.renv.Home,
-			"homeDir":             m.dsh.effectiveHome(),
+			"defaultHomeDir":      m.dsh.effectiveHome(),
 		},
 		"status": m.dsh.Status(),
 	})
@@ -827,15 +827,7 @@ func (m *AdminMux) patchNodePty() error {
 	return err
 }
 
-// patchNodePtyHome 触发指定主目录的 node-pty 版本固定与清理，用于切换主目录后
-// 在新 HOME 下重新执行 ensureNodePty。切换场景下调用方已在前面重启过 dsh，
-// 此处忽略返回的重启标记，不再重复重启。
-func (m *AdminMux) patchNodePtyHome(home string) error {
-	_, err := ensureNodePty(m.renv, home)
-	return err
-}
-
-// defaultHomeSemantic 返回默认主目录的“相对/语义”路径。它是本应用的 shares 目录，
+// defaultHomeSemantic 返回主目录的“相对/语义”路径。它是本应用的 shares 目录，
 // 即 /var/apps/<AppName>/shares/<AppName>，其实际系统路径为启动时的 HOME
 // （如 /vol1/@appshare/Harness）。资源页用它作为固定不可移除的第一张卡片。
 func (m *AdminMux) defaultHomeSemantic() string {
@@ -860,196 +852,6 @@ func (m *AdminMux) nodeVersionsInfo() []map[string]interface{} {
 		})
 	}
 	return info
-}
-
-// resolveExistingDir 返回目录的「实际」路径（解析符号链接），失败时退回 Clean 结果。
-// 白名单比对必须对符号链接也成立：授权目录里的一个符号链接指向 /etc 时，路径前缀
-// 看起来在白名单内，实际拷进去的是 /etc（RemoveAll(dest/.dsh) 也随之落到 /etc 下）。
-func resolveExistingDir(path string) string {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Clean(real)
-	}
-	return filepath.Clean(path)
-}
-
-// homeDirAllowed 判断目标目录是否落在白名单目录**之内**（白名单目录自身也算）。
-//
-// 用 filepath.Rel 判「是否在目录之内」，而不是字符串前缀比较：前缀比较会把
-// /vol1/@appshare/Harness-evil（或 /vol1/@appshare/Harness-bak）误判成
-// /vol1/@appshare/Harness 的子目录 —— 那正是最容易被凑出来的越权路径。
-// 判断前两侧都解析符号链接（见 resolveExistingDir）：dest 是指向白名单外的链接时
-// 必须判为不允许。
-func homeDirAllowed(dest string, allowed []string) bool {
-	target := resolveExistingDir(dest)
-	for _, a := range allowed {
-		if a == "" {
-			continue
-		}
-		root := resolveExistingDir(a)
-		rel, err := filepath.Rel(root, target)
-		if err != nil {
-			continue
-		}
-		if rel == "." {
-			return true
-		}
-		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-			continue // 落在该白名单目录之外
-		}
-		return true
-	}
-	return false
-}
-
-// homeAllowedRoots 收集「允许被设为 dsh 主目录」的白名单根目录：
-//  1. 当前请求用户的飞牛授权目录（网关注入的 X-Trim-Userid → fnOS 查询）；
-//  2. 默认主目录：本应用的 shares 目录，即启动时解析出的 renv.Home 与其语义路径
-//     （/var/apps/<AppName>/shares/<AppName>，见 defaultHomeSemantic）。
-//
-// 拿不到授权列表时（非飞牛环境 / m.fnos 不可用 / 请求里没有 uid / 查询失败）的
-// **策略：只保留默认主目录，其余一律拒绝（fail-closed）**。理由：切换主目录是破坏性
-// 操作（migrate 分支会先 RemoveAll(dest/.dsh) 再覆盖拷贝），在拿不到「这个用户被授权
-// 了哪些目录」的时候宁可拒绝也不猜；猜错等于把任意目录交给前端删。默认主目录本身
-// 必须始终可选，否则开发/测试环境里连「切回默认目录」都做不了。
-func (m *AdminMux) homeAllowedRoots(r *http.Request) []string {
-	roots := make([]string, 0, 4)
-	if m.renv != nil && m.renv.Home != "" {
-		roots = append(roots, m.renv.Home)
-	}
-	if s := m.defaultHomeSemantic(); s != "" {
-		roots = append(roots, s)
-	}
-	if m.fnos == nil {
-		return roots
-	}
-	uid := getUIDFromRequest(r)
-	if uid <= 0 {
-		return roots
-	}
-	paths, _, err := m.fnos.GetUserAccessibleFolders(uid)
-	if err != nil {
-		logWarn("[home] cannot resolve authorized folders for uid %d: %v - only the default home dir is allowed", uid, err)
-		return roots
-	}
-	return append(roots, paths...)
-}
-
-// setHomeReq 是“设置为主目录”请求体。
-type setHomeReq struct {
-	Path    string `json:"path"`    // 目标目录的实际系统路径
-	Migrate bool   `json:"migrate"` // 是否把当前 HOME 的 ~/.dsh 复制到目标目录
-}
-
-// handleSetHome 把某个已授权目录设为 dsh 的 HOME，并在确认后把当前 ~/.dsh 配置
-// 复制到目标目录（可选），随后重启 dsh 使新的 HOME 生效。
-func (m *AdminMux) handleSetHome(w http.ResponseWriter, r *http.Request) {
-	var req setHomeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	dest := filepath.Clean(req.Path)
-	if dest == "" || dest == "." || !filepath.IsAbs(dest) {
-		writeErr(w, "无效的目标目录路径", http.StatusBadRequest)
-		return
-	}
-	// 目标目录必须已存在且为目录。
-	if fi, err := os.Stat(dest); err != nil || !fi.IsDir() {
-		writeErr(w, "目标目录不存在或不是目录", http.StatusBadRequest)
-		return
-	}
-
-	// 忙守卫（AGENTS 第 5 节硬约束）：切换主目录会连带做两件危险事 —— 停 dsh
-	// （杀掉进程组，可能带走正在持有 profile 写锁的 `dsh plugin …`）与在 migrate
-	// 分支里 `RemoveAll(dest/.dsh)`。先挡，被拒时不改盘、不重启。
-	// （顺序仍保持「先守卫、后其它校验」：被拒时给出的 409 与历史行为一致。）
-	if err := m.busyGuard("切换 dsh 主目录"); err != nil {
-		writeErr(w, err.Error(), http.StatusConflict)
-		return
-	}
-
-	current := m.dsh.effectiveHome()
-	if current != "" {
-		// 规范化比较，避免符号链接/末尾斜杠造成的误判。
-		ci, e1 := os.Stat(current)
-		di, e2 := os.Stat(dest)
-		if e1 == nil && e2 == nil && os.SameFile(ci, di) {
-			writeJSON(w, map[string]interface{}{"ok": true, "unchanged": true, "homeDir": current})
-			return
-		}
-	}
-
-	// 目标必须属于「当前请求用户的授权目录 + 默认主目录」（函数注释与前端文案都写着
-	// 「已授权目录」）。旧实现只校验「存在且是目录」，于是任意绝对目录（/etc、/tmp/x）
-	// 都能被设为 dsh 的 HOME，migrate 分支还会先 RemoveAll(dest/.dsh) 再覆盖拷贝。
-	// 拿不到授权列表时的策略见 homeAllowedRoots（fail-closed，仅默认主目录）。
-	// 放在「同一目录」的短路返回之后：那种情况本就不改盘，无需授权判定。
-	allowedRoots := m.homeAllowedRoots(r)
-	if !homeDirAllowed(dest, allowedRoots) {
-		logWarn("[home] rejected home dir %s: not in the caller's authorized folders", dest)
-		writeErr(w, "目标目录不在当前用户的授权目录中", http.StatusBadRequest)
-		return
-	}
-
-	// 可选：迁移当前主目录的 ~/.dsh 配置至目标目录。
-	if req.Migrate && current != "" {
-		srcDsh := filepath.Join(current, ".dsh")
-		if fi, err := os.Stat(srcDsh); err == nil && fi.IsDir() {
-			// 迁移即覆盖：若目标目录已存在 .dsh，先整体删除再拷贝，
-			// 避免残留旧配置或新旧文件混叠。
-			dstDsh := filepath.Join(dest, ".dsh")
-			if _, err := os.Lstat(dstDsh); err == nil {
-				// 删除前再确认一次白名单：这一句删的是目标目录下的整个 .dsh，
-				// 是本次请求里破坏性最强的一步，不能只依赖前面那次判断。
-				if !homeDirAllowed(dest, allowedRoots) {
-					writeErr(w, "目标目录不在当前用户的授权目录中", http.StatusBadRequest)
-					return
-				}
-				if err := os.RemoveAll(dstDsh); err != nil {
-					writeErr(w, "迁移配置失败: 无法移除目标 ~/.dsh: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				logWarn("[home] removed existing ~/.dsh at %s (overwritten by migration)", dstDsh)
-			}
-			if err := copyDir(srcDsh, dstDsh); err != nil {
-				writeErr(w, "迁移配置失败: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			logInfo("[home] migrated ~/.dsh from %s to %s", srcDsh, dstDsh)
-		} else {
-			logInfo("[home] source ~/.dsh not found at %s, migration skipped", srcDsh)
-		}
-	}
-
-	// 保存新的 HOME 配置。
-	next := GetConfig()
-	next.HomeDir = dest
-	if err := SaveConfig(m.renv, &next, false); err != nil {
-		writeErr(w, "保存配置失败: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	logInfo("[home] homeDir switched to %s", dest)
-
-	// 后台重启 dsh，使新的 HOME 环境变量生效（避免阻塞请求线程）；
-	// 重启后触发 node-pty 自动 patch，确保新 HOME 的 .dsh/profiles 下 node-pty 正常。
-	go func() {
-		if err := m.restartDsh(); err != nil {
-			logError("[home] dsh restart failed: %v", err)
-			return
-		}
-		logInfo("[home] dsh restarted with new HOME=%s", dest)
-		if perr := m.patchNodePtyHome(dest); perr != nil {
-			logWarn("[node-pty] patch after home switch failed: %v", perr)
-		} else {
-		}
-	}()
-
-	writeJSON(w, map[string]interface{}{
-		"ok":      true,
-		"changed": true,
-		"homeDir": dest,
-		"status":  m.dsh.Status(),
-	})
 }
 
 // handleDshBackup 把当前 HOME 的 ~/.dsh 目录整体压缩打包为
@@ -1298,8 +1100,6 @@ func (m *AdminMux) buildHandler() http.Handler {
 			// 在 buildHandler 的 switch 中添加
 		case p == "/api/dsh/restart" && r.Method == http.MethodPost:
 			m.handleDshRestart(w, r)
-		case p == "/api/dsh/set-home" && r.Method == http.MethodPost:
-			m.handleSetHome(w, r)
 		case p == "/api/dsh/backup" && r.Method == http.MethodPost:
 			m.handleDshBackup(w, r)
 		case p == "/api/dsh/data-backups" && r.Method == http.MethodGet:

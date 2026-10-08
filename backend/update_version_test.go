@@ -93,7 +93,7 @@ func TestRefreshServerPackageVersions(t *testing.T) {
 	prevServerDir := serverDirFn
 	serverDirFn = func(*UpdateManager) string { return serverDir }
 	prevCfg := GetConfig()
-	initConfig(&AppConfig{HomeDir: home, DshPort: 0})
+	initConfig(&AppConfig{DshPort: 0})
 	t.Cleanup(func() {
 		serverDirFn = prevServerDir
 		initConfig(&prevCfg)

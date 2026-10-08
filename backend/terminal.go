@@ -384,15 +384,11 @@ func terminalEnv(renv *RuntimeEnv, home string) []string {
 	return env
 }
 
-// effectiveHome 返回终端会话应使用的主目录：用户在资源页切换过主目录后以
-// AppConfig.HomeDir 为准（与 DshManager.effectiveHome 同一语义），否则回退到启动时
-// 解析出的 HOME。终端必须与 dsh 服务用同一份 HOME —— 否则在终端里执行
-// `dsh plugin --profile web …` 操作的是另一份 ~/.dsh，与 dsh 服务实际加载的 profile
-// 不是同一个（现象：控制台/市场里改了插件，终端里看不到）。
+// effectiveHome 返回终端会话应使用的主目录：与 dsh 服务一致，恒为启动时解析出的 HOME
+// （主目录不可切换，见 DshManager.effectiveHome）。两者必须用同一份 HOME —— 否则在
+// 终端里执行 `dsh plugin --profile web …` 操作的是另一份 ~/.dsh，与 dsh 服务实际加载的
+// profile 不是同一个（现象：控制台/市场里改了插件，终端里看不到）。
 func (m *SessionManager) effectiveHome() string {
-	if h := GetConfig().HomeDir; h != "" {
-		return h
-	}
 	if m.renv != nil {
 		return m.renv.Home
 	}

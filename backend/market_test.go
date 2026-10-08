@@ -80,7 +80,7 @@ func setupMarketTest(t *testing.T) (m *UpdateManager, home, serverDir, targetDir
 	}
 
 	prevCfg := GetConfig()
-	initConfig(&AppConfig{HomeDir: home, DshPort: 0})
+	initConfig(&AppConfig{DshPort: 0})
 	prevServerDir := serverDirFn
 	serverDirFn = func(*UpdateManager) string { return serverDir }
 	prevStop, prevStart, prevReady, prevPortFree := dshStopFn, marketStartDshFn, marketReadyFn, dshPortFreeFn
@@ -105,8 +105,9 @@ func setupMarketTest(t *testing.T) (m *UpdateManager, home, serverDir, targetDir
 	})
 
 	m = &UpdateManager{
-		renv:     &RuntimeEnv{Home: home},
-		dsh:      &DshManager{},
+		renv: &RuntimeEnv{Home: home},
+		// dsh 也要拿到同一份 HOME：市场安装要读 dsh 的 profile 目录（effectiveHome）。
+		dsh:      &DshManager{renv: &RuntimeEnv{Home: home}},
 		statuses: make(map[updateKind]*UpdateStatus),
 	}
 	m.statuses[updateKindMarket] = &UpdateStatus{Kind: updateKindMarket}

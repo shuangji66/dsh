@@ -45,10 +45,11 @@ type AppConfig struct {
 	// 默认 "node24"（系统默认 node）。当宿主机存在 /var/apps/nodejs_v26/target/bin/node
 	// 时，用户可切换到 "node26"，dsh 启动时会把对应版本的 bin 目录前置到 PATH。
 	NodeVersion string `json:"nodeVersion"`
-	// HomeDir 是 dsh 进程的 HOME 环境变量（实际系统目录）。空表示使用启动时的
-	// 默认主目录（= /var/apps/Harness/shares/Harness 的实际路径 /vol1/@appshare/Harness）。
-	// 资源页可把某个已授权目录设为新的主目录，保存后重启 dsh 生效。
-	HomeDir string `json:"homeDir"`
+	// 主目录（dsh 的 HOME）**不可配置**：它恒为本应用的 shares 目录
+	// （/var/apps/<AppName>/shares/<AppName> 的实际路径），见 DshManager.effectiveHome。
+	// 曾经存在的 homeDir 配置项与资源页的「设置为主目录」功能已整体移除 —— 目标目录的
+	// 平台权限模型（飞牛共享目录的 ACL / `system.trim_acl` 扩展属性）会让 dsh 的 profile
+	// 文件对应用用户不可读，插件安装直接崩，风险不可控。
 	// AccessURLs 是用户配置的 dsh 访问地址列表，显示在概览页供快速访问。
 	AccessURLs []string `json:"accessUrls,omitempty"`
 	// BrowserCompat 为浏览器兼容模式开关，默认关闭。

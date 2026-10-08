@@ -294,13 +294,17 @@ func (m *DshManager) logError(format string, a ...interface{}) {
 	m.logf(levelError, format, a...)
 }
 
-// effectiveHome returns the HOME directory that dsh should run with. When the
-// user has switched home directories via the resource page the configured value
-// (AppConfig.HomeDir) wins; otherwise it falls back to the launch-time default
-// HOME (the real path behind /var/apps/Harness/shares/Harness).
+// effectiveHome returns the HOME directory that dsh runs with: always the
+// launch-time default (the real path behind /var/apps/Harness/shares/Harness).
+//
+// 主目录**不可切换**。历史上资源页可以把某个「已授权目录」设为 dsh 的 HOME，但那类
+// 目录的权限由平台共享模型（飞牛用户共享的 mode 000 + ACL + `system.trim_acl`）决定：
+// dsh 写出的每个文件能否被读，取决于飞牛层当时写下的那条逐文件记录，记录一旦写坏，
+// 连文件属主（dsh 自己）都会 EACCES —— 表现为 `dsh plugin …` 一启动就崩、插件装不上，
+// 而任何「清理陈旧锁」之类的自愈都无从下手。因此该功能连同 HomeDir 配置项整体移除。
 func (m *DshManager) effectiveHome() string {
-	if h := GetConfig().HomeDir; h != "" {
-		return h
+	if m.renv == nil {
+		return ""
 	}
 	return m.renv.Home
 }

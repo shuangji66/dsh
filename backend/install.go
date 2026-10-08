@@ -30,10 +30,10 @@ import (
 // 返回的 bool 表示是否需要重启 dsh（仅在执行了 pnpm install 时为真），由调用方
 // 在 pnpm install 完成后按该标记重启 dsh。
 func ensureNodePty(renv *RuntimeEnv, home string) (restartNeeded bool, err error) {
-	// 优先读取 config.json 的 homeDir，这才是 dsh 服务实际使用的 HOME；
-	// 其次回退到启动时默认主目录与环境变量。
-	if home == "" {
-		home = GetConfig().HomeDir
+	// 主目录不可切换（见 DshManager.effectiveHome）：调用方没给就回退到启动时解析出的
+	// 主目录，再不行才用平台约定路径。
+	if home == "" && renv != nil {
+		home = renv.Home
 	}
 	if home == "" {
 		home = "/var/apps/Harness/shares/Harness"
@@ -366,8 +366,8 @@ func indentOf(ln string) int {
 	return n
 }
 
-// copyDir 递归拷贝目录（保持权限，保留符号链接本身）。既用于资源页把当前
-// HOME 的 ~/.dsh 迁移到新的主目录，也用于更新时的资源拷贝。
+// copyDir 递归拷贝目录（保持权限，保留符号链接本身）。用于更新/替换时的资源拷贝
+// （server 产物、插件市场包）。
 func copyDir(src, dst string) error {
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
@@ -392,7 +392,7 @@ func copyDir(src, dst string) error {
 		}
 		switch {
 		case fi.Mode()&os.ModeSymlink != 0:
-			// 复制符号链接本身，避免迁移后链接被解析内容替换。
+			// 复制符号链接本身，不解析成链接指向的内容。
 			link, err := os.Readlink(srcPath)
 			if err != nil {
 				return err

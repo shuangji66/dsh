@@ -23,27 +23,10 @@ const { t } = useI18n()
 // 就已开始握手 —— 不能在这里 new：宿主桌面的握手监听只保留 60 秒，等本页挂载再握手，
 // 打开应用一段时间后进来的用户就永远握不上了（详见该文件头注释）。
 
-// 主目录信息（来自后端 settings API 的 runtime）：默认主目录与当前主目录。
-const defaultHomeDir = ref('') // 默认主目录的实际系统路径
-const defaultHomeConverted = ref('') // 默认主目录 sdk 转换后的语义路径
-const homeDir = ref('') // 当前生效的主目录（dsh 的 HOME 实际路径）
-
-// 默认主目录是否就是当前主目录（未切换到其它授权目录时成立）
-const isDefaultCurrent = computed(
-  () => !!defaultHomeDir.value && !!homeDir.value && defaultHomeDir.value === homeDir.value
-)
-
-// 标记某个授权目录是否为当前主目录
-function isCurrentHome(path: string) {
-  return !!path && !!homeDir.value && path === homeDir.value
-}
-
-// 设置为主目录的确认弹窗状态
-const setHomeDialogVisible = ref(false)
-const setHomeTarget = ref<string | null>(null)
-const setHomeConverted = ref('') // 目标目录 sdk 转换后的语义路径
-const setHomeBusy = ref(false)
-const migrateConfig = ref(false)
+// 主目录信息（来自后端 settings API 的 runtime）。主目录固定为本应用的 shares 目录，
+// 不可切换，因此没有「当前主目录 vs 默认主目录」之分。
+const homeDir = ref('') // 主目录（dsh 的 HOME）实际系统路径
+const homeDirConverted = ref('') // 主目录 sdk 转换后的语义路径
 
 // 备份当前主目录 ~/.dsh 的确认弹窗状态
 const backupDialogVisible = ref(false)
@@ -70,7 +53,6 @@ const removeDirTarget = ref<string | null>(null)
 // 任一弹窗打开期间锁定页面滚动（弹窗会叠加：恢复备份弹窗之上还有二次确认）
 const anyDialogOpen = computed(
   () =>
-    setHomeDialogVisible.value ||
     backupDialogVisible.value ||
     removeDirDialogVisible.value ||
     restoreVisible.value ||
@@ -82,45 +64,17 @@ useBodyScrollLock(anyDialogOpen)
 async function loadHomeInfo() {
   if (!settings.runtime) await settings.load()
   const r = settings.runtime
-  defaultHomeDir.value = r?.defaultHomeDir || ''
-  homeDir.value = r?.homeDir || ''
-  // 转换默认主目录的语义路径（默认主目录不一定在用户授权列表内，需单独转换）
-  if (defaultHomeDir.value) {
+  homeDir.value = r?.defaultHomeDir || ''
+  // 转换主目录的语义路径（它不一定在用户授权列表内，需单独转换）
+  if (homeDir.value) {
     try {
       const language = navigator.language || 'zh-CN'
-      const res = await api.convertPath([defaultHomeDir.value], language)
-      defaultHomeConverted.value = res?.result?.[0]?.semanticPath || ''
+      const res = await api.convertPath([homeDir.value], language)
+      homeDirConverted.value = res?.result?.[0]?.semanticPath || ''
     } catch {
-      defaultHomeConverted.value = ''
+      homeDirConverted.value = ''
     }
   }
-}
-
-// 异步的路径转换回调是否仍适用于当前弹窗：期间用户可能关掉弹窗、再点开另一个目录
-// （命中缓存时新目标会同步填好显示路径），此时旧目录的响应必须丢弃 —— 否则会把显示路径
-// 覆盖成旧目录的，而确认提交的仍是新目录（显示与提交不一致）。
-function isCurrentSetHomeTarget(path: string) {
-  return setHomeDialogVisible.value && setHomeTarget.value === path
-}
-
-function onSetHomeClick(path: string) {
-  setHomeTarget.value = path
-  setHomeConverted.value = convertedPaths.value[path] || ''
-  // 若无缓存转换结果（如默认主目录不在授权列表），则单独调用 SDK 转换。
-  if (!setHomeConverted.value) {
-    api
-      .convertPath([path], navigator.language || 'zh-CN')
-      .then((res) => {
-        if (!isCurrentSetHomeTarget(path)) return
-        setHomeConverted.value = res?.result?.[0]?.semanticPath || ''
-      })
-      .catch(() => {
-        if (!isCurrentSetHomeTarget(path)) return
-        setHomeConverted.value = ''
-      })
-  }
-  migrateConfig.value = false
-  setHomeDialogVisible.value = true
 }
 
 function onBackupClick() {
@@ -142,30 +96,6 @@ async function confirmBackup() {
   } finally {
     backupBusy.value = false
     backupDialogVisible.value = false
-  }
-}
-
-async function confirmSetHome() {
-  if (setHomeBusy.value || !setHomeTarget.value) return
-  setHomeBusy.value = true
-  const path = setHomeTarget.value
-  try {
-    const p = await api.dshSetHome(path, migrateConfig.value)
-    if (p.ok) {
-      toast.show(t('directory_home_switched', { path }), 'success')
-      // 主动刷新：重新拉取后端 settings 以获取最新 homeDir，再刷新目录列表
-      await settings.load()
-      await loadHomeInfo()
-      await store.load()
-    } else {
-      toast.show(p.error || t('directory_home_switch_failed'), 'error')
-    }
-  } catch (e) {
-    toast.show((e as Error).message, 'error')
-  } finally {
-    setHomeBusy.value = false
-    setHomeDialogVisible.value = false
-    setHomeTarget.value = null
   }
 }
 
@@ -396,42 +326,28 @@ onBeforeUnmount(() => {
     </PageHeader>
 
     <!-- 每个目录一张卡片，按容器宽度自适应分栏（.g-card-grid）：
-         默认主目录固定为第一张，备份目录紧随其后，其余为已授权目录；加载/空态卡片占满整行。 -->
+         主目录固定为第一张，备份目录紧随其后，其余为已授权目录；加载/空态卡片占满整行。 -->
     <div class="g-card-grid g-fade-in">
-      <!-- 默认主目录（固定第一张，不可移除） -->
-      <div v-if="defaultHomeDir" class="g-card g-card-hover p-4 flex flex-col border-brand/40 dark:border-brand/40 bg-brand/[0.03] dark:bg-brand/[0.05]">
+      <!-- 主目录（固定第一张，不可移除、不可切换） -->
+      <div v-if="homeDir" class="g-card g-card-hover p-4 flex flex-col border-brand/40 dark:border-brand/40 bg-brand/[0.03] dark:bg-brand/[0.05]">
         <div class="flex flex-col gap-1 min-w-0">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="text-[11px] font-medium uppercase tracking-widest text-brand dark:text-brand">{{ t('directory_default_home_title') }}</span>
-          </div>
-          <span class="font-mono text-sm text-ink dark:text-white break-all">{{ defaultHomeDir }}</span>
-          <span v-if="defaultHomeConverted" class="text-xs text-ink-soft dark:text-[#A6A6AD] truncate">
-            {{ defaultHomeConverted }}
+          <span class="font-mono text-sm text-ink dark:text-white break-all">{{ homeDir }}</span>
+          <span v-if="homeDirConverted" class="text-xs text-ink-soft dark:text-[#A6A6AD] truncate">
+            {{ homeDirConverted }}
           </span>
         </div>
         <div class="flex flex-wrap items-center gap-2 mt-auto pt-3 border-t border-line dark:border-[#2A2A32]">
-          <!-- 默认主目录：仅当它仍是当前主目录时显示“当前主目录”标记；否则可设置回默认主目录 -->
           <span
-            v-if="isDefaultCurrent"
             class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
-            :title="t('directory_current_home')"
-          >{{ t('directory_current_home') }}</span>
-          <button
-            v-else
-            class="g-btn-secondary h-8 px-3 text-xs"
-            @click="onSetHomeClick(defaultHomeDir)"
-          >{{ t('directory_set_home') }}</button>
-          <button class="g-btn-secondary h-8 px-3 text-xs" @click="openFileManager(defaultHomeDir)">{{ t('directory_open') }}</button>
+            :title="t('directory_home_label')"
+          >{{ t('directory_home_label') }}</span>
+          <button class="g-btn-secondary h-8 px-3 text-xs" @click="openFileManager(homeDir)">{{ t('directory_open') }}</button>
         </div>
       </div>
 
-      <!-- 备份目录（独立卡片，结构与默认主目录卡片一致：上方路径 + 下方操作行；
-           操作行里放「备份目录」标记与「打开」按钮，不再挂在默认主目录卡片内） -->
+      <!-- 备份目录（独立卡片，结构与主目录卡片一致：上方路径 + 下方操作行） -->
       <div v-if="backupDirPath" class="g-card g-card-hover p-4 flex flex-col">
         <div class="flex flex-col gap-1 min-w-0">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="text-[11px] font-medium uppercase tracking-widest text-ink-faint dark:text-[#8A8A92]">{{ t('directory_backup_dir') }}</span>
-          </div>
           <span class="font-mono text-sm text-ink dark:text-white break-all">{{ backupDirPath }}</span>
           <span v-if="backupDirConverted" class="text-xs text-ink-soft dark:text-[#A6A6AD] truncate">{{ backupDirConverted }}</span>
         </div>
@@ -471,66 +387,12 @@ onBeforeUnmount(() => {
             </span>
           </div>
           <div class="flex flex-wrap items-center gap-2 mt-auto pt-3 border-t border-line dark:border-[#2A2A32]">
-            <!-- 若该目录已是当前主目录则标记，否则提供“设置为主目录”按钮 -->
-            <span
-              v-if="isCurrentHome(p)"
-              class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
-            >{{ t('directory_current_home') }}</span>
-            <button
-              v-else
-              class="g-btn-secondary h-8 px-3 text-xs"
-              @click="onSetHomeClick(p)"
-            >{{ t('directory_set_home') }}</button>
             <button class="g-btn-secondary h-8 px-3 text-xs" @click="openFileManager(p)">{{ t('directory_open') }}</button>
             <button class="g-btn-danger h-8 px-3 text-xs" @click="onRemoveDirClick(p)">{{ t('directory_remove') }}</button>
           </div>
         </div>
       </template>
     </div>
-
-    <!-- 设置为主目录确认弹窗（含迁移配置圆形复选框） -->
-    <ConfirmDialog
-      v-model:visible="setHomeDialogVisible"
-      :title="t('confirm_set_home_title')"
-      :confirm-text="t('confirm_ok')"
-      :cancel-text="t('confirm_cancel')"
-      :confirm-loading="setHomeBusy"
-      @confirm="confirmSetHome()"
-    >
-      <div class="mb-2">
-        <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed whitespace-pre-line mb-3">
-          {{ t('confirm_set_home_msg') }}
-        </p>
-        <p class="font-mono text-xs text-ink dark:text-white break-all bg-ink/[0.03] dark:bg-white/[0.05] rounded-md px-3 py-2 mb-4">{{ setHomeConverted || setHomeTarget || '' }}</p>
-        <label class="flex items-start gap-3 cursor-pointer select-none group">
-          <input
-            v-model="migrateConfig"
-            type="checkbox"
-            class="peer sr-only"
-          />
-          <span
-            class="relative w-5 h-5 mt-0.5 rounded-full shrink-0 border-2 border-line dark:border-[#3A3A42] bg-white dark:bg-[#1F1F26] transition-colors peer-checked:bg-brand peer-checked:border-brand"
-          >
-            <svg
-              v-if="migrateConfig"
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              class="absolute inset-0 w-full h-full text-white p-1"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="3"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            ><path d="M20 6L9 17l-5-5"/></svg>
-          </span>
-          <span class="min-w-0">
-            <span class="block text-sm font-medium text-ink dark:text-white">{{ t('set_home_migrate_label') }}</span>
-            <span class="block text-xs text-ink-soft dark:text-[#A6A6AD] mt-0.5">{{ t('set_home_migrate_hint') }}</span>
-          </span>
-        </label>
-      </div>
-    </ConfirmDialog>
-
     <!-- 移除授权目录确认弹窗 -->
     <ConfirmDialog
       v-model:visible="removeDirDialogVisible"

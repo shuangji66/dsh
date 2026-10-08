@@ -25,7 +25,6 @@ export const useSettingsStore = defineStore('settings', () => {
     dshMemLimit: 0,
     dshMemAuto: true,
     nodeVersion: 'node24',
-    homeDir: '',
     accessUrls: [],
     browserCompat: false
   })

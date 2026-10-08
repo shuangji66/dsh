@@ -80,7 +80,7 @@ func TestApplyHarnessLeavesNoBackup(t *testing.T) {
 	prevCfg := GetConfig()
 	// DshPort 取一个不会出现在任何进程 argv 里的端口：applyHarness 会调 dsh.Stop()，
 	// 而 Stop 在「没有受管进程」时按 `--port <DshPort>` 扫 /proc 找 dsh。
-	initConfig(&AppConfig{HomeDir: t.TempDir(), DshPort: 65535})
+	initConfig(&AppConfig{DshPort: 65535})
 	prevBinDir := harnessBinDirFn
 	harnessBinDirFn = func(*UpdateManager) string { return binDir }
 	t.Cleanup(func() {
@@ -116,7 +116,7 @@ func TestApplyServerKeepsBackup(t *testing.T) {
 	writeServerFixture(t, filepath.Join(extractDir, "server"), "2.0.0")
 
 	prevCfg := GetConfig()
-	initConfig(&AppConfig{HomeDir: home, DshPort: 65535})
+	initConfig(&AppConfig{DshPort: 65535})
 	prevServerDir, prevBusy, prevStop, prevPortFree := serverDirFn, marketBusyFn, dshStopFn, dshPortFreeFn
 	serverDirFn = func(*UpdateManager) string { return serverDir }
 	marketBusyFn = func(*UpdateManager) (bool, string) { return false, "" }

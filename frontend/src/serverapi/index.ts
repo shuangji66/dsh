@@ -54,10 +54,9 @@ export interface RuntimeInfo {
   // 即「自动设置」时 dsh 实际拿到的上限：开关打开时输入框展示它，而不是持久化的手动值。
   // 后端探测不到时为 0（此时前端显示空）。
   nodeHeapLimitMB?: number
-  // 主目录相关（资源页）：
-  defaultHomeSemantic: string // 默认主目录的相对/语义路径，如 /var/apps/Harness/shares/Harness
-  defaultHomeDir: string // 默认主目录的实际系统路径
-  homeDir: string // 当前生效的主目录（dsh 的 HOME 实际路径）
+  // 主目录（资源页）：主目录固定为本应用的 shares 目录，不可切换。
+  defaultHomeSemantic: string // 主目录的相对/语义路径，如 /var/apps/Harness/shares/Harness
+  defaultHomeDir: string // 主目录的实际系统路径（dsh 的 HOME）
 }
 
 export interface AppConfig {
@@ -79,7 +78,6 @@ export interface AppConfig {
   dshMemLimit: number
   dshMemAuto: boolean
   nodeVersion: string // dsh 启动使用的 node 版本，"node24"/"node26"，默认 "node24"
-  homeDir?: string // 当前设置的主目录实际路径（用于保存配置时保留）
   accessUrls?: string[] // 用户配置的 dsh 访问地址列表
   // 浏览器兼容模式：修正 dsh 客户端只适配 V8 的原生函数格式判断，
   // 供 Firefox/Zen/Safari 等非 V8 内核正常加载会话历史。默认关闭。
@@ -263,19 +261,6 @@ export const api = {
   dshStart: () => request<DshStatus>('/api/dsh/start', { method: 'POST' }),
   dshStop: () => request<DshStatus>('/api/dsh/stop', { method: 'POST' }),
   dshRestart: () => request<DshStatus>('/api/dsh/restart', { method: 'POST' }),
-  // 资源页：把某个已授权目录设为 dsh 的 HOME（可选迁移 ~/.dsh 配置），确认后重启 dsh
-  dshSetHome: (path: string, migrate: boolean) =>
-    request<{
-      ok: boolean
-      changed?: boolean
-      unchanged?: boolean
-      homeDir?: string
-      error?: string
-      status?: DshStatus
-    }>('/api/dsh/set-home', {
-      method: 'POST',
-      body: JSON.stringify({ path, migrate })
-    }),
   // 目录页：备份当前 HOME 的 ~/.dsh 到统一备份目录 dsh-data-backup-<时间戳>.tar.gz
   dshBackup: () =>
     request<{ ok: boolean; name?: string; path?: string; size?: number; error?: string }>(

@@ -266,6 +266,19 @@
   3. **「server 目录在哪」只有一个入口**：`serverDirFn` —— 更新 dsh 服务、回滚备份、
      市场定位 dshmarket 都用它，测试也因此能注入临时目录（否则会碰到真实的
      `/var/apps/Harness/target/server`）。
+- **主目录（dsh 的 HOME）不可切换，别再把这个功能加回来** —— 资源页曾经可以把某个
+  「已授权目录」设为 dsh 的 HOME，现已整体移除（`AppConfig.HomeDir`、
+  `/api/dsh/set-home`、`handleSetHome` 都没有了；`DshManager.effectiveHome()` 恒返回
+  `renv.Home`）。原因不是「迁移配置不好使」，而是**目标目录的权限由平台共享模型决定**：
+  飞牛用户共享目录用 `mode 000` + ACL + `system.trim_acl` 扩展属性授权，应用写出的
+  每个文件能否被读，取决于飞牛层为它写下的那条逐文件记录；记录一旦写坏（实测见到
+  24 字节的残缺记录，正常是 44/84 字节），**连文件属主（dsh 自己）读它都会 EACCES**，
+  于是 `dsh plugin --profile web …` 在第一步读 `profiles/web/package.json` 时就抛
+  未捕获异常退出（现象：插件列表空白、市场里装不上，控制台日志里什么都没有 ——
+  因为根本没有陈旧锁可清，30 秒锁巡检再正确也无从下手）。在应用自己拥有（`owner=Harness`、
+  mode 非 0）的目录里不会这样：即使同一条记录写坏，POSIX 属主权限仍然兜底。
+  排查同类问题时：`cat <home>/.dsh/profiles/web/package.json` 应以 dsh 的身份（Harness）
+  读得通，读不通就是这个问题。
 - **iOS 上「菜单内焦点搬家」的 `relatedTarget` 是 null** —— dsh 0.1.7 的模型座位
   （`conversation.input.model`）自己实现两级菜单，并在根节点用 `onBlur` 关菜单，守卫写成
   `event.relatedTarget instanceof Node && (rootRef/menuRef 包含它)`：桌面上点选项时焦点落在该

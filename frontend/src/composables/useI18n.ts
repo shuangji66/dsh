@@ -201,19 +201,8 @@ const zh: Record<string, string> = {
   directory_open_window: '已打开授权窗口，完成选择后将自动刷新',
   directory_open_failed: '打开文件管理器失败: {msg}',
   directory_host_bridge_lost: '与飞牛桌面的连接已失效，请关闭本应用窗口后重新打开（刷新页面无效）',
-  // 默认主目录固定卡片
-  directory_current_home: '当前主目录',
-  directory_default_home_title: '默认主目录',
-  directory_default_home_desc: '应用默认主目录，固定不可移除',
-  directory_open_home: '打开主目录',
-  // 设置为主目录
-  directory_set_home: '设置为主目录',
-  confirm_set_home_title: '设置为主目录',
-  confirm_set_home_msg: '切换主目录为该目录，切换后自动重启 dsh 服务。',
-  set_home_migrate_label: '迁移当前主目录配置至该目录',
-  set_home_migrate_hint: '将当前主目录的 .dsh 目录复制至该目录并覆盖。部分配置存在路径问题。',
-  directory_home_switched: '已切换主目录为 {path}',
-  directory_home_switch_failed: '切换主目录失败',
+  // 主目录固定卡片（主目录不可切换，见后端 effectiveHome）
+  directory_home_label: '主目录',
   // 备份当前主目录 ~/.dsh
   directory_backup: '备份',
   confirm_backup_title: '备份主目录配置',
@@ -603,20 +592,9 @@ const en: Record<string, string> = {
   directory_open_window: 'Authorization window opened, refreshing after selection',
   directory_open_failed: 'Failed to open file manager: {msg}',
   directory_host_bridge_lost: 'Connection to the fnOS desktop was lost. Close and reopen this app window (reloading the page does not help).',
-  // Default home pinned card
-  directory_current_home: 'Current home',
-  directory_default_home_title: 'Default home',
-  directory_default_home_desc: 'Default home directory, pinned and cannot be removed',
-  directory_open_home: 'Open home',
-  // Set as home
-  directory_set_home: 'Set as home',
-  confirm_set_home_title: 'Set as Home',
-  confirm_set_home_msg: 'Switch home directory to this directory; the dsh service will restart automatically.',
-  set_home_migrate_label: 'Migrate current home config to this directory',
-  set_home_migrate_hint: 'Copies the current home .dsh directory to this directory and overwrites. Some configs may have path issues.',
-  directory_home_switched: 'Home switched to {path}',
-  directory_home_switch_failed: 'Failed to switch home directory',
-  // Backup current home ~/.dsh
+  // Home pinned card (the home directory cannot be switched, see effectiveHome)
+  directory_home_label: 'Home',
+  // Back up the current home's ~/.dsh
   directory_backup: 'Backup',
   confirm_backup_title: 'Back up home config',
   confirm_backup_msg: 'Back up the .dsh directory under the current home (includes KEY, chat history, config and plugins). Continue?',

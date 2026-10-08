@@ -69,7 +69,7 @@ func TestCleanStaleProfileLocks(t *testing.T) {
 	}
 
 	prevCfg := GetConfig()
-	initConfig(&AppConfig{HomeDir: home})
+	initConfig(&AppConfig{})
 	t.Cleanup(func() { initConfig(&prevCfg) })
 
 	m := newTestDshManager(home, "")
@@ -96,7 +96,7 @@ func TestCleanStaleProfileLocks(t *testing.T) {
 // 没有锁文件时不应报错、也不应影响其它逻辑。
 func TestCleanStaleProfileLocksWithoutFiles(t *testing.T) {
 	prevCfg := GetConfig()
-	initConfig(&AppConfig{HomeDir: t.TempDir()})
+	initConfig(&AppConfig{})
 	t.Cleanup(func() { initConfig(&prevCfg) })
 	m := newTestDshManager(t.TempDir(), "")
 	if got := m.cleanStaleProfileLocks(); got != 0 {
@@ -365,7 +365,7 @@ func TestHarnessUpdateAndDataRestoreRespectBusyGuard(t *testing.T) {
 	}
 
 	prevCfg := GetConfig()
-	initConfig(&AppConfig{HomeDir: home})
+	initConfig(&AppConfig{})
 	t.Cleanup(func() { initConfig(&prevCfg) })
 
 	m := &UpdateManager{renv: &RuntimeEnv{Home: home}, dsh: newTestDshManager(home, "")}

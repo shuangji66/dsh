@@ -210,6 +210,15 @@
   2. **不要为了“更快看到界面”放宽门禁**（例如只留 `checker.quick()`）：端口通了但凭据
      没换到就放行，只会把用户送进 dsh 的未授权响应；而把 `deps` 阶段的放行提前，会让
      流水线收尾重启 dsh 时界面随即失效。
+- **dsh 市场的「回环栅栏」要在反代上成对伪装，`isLoopbackFencedRoute` 里的两条路径
+  缺一不可** —— dshmarket 既拦重启请求（`trustedRestartRequest`，POST `/dsh-market/restart`
+  见转发标记头直接 403），又用状态轮询回答「从当前页面发起的重启能不能过栅栏」
+  （`restartReachableFrom` → `GET /dsh-market/status` 的 `restartReachable` 字段，
+  #782/#678），前端拿到 false 就**把「立即重启」按钮藏起来**。判据是「回环对端 +
+  无 `Forwarded` / `x-forwarded-*` / `x-real-ip` + Host 是回环 authority」，所以反代
+  `forward()` 对这两条路径都要删转发头、把 Host/Origin 改写成 dsh 上游。只伪装 restart
+  会得到自相矛盾的状态（POST 能成功、按钮却不见）；只伪装 status 则 POST 吃 403。
+  回归测试见 `backend/proxy_market_restart_test.go`。
 - **反代有「根挂载」与「子路径挂载」两种形态，自留路径一律经 `proxyMount`** ——
   子路径挂载来自平台网关把 `<prefix>/…` 整段转发到 `HARNESS_PROXY_SOCK`，反代在
   `stripMount` 里剥掉前缀（此后 `r.URL` 是挂载内路径），因此：

@@ -1102,17 +1102,33 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.forward(w, r, checker)
 }
 
-// isPrivilegedControlRoute reports whether the proxied path is a dsh
-// process-control endpoint that enforces a strict same-origin loopback guard
-// (trustedRestartRequest in dshmarket/src/restart.ts): it only accepts requests
-// that look like they came directly from a browser on loopback and REJECTS any
-// forwarding trace (Forwarded / x-forwarded-* / x-real-ip). When the proxy
-// forwards such a request it must therefore NOT append proxy headers (which the
-// normal forward path does) and must rewrite Host/Origin to the dsh upstream so
-// the same-origin check passes.
-func isPrivilegedControlRoute(path string) bool {
+// dsh 市场（dshmarket）里跑「回环栅栏」的两条路径，见 dshmarket/src/restart.ts。
+const (
+	// marketRestartRoute 执行重启：trustedRestartRequest 直接以 403 拒绝任何带
+	// 转发标记头的请求。
+	marketRestartRoute = "/dsh-market/restart"
+	// marketStatusRoute 状态轮询：用 restartReachableFrom 回答「从当前这个页面
+	// 发起的重启能不能过栅栏」，前端据此决定显不显示「立即重启」按钮（#782）。
+	// 它与上面那条栅栏共用 directLoopbackRequest，判据是「回环对端 + 无转发标记头
+	// + Host 是回环 authority」（#678）。
+	marketStatusRoute = "/dsh-market/status"
+)
+
+// isLoopbackFencedRoute reports whether the proxied path answers to dshmarket's
+// loopback fence (dshmarket/src/restart.ts): it only accepts requests that look
+// like they came directly from a browser on loopback and REJECTS any forwarding
+// trace (Forwarded / x-forwarded-* / x-real-ip). When the proxy forwards such a
+// request it must therefore NOT append proxy headers (which the normal forward
+// path does) and must rewrite Host/Origin to the dsh upstream so it reads as a
+// same-origin loopback call.
+//
+// 两条路径都要伪装，缺一不可：
+//   - restart 伪装后重启请求才不会吃到 403；
+//   - status 伪装后前端才认为重启可达。否则按钮被藏起来，而同一路径的 POST 明明
+//     能过栅栏 —— 出现「按钮点不到、接口却能通」的自相矛盾（#782）。
+func isLoopbackFencedRoute(path string) bool {
 	switch path {
-	case "/dsh-market/restart":
+	case marketRestartRoute, marketStatusRoute:
 		return true
 	}
 	return false
@@ -1280,12 +1296,12 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 		outReq.Header.Set("sec-fetch-site", "same-origin")
 	}
 	outReq.Host = checker.hostPort()
-	// 特权控制类请求（如 /dsh-market/restart）在 dsh 侧有严格安全栅栏
-	// （trustedRestartRequest）：要求请求看起来像“来自同源回环浏览器的直接请求”，
-	// 且不允许携带任何转发标记头（Forwarded / x-forwarded-* / x-real-ip），
-	// 否则以 403 拒绝。因此反代转发这类请求时不能附加转发头，并把 Host/Origin
-	// 统一改写为 dsh 上游同源，从而放行反代后的一键重启。
-	if isPrivilegedControlRoute(r.URL.Path) {
+	// 回环栅栏路径（/dsh-market/restart 与 /dsh-market/status）在 dsh 侧有严格
+	// 安全栅栏：要求请求看起来像“来自同源回环浏览器的直接请求”，且不允许携带任何
+	// 转发标记头（Forwarded / x-forwarded-* / x-real-ip）。因此反代转发这两条路径
+	// 时不能附加转发头，并把 Host/Origin 统一改写为 dsh 上游同源 —— 重启请求靠它
+	// 才不被 403，状态轮询靠它才让 dsh 报告 restartReachable=true（前端据此显示按钮）。
+	if isLoopbackFencedRoute(r.URL.Path) {
 		outReq.Header.Del("Forwarded")
 		outReq.Header.Del("X-Forwarded-For")
 		outReq.Header.Del("X-Forwarded-Host")
@@ -1318,7 +1334,8 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 	//（实际约 0.5s 后对自己 SIGTERM，由 detached helper 拉起新进程）。此时
 	// 通知 DshManager 作废缓存并后台重新发现新 dsh PID，刷新 PID 文件与
 	// 概览 CPU/内存监控（否则旧 PID 的僵尸态会让监控读到 0）。
-	if isPrivilegedControlRoute(r.URL.Path) && r.Method == http.MethodPost && resp.StatusCode == http.StatusOK {
+	// 只认 restart 这条路：status 是只读轮询（非 GET 一律 405），不该在这里出现。
+	if r.URL.Path == marketRestartRoute && r.Method == http.MethodPost && resp.StatusCode == http.StatusOK {
 		p.dsh.notifySelfRestart()
 	}
 

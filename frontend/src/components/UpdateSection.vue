@@ -245,15 +245,23 @@ const repoSlugs: Record<UpdateKind, string> = {
 const dialogRepoSlug = computed(() => repoSlugs[dialogKind.value])
 const dialogRepoURL = computed(() => `https://github.com/${dialogRepoSlug.value}`)
 
-// 版本号右上角红点：有更新时显示
+// 版本号右上角红点：有更新时显示。两种「有更新」都算 —— 可就地下载安装的（hasUpdate），
+// 以及跨主要/次要版本、只能更新 fpk 安装包的（storeUpdate，目前只有 harness）。
+// 只看 hasUpdate 会让跨线的新版本完全静默，用户根本不知道有新版本可装。
 function hasUpdateDot(kind: UpdateKind): boolean {
-  return statusOf(kind).hasUpdate
+  const st = statusOf(kind)
+  return st.hasUpdate || !!st.storeUpdate
 }
 function versionText(kind: UpdateKind): string {
   return statusOf(kind).localVersion
 }
 function latestText(kind: UpdateKind): string {
   return statusOf(kind).latestVersion
+}
+// 需换上去的版本号（storeUpdate 为真时有值；latestVersion 是兜底）。
+function storeVersionText(kind: UpdateKind): string {
+  const st = statusOf(kind)
+  return st.storeVersion || st.latestVersion
 }
 
 // 通过 SSE 监听后端推送的更新检测结果。
@@ -277,6 +285,10 @@ async function doCheck(kind: UpdateKind) {
     const st = statusOf(kind)
     if (st?.error) {
       toast.show(uiText(st.error, st.errorRef), 'error')
+    } else if (st?.storeUpdate) {
+      // 跨主要/次要版本：控制台不下载，直接告诉用户需更新 fpk 安装包。
+      // 这里不能落到下面的「暂无更新」—— 那会让用户以为已经是最新的。
+      toast.show(t('update_store_toast', { v: storeVersionText(kind) }), 'info')
     } else if (st && !st.hasUpdate) {
       toast.show(t('update_no_new'), 'success')
     }
@@ -940,9 +952,20 @@ watch(
               </div>
 
               <template v-else>
+                <!-- 跨主要/次要版本（1.4 → 1.5、1.x → 2.x）：控制台不提供下载入口，
+                     只提示需更新 fpk 安装包（底部操作行因此整行隐藏）。
+                     必须排在「无更新提示」之前 —— 那种情况下 hasUpdate 也是 false。 -->
+                <div
+                  v-if="dialogStatus.storeUpdate"
+                  class="mt-3 rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed"
+                >
+                  {{ t('update_store_required', { v: storeVersionText(dialogKind) }) }}
+                </div>
+
                 <!-- 更新内容（release 正文，不含标题）：Markdown 渲染，超长可滚动，不撑破弹窗。
-                     正文与其它弹窗同一档：text-sm + ink-soft + leading-relaxed（小标题用次要小字）。 -->
-                <div v-if="dialogStatus.hasUpdate && dialogStatus.releaseNotes" class="mt-3">
+                     正文与其它弹窗同一档：text-sm + ink-soft + leading-relaxed（小标题用次要小字）。
+                     跨线版本同样给正文：用户正是靠它判断要不要换这一版。 -->
+                <div v-if="(dialogStatus.hasUpdate || dialogStatus.storeUpdate) && dialogStatus.releaseNotes" class="mt-3">
                   <div class="text-xs text-ink-faint dark:text-[#8A8A92] mb-1">{{ t('update_release_notes') }}</div>
                   <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-sm text-ink-soft dark:text-[#A6A6AD] max-h-44 overflow-y-auto leading-relaxed">
                     <MarkdownText :source="dialogStatus.releaseNotes" />
@@ -950,7 +973,7 @@ watch(
                 </div>
 
                 <!-- 无更新提示 -->
-                <div v-else-if="!dialogStatus.hasUpdate" class="mt-3 text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed">
+                <div v-else-if="!dialogStatus.hasUpdate && !dialogStatus.storeUpdate" class="mt-3 text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed">
                   {{ t('update_no_update') }}
                 </div>
               </template>

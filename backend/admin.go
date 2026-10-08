@@ -1431,6 +1431,13 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 		writeErrU(w, http.StatusGone, "err_update_pack_gone", "%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", "kind", string(kind))
 		return
 	}
+	// 控制台只自更新同一 major.minor 线内的补丁版（1.4.3 → 1.4.9）。跨主要/次要版本
+	// （1.4 → 1.5、1.x → 2.x）要提示需更新 fpk 安装包，**同步**拒绝：既不下字节，
+	// 也不把这轮状态改成 downloading（否则弹窗会先闪一下进度条再变成错误）。
+	if v := m.update.getStatus(kind).LatestVersion; v != "" && !harnessSelfUpdateAllowed(v) {
+		writeErrOperation(w, errHarnessStoreUpdate(v))
+		return
+	}
 	// 同步置“下载中”状态：在返回 HTTP 响应前后端状态即已就绪（downloadUpdate
 	// goroutine 内还会再置一次，幂等）。这样即使 SSE 首帧丢失或断线重连，
 	// 前端拿到的快照也必然是 downloading，不会退回空闲页。

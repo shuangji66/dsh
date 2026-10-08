@@ -86,7 +86,11 @@
   通知旧端（`\x1b]detached\x07` + close 4001）；被顶掉端的输入 / 尺寸请求在服务端丢弃
   （`writeInput` / `resize` 走 `isOwner`，非操作端返回 `errNotOwner`，上层静默忽略）。
 - `update.go` — **harness 控制台自更新**（版本检测、下载、备份与替换）+ dsh 数据备份/
-  恢复；`harnessVersion` 由 `-ldflags -X` 注入。下载只有「发布资产」一种策略
+  恢复；`harnessVersion` 由 `-ldflags -X` 注入。**自更新只允许同一 major.minor 线内的
+  小版本（1.4.3 → 1.4.9）**：跨主要/次要版本（1.4 → 1.5、1.x → 2.x）一律拒绝下载与安装，
+  改为提示需更新 fpk 安装包 —— `HasUpdate` 的语义就是「有可就地下载安装的
+  更新」，跨线走 `StoreUpdate`/`StoreVersion`，判定入口是 `harnessUpdateTarget` /
+  `sameMinorLine`，见规则 14。下载只有「发布资产」一种策略
   （`downloadPlanFor`）：代理+直连各 2 次 + HTTP Range 断点续传 + 暂停/取消；
   **是否「先从代理更新」由 `AppConfig.ProxyUpdate`（设置页「代理harness更新」）控制** ——
   代理地址探测不通或代理通路失败回退直连；它与 `ProxyEnabled`（设置页「代理dsh」，
@@ -332,6 +336,24 @@
      新增一句提示 = 后端加 code + 前端补两条译文，跑一次 `go test` 就知道漏没漏。
    - 反面教材（本次踩过）：前端用 `st.error.includes('用户取消')` 判断「用户取消了下载」——
      语言一换就失效；现在后端在取消时置 `Cancelled` 标记 + code，前端只看结构化字段。
+
+14. **控制台自更新只允许小版本，跨版本必须更新 fpk 安装包** —— harness 只能就地更新同一
+   `major.minor` 线内的补丁版（`1.4.3 → 1.4.9`）；跨主要/次要版本（`1.4 → 1.5`、`1.x → 2.x`）
+   一律**拒绝下载与安装**，改为提示用户更新 fpk 安装包。原因：平台侧的部署
+   脚本/依赖与 dsh 的配套版本都在 fpk 里，控制台自己解开一个跨线的包只会得到「二进制换了、
+   平台侧没换」的半升级状态 —— 因此**不要**给这条规则加任何「下载后自更新」的变体。
+   - 判定只有一处：`update.go` 的 `harnessUpdateTarget` / `sameMinorLine`（基准是
+     **仓库最新版**，不是「本线最高补丁版」—— 最新版一跨线，就地自更新整体停用，否则用户会
+     在被新线取代的旧线上继续升级且永远看不到「需要换包」的提示）。结论写进状态的两个新字段：
+     `StoreUpdate` / `StoreVersion`，与 `HasUpdate` **互斥**；`HasUpdate` 的语义因此被收紧为
+     「有可就地下载安装的更新」，别再往里塞别的含义。
+   - 三处闸门：`POST /api/update/download`（同步 400 + `err_update_store_required`，
+     **不下字节、不改状态**）、`downloadUpdate`、`installUpdate`。新增任何「下载/安装 harness
+     更新包」的入口，都要挂上同一判定。
+   - 前端（`UpdateSection.vue`）：红点在 `hasUpdate || storeUpdate` 时亮（只看 `hasUpdate`
+     会让跨线新版本完全静默）；弹窗给 `update_store_required` 文案、下载按钮整行隐藏、
+     **更新内容照常显示**；「检查更新」不再误报「暂无更新」。回归测试见
+     `backend/update_store_test.go`。
 
 ---
 

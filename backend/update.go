@@ -138,12 +138,21 @@ type tagInfo struct {
 //     走 market.go，进度用 Phase/Message 表达）。
 type UpdateStatus struct {
 	Kind          updateKind `json:"kind"`
-	LocalVersion  string     `json:"localVersion"`           // 本地版本号
-	LatestVersion string     `json:"latestVersion"`          // 最新版本号（空表示未获取到）
-	HasUpdate     bool       `json:"hasUpdate"`              // 是否有可用更新
-	CheckedAt     time.Time  `json:"checkedAt"`              // 最近检测时间
-	Error         string     `json:"error,omitempty"`        // 最近一次检测/拉取失败原因
-	ReleaseNotes  string     `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
+	LocalVersion  string     `json:"localVersion"`  // 本地版本号
+	LatestVersion string     `json:"latestVersion"` // 最新版本号（空表示未获取到）
+	// HasUpdate 表示「有可就地安装的更新」。它的语义**只有**这一条：能下载、能安装。
+	// harness 跨 major/minor 的版本（1.4 → 1.5、1.x → 2.x）不在此列，那些版本只能去
+	// 换 fpk 安装包，走 StoreUpdate（见下）。别的链路不受影响。
+	HasUpdate bool `json:"hasUpdate"`
+	// StoreUpdate / StoreVersion 仅 harness 使用：仓库最新版跨过了 major/minor 线，
+	// 控制台**不能**就地自更新，只能更新本应用的 fpk 安装包（换包）。
+	// StoreUpdate 为真时 HasUpdate 恒为 false，StoreVersion 给出要换上去的版本号。
+	// 前端据此亮红点、在弹窗里给「需更新 fpk 安装包」的提示（并隐藏下载按钮）。
+	StoreUpdate  bool      `json:"storeUpdate,omitempty"`
+	StoreVersion string    `json:"storeVersion,omitempty"`
+	CheckedAt    time.Time `json:"checkedAt"`              // 最近检测时间
+	Error        string    `json:"error,omitempty"`        // 最近一次检测/拉取失败原因
+	ReleaseNotes string    `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
 
 	// 下载进度（仅 harness 更新包下载期间有值；下载完成后清空）。
 	Downloading     bool  `json:"downloading,omitempty"`     // 是否正在下载更新包
@@ -407,6 +416,57 @@ func compareVersion(a, b string) int {
 		}
 	}
 	return 0
+}
+
+// --- 「控制台只自更新小版本」的判定 ---
+//
+// harness 控制台**只允许就地自更新同一 major.minor 线内的补丁版**（1.4.3 → 1.4.9）。
+// 跨主要/次要版本（1.4 → 1.5、1.x → 2.x）一律拒绝下载与安装，只提示用户更新 fpk
+// 安装包（换包，而不是控制台自己就地升级）：这类升级不只是换控制台二进制，平台侧的
+// 部署脚本/依赖与 dsh 的配套版本都在 fpk 里，换包才会把它们一起换掉；让控制台自己
+// 解开一个跨线的包，会得到一个「二进制换了、平台侧没换」的半升级状态。
+//
+// 判定基准是**仓库最新版**（不是「本线最高补丁版」）：最新版一旦跨线，就地自更新整体
+// 停用（即使同一条线里还挂着更早发布的补丁版）—— 否则用户会在一个已被新线取代的旧线
+// 上继续升级，且永远看不到「需要换包」的提示。
+
+// sameMinorLine 报告两个版本号是否属于同一条 major.minor 线（只看前两段数字，
+// 预发布后缀不影响）。任一侧解析不出两段数字时返回 false（判不了就不自更新）。
+func sameMinorLine(a, b string) bool {
+	an, _ := splitVersion(a)
+	bn, _ := splitVersion(b)
+	if len(an) < 2 || len(bn) < 2 {
+		return false
+	}
+	return an[0] == bn[0] && an[1] == bn[1]
+}
+
+// harnessSelfUpdateAllowed 报告某个 harness 版本能否由控制台就地更新（同一 major.minor 线）。
+func harnessSelfUpdateAllowed(version string) bool {
+	return sameMinorLine(harnessVersion, version)
+}
+
+// harnessUpdateTarget 判定「本地当前版本 → 仓库最新版本 latest」这次检测该走哪条路：
+//   - selfUpdate=true：允许就地下载安装（同线补丁版）；
+//   - storeUpdate=true：跨了 major/minor，只能更新 fpk 安装包；
+//   - 两者都 false：latest 不比本地新（没有更新）。
+func harnessUpdateTarget(latest string) (selfUpdate, storeUpdate bool) {
+	if latest == "" || compareVersion(latest, harnessVersion) <= 0 {
+		return false, false
+	}
+	if harnessSelfUpdateAllowed(latest) {
+		return true, false
+	}
+	return false, true
+}
+
+// errHarnessStoreUpdate 构造「该版本不能由控制台自更新，需更新 fpk 安装包」的用户错误。
+// 面向用户的文案走 code + 参数（见 uimsg.go），错误串本身会被 logError 打进日志，
+// 因此这里保持中文原文作为兜底（与 err_update_pack_gone 等既有 code 一致）。
+func errHarnessStoreUpdate(version string) error {
+	return uiErr("err_update_store_required",
+		"新版本 %s 需要更新 fpk 安装包（控制台只支持同一主要/次要版本线内的小版本自更新，如 1.4.3 → 1.4.9）",
+		"version", version)
 }
 
 // pickLatest 从全部 tag 中筛出指定前缀（harness- / dsh-）的 tag，按版本号排序取最新。
@@ -763,6 +823,8 @@ func (m *UpdateManager) checkOnce() {
 		if st, ok := m.statuses[updateKindHarness]; ok {
 			st.LatestVersion = ""
 			st.HasUpdate = false
+			st.StoreUpdate = false
+			st.StoreVersion = ""
 			st.CheckedAt = now
 			setErrFields(&st.Error, &st.ErrorRef, err)
 			st.ReleaseNotes = ""
@@ -793,12 +855,20 @@ func (m *UpdateManager) checkOnce() {
 		st.CheckedAt = now
 		setErrFields(&st.Error, &st.ErrorRef, nil)
 		st.ReleaseNotes = harnessNotes
+		// 三个字段一起写：HasUpdate（可下载安装）与 StoreUpdate/StoreVersion（跨线，只能
+		// 换包）是互斥的两条结论，逐个分支清空才不会把上一轮的结论留在快照里。
+		st.LatestVersion = ""
+		st.HasUpdate = false
+		st.StoreUpdate = false
+		st.StoreVersion = ""
 		if h != nil {
+			self, store := harnessUpdateTarget(h.version)
 			st.LatestVersion = h.version
-			st.HasUpdate = compareVersion(h.version, harnessVersion) > 0
-		} else {
-			st.LatestVersion = ""
-			st.HasUpdate = false
+			st.HasUpdate = self
+			st.StoreUpdate = store
+			if store {
+				st.StoreVersion = h.version
+			}
 		}
 	})
 
@@ -817,8 +887,10 @@ func (m *UpdateManager) checkOnce() {
 	ds := m.getStatus(updateKindDsh)
 	ms := m.getStatus(updateKindMarket)
 	// changed 判断某目标的结论是否与上次不同（true 才允许输出该目标那一行）。
-	changed := func(k updateKind, has bool, latest string) bool {
-		sig := fmt.Sprintf("%v/%s", has, latest)
+	// store 也进签名：同一条「最新版」在「可就地更新」与「只能换包」之间切换时，
+	// 日志必须跟着变一句，否则会留下「有更新却没有任何下载入口」的现场。
+	changed := func(k updateKind, has, store bool, latest string) bool {
+		sig := fmt.Sprintf("%v/%v/%s", has, store, latest)
 		if m.lastCheckSig[k] == sig {
 			return false
 		}
@@ -829,14 +901,19 @@ func (m *UpdateManager) checkOnce() {
 	if m.lastCheckSig == nil {
 		m.lastCheckSig = map[updateKind]string{}
 	}
-	showHarness := changed(updateKindHarness, hs.HasUpdate, hs.LatestVersion)
-	showDsh := changed(updateKindDsh, ds.HasUpdate, ds.LatestVersion)
-	showMarket := changed(updateKindMarket, ms.HasUpdate, ms.LatestVersion)
+	showHarness := changed(updateKindHarness, hs.HasUpdate, hs.StoreUpdate, hs.LatestVersion)
+	showDsh := changed(updateKindDsh, ds.HasUpdate, false, ds.LatestVersion)
+	showMarket := changed(updateKindMarket, ms.HasUpdate, false, ms.LatestVersion)
 	m.checkLogMu.Unlock()
 
 	if showHarness && hs.HasUpdate {
 		logInfo("%s update available: %s -> %s",
 			updateLogTag(updateKindHarness), harnessVersion, hs.LatestVersion)
+	}
+	// 跨 major/minor：控制台不下载、不安装，只提示需更新 fpk 安装包（见 harnessUpdateTarget）。
+	if showHarness && hs.StoreUpdate {
+		logInfo("%s update requires a new fpk package (major/minor change, self-update disabled): %s -> %s",
+			updateLogTag(updateKindHarness), harnessVersion, hs.StoreVersion)
 	}
 	if showDsh && ds.HasUpdate {
 		logInfo("%s update available: %s -> %s",
@@ -2210,6 +2287,12 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		return fmt.Errorf("尚未获取到最新版本号，请先执行检查更新")
 	}
 	version := st.LatestVersion
+	// 只允许同 major.minor 线的补丁版：跨线的版本靠更新 fpk 安装包，一律不下这份字节。
+	// 这里再挡一次（handler 已经先挡）是因为「检测结论」与「点下载」之间隔着一段时间，
+	// 期间每小时自动检测可能刚好把最新版换成跨线的那一版。
+	if !harnessSelfUpdateAllowed(version) {
+		return errHarnessStoreUpdate(version)
+	}
 	rawURL := assetURLFn(m, k, version, m.updateArch())
 	// wantSHA 是发布资产期望的 sha256（空表示这次不校验，见 releaseChecksum）。
 	var wantSHA string
@@ -2362,6 +2445,12 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 	p := m.getPending(k)
 	if p == nil {
 		return fmt.Errorf("尚未下载 %s 更新包，请先下载更新", k)
+	}
+	// 安装侧也复核一次线：待安装包是「下载 → 安装」两步之间留在盘上的东西，安装是
+	// 最后一道闸门 —— 跨 major/minor 的包绝不能被装上去（那会得到「二进制换了、平台
+	// 侧没换」的半升级状态）。正常情况下下载侧已挡住，这里只作兜底。
+	if !harnessSelfUpdateAllowed(p.Version) {
+		return errHarnessStoreUpdate(p.Version)
 	}
 	if _, err := os.Stat(p.PkgPath); err != nil {
 		m.clearPending(k)

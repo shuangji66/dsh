@@ -151,7 +151,14 @@ export interface UpdateStatus {
   kind: UpdateKind
   localVersion: string
   latestVersion: string
+  // hasUpdate 的唯一语义是「有可就地下载安装的更新」。harness 跨 major/minor 的版本
+  // （1.4 → 1.5、1.x → 2.x）不算，那种情况走 storeUpdate（见下）。
   hasUpdate: boolean
+  // 仅 harness：仓库最新版跨过了 major/minor 线，控制台不能就地自更新，只能更新
+  // fpk 安装包。为真时 hasUpdate 恒为 false，红点按两者之一亮。
+  storeUpdate?: boolean
+  // 需换上去的版本号（storeUpdate 为真时有值）。
+  storeVersion?: string
   checkedAt: string
   error?: string
   // 最新 release 的更新内容（正文，不含标题；可能为空串。市场来自 npm，恒为空）

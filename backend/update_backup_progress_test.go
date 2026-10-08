@@ -234,7 +234,8 @@ func TestRestoreRefusedWhileBackupRunning(t *testing.T) {
 	path := makeBackupFile(t, m, "dsh-data-1.0.0-20250101000000.tar.gz")
 
 	// 直接占住跟踪器模拟「备份进行中」：RestoreDshData 的第一道判定就是它。
-	dshBackup.begin("dsh-data-1.0.0-20250101000000.tar.gz", path, 1, 1)
+	dshBackup.begin("dsh-data-1.0.0-20250101000000.tar.gz", path)
+	dshBackup.setTotals(1, 1)
 	err := m.RestoreDshData(path)
 
 	if err == nil || !strings.Contains(err.Error(), "正在备份") {
@@ -273,4 +274,100 @@ func waitDshBackupDone(t *testing.T, m *UpdateManager, timeout time.Duration) Ds
 	}
 	t.Fatalf("等待备份结束超时, 最后状态 %+v", m.GetDshBackupStatus())
 	return DshBackupStatus{}
+}
+
+// --- 半成品（.part）与完成包的区分 ---
+
+// 打包先写 <名称>.part、成功后改名：留下的半成品不能被当成一份可用备份。
+// 恢复是「先删 ~/.dsh 再解压」，拿半个包恢复就是把数据删了却解不出内容。
+func TestBackupWritesPartFileThenRenames(t *testing.T) {
+	t.Setenv("TRIM_PKGVAR", t.TempDir())
+	home := t.TempDir()
+	m := newBackupTestManager(t, home, t.TempDir())
+	resetDshBackupTracker(t)
+
+	dshDir := filepath.Join(home, ".dsh")
+	if err := os.MkdirAll(dshDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeSrcTree(t, dshDir, 2)
+
+	if err := m.BackupDshData(); err != nil {
+		t.Fatalf("BackupDshData: %v", err)
+	}
+	st := waitDshBackupDone(t, m, 30*time.Second)
+	if !st.Ok {
+		t.Fatalf("备份应成功，实际 %+v", st)
+	}
+	// 完成包在，半成品不在。
+	if _, err := os.Stat(st.Path); err != nil {
+		t.Fatalf("完成包应存在: %v", err)
+	}
+	if _, err := os.Stat(st.Path + backupPartSuffix); !os.IsNotExist(err) {
+		t.Fatalf("收尾后不该留下 .part 半成品")
+	}
+	// 半成品也不该出现在备份列表里（名字不匹配 -<14位时间戳>.tar.gz）。
+	if isBackupFile(filepath.Base(st.Path)+backupPartSuffix, "dsh-data-") {
+		t.Fatal(".part 半成品不该被当成合法备份文件")
+	}
+}
+
+// 启动清理：上次打包被杀留下的 .part 会被扫掉（它既不在备份列表里，也不会被 30 天清理碰到）。
+func TestSweepPartialBackups(t *testing.T) {
+	t.Setenv("TRIM_PKGVAR", t.TempDir())
+	m := newBackupTestManager(t, t.TempDir(), t.TempDir())
+	resetDshBackupTracker(t)
+
+	dir := m.backupDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	partial := filepath.Join(dir, "dsh-data-1.0.0-20250101000000.tar.gz"+backupPartSuffix)
+	keep := filepath.Join(dir, "dsh-data-1.0.0-20250101000000.tar.gz")
+	for _, p := range []string{partial, keep} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m.sweepPartialBackups()
+
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Fatal("半成品应被清掉")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("完成包不能被误删: %v", err)
+	}
+}
+
+// 正在写的那一份不能被删：删掉后这次备份仍会报「成功」，盘上却查无此包。
+func TestDeleteDshDataBackupRefusesInFlightFile(t *testing.T) {
+	t.Setenv("TRIM_PKGVAR", t.TempDir())
+	m := newBackupTestManager(t, t.TempDir(), t.TempDir())
+	resetDshBackupTracker(t)
+
+	dir := m.backupDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "dsh-data-1.0.0-20250101000000.tar.gz"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟「这份文件正在被备份写入」。
+	dshBackup.begin(name, path)
+	if err := m.DeleteDshDataBackup(name); err == nil {
+		t.Fatal("正在写入的备份文件不允许删除")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("被拒绝时不该删除文件: %v", err)
+	}
+
+	// 备份结束后即可删除。
+	dshBackup.finish(true, false, nil, 1)
+	if err := m.DeleteDshDataBackup(name); err != nil {
+		t.Fatalf("备份结束后应可删除: %v", err)
+	}
 }

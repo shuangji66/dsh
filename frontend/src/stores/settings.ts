@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api, type AppConfig, type DshStatus, type RuntimeInfo, type SettingsPayload } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
-import { useI18n } from '@/composables/useI18n'
+import { uiErrText, useI18n } from '@/composables/useI18n'
 
 // 手动设置的 node 堆内存上限阈值（MB）。MEM_LIMIT_MIN_MB 与后端 config.go 的
 // minDshMemLimitMB 保持一致（低于它后端也拒绝保存）；MEM_LIMIT_WARN_MB 只用于前端
@@ -77,7 +77,7 @@ export const useSettingsStore = defineStore('settings', () => {
       // 后端下发的就是当前生效的配置，作为「已保存」基准
       markApplied(p.config)
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
     } finally {
       loading.value = false
     }
@@ -117,7 +117,7 @@ export const useSettingsStore = defineStore('settings', () => {
       savedSeq.value++
       return true
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
       return false
     } finally {
       loading.value = false
@@ -131,7 +131,7 @@ export const useSettingsStore = defineStore('settings', () => {
       toast.show(t('dsh_started'), 'success')
       await load()
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
     }
   }
 
@@ -142,7 +142,7 @@ export const useSettingsStore = defineStore('settings', () => {
       toast.show(t('dsh_stopped'), 'success')
       await load()
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
     }
   }
 
@@ -154,7 +154,7 @@ export const useSettingsStore = defineStore('settings', () => {
       toast.show(t('dsh_restarted'), 'success')
       await load()
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
     } finally {
       loading.value = false
     }

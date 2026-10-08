@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,9 +66,10 @@ type DshManager struct {
 
 	// pluginCmdMu 保护 pluginCmdN：正在执行的 `dsh plugin …` 命令计数。
 	// 这些命令会在 dsh 进程内持有 profile 写锁（plugin-manager 的
-	// package.json.lock），所以「更新 dsh 服务 / 更新市场 / 回滚 server 目录」之前
-	// 必须先确认没有正在跑的命令，否则杀掉它们就会留下陈旧锁。用独立互斥锁：
-	// Stop 会长时间持有 m.mu，不能共用。
+	// package.json.lock），所以「更新 harness / 切换 dsh 版本 / 恢复 dsh 数据 /
+	// 市场变更后重启」之前必须先确认没有正在跑的命令，否则杀掉它们就会留下陈旧锁。
+	// 用独立互斥锁：Stop 会长时间持有 m.mu，不能共用。
+	// 所有插件命令都必须经 RunPluginCommand 登记（含插件市场的 add/remove/list）。
 	pluginCmdMu sync.Mutex
 	pluginCmdN  int
 }
@@ -1169,23 +1171,34 @@ type PluginInfo struct {
 }
 
 // runPluginCmd 以 dsh 的运行环境执行 `dsh plugin --profile web <args...>`，
-// 返回合并后的 stdout/stderr 输出。
-//
-// 执行前会先清掉「持有者已死」的 profile 写锁：dsh 的 plugin-manager 在插件列表 /
-// 安装 / 卸载时都会先拿 `profiles/web/package.json.lock`，而陈旧锁会让这条命令
-// 白等 120 秒再失败（见 cleanStaleProfileLocks）。顺手在这里自愈，控制台就不会
-// 出现「插件列表空白 + 请求挂起」。
+// 返回合并后的 stdout/stderr 输出。走 RunPluginCommand（清陈旧锁 + 登记忙守卫）。
 func (m *DshManager) runPluginCmd(args ...string) (string, error) {
-	m.cleanStaleProfileLocks()
-	// 登记「插件命令进行中」：更新 dsh 服务 / 更新市场 / 回滚都要先看这个计数，
-	// 否则会把这批命令连同它持有的 profile 写锁一起带走（见 PluginCmdRunning）。
-	m.beginPluginCmd()
-	defer m.endPluginCmd()
 	// 注意：Go 不允许向变参函数混合传字面量与 slice...，需先拼成一个切片再一次性展开。
 	all := append([]string{"plugin", "--profile", "web"}, args...)
 	// 带超时：即使遇到无法自愈的挂起（例如持有者还活着但在等网络），也不能让
 	// 控制台的 HTTP 请求无限挂住、并不断堆积 dsh 子进程。
-	return m.runDshCmdTimeout(pluginCmdTimeout, all...)
+	return m.RunPluginCommand(pluginCmdTimeout, all)
+}
+
+// RunPluginCommand 执行**一整条** `dsh plugin …` 命令行（含开头的 "plugin" 与
+// "--profile web"），是控制台侧所有插件命令的唯一入口 —— 插件页的 list/remove 与
+// 插件市场的 add/remove 都必须走它。绕开它的代价（市场曾直接调 runDshCmdTimeout）：
+//
+//   - 执行前不清「持有者已死」的 profile 写锁（见 cleanStaleProfileLocks），那条命令
+//     会白等 120 秒再失败（现象：插件列表空白、市场里装不上）；
+//   - `PluginCmdRunning()` 看不到这次操作，`replaceBusyGuard`（切换 dsh 版本 / 更新
+//     harness / 恢复数据前的统一前置检查）与概览页「停止/重启」的风险提示都会误判成
+//     「没有插件操作在跑」，而这次 pnpm 正在重写 profiles/web —— 正是忙守卫要防的场景。
+//
+// timeout 由调用方决定，别在这里写死：插件页的只读命令用 pluginCmdTimeout，市场的
+// add 允许 10 分钟（marketCmdTimeout）。
+func (m *DshManager) RunPluginCommand(timeout time.Duration, args []string) (string, error) {
+	m.cleanStaleProfileLocks()
+	// 登记「插件命令进行中」：更新 dsh 服务 / 更新市场 / 恢复数据都要先看这个计数，
+	// 否则会把这批命令连同它持有的 profile 写锁一起带走（见 PluginCmdRunning）。
+	m.beginPluginCmd()
+	defer m.endPluginCmd()
+	return m.runDshCmdTimeout(timeout, args...)
 }
 
 // --- 陈旧的 dsh 写锁清理 ---
@@ -1280,6 +1293,11 @@ func (m *DshManager) selectedDshVersion() string {
 	return v
 }
 
+// errNoDshVersion 表示「本机没有选中且装着的 dsh 版本」。错误文本保持英文（它会被日志
+// 打印，见 AGENTS 规则 7），界面要中文文案时用 errors.Is 判它，再换成自己的话术
+// （等待页由 main.go 的 not-installed 阶段给，市场检测由 market.go 给）。
+var errNoDshVersion = errors.New("no dsh version selected: download and switch to one from the console version list")
+
 // dshBinPath 返回当前选中版本里 dsh 可执行文件的绝对路径；未安装任何版本时报错。
 //
 // 这是 dsh 侧唯一的可执行文件解析入口：启动 dsh、执行 `dsh plugin …`、`dsh -V` 都走它，
@@ -1287,11 +1305,11 @@ func (m *DshManager) selectedDshVersion() string {
 func (m *DshManager) dshBinPath() (string, error) {
 	v := m.selectedDshVersion()
 	if v == "" {
-		return "", fmt.Errorf("尚未安装 dsh 服务：请在控制台概览页的 dsh 版本列表里下载并切换一个版本（安装目录 %s）", serverRootFor(m.renv))
+		return "", fmt.Errorf("%w (%s)", errNoDshVersion, serverRootFor(m.renv))
 	}
 	bin := versionDshBinFor(m.renv, v)
 	if fi, err := os.Stat(bin); err != nil || !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("dsh %s 的可执行文件不存在（%s），请重新下载该版本", v, bin)
+		return "", fmt.Errorf("dsh %s has no executable at %s, re-download that version", v, bin)
 	}
 	return bin, nil
 }
@@ -1347,7 +1365,7 @@ func (m *DshManager) runDshCmdTimeout(timeout time.Duration, args ...string) (st
 			<-done
 		}
 		return strings.TrimSpace(out.String()),
-			fmt.Errorf("执行 dsh %s 超时（%s）", strings.Join(args, " "), timeout)
+			fmt.Errorf("dsh %s timed out (%s)", strings.Join(args, " "), timeout)
 	}
 }
 

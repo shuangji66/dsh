@@ -416,8 +416,10 @@ func safeNext(next string) string {
 
 const loginPageHTML = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
+<!-- 文案双语：控制台的界面语言存在 localStorage（console-language），本页与控制台同源，
+     因此页内脚本直接读它 —— 登录页是后端渲染的独立页面，用不了前端的 i18n 字典。 -->
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>登录 - DeepSeek Harness</title>
+<title data-zh="登录 - DeepSeek Harness" data-en="Sign in - DeepSeek Harness">登录 - DeepSeek Harness</title>
 <style>
   :root{
     --brand:#6366F1;
@@ -485,17 +487,52 @@ const loginPageHTML = `<!DOCTYPE html>
 </style></head><body><div class="wrap">
   <div class="card">
     <div class="logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
-    <h1>欢迎回来</h1><p class="sub">访问受密码保护，请输入登录密码</p>
+    <h1 data-zh="欢迎回来" data-en="Welcome back">欢迎回来</h1>
+    <p class="sub" data-zh="访问受密码保护，请输入登录密码" data-en="This console is password protected. Enter the access password.">访问受密码保护，请输入登录密码</p>
     <form method="POST" action="__LOGIN_ACTION__">
-      <label for="pw">密码</label>
+      <label for="pw" data-zh="密码" data-en="Password">密码</label>
       <input id="pw" name="password" type="password" autofocus required
-             autocomplete="current-password" placeholder="请输入访问密码">
-      <button type="submit">登 录</button>
+             autocomplete="current-password" data-ph-zh="请输入访问密码" data-ph-en="Enter the access password"
+             placeholder="请输入访问密码">
+      <button type="submit" data-zh="登 录" data-en="Sign in">登 录</button>
     </form>
     __ERROR_SLOT__
   </div>
   <div class="foot">DeepSeek Harness</div>
-</div></body></html>`
+</div>
+<script>
+// 按控制台的界面语言（localStorage.console-language，与控制台同源）改写本页文案；
+// 读不到（隐私模式等）或不是 en 时保持中文，绝不因为这段脚本让页面显示不出内容。
+(function () {
+  var en = false;
+  try { en = localStorage.getItem('console-language') === 'en' } catch (e) { en = false }
+  if (!en) return;
+  document.documentElement.lang = 'en';
+  var els = document.querySelectorAll('[data-en]');
+  for (var i = 0; i < els.length; i++) {
+    var v = els[i].getAttribute('data-en');
+    if (v) els[i].textContent = v;
+  }
+  var phs = document.querySelectorAll('[data-ph-en]');
+  for (var j = 0; j < phs.length; j++) {
+    var p = phs[j].getAttribute('data-ph-en');
+    if (p) phs[j].setAttribute('placeholder', p);
+  }
+})();
+</script>
+</body></html>`
+
+// loginErrText 返回登录页错误提示的中英文案。登录页是后端渲染的独立页面（没有前端
+// 运行时，用不上 useI18n），因此这两句直接写在这里；其余页面文案走 data-zh/data-en。
+func loginErrText(code string) (zh, en string, ok bool) {
+	switch code {
+	case "err_login_bad_password":
+		return "密码错误", "Wrong password", true
+	case "err_login_disabled":
+		return "鉴权未启用（未设置密码），无需登录。", "Authentication is disabled (no password set); no sign-in needed.", true
+	}
+	return "", "", false
+}
 
 // htmlEscape 转义要嵌入 HTML 属性的文本（与错误提示槽用同一套替换规则）。
 func htmlEscape(s string) string {
@@ -512,10 +549,13 @@ func htmlEscape(s string) string {
 // 这里再经 safeNext 校验（挡协议相对地址/反斜杠/回到登录页自身的循环），
 // 只有校验后确实是一个有意义的、非挂载根的路径才写进 query；否则保持
 // `<prefix>/_login` 原样（少一个无意义的 `?next=%2F`）。
-func serveLoginPage(w http.ResponseWriter, errMsg, next string, mount proxyMount) {
+func serveLoginPage(w http.ResponseWriter, errCode, next string, mount proxyMount) {
 	slot := ""
-	if errMsg != "" {
-		slot = `<div class="err">` + htmlEscape(errMsg) + `</div>`
+	if zh, en, ok := loginErrText(errCode); ok {
+		slot = `<div class="err" data-en="` + htmlEscape(en) + `">` + htmlEscape(zh) + `</div>`
+	} else if errCode != "" {
+		// 认不出的 code：原样显示（不静默吞掉，便于排查）
+		slot = `<div class="err">` + htmlEscape(errCode) + `</div>`
 	}
 	action := mount.join(authLogin)
 	if safe := safeNext(next); safe != "/" {
@@ -552,11 +592,11 @@ func (a *Auth) handleAuthRoutes(w http.ResponseWriter, r *http.Request, mount pr
 			r.ParseForm()
 			pwd := r.FormValue("password")
 			if c.Password == "" {
-				serveLoginPage(w, "鉴权未启用（未设置密码），无需登录。", next, mount)
+				serveLoginPage(w, "err_login_disabled", next, mount)
 				return true
 			}
 			if pwd != c.Password {
-				serveLoginPage(w, "密码错误", next, mount)
+				serveLoginPage(w, "err_login_bad_password", next, mount)
 				return true
 			}
 			// 登录有效期取配置中的 AuthTTLHours（小时）；未配置或非法时回退到 4 小时

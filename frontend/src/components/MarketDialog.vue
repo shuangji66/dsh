@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { UpdateStatus } from '@/serverapi'
-import { useI18n } from '@/composables/useI18n'
+import { uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -88,10 +88,10 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
             <div class="mt-3 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
               <div class="h-full rounded-full bg-brand progress-indeterminate"></div>
             </div>
-            <div v-if="status.message" class="mt-2 font-mono text-[11px] text-ink-faint dark:text-[#8A8A92] break-all">
-              {{ status.message }}
+            <div v-if="status.message" class="mt-2 font-mono text-xs text-ink-faint dark:text-[#8A8A92] break-all select-text">
+              {{ uiText(status.message, status.messageRef) }}
             </div>
-            <div class="mt-2 text-[11px] text-ink-faint dark:text-[#8A8A92]">{{ t('market_busy_hint') }}</div>
+            <div class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('market_busy_hint') }}</div>
           </div>
 
           <template v-else>
@@ -106,27 +106,28 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
                 <span class="font-mono text-sm font-semibold text-ink dark:text-white">{{ latest || '—' }}</span>
               </div>
             </div>
-            <!-- 未安装：说明 + 要装的版本（同一档字号/颜色，见下面那行） -->
-            <p v-else class="text-xs text-ink-faint dark:text-[#8A8A92]">
+            <!-- 未安装：说明用正文档（text-sm + ink-soft，见 style.css 的弹窗字号约定），
+                 要装的版本号是元信息，用 text-xs + ink-faint。 -->
+            <p v-else class="text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
               {{ t('market_not_installed_desc') }}
             </p>
             <p v-if="!installed && latest" class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">
               {{ t('market_install_target', { v: latest }) }}
             </p>
-            <p v-if="!installed && !latest" class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">
+            <p v-if="!installed && !latest" class="mt-2 text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
               {{ t('market_latest_unknown') }}
             </p>
 
             <!-- 失败提示 -->
             <div
               v-if="status.error"
-              class="mt-3 rounded-lg px-3 py-2 text-xs break-words bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]"
-            >{{ status.error }}</div>
+              class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]"
+            >{{ uiText(status.error, status.errorRef) }}</div>
 
             <!-- 已安装但检测不到更新信息（检测失败）：给出诊断原因 -->
             <div
               v-if="installed && !latest && !status.error && status.marketDir"
-              class="mt-3 rounded-lg px-3 py-2 text-xs break-words bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] text-ink-soft dark:text-[#A6A6AD]"
+              class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] text-ink-soft dark:text-[#A6A6AD]"
             >{{ status.marketDir }}</div>
           </template>
 

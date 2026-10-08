@@ -181,7 +181,12 @@ func main() {
 		// 用户去版本列表里下载 + 切换），因此用专门的 not-installed 阶段 —— 反代
 		// 的等待页会显示「尚未安装 dsh 服务」并给出下一步，而不是一条启动失败报错。
 		if dsh.selectedDshVersion() == "" {
-			boot.set(phaseNotInstalled, fmt.Sprintf("请在控制台「概览」页的 dsh 版本列表里下载一个版本并点「切换」（安装目录 %s）", serverRootFor(&renv)))
+			// 等待页是双语页（中英并排），因此 detail 也给中英各一行（该页的 CSS 是
+			// white-space:pre-line）。这一页是后端渲染的独立页面，用不了前端的 i18n。
+			boot.set(phaseNotInstalled,
+				fmt.Sprintf("请在控制台「概览」页的 dsh 版本列表里下载一个版本，再点「切换」（安装目录 %s）\n"+
+					"Download a version from the console version list and press Switch (install dir %s)",
+					serverRootFor(&renv), serverRootFor(&renv)))
 			logWarn("dsh is not installed: no version selected under %s", serverRootFor(&renv))
 		} else if err := dsh.Start(); err != nil {
 			boot.set(phaseFailed, err.Error())
@@ -193,7 +198,7 @@ func main() {
 			boot.set(phaseAuth, "")
 			captureDshSession(dsh)
 			// 执行 node-pty 固定版本与清理（会等待目录生成）。传入空 home 由函数内部
-			// 优先从 config.json 的 homeDir 解析 dsh 实际使用的 HOME。若返回需要重启，
+			// 回退到启动时解析出的主目录（主目录不可切换，见 DshManager.effectiveHome）。若返回需要重启，
 			// 则在 pnpm install 完成后重启 dsh 使 node-pty 1.2.0-beta.15 生效。
 			boot.set(phaseDeps, "")
 			restartNeeded, err := ensureNodePty(&renv, "")

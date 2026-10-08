@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -653,5 +655,57 @@ func TestProxyWebSocketRequiresLogin(t *testing.T) {
 	status := rawUpgradeStatus(t, srv.Listener.Addr().String(), "")
 	if !strings.Contains(status, "401") {
 		t.Fatalf("未登录时的 WebSocket 状态行 = %q, want 401", status)
+	}
+}
+
+// 「未安装」阶段在用户装好版本并切换之后必须作废。启动阶段只有 main.go 能写，
+// 用户在控制台里装好版本、点了「切换」之后这个阶段会一直留在内存里 —— 不处理的话
+// 等待页会继续显示「尚未安装 dsh 服务，请先下载一个版本」（切换后 dsh 启动失败时
+// 那句指引还会一直挂着，真正的原因只在日志里）。
+func TestProxyNotInstalledPhaseGoesStaleOnceVersionSelected(t *testing.T) {
+	port := closedPort(t)
+	prev := GetConfig()
+	cfg := prev
+	cfg.DshPort = port
+	cfg.AuthEnabled = true
+	cfg.Password = proxyTestPassword
+	cfg.DshVersion = "0.2.0"
+	initConfig(&cfg)
+	t.Cleanup(func() { initConfig(&prev) })
+
+	dataDir := t.TempDir()
+	renv := &RuntimeEnv{DataDir: dataDir, Home: t.TempDir()}
+	bin := versionDshBinFor(renv, "0.2.0")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dsh := &DshManager{renv: renv, logf: func(logLevel, string, ...interface{}) {}}
+	boot := newBootState()
+	proxy := newReverseProxy(NewAuth(), dsh, boot)
+	boot.set(phaseNotInstalled, "请先下载一个版本并切换")
+
+	// 已选中且装着版本 → 阶段作废：端口未监听、进程不在 → stopped，且不带旧 detail。
+	rec := proxyGet(t, proxy, readyPath, sessionCookieHeader())
+	var st proxyState
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("解析 %s 响应失败: %v (body=%s)", readyPath, err, rec.Body.String())
+	}
+	if st.Phase != phaseStopped || st.Detail != "" {
+		t.Fatalf("装好并选中版本后不该再显示未安装，实得 %+v", st)
+	}
+
+	// 对照：把选中版本清掉（= 真的没装）时，not-installed 与指引必须原样保留。
+	cfg = GetConfig()
+	cfg.DshVersion = ""
+	initConfig(&cfg)
+	rec = proxyGet(t, proxy, readyPath, sessionCookieHeader())
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("解析 %s 响应失败: %v", readyPath, err)
+	}
+	if st.Phase != phaseNotInstalled || st.Detail == "" {
+		t.Fatalf("未装版本时应保留 not-installed 与指引，实得 %+v", st)
 	}
 }

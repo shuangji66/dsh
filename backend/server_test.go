@@ -92,8 +92,14 @@ func waitInstallPhase(t *testing.T, srv *ServerManager, want ...string) *DshInst
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		// 必须在锁内**拷贝**一份再判断：安装 goroutine 正在就地改 srv.install，
+		// 把那个指针带出锁去读字段就是数据竞争（-race 能抓到）。
 		srv.mu.Lock()
-		st := srv.install
+		var st *DshInstallState
+		if srv.install != nil {
+			cp := *srv.install
+			st = &cp
+		}
 		srv.mu.Unlock()
 		if st != nil {
 			for _, w := range want {
@@ -718,5 +724,133 @@ func TestPatchAttachmentFsync(t *testing.T) {
 	// 目录里没有 attachment-local（布局变化）→ 也要报错，而不是静默通过。
 	if err := srv.patchAttachmentFsync(t.TempDir()); err == nil {
 		t.Fatal("找不到 attachment-local 时应报错")
+	}
+}
+
+// 校验失败也要能换到下一个镜像源：verify 失败时那次安装的目录已被清掉，必须像
+// npm 失败那样重建出干净骨架 —— 否则 `npm install --prefix <dir>` 会因为目录不存在
+// 直接 chdir 失败，那一次换源就白丢了（错误还会被算到镜像源头上）。
+func TestInstallFallbackAfterVerifyFailureKeepsUsableDir(t *testing.T) {
+	dataDir := t.TempDir()
+	_, srv := newServerTestManager(t, dataDir)
+	const version = "0.3.0"
+
+	var attempts []string
+	var dirStates []string
+	prev := npmInstallFn
+	npmInstallFn = func(m *ServerManager, ctx context.Context, dir, v string, mirror npmMirror) error {
+		attempts = append(attempts, mirror.Name)
+		// 关键断言素材：每次「真正执行 npm」时版本目录都必须存在且是目录。
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			dirStates = append(dirStates, "ok")
+		} else {
+			dirStates = append(dirStates, "missing")
+		}
+		bin := filepath.Join(dir, "node_modules", ".bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			return err
+		}
+		if len(attempts) == 1 {
+			// 第一个镜像源「装上了」但产物不可运行 → verifyInstall 失败。
+			return os.WriteFile(filepath.Join(bin, "dsh"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
+		}
+		return os.WriteFile(filepath.Join(bin, "dsh"), []byte("#!/bin/sh\necho "+v+"\n"), 0o755)
+	}
+	t.Cleanup(func() { npmInstallFn = prev })
+
+	if err := srv.Install(version); err != nil {
+		t.Fatalf("启动安装失败: %v", err)
+	}
+	st := waitInstallPhase(t, srv, "done", "error")
+	if st.Phase != "done" || st.Error != "" {
+		t.Fatalf("校验失败后应换下一个镜像源并装成功，实际状态 = %+v", st)
+	}
+	if got := strings.Join(attempts, ","); got != npmMirrors[0].Name+","+npmMirrors[1].Name {
+		t.Fatalf("镜像源尝试顺序 = %q, want 前两个源", got)
+	}
+	if got := strings.Join(dirStates, ","); got != "ok,ok" {
+		t.Fatalf("每次执行 npm 时版本目录都必须已重建（否则 chdir 失败、换源白丢），实际: %s", got)
+	}
+	if !dshVersionInstalled(srv.versionDir(version)) {
+		t.Fatal("安装完成后版本目录里应有可执行的 dsh")
+	}
+}
+
+// CancelInstall 只发取消信号、自己不写状态：终态由安装 goroutine 统一落定。
+// 早期实现无条件写 Cancelled=true —— 若这次取消正好紧跟在一轮安装收尾之后
+// （cancelInstall 还没置空、新一次安装已拿到 applying），会把新安装改写成「已取消」。
+func TestCancelInstallNeverOverwritesTerminalState(t *testing.T) {
+	dataDir := t.TempDir()
+	_, srv := newServerTestManager(t, dataDir)
+
+	// 造出那个窗口：状态已是 done，但 cancelInstall 还没被 goroutine 置空、done 已关闭。
+	srv.mu.Lock()
+	srv.install = &DshInstallState{Version: "0.2.0", Phase: "done", Message: "dsh 0.2.0 安装完成"}
+	srv.cancelInstall = func() {}
+	closed := make(chan struct{})
+	close(closed)
+	srv.installDone = closed
+	srv.mu.Unlock()
+
+	if !srv.CancelInstall() {
+		t.Fatal("窗口内调用应报告「取消已发出」")
+	}
+	srv.mu.Lock()
+	st := srv.install
+	srv.mu.Unlock()
+	if st == nil || st.Phase != "done" || st.Cancelled || st.Error != "" {
+		t.Fatalf("取消不能改写已完成的安装状态，实得 %+v", st)
+	}
+}
+
+// 低于 dshMinVersion 的版本不允许安装：列表里已经过滤掉它们（子路径挂载下必 404），
+// 直接调 API 也必须拒绝，否则会装出一个控制台用不了的版本。
+func TestInstallRejectsVersionBelowMin(t *testing.T) {
+	dataDir := t.TempDir()
+	_, srv := newServerTestManager(t, dataDir)
+	for _, v := range []string{"0.1.6", "0.1.7-alpha.1", "0.1.6-rc.9"} {
+		if err := srv.Install(v); err == nil {
+			t.Fatalf("低于 %s 的版本（%s）不该被安装", dshMinVersion, v)
+		} else if !strings.Contains(err.Error(), dshMinVersion) {
+			t.Fatalf("拒绝理由应点明最低版本 %s，实得 %v", dshMinVersion, err)
+		}
+	}
+	// 边界：恰好在最低版本上必须允许（用假 npm，别真去装）。
+	prev := npmInstallFn
+	npmInstallFn = fakeNpmInstall(t, nil, nil)
+	t.Cleanup(func() { npmInstallFn = prev })
+	if err := srv.Install(dshMinVersion); err != nil {
+		t.Fatalf("恰好在最低版本上的应该允许: %v", err)
+	}
+	if st := waitInstallPhase(t, srv, "done", "error"); st.Phase != "done" {
+		t.Fatalf("边界版本应安装成功，实得 %+v", st)
+	}
+}
+
+// 每次安装都要带一个新的序号：前端的「结果只提示一次」用它做去重键，
+// 否则「同一个版本装成功两次」的第二次会被静默吞掉。
+func TestInstallCarriesFreshSeq(t *testing.T) {
+	dataDir := t.TempDir()
+	_, srv := newServerTestManager(t, dataDir)
+	prev := npmInstallFn
+	npmInstallFn = fakeNpmInstall(t, nil, nil)
+	t.Cleanup(func() { npmInstallFn = prev })
+
+	if err := srv.Install("0.4.0"); err != nil {
+		t.Fatal(err)
+	}
+	first := waitInstallPhase(t, srv, "done").Seq
+	if first == 0 {
+		t.Fatal("安装状态必须带序号（前端去重要用）")
+	}
+	if err := srv.Delete("0.4.0"); err != nil {
+		t.Fatalf("删除已装版本: %v", err)
+	}
+	if err := srv.Install("0.4.0"); err != nil {
+		t.Fatal(err)
+	}
+	second := waitInstallPhase(t, srv, "done").Seq
+	if second <= first {
+		t.Fatalf("第二次安装的序号必须更大（%d → %d），否则前端会把结果提示吞掉", first, second)
 	}
 }

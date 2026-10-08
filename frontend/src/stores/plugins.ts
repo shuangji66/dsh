@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, type PluginInfo } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
+import { uiErrText, useI18n } from '@/composables/useI18n'
 
 export const usePluginsStore = defineStore('plugins', () => {
   // 插件列表缓存：store 常驻，切换子页面不重复命令拉取；卸载/重置插件后
@@ -12,6 +13,7 @@ export const usePluginsStore = defineStore('plugins', () => {
   let pluginsCached = false
 
   const toast = useToastStore()
+  const { t } = useI18n()
 
   async function loadPlugins(force = false): Promise<PluginInfo[]> {
     if (!force && pluginsCached) return plugins.value
@@ -21,7 +23,7 @@ export const usePluginsStore = defineStore('plugins', () => {
       plugins.value = p.plugins || []
       pluginsCached = true
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
     } finally {
       pluginsLoading.value = false
     }

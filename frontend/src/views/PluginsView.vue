@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { usePluginsStore } from '@/stores/plugins'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
-import { useI18n } from '@/composables/useI18n'
+import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { api } from '@/serverapi'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
@@ -61,7 +61,7 @@ async function removePlugin(name: string) {
       toast.show(p.msg || t('plugin_remove_failed'), 'error')
     }
   } catch (e) {
-    toast.show((e as Error).message, 'error')
+    toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     removingPlugin.value = null
   }
@@ -75,10 +75,10 @@ async function resetPlugins() {
       // 重置请求已返回，后台正在重启 dsh 并触发 node-pty 自动 patch，提示用户
       toast.show(t('plugin_reset_started'), 'success')
     } else {
-      toast.show(p.error || t('plugin_reset_failed'), 'error')
+      toast.show(uiText(p.error, p, t('plugin_reset_failed')), 'error')
     }
   } catch (e) {
-    toast.show((e as Error).message, 'error')
+    toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     resetting.value = false
     // 重置后清除缓存并重新拉取列表
@@ -115,7 +115,7 @@ async function togglePlugin(p: { name: string; disabled?: boolean }) {
       toast.show(r.msg || t('plugin_toggle_failed'), 'error')
     }
   } catch (e) {
-    toast.show((e as Error).message, 'error')
+    toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     togglingPlugin.value = null
   }
@@ -170,7 +170,7 @@ async function executeRestart() {
     // 重启完成后清掉内联提示（列表刷新后该插件应已生效）
     needsRestartPlugin.value = null
   } catch (e) {
-    toast.show((e as Error).message, 'error')
+    toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     restarting.value = false
   }

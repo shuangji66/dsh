@@ -26,6 +26,11 @@ const zh: Record<string, string> = {
   nav_terminal: '终端',
   nav_logs: '日志',
   nav_theme: '主题',
+  // 通用兜底：接口失败但没有可翻译的 code 时用
+  visitor_kicked_fallback: '已注销该访客',
+  common_op_failed: '操作失败',
+  err_reset_profiles_failed: 'profiles 目录删除失败',
+  err_update_cancelled: '用户取消更新',
   sidebar_expand: '展开',
   sidebar_collapse: '折叠',
   theme_label: '主题',
@@ -434,7 +439,8 @@ const zh: Record<string, string> = {
   market_busy_hint: '安装/卸载由 dsh 的插件命令完成，完成后会自动重启 dsh 服务使变更生效（期间服务短暂中断）。',
   market_not_installed_desc: '尚未安装插件市场。安装后即可在市场里浏览、安装与管理插件。',
   market_install_target: '将安装最新版本：{v}',
-  market_latest_unknown: '暂时取不到最新版本号，请稍后点「检查更新」重试。',
+  // 「检查更新」按钮在这个弹窗的被遮住的版本行上，弹窗内点不到 —— 文案要指向能做的事。
+  market_latest_unknown: '暂时取不到最新版本号。可先关闭本弹窗，在概览页点「检查更新」重试。',
   market_toast_done: '{action}完成',
   market_toast_done_generic: '插件市场操作完成',
   market_install_btn: '安装',
@@ -452,6 +458,87 @@ const zh: Record<string, string> = {
   access_urls_placeholder: '输入 dsh 访问地址',
   access_urls_empty: '暂无访问地址',
   access_urls_saved: '访问地址已保存',
+
+  // --- 后端返回的用户文案（code + 参数，见 backend/uimsg.go）---
+  err_config_format: '配置格式错误',
+  err_password_weak: '密码不符合要求：{detail}',
+  err_ttl_min: '登录有效期必须大于 0 小时',
+  err_ttl_max: '登录有效期不能超过 720 小时（30 天）',
+  err_mem_too_big: 'dsh 内存限制不能超过 65536 MB（64GB）',
+  err_node_version_invalid: '无效的 node 版本: {version}',
+  err_mem_zero: 'dsh 内存限制必须大于 0 MB',
+  err_mem_too_low: 'node 堆内存上限过低，请增大分配（至少 {min} MB）',
+  err_port_proxy_range: '反代端口必须在 {min}-{max} 之间',
+  err_port_dsh_range: 'dsh 端口必须在 {min}-{max} 之间',
+  err_port_same: '反代端口不能与 dsh 端口相同',
+  err_save_failed: '保存失败: {detail}',
+  err_log_not_configured: '日志文件未配置',
+  err_log_read_failed: '读取日志失败: {detail}',
+  err_log_missing: '日志文件不存在',
+  err_dsh_running: 'dsh 已在运行',
+  err_no_dsh_version: '未安装 dsh 服务：请先在控制台「概览」页的版本列表里下载一个版本，再点「切换」',
+  err_dsh_start_failed: '启动失败: {detail}',
+  err_dsh_stop_failed: '停止失败: {detail}',
+  err_plugin_list_failed: '执行插件列表失败: {detail}',
+  err_need_plugin_name: '缺少插件名',
+  err_plugin_name_invalid: '插件名不合法（仅允许 npm 包名）',
+  err_plugin_patch_failed: '写入补丁层失败: {detail}',
+  err_plugin_remove_failed: '卸载失败: {detail}',
+  err_need_id: '缺少 id',
+  err_uid_missing: '无法获取当前用户 UID',
+  err_need_path: '缺少 path',
+  err_update_two_step: '更新已拆分为“下载”与“安装”两步，请使用 /api/update/download 与 /api/update/install',
+  err_bad_request: '请求格式错误: {detail}',
+  err_path_convert_failed: '路径转换失败: {detail}',
+  err_kind_invalid: 'kind 必须为 harness、dsh 或 market',
+  err_update_pack_gone: '{kind} 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新',
+  err_need_version: '缺少 version',
+  err_backup_list_failed: '读取备份列表失败: {detail}',
+  err_need_name: '缺少 name',
+  err_market_busy: '正在执行其它更新/插件操作，请等它结束后再重试',
+  err_plugin_cmd_running: '控制台正在执行插件命令（dsh plugin …）。需要停止 dsh 的操作会中断它并留下陈旧的 profile 写锁（之后插件列表/安装都会失败）；请稍等它结束再重试',
+  err_market_op_running: '插件市场{detail}。需要停止 dsh 的操作会中断它并留下陈旧的 profile 写锁（之后插件列表/安装都会失败）；请等它完成或先在市场里取消，再重试',
+  err_dsh_manager_unavailable: 'dsh 管理器不可用',
+  err_market_detect_failed: '检测插件市场失败（dsh plugin --profile {profile} list）: {detail}',
+  err_market_op_failed: '插件市场操作失败（{mirrors} 均失败，不重试、不使用官方源）: {detail}',
+  err_market_cmd_failed: 'dsh {cmd} 失败: {detail}',
+  err_version_install_running: '已有 dsh 版本正在安装（{version}），请等它结束或先取消',
+  err_version_op_busy: '正在执行其它 dsh 版本操作，请稍后再试',
+  err_version_invalid: '非法的版本号: {version}',
+  err_version_installed: 'dsh {version} 已安装，无需重复下载',
+  err_version_below_min: 'dsh {version} 低于控制台支持的最低版本 {min}',
+  err_version_not_installed: 'dsh {version} 尚未安装，请先下载',
+  err_version_current: 'dsh {version} 已经是当前版本',
+  err_version_in_use: 'dsh {version} 是当前正在使用的版本，请先切换到其它版本再删除',
+  err_version_missing: 'dsh {version} 未安装',
+  err_version_delete_failed: '删除 dsh {version} 失败: {detail}',
+  err_install_prepare_failed: '准备安装目录失败: {detail}',
+  err_verify_no_binary: '安装目录里没有可执行的 dsh（{path}）',
+  err_verify_exec_failed: '执行 dsh -V 失败: {detail}',
+  err_verify_version_mismatch: '安装后的版本号是 {got}，与请求的 {want} 不一致',
+  err_install_all_mirrors_failed: '从 {mirrors} 下载 dsh {version} 均失败（不重试、不使用官方源）: {detail}',
+  err_data_op_busy: '正在执行其它更新/备份/恢复操作，请等它结束后再重试',
+  err_backup_running: '已有备份任务正在进行',
+  err_backup_busy: '正在执行其它更新/恢复操作，请等它结束后再备份',
+  err_restore_busy_backup: '正在备份 dsh 数据，请先取消备份或等它结束后再恢复',
+  err_restore_busy: '正在执行其它更新/备份操作，请等它结束后再恢复 dsh 数据',
+  err_backup_no_home: '无法获取当前主目录',
+  err_backup_no_dsh_dir: '.dsh 目录不存在',
+  err_backup_bad_name: '非法的备份文件名: {name}',
+  err_backup_in_flight: '这份备份正在写入中，请等它结束或先取消这次备份',
+  err_restore_remove_failed: '删除 ~/.dsh 目录失败: {detail}',
+  err_restore_extract_failed: '解压备份失败: {detail}',
+  err_backup_bad_path: '非法的备份路径: {path}',
+  err_backup_missing: '备份文件不存在: {detail}',
+  msg_market_from_mirror: '正在从 {mirror} 处理 {pkg}',
+  msg_market_installing: '正在安装 {pkg}@{version}',
+  msg_market_restarting: '正在重启 dsh 服务以使插件市场变更生效',
+  msg_install_from_mirror: '正在从 {mirror} 下载 {pkg}@{version}',
+  msg_install_done: 'dsh {version} 安装完成',
+  msg_visitor_gateway_no_logout: '网关访问由飞牛 OS 认证，无需注销',
+  msg_visitor_not_found: '该访客不存在',
+  msg_visitor_kicked: '已注销该访客',
+  msg_verifying: '正在校验安装并应用兼容补丁',
 }
 
 const en: Record<string, string> = {
@@ -462,6 +549,11 @@ const en: Record<string, string> = {
   nav_terminal: 'Terminal',
   nav_logs: 'Logs',
   nav_theme: 'Theme',
+  // Generic fallback when a request fails without a translatable code
+  visitor_kicked_fallback: 'Signed that visitor out',
+  common_op_failed: 'The operation failed',
+  err_reset_profiles_failed: 'Failed to remove the profiles directory',
+  err_update_cancelled: 'Update cancelled by the user',
   sidebar_expand: 'Expand',
   sidebar_collapse: 'Collapse',
   theme_label: 'Theme',
@@ -863,7 +955,8 @@ const en: Record<string, string> = {
   market_busy_hint: "Install and removal run through the dsh plugin command; dsh restarts afterwards so the change takes effect (a short service interruption).",
   market_not_installed_desc: 'The plugin market is not installed yet. Install it to browse, install and manage plugins from the market.',
   market_install_target: 'The latest version will be installed: {v}',
-  market_latest_unknown: 'The latest version is not known right now — try "Check" again in a moment.',
+  market_latest_unknown:
+    'The latest version is not known right now. Close this dialog and press "Check" on the overview page to retry.',
   market_toast_done: '{action} finished',
   market_toast_done_generic: 'Plugin market operation finished',
   market_install_btn: 'Install',
@@ -881,6 +974,87 @@ const en: Record<string, string> = {
   access_urls_placeholder: 'Enter dsh access URL',
   access_urls_empty: 'No access URLs configured',
   access_urls_saved: 'Access URLs saved',
+
+  // --- User-facing texts returned by the backend (code + params, see backend/uimsg.go) ---
+  err_config_format: 'Invalid configuration format',
+  err_password_weak: 'Password does not meet the requirements: {detail}',
+  err_ttl_min: 'Login validity must be greater than 0 hours',
+  err_ttl_max: 'Login validity cannot exceed 720 hours (30 days)',
+  err_mem_too_big: 'The dsh memory limit cannot exceed 65536 MB (64 GB)',
+  err_node_version_invalid: 'Invalid node version: {version}',
+  err_mem_zero: 'The dsh memory limit must be greater than 0 MB',
+  err_mem_too_low: 'The node heap limit is too low, raise it (at least {min} MB)',
+  err_port_proxy_range: 'The proxy port must be between {min} and {max}',
+  err_port_dsh_range: 'The dsh port must be between {min} and {max}',
+  err_port_same: 'The proxy port cannot be the same as the dsh port',
+  err_save_failed: 'Save failed: {detail}',
+  err_log_not_configured: 'No log file configured',
+  err_log_read_failed: 'Failed to read the log: {detail}',
+  err_log_missing: 'The log file does not exist',
+  err_dsh_running: 'dsh is already running',
+  err_no_dsh_version: 'The dsh service is not installed: download a version from the version list on the overview page, then press Switch',
+  err_dsh_start_failed: 'Failed to start: {detail}',
+  err_dsh_stop_failed: 'Failed to stop: {detail}',
+  err_plugin_list_failed: 'Failed to list plugins: {detail}',
+  err_need_plugin_name: 'Missing plugin name',
+  err_plugin_name_invalid: 'Invalid plugin name (npm package names only)',
+  err_plugin_patch_failed: 'Failed to write the patch layer: {detail}',
+  err_plugin_remove_failed: 'Uninstall failed: {detail}',
+  err_need_id: 'Missing id',
+  err_uid_missing: 'Cannot determine the current user UID',
+  err_need_path: 'Missing path',
+  err_update_two_step: 'Updating is split into download and install; use /api/update/download and /api/update/install',
+  err_bad_request: 'Malformed request: {detail}',
+  err_path_convert_failed: 'Path conversion failed: {detail}',
+  err_kind_invalid: 'kind must be harness, dsh or market',
+  err_update_pack_gone: '{kind} no longer uses update packages: manage dsh versions from the version list and the plugin market from the market dialog',
+  err_need_version: 'Missing version',
+  err_backup_list_failed: 'Failed to read the backup list: {detail}',
+  err_need_name: 'Missing name',
+  err_market_busy: 'Another update or plugin operation is running; wait for it to finish and retry',
+  err_plugin_cmd_running: 'The console is running a dsh plugin command. Anything that stops dsh would interrupt it and leave a stale profile lock (plugin listing/installing fails afterwards); wait for it to finish and retry',
+  err_market_op_running: 'The plugin market is {detail}. Anything that stops dsh would interrupt it and leave a stale profile lock (plugin listing/installing fails afterwards); wait for it or cancel it in the market first',
+  err_dsh_manager_unavailable: 'The dsh manager is unavailable',
+  err_market_detect_failed: 'Failed to detect the plugin market (dsh plugin --profile {profile} list): {detail}',
+  err_market_op_failed: 'Plugin market operation failed (all of {mirrors} failed; no retry, no official registry): {detail}',
+  err_market_cmd_failed: 'dsh {cmd} failed: {detail}',
+  err_version_install_running: 'dsh {version} is already being installed; wait for it to finish or cancel it first',
+  err_version_op_busy: 'Another dsh version operation is running; try again in a moment',
+  err_version_invalid: 'Invalid version: {version}',
+  err_version_installed: 'dsh {version} is already installed',
+  err_version_below_min: 'dsh {version} is below the oldest version the console supports ({min})',
+  err_version_not_installed: 'dsh {version} is not installed yet; download it first',
+  err_version_current: 'dsh {version} is already the current version',
+  err_version_in_use: 'dsh {version} is in use; switch to another version before deleting it',
+  err_version_missing: 'dsh {version} is not installed',
+  err_version_delete_failed: 'Failed to delete dsh {version}: {detail}',
+  err_install_prepare_failed: 'Failed to prepare the install directory: {detail}',
+  err_verify_no_binary: 'No runnable dsh binary in the install directory ({path})',
+  err_verify_exec_failed: 'dsh -V failed: {detail}',
+  err_verify_version_mismatch: 'Installed version is {got} but {want} was requested',
+  err_install_all_mirrors_failed: 'Failed to install dsh {version} from all of {mirrors} (no retry, no official registry): {detail}',
+  err_data_op_busy: 'Another update, backup or restore operation is running; wait for it to finish and retry',
+  err_backup_running: 'A backup is already running',
+  err_backup_busy: 'Another update or restore operation is running; back up after it finishes',
+  err_restore_busy_backup: 'dsh data is being backed up; cancel the backup or wait for it to finish before restoring',
+  err_restore_busy: 'Another update or backup operation is running; restore after it finishes',
+  err_backup_no_home: 'Cannot determine the current home directory',
+  err_backup_no_dsh_dir: 'The .dsh directory does not exist',
+  err_backup_bad_name: 'Invalid backup file name: {name}',
+  err_backup_in_flight: 'This backup is still being written; wait for it to finish or cancel it first',
+  err_restore_remove_failed: 'Failed to remove the ~/.dsh directory: {detail}',
+  err_restore_extract_failed: 'Failed to extract the backup: {detail}',
+  err_backup_bad_path: 'Invalid backup path: {path}',
+  err_backup_missing: 'The backup file does not exist: {detail}',
+  msg_market_from_mirror: 'Working on {pkg} via {mirror}',
+  msg_market_installing: 'Installing {pkg}@{version}',
+  msg_market_restarting: 'Restarting the dsh service so the plugin market change takes effect',
+  msg_install_from_mirror: 'Downloading {pkg}@{version} from {mirror}',
+  msg_install_done: 'dsh {version} installed',
+  msg_verifying: 'Verifying the installation and applying compatibility patches',
+  msg_visitor_gateway_no_logout: 'Gateway access is authenticated by fnOS; no sign-out needed',
+  msg_visitor_not_found: 'That visitor does not exist',
+  msg_visitor_kicked: 'Signed that visitor out',
 }
 
 const dict: Record<Locale, Record<string, string>> = { zh, en }
@@ -890,17 +1064,48 @@ export function setLocale(l: Locale) {
   localStorage.setItem(LOCALE_KEY, l)
 }
 
-export function useI18n() {
-  function t(key: string, params?: Record<string, string | number>): string {
-    let s = dict[locale.value][key]
-    if (s === undefined) s = dict.zh[key]
-    if (s === undefined) s = key
-    if (params) {
-      for (const k of Object.keys(params)) {
-        s = s.replace(new RegExp(`\\{${k}\\}`, 'g'), String(params[k]))
-      }
+// tr 是本模块的翻译实现：useI18n().t 与下面的 uiText / uiErrText 共用。
+// 取不到 key 时返回 key 本身（调用方据此判断「这条没有译文」）。
+function tr(key: string, params?: Record<string, string | number>): string {
+  let s = dict[locale.value][key]
+  if (s === undefined) s = dict.zh[key]
+  if (s === undefined) s = key
+  if (params) {
+    for (const k of Object.keys(params)) {
+      s = s.replace(new RegExp(`\\{${k}\\}`, 'g'), String(params[k]))
     }
-    return s
   }
-  return { locale, t, setLocale }
+  return s
+}
+
+export function useI18n() {
+  return { locale, t: tr, setLocale }
+}
+
+// --- 后端返回文案的本地化 ---
+//
+// 后端返回的是「原文 + code + 参数」（见 backend/uimsg.go）：有 code 且字典命中就用当前
+// 语言的译文，否则回退到后端给的中文原文。这样 toast / 进度行 / 弹窗诊断都随语言切换，
+// 而旧版前端遇到新 code 也只是显示原文，不会白屏或显示 key。
+
+// UIRefLike 是后端文案引用的结构（与 serverapi 的 UIRef 一致，这里只做结构约束，
+// 避免 composable 反向依赖 serverapi）。
+export interface UIRefLike {
+  code?: string
+  params?: Record<string, string>
+}
+
+// uiText 渲染一条「原文 + 引用」：优先译文，其次原文，最后 fallback。
+export function uiText(text?: string, ref?: UIRefLike, fallback = ''): string {
+  if (ref?.code) {
+    const s = tr(ref.code, ref.params)
+    if (s !== ref.code) return s
+  }
+  return text || fallback
+}
+
+// uiErrText 渲染一个抛出的错误（通常是 serverapi 的 ApiError）。
+export function uiErrText(e: unknown, fallback = ''): string {
+  const err = e as { code?: string; params?: Record<string, string>; message?: string } | null
+  return uiText(err?.message, err ?? undefined, fallback)
 }

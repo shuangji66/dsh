@@ -60,10 +60,50 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 // writeErr writes a JSON error body with the given status.
+//
+// 只用于**没有 code** 的场合（内部错误、诊断文本）。面向用户的文案一律走 writeErrU /
+// writeErrFrom：它们会把 code + params 一并回报，前端据此走 i18n（见 uimsg.go）。
 func writeErr(w http.ResponseWriter, msg string, status int) {
+	writeErrBody(w, status, msg, uiMsg{})
+}
+
+// writeErrU 写回一条带 code 的用户错误（toast / 弹窗文案）。
+//
+// 中文原文（zh）同时是「前端不认这个 code」时的兜底文案；params 以 k/v 成对给出：
+//
+//	writeErrU(w, http.StatusBadRequest, "err_need_field", "缺少 %s", "field", "version")
+func writeErrU(w http.ResponseWriter, status int, code, zh string, kv ...string) {
+	writeErrBody(w, status, formatKV(zh, kv), uiMsg{Code: code, Params: kvMap(kv)})
+}
+
+// writeErrFrom 把服务层返回的错误写回：带 code 的走 code（前端 i18n），busy 类并发拒绝
+// 自动用 409，其余按 fallbackStatus。
+func writeErrFrom(w http.ResponseWriter, err error, fallbackStatus int) {
+	status := fallbackStatus
+	if isBusyErr(err) {
+		status = http.StatusConflict
+	}
+	m, _ := uiMsgOf(err)
+	writeErrBody(w, status, err.Error(), m)
+}
+
+// writeErrOperation 保留旧名（busy 类 → 409，其余 → 400），内部走 writeErrFrom。
+func writeErrOperation(w http.ResponseWriter, err error) {
+	writeErrFrom(w, err, http.StatusBadRequest)
+}
+
+// writeErrBody 是三个错误出口的公共实现：body 里除 error 原文外还带 code/params（有才带）。
+func writeErrBody(w http.ResponseWriter, status int, msg string, ref uiMsg) {
+	body := map[string]interface{}{"ok": false, "error": msg}
+	if ref.Code != "" {
+		body["code"] = ref.Code
+		if len(ref.Params) > 0 {
+			body["params"] = ref.Params
+		}
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": msg})
+	json.NewEncoder(w).Encode(body)
 }
 
 // sessionInfo is the JSON summary of a live terminal session.
@@ -83,7 +123,7 @@ func (m *AdminMux) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (m *AdminMux) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		writeErr(w, "missing id", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
 		return
 	}
 	data, err := m.sessions.history(id)
@@ -98,7 +138,7 @@ func (m *AdminMux) handleSessionHistory(w http.ResponseWriter, r *http.Request) 
 func (m *AdminMux) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		writeErr(w, "missing id", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
 		return
 	}
 	if err := m.sessions.closeByID(id); err != nil {
@@ -112,7 +152,7 @@ func (m *AdminMux) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 func (m *AdminMux) handleClearSession(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		writeErr(w, "missing id", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
 		return
 	}
 	if err := m.sessions.clearHistory(id); err != nil {
@@ -396,24 +436,24 @@ type saveSettingsReq struct {
 func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	var req saveSettingsReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Config == nil {
-		writeErr(w, "配置格式错误", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_config_format", "配置格式错误")
 		return
 	}
 	// 保存前校验密码强度：仅当开启登录鉴权时校验（≥8位，含字母、数字、标点）；
 	// 关闭鉴权时不校验，允许保留任意历史密码，避免切换开关被旧密码拦截。
 	if req.Config.AuthEnabled && req.Config.Password != "" {
 		if v := validatePassword(req.Config.Password); v != "" {
-			writeErr(w, "密码不符合要求："+v, http.StatusBadRequest)
+			writeErrU(w, http.StatusBadRequest, "err_password_weak", "密码不符合要求：%s", "detail", v)
 			return
 		}
 	}
 	// 校验登录有效期（小时）：必须为正整数，且不超过 720 小时（30 天）
 	if req.Config.AuthTTLHours <= 0 {
-		writeErr(w, "登录有效期必须大于 0 小时", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_ttl_min", "登录有效期必须大于 0 小时")
 		return
 	}
 	if req.Config.AuthTTLHours > 720 {
-		writeErr(w, "登录有效期不能超过 720 小时（30 天）", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_ttl_max", "登录有效期不能超过 720 小时（30 天）")
 		return
 	}
 	// 校验 dsh 内存限制（MB）：不超过 65536 MB（64GB）。
@@ -421,12 +461,12 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	// 补齐（与 LoadConfig 的默认值同源），这样「默认值」始终是这台机器上 node 的
 	// 实际上限，而不是某个写死的数字。
 	if req.Config.DshMemLimit > 65536 {
-		writeErr(w, "dsh 内存限制不能超过 65536 MB（64GB）", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_mem_too_big", "dsh 内存限制不能超过 65536 MB（64GB）")
 		return
 	}
 	// 校验 node 版本：只允许 node24/node26。
 	if !validNodeVersions()[req.Config.NodeVersion] {
-		writeErr(w, "无效的 node 版本: "+req.Config.NodeVersion, http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_node_version_invalid", "无效的 node 版本: %s", "version", req.Config.NodeVersion)
 		return
 	}
 	// node26 已不再可用（如被卸载）时，不拒绝保存，而是静默回退到 node24，
@@ -440,14 +480,14 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		req.Config.DshMemLimit = defaultDshMemLimit(0, req.Config.NodeVersion)
 	}
 	if req.Config.DshMemLimit <= 0 {
-		writeErr(w, "dsh 内存限制必须大于 0 MB", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_mem_zero", "dsh 内存限制必须大于 0 MB")
 		return
 	}
 	// 手动设置的 node 堆内存上限过低时拒绝保存（前端同阈值红字提示并阻止提交）：
 	// 这个量级下 dsh 起来就会频繁 GC / OOM，比「保存成功但跑不稳」更糟。
 	// 「自动设置」不受此限：自动模式不使用这个持久化值，它可能是历史遗留的小数值。
 	if !req.Config.DshMemAuto && req.Config.DshMemLimit < minDshMemLimitMB {
-		writeErr(w, fmt.Sprintf("node 堆内存上限过低，请增大分配（至少 %d MB）", minDshMemLimitMB), http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_mem_too_low", "node 堆内存上限过低，请增大分配（至少 %s MB）", "min", strconv.Itoa(minDshMemLimitMB))
 		return
 	}
 	locked := m.dsh.Running()
@@ -458,7 +498,7 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		req.Config.ProxyPort = GetConfig().ProxyPort
 	}
 	if !validListenPort(req.Config.ProxyPort) {
-		writeErr(w, fmt.Sprintf("反代端口必须在 %d-%d 之间", minListenPort, maxListenPort), http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_port_proxy_range", "反代端口必须在 %s-%s 之间", "min", strconv.Itoa(minListenPort), "max", strconv.Itoa(maxListenPort))
 		return
 	}
 	// dsh 运行中时端口被锁定（SaveConfig 会保留旧值），比较基准也要用锁定的旧值。
@@ -469,11 +509,11 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	// dsh 端口同样必须校验：历史上这里只拿它和反代端口比相等，落盘一个 0/超出范围的
 	// 值会让 `dsh web --port 0` 随机端口、反代永远停在等待页（见 loadJSONFile 的兜底）。
 	if !validListenPort(effDshPort) {
-		writeErr(w, fmt.Sprintf("dsh 端口必须在 %d-%d 之间", minListenPort, maxListenPort), http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_port_dsh_range", "dsh 端口必须在 %s-%s 之间", "min", strconv.Itoa(minListenPort), "max", strconv.Itoa(maxListenPort))
 		return
 	}
 	if req.Config.ProxyPort == effDshPort {
-		writeErr(w, "反代端口不能与 dsh 端口相同", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_port_same", "反代端口不能与 dsh 端口相同")
 		return
 	}
 	// 反代端口变动需要即时重绑监听（反代是本进程自己的监听，不像 dsh 端口那样必须
@@ -483,7 +523,7 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := SaveConfig(m.renv, req.Config, locked); err != nil {
-		writeErr(w, "保存失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_save_failed", "保存失败: %s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "locked": locked, "config": GetConfig()})
@@ -514,7 +554,7 @@ func (m *AdminMux) rebindProxyPort(port int) error {
 func (m *AdminMux) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	path := m.renv.LogFile
 	if path == "" {
-		writeErr(w, "日志文件未配置", http.StatusNotFound)
+		writeErrU(w, http.StatusNotFound, "err_log_not_configured", "日志文件未配置")
 		return
 	}
 	data, err := os.ReadFile(path)
@@ -523,7 +563,7 @@ func (m *AdminMux) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]interface{}{"ok": true, "path": path, "content": "", "exists": false})
 			return
 		}
-		writeErr(w, "读取日志失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_log_read_failed", "读取日志失败: %s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "path": path, "content": string(data), "exists": true})
@@ -533,16 +573,16 @@ func (m *AdminMux) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 func (m *AdminMux) handleDownloadLog(w http.ResponseWriter, r *http.Request) {
 	path := m.renv.LogFile
 	if path == "" {
-		writeErr(w, "日志文件未配置", http.StatusNotFound)
+		writeErrU(w, http.StatusNotFound, "err_log_not_configured", "日志文件未配置")
 		return
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeErr(w, "日志文件不存在", http.StatusNotFound)
+			writeErrU(w, http.StatusNotFound, "err_log_missing", "日志文件不存在")
 			return
 		}
-		writeErr(w, "读取日志失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_log_read_failed", "读取日志失败: %s", "detail", err.Error())
 		return
 	}
 	fname := filepath.Base(path)
@@ -557,11 +597,17 @@ func (m *AdminMux) handleDownloadLog(w http.ResponseWriter, r *http.Request) {
 
 func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 	if m.dsh.Running() {
-		writeErr(w, "dsh 已在运行", http.StatusConflict)
+		writeErrU(w, http.StatusConflict, "err_dsh_running", "dsh 已在运行")
+		return
+	}
+	// 「没有选中的版本」在这里就拦住并给中文指引：DshManager.Start 那条错误是英文的
+	// （它会被日志打印，见 AGENTS 规则 7），直接透出会让用户看到一句英文。
+	if m.dsh.selectedDshVersion() == "" {
+		writeErrU(w, http.StatusConflict, "err_no_dsh_version", "未安装 dsh 服务：请先在控制台「概览」页的版本列表里下载一个版本，再点「切换」")
 		return
 	}
 	if err := m.dsh.Start(); err != nil {
-		writeErr(w, "启动失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_dsh_start_failed", "启动失败: %s", "detail", err.Error())
 		return
 	}
 	// 启动后等待并捕获一次性访问 token（新版 dsh 打印在启动日志里），用 token
@@ -573,7 +619,7 @@ func (m *AdminMux) handleDshStart(w http.ResponseWriter, r *http.Request) {
 
 func (m *AdminMux) handleDshStop(w http.ResponseWriter, r *http.Request) {
 	if err := m.dsh.Stop(); err != nil {
-		writeErr(w, "停止失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_dsh_stop_failed", "停止失败: %s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, m.dsh.Status())
@@ -612,7 +658,7 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
 func (m *AdminMux) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 	out, err := m.dsh.runPluginCmd("list")
 	if err != nil {
-		writeErr(w, "执行插件列表失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_plugin_list_failed", "执行插件列表失败: %s", "detail", err.Error())
 		return
 	}
 	plugins := parsePluginList(out)
@@ -678,12 +724,12 @@ func validPluginName(name string) bool {
 func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
 	var body togglePluginReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		writeErr(w, "缺少插件名", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_plugin_name", "缺少插件名")
 		return
 	}
 	// 名字会参与拼路径读取 package.json / 补丁行，必须先校验（见 validPluginName）。
 	if !validPluginName(body.Name) {
-		writeErr(w, "插件名不合法（仅允许 npm 包名）", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_plugin_name_invalid", "插件名不合法（仅允许 npm 包名）")
 		return
 	}
 	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
@@ -697,7 +743,7 @@ func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
 	for _, id := range rows {
 		if err := setPluginDisabled(patchPath, id, !body.Enabled); err != nil {
 			logError("[plugin] toggle %s id %s -> %v failed: %v", body.Name, id, body.Enabled, err)
-			writeErr(w, "写入补丁层失败: "+err.Error(), http.StatusInternalServerError)
+			writeErrU(w, http.StatusInternalServerError, "err_plugin_patch_failed", "写入补丁层失败: %s", "detail", err.Error())
 			return
 		}
 	}
@@ -725,18 +771,18 @@ type removePluginReq struct {
 func (m *AdminMux) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 	var body removePluginReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		writeErr(w, "缺少插件名", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_plugin_name", "缺少插件名")
 		return
 	}
 	// 名字会原样成为 `dsh plugin … remove <name>` 的 argv：以 "-" 开头会被当成选项，
 	// 含路径分隔符的名字也不是包名。校验不通过直接 400，连命令都不执行。
 	if !validPluginName(body.Name) {
-		writeErr(w, "插件名不合法（仅允许 npm 包名）", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_plugin_name_invalid", "插件名不合法（仅允许 npm 包名）")
 		return
 	}
 	out, err := m.dsh.runPluginCmd("remove", body.Name)
 	if err != nil {
-		writeErr(w, "卸载失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_plugin_remove_failed", "卸载失败: %s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "removed": body.Name, "msg": out})
@@ -755,9 +801,21 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 	// （连带终止它的进程组）—— 正好把锁持有者一起带走：那次安装白做，还会留下陈旧锁
 	// 让之后所有插件操作白等 120 秒。被拒时不产生任何删除与停机。
 	if err := m.busyGuard("重置插件"); err != nil {
-		writeErr(w, err.Error(), http.StatusConflict)
+		writeErrOperation(w, err)
 		return
 	}
+	// 再与「备份 / 恢复 / 更新」互斥：dsh 数据备份是分钟级的异步任务（见 update.go 的
+	// BackupDshData），它读的正是这里要删的 ~/.dsh。撞上就会打出一份「成功但缺 profiles」
+	// 的包，或者让那次备份在 walk 中途失败。同一把 applying 锁，双向互斥；拿不到就整次
+	// 拒绝，不产生任何删除与停机。
+	release, err := m.update.beginExclusiveDshDataOp()
+	if err != nil {
+		writeErrOperation(w, err)
+		return
+	}
+	// 锁只覆盖「删 profiles」这段破坏性动作：后面那次重启 + node-pty patch 要跑几分钟，
+	// 长期占着 applying 会让别的更新/备份一直拿不到锁。
+	defer release()
 
 	// 删除 $HOME/.dsh/profiles 目录
 	// 使用当前生效的主目录（若已在资源页切换过，则以切换后的为准）。
@@ -793,6 +851,7 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{
 			"ok":             false,
 			"error":          "profiles 目录删除失败",
+			"code":           "err_reset_profiles_failed",
 			"profileDeleted": false,
 			"profilesDir":    profilesDir,
 		})
@@ -861,7 +920,7 @@ func (m *AdminMux) nodeVersionsInfo() []map[string]interface{} {
 // 进度由前端轮询 /api/dsh/backup/status 得到，取消走 /api/dsh/backup/cancel。
 func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
 	if err := m.update.BackupDshData(); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{
@@ -974,20 +1033,20 @@ type deleteVisitorReq struct {
 func (m *AdminMux) handleDeleteVisitor(w http.ResponseWriter, r *http.Request) {
 	var body deleteVisitorReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
-		writeErr(w, "缺少 id", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
 		return
 	}
 	// 网关访问没有 harness 会话可吊销（每次请求都由网关注入身份头，注销也拦不住），
 	// 明确拒绝而不是假装成功，免得前端以为已经把这台设备踢下线。
 	if isGatewayVisitorID(body.ID) {
-		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "网关访问由飞牛 OS 认证，无需注销"})
+		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "网关访问由飞牛 OS 认证，无需注销", "msgCode": "msg_visitor_gateway_no_logout"})
 		return
 	}
 	if !m.auth.RevokeVisitor(body.ID) {
-		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "该访客不存在"})
+		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "该访客不存在", "msgCode": "msg_visitor_not_found"})
 		return
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "deleted": true, "msg": "已注销该访客"})
+	writeJSON(w, map[string]interface{}{"ok": true, "deleted": true, "msg": "已注销该访客", "msgCode": "msg_visitor_kicked"})
 }
 
 // --- fnOS proxy ---
@@ -997,7 +1056,7 @@ func (m *AdminMux) handleFnos(w http.ResponseWriter, r *http.Request) {
 	case p == "user-access" && r.Method == http.MethodGet:
 		uid := getUIDFromRequest(r)
 		if uid <= 0 {
-			writeJSON(w, map[string]interface{}{"ok": false, "error": "无法获取当前用户 UID"})
+			writeJSON(w, map[string]interface{}{"ok": false, "error": "无法获取当前用户 UID", "code": "err_uid_missing"})
 			return
 		}
 		paths, msg, err := m.fnos.GetUserAccessibleFolders(uid)
@@ -1010,14 +1069,14 @@ func (m *AdminMux) handleFnos(w http.ResponseWriter, r *http.Request) {
 	case p == "user-access" && r.Method == http.MethodDelete:
 		uid := getUIDFromRequest(r)
 		if uid <= 0 {
-			writeErr(w, "无法获取当前用户 UID", http.StatusBadRequest)
+			writeErrU(w, http.StatusBadRequest, "err_uid_missing", "无法获取当前用户 UID")
 			return
 		}
 		var body struct {
 			Path string `json:"path"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Path == "" {
-			writeErr(w, "缺少 path", http.StatusBadRequest)
+			writeErrU(w, http.StatusBadRequest, "err_need_path", "缺少 path")
 			return
 		}
 		ok, msg, err := m.fnos.DelUserAccessibleFolder(uid, body.Path)
@@ -1135,7 +1194,7 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleMarketInfo(w, r)
 		case p == "/api/update/apply" && r.Method == http.MethodPost:
 			// 兼容旧版一键更新：更新已拆分为“下载”与“安装”两步。
-			writeErr(w, "更新已拆分为“下载”与“安装”两步，请使用 /api/update/download 与 /api/update/install", http.StatusGone)
+			writeErrU(w, http.StatusGone, "err_update_two_step", "更新已拆分为“下载”与“安装”两步，请使用 /api/update/download 与 /api/update/install")
 		case p == "/api/update/download" && r.Method == http.MethodPost:
 			m.handleUpdateDownload(w, r)
 		case p == "/api/update/install" && r.Method == http.MethodPost:
@@ -1241,7 +1300,7 @@ type convertPathReq struct {
 func (m *AdminMux) handleConvertPath(w http.ResponseWriter, r *http.Request) {
 	var req convertPathReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
 		return
 	}
 	if len(req.Paths) == 0 {
@@ -1251,7 +1310,7 @@ func (m *AdminMux) handleConvertPath(w http.ResponseWriter, r *http.Request) {
 
 	result, err := m.fnos.ConvertPath(req.Paths, req.Language)
 	if err != nil {
-		writeErr(w, "路径转换失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_path_convert_failed", "路径转换失败: %s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "result": result})
@@ -1358,18 +1417,18 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 		Kind string `json:"kind"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
 		return
 	}
 	kind := updateKind(body.Kind)
 	if !validUpdateKind(kind) {
-		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_kind_invalid", "kind 必须为 harness、dsh 或 market")
 		return
 	}
 	// 只有 harness 还有「下载更新包」这一步：dsh 走 npm install（server.go）、
 	// 市场走 dsh plugin add（market.go），同步拒绝比让前端先看到进度再收到错误更清楚。
 	if kind != updateKindHarness {
-		writeErr(w, fmt.Sprintf("%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", kind), http.StatusGone)
+		writeErrU(w, http.StatusGone, "err_update_pack_gone", "%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", "kind", string(kind))
 		return
 	}
 	// 同步置“下载中”状态：在返回 HTTP 响应前后端状态即已就绪（downloadUpdate
@@ -1380,7 +1439,7 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 		st.ReadyToInstall = false
 		st.Cancelled = false
 		st.Paused = false
-		st.Error = ""
+		setErrFields(&st.Error, &st.ErrorRef, nil)
 		st.ErrorHint = ""
 		st.Downloading = true
 		st.DownloadPct = 0
@@ -1401,7 +1460,7 @@ func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) 
 			upd := m.update
 			st := upd.getStatus(kind)
 			st.CheckedAt = time.Now()
-			st.Error = err.Error()
+			setErrFields(&st.Error, &st.ErrorRef, err)
 			st.Cancelled = false
 			st.Paused = false
 			st.Downloading = false
@@ -1425,16 +1484,16 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		Kind string `json:"kind"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
 		return
 	}
 	kind := updateKind(body.Kind)
 	if !validUpdateKind(kind) {
-		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_kind_invalid", "kind 必须为 harness、dsh 或 market")
 		return
 	}
 	if kind != updateKindHarness {
-		writeErr(w, fmt.Sprintf("%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", kind), http.StatusGone)
+		writeErrU(w, http.StatusGone, "err_update_pack_gone", "%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", "kind", string(kind))
 		return
 	}
 	go func() {
@@ -1443,7 +1502,7 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 			upd := m.update
 			st := upd.getStatus(kind)
 			st.CheckedAt = time.Now()
-			st.Error = err.Error()
+			setErrFields(&st.Error, &st.ErrorRef, err)
 			st.Cancelled = false
 			st.Phase = ""
 			upd.setStatus(kind, &st)
@@ -1453,7 +1512,7 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		// 成功后立即推送成功状态：完成更新解压/备份替换动作即可结束弹窗，
 		// 不等待 dsh 启动成功（会话 cookie 由异步 captureDshSession 换取）。
 		// 用 updateStatus 就地修改（而非 getStatus+setStatus 副本替换），
-		// 避免与 refreshDshVersion 的更新互相覆盖。
+		// 避免与并发的版本检测（refreshVersions / refreshDshStatus）互相覆盖。
 		// 注意：phase 必须置为非空的 "done"——Phase 字段带 json omitempty，
 		// 空字符串会被省略导致前端收不到（前端以 phase==="done" 为成功信号关弹窗）。
 		// 另外：kind==harness 时安装成功会 exec 换新映像，本 goroutine 随之消亡，
@@ -1462,7 +1521,7 @@ func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		upd := m.update
 		upd.updateStatus(kind, func(st *UpdateStatus) {
 			st.CheckedAt = time.Now()
-			st.Error = ""
+			setErrFields(&st.Error, &st.ErrorRef, nil)
 			st.HasUpdate = false
 			st.Phase = "done"
 			st.ReadyToInstall = false
@@ -1493,12 +1552,12 @@ func (m *AdminMux) handleDiscardUpdate(w http.ResponseWriter, r *http.Request) {
 		Kind string `json:"kind"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, "请求格式错误: "+err.Error(), http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
 		return
 	}
 	kind := updateKind(body.Kind)
 	if !validUpdateKind(kind) {
-		writeErr(w, "kind 必须为 harness、dsh 或 market", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_kind_invalid", "kind 必须为 harness、dsh 或 market")
 		return
 	}
 	if err := m.update.DiscardUpdate(kind); err != nil {
@@ -1571,11 +1630,11 @@ func (m *AdminMux) handleDshVersionInstall(w http.ResponseWriter, r *http.Reques
 		Version string `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Version == "" {
-		writeErr(w, "缺少 version", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_version", "缺少 version")
 		return
 	}
 	if err := m.update.server.Install(body.Version); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "version": body.Version})
@@ -1603,11 +1662,11 @@ func (m *AdminMux) handleDshVersionDelete(w http.ResponseWriter, r *http.Request
 		Version string `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Version == "" {
-		writeErr(w, "缺少 version", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_version", "缺少 version")
 		return
 	}
 	if err := m.update.server.Delete(body.Version); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "deleted": body.Version})
@@ -1620,11 +1679,11 @@ func (m *AdminMux) handleDshVersionSwitch(w http.ResponseWriter, r *http.Request
 		Version string `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Version == "" {
-		writeErr(w, "缺少 version", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_version", "缺少 version")
 		return
 	}
 	if err := m.update.server.Switch(body.Version); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "switched": body.Version})
@@ -1635,7 +1694,7 @@ func (m *AdminMux) handleDshVersionSwitch(w http.ResponseWriter, r *http.Request
 // handleMarketInstall 安装插件市场的最新版（异步，进度经 SSE 推送）。
 func (m *AdminMux) handleMarketInstall(w http.ResponseWriter, r *http.Request) {
 	if err := m.update.InstallMarket(); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "install"})
@@ -1644,7 +1703,7 @@ func (m *AdminMux) handleMarketInstall(w http.ResponseWriter, r *http.Request) {
 // handleMarketUpdate 把插件市场更新到最新版（异步）。
 func (m *AdminMux) handleMarketUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := m.update.UpdateMarket(); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "update"})
@@ -1653,7 +1712,7 @@ func (m *AdminMux) handleMarketUpdate(w http.ResponseWriter, r *http.Request) {
 // handleMarketRemove 卸载插件市场（异步）。
 func (m *AdminMux) handleMarketRemove(w http.ResponseWriter, r *http.Request) {
 	if err := m.update.RemoveMarket(); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "remove"})
@@ -1671,7 +1730,7 @@ func (m *AdminMux) handleMarketDone(w http.ResponseWriter, r *http.Request) {
 func (m *AdminMux) handleListDshDataBackups(w http.ResponseWriter, r *http.Request) {
 	backups, err := m.update.ListDshDataBackups()
 	if err != nil {
-		writeErr(w, "读取备份列表失败: "+err.Error(), http.StatusInternalServerError)
+		writeErrU(w, http.StatusInternalServerError, "err_backup_list_failed", "读取备份列表失败: %s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "backups": backups})
@@ -1685,7 +1744,7 @@ type delDshDataReq struct {
 func (m *AdminMux) handleDeleteDshDataBackup(w http.ResponseWriter, r *http.Request) {
 	var body delDshDataReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		writeErr(w, "缺少 name", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_name", "缺少 name")
 		return
 	}
 	if err := m.update.DeleteDshDataBackup(body.Name); err != nil {
@@ -1703,13 +1762,13 @@ type dshDataRestoreReq struct {
 func (m *AdminMux) handleDshDataRestore(w http.ResponseWriter, r *http.Request) {
 	var body dshDataRestoreReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		writeErr(w, "缺少 name", http.StatusBadRequest)
+		writeErrU(w, http.StatusBadRequest, "err_need_name", "缺少 name")
 		return
 	}
 	dir := m.update.backupDir()
 	fullPath := filepath.Join(dir, body.Name)
 	if err := m.update.RestoreDshData(fullPath); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
+		writeErrOperation(w, err)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "started": true})

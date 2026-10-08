@@ -24,7 +24,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   const data = await res.json().catch(() => null)
   if (!res.ok) {
-    throw new Error((data && (data.error || data.msg)) || `HTTP ${res.status}`)
+    throw apiErrorFrom(data, res.status)
   }
   return data as T
 }
@@ -175,8 +175,14 @@ export interface UpdateStatus {
   errorHint?: string
   // 当前阶段的说明/实时尾行（仅市场：`dsh plugin …` 的输出尾行与「正在重启 dsh」等）。
   message?: string
+  // error/message 的界面文案引用（code + 参数）：前端优先按它走 i18n，见 uiText()。
+  errorRef?: UIRef
+  messageRef?: UIRef
   // 仅市场：`dsh plugin --profile web list` 的检测诊断（解释「为什么检测不到」）。
   marketDir?: string
+  // 仅市场：第几次市场操作（后端每次安装/更新/卸载自增）。前端「结果只提示一次」用它
+  // 做去重键 —— 只按 phase+error 去重时，「装成功」之后「卸载成功」的结果会被吞掉。
+  seq?: number
 }
 
 export type UpdateKind = 'harness' | 'dsh' | 'market'
@@ -215,6 +221,12 @@ export interface DshInstallState {
   message?: string
   error?: string
   cancelled?: boolean
+  // 第几次安装（后端每次 Install 自增）：前端「结果只提示一次」的去重键，
+  // 只按 version+phase 去重会把「同一版本装成功两次」的第二次吞掉。
+  seq?: number
+  // error/message 的界面文案引用（code + 参数），见 uiText()。
+  errorRef?: UIRef
+  messageRef?: UIRef
 }
 
 // dsh 版本快照（列表 + 选中 + 安装进度）
@@ -261,6 +273,8 @@ export interface DshRestoreStatus {
   done: boolean
   ok: boolean
   error?: string
+  // error 的界面文案引用（code + 参数），见 uiText()。
+  errorRef?: UIRef
 }
 
 // dsh 数据备份状态（后端异步打包，弹窗只是观察者）。
@@ -282,9 +296,37 @@ export interface DshBackupStatus {
   totalBytes: number
   files: number
   totalFiles: number
+  // error 的界面文案引用（code + 参数），见 uiText()。
+  errorRef?: UIRef
 }
 
 // 新增一个带自定义 headers 的 request 函数
+// UIRef 是后端返回的「界面文案引用」（code + 参数，见 backend/uimsg.go）：
+// 前端按 code 查 i18n，取不到才回退到后端给的中文原文。
+export interface UIRef {
+  code?: string
+  params?: Record<string, string>
+}
+
+// ApiError 是后端返回的错误，带上它的 code/params，供 uiErrText(e) 走 i18n。
+export class ApiError extends Error {
+  code?: string
+  params?: Record<string, string>
+  constructor(message: string, code?: string, params?: Record<string, string>) {
+    super(message)
+    this.name = 'ApiError'
+    this.code = code
+    this.params = params
+  }
+}
+
+// apiErrorFrom 把响应体转成 ApiError（body 可能是 null / 非 JSON）。
+function apiErrorFrom(data: unknown, status: number): ApiError {
+  const b = (data ?? {}) as { error?: string; msg?: string; code?: string; params?: Record<string, string> }
+  const msg = b.error || b.msg || `HTTP ${status}`
+  return new ApiError(msg, b.code, b.params)
+}
+
 async function requestWithHeaders<T>(path: string, init?: RequestInit, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(runtimeBase() + path, {
     headers: { 'Content-Type': 'application/json', ...headers },
@@ -292,7 +334,7 @@ async function requestWithHeaders<T>(path: string, init?: RequestInit, headers?:
   })
   const data = await res.json().catch(() => null)
   if (!res.ok) {
-    throw new Error((data && (data.error || data.msg)) || `HTTP ${res.status}`)
+    throw apiErrorFrom(data, res.status)
   }
   return data as T
 }
@@ -349,7 +391,7 @@ export const api = {
   // 用户授权相关（已存在，确认导出）
   // 用户授权相关：通过请求头传递 uid
   fnosUserAccess: (uid: number) =>
-    requestWithHeaders<{ ok: boolean; paths: string[]; msg: string }>(
+    requestWithHeaders<{ ok: boolean; paths: string[]; msg: string; error?: string; code?: string; params?: Record<string, string> }>(
       '/api/fnos/user-access',
       undefined,
       { 'X-Trim-Userid': String(uid) }
@@ -379,7 +421,7 @@ export const api = {
   visitors: () => request<{ ok: boolean; visitors: Visitor[] }>('/api/visitors'),
   // 概览页：注销访客（该访客需重新登录）
   deleteVisitor: (id: string) =>
-    request<{ ok: boolean; deleted: boolean; msg: string }>('/api/visitors', {
+    request<{ ok: boolean; deleted: boolean; msg: string; msgCode?: string }>('/api/visitors', {
       method: 'DELETE',
       body: JSON.stringify({ id })
     }),
@@ -401,6 +443,9 @@ export const api = {
       ok: boolean
       started?: boolean
       error?: string
+      // 失败时的界面文案引用（code + 参数），见 backend/uimsg.go
+      code?: string
+      params?: Record<string, string>
       profileDeleted?: boolean
       profilesDir?: string
     }>('/api/plugins/reset', {

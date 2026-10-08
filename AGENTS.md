@@ -51,6 +51,10 @@
   + `proxyState`。反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
   `not-installed` 表示「本机没有选中的 dsh 版本」，等待页据此提示去概览页下载 + 切换
   （`userActionPhase` 是「需要用户动手」的唯一判定入口，新增阶段时一起改）。
+  **这个阶段会在「已选中且装着版本」时自动作废**（`proxy.go` 的 `state()`）：启动阶段只有
+  `main.go` 能写，而控制台起来之后用户在概览页装好版本并点了「切换」是常态 —— 不作废的话
+  等待页会一直说「尚未安装 dsh 服务，请先下载一个版本」，与事实相反（切换后启动失败时更糟：
+  真正的原因只在日志里）。
 - `config.go` — `AppConfig`（前端可改，含反代端口 `ProxyPort`）与 `RuntimeEnv`（环境变量）。
   `AppConfig.DshVersion` 是**当前选中的 dsh 版本**（`${TRIM_PKGVAR}/server/` 下的目录名，
   空 = 未安装）：由概览页的版本列表写入，设置页不暴露；这是全应用唯一的 dsh 版本来源。
@@ -96,8 +100,17 @@
   返回，打包在 goroutine 里跑，进度走 `GET /api/dsh/backup/status`、取消走
   `POST /api/dsh/backup/cancel`（取消删除不完整的备份文件）—— **别把 handler 改回同步**，
   前端「关掉弹窗不终止备份、重开弹窗同步进度」全靠这条边界。打包只有一份实现
-  `tgzDirAsProgress`（`tgzDirAs` 是它的 `prog=nil` 包装），与「更新/恢复」用同一把
-  `applying` 双向互斥。
+  `tgzDirAsProgress`（`tgzDirAs` 是它的 `prog=nil` 包装），与「更新/恢复/重置插件」用
+  同一把 `applying` 双向互斥（`beginExclusiveDshDataOp` 是短操作的取用入口）。
+  三条配套约束：
+  1. **产物分两步落盘**：先写 `<名称>.part`、成功后 `os.Rename` 成 `<名称>`（见
+     `backupPartSuffix`）。恢复是「先删 `~/.dsh` 再解压」，半成品若与完成包同名，一次
+     进程被杀就能让用户用半个包恢复、把数据删了却解不出内容。`.part` 不会被备份列表
+     列出（`isBackupFile` 只认 `-<14位时间戳>.tar.gz`），启动时与每次开始备份前由
+     `sweepPartialBackups` 清掉。**别再改回直写最终文件名。**
+  2. **预扫描（`scanDirSize`）在 goroutine 里做**，接口返回前只跑存在性与互斥检查；
+    总量先为 0（前端按「总量未知」渲染），扫完由 `dshBackup.setTotals` 补上。
+  3. `DeleteDshDataBackup` 拒绝删除**正在写的那一份**（否则备份仍报成功、盘上却查无此包）。
   **dsh 服务更新与插件市场更新都不再走这里**（没有可下载的压缩包）。
 - `server.go` — **dsh 服务的多版本管理**：`${TRIM_PKGVAR}/server/<版本>/` 下的
   `npm install --prefix` 安装产物；镜像源取自 `npmMirrors`（阿里云 → 腾讯云 → 华为云，
@@ -172,9 +185,12 @@
   `main` 的 `overflow` 变 `hidden` 且滚动位置不变（关闭后还原）。
 - **全局禁选 / 禁原生拖拽 / 输入框禁自动填充**（`style.css` + `App.vue`）：
   `html { user-select: none }` 全局禁止文本选择，需要拖选的地方必须显式加 Tailwind 的
-  `select-text` —— 现在只有两处：`LogView` 的日志 `<pre>`、`TerminalView` 整页；日志路径与
-  「自动滚动」状态、插件名与版本号都刻意不放（插件名走「点击即复制」，见 `PluginsView` 的
-  `copyPluginName`）。输入框 / textarea / contenteditable 已在同一条规则里放开。
+  `select-text`。现在加了的：`LogView` 的日志 `<pre>`、`TerminalView` 整页，以及弹窗里
+  **错误/诊断类文本块**（`MarketDialog` 的失败提示、检测诊断与 npm 尾行；
+  `ServerVersionsDialog` 的列表拉取失败提示、安装失败提示与 npm 尾行）—— 这些内容常要
+  拿去搜/贴，不让选中等于逼用户手抄。刻意**不放**的：日志路径与「自动滚动」状态、插件名与
+  版本号（插件名走「点击即复制」，见 `PluginsView` 的 `copyPluginName`）。输入框 /
+  textarea / contenteditable 已在同一条规则里放开。
   **原生拖拽**由 `App.vue` onMounted 里捕获阶段的 `dragstart` 统一拦掉 —— Chromium 把
   v-html 注入的内联 SVG 图标当图片一样可拖，随手点一下就拖出半透明拖拽快照；将来要加拖拽
   排序/拖放上传，给对应元素标 `data-allow-drag` 即可放行。所有输入框都要带 `autocomplete`
@@ -208,6 +224,14 @@
 7. **日志只用 `logInfo` / `logWarn` / `logError`，且用英文** —— 不要再引入
    `logger()` / `log.Printf` / `fmt.Println`。基础的成功操作（PID 文件写入、无需重装的
    空操作、回收子进程成功等）**不记日志**；只记状态变化、用户发起的操作与失败/异常。
+   - **会进日志的错误串必须是英文**：判别方法很简单 —— 这个错误会被 `logXxx(..., err)`
+     打印吗？会就写英文。已经踩过的三个点：拉镜像源元数据、`verifyInstall` 的校验失败、
+     `patchAttachmentFsync` 的补丁失败，都是中文串顺着 `logWarn(..., err)` 进了日志（现已
+     改成英文）。
+   - 守卫：`backend/logging_test.go` 的 `TestNoChineseInLogCallText`（日志调用的实参不得含
+     非 ASCII）与 `TestLoggedErrorsAreEnglish`（那条链路上会进日志的错误串必须纯 ASCII）；
+     镜像源中文名的守卫在 `backend/mirror_log_language_test.go`。
+   - **界面文案的英文由「后端给 code + 参数、前端查字典」提供**，见下面第 13 条。
    高频路径（状态轮询、每小时自动检测）要么只在结果真正变化时记一行，要么依赖
    `logging.go` 的重复抑制，**不要每次调用都刷一行**。dsh 子进程的输出必须原样透传，
    不要加前缀或改写格式（控制台靠「无 `[Harness]` 前缀」把它识别为黄色 dsh 输出）。
@@ -266,6 +290,48 @@
    - **顺序**：市场安装/卸载是 pnpm 在 profile 里跑并持有 profile 写锁，**绝不能在它跑的时候
      停 dsh**（会留下陈旧锁）。所以是「先跑完插件命令 → 过忙守卫 → 重启 dsh 让 bundle 生效」；
      切换 dsh 版本同样是「过忙守卫 → 停 dsh → 用新版本启动」。
+   - **控制台侧所有 `dsh plugin …` 都走 `DshManager.RunPluginCommand`**（超时由调用方给：
+     插件页的只读命令用 `pluginCmdTimeout`、市场 `add` 用 `marketCmdTimeout`）。它做两件事：
+     执行前清陈旧锁、全程登记 `PluginCmdRunning()`（忙守卫与概览页风险提示的来源）。第 5 节
+     那条硬约束里有这条的完整来龙去脉与回归测试位置。
+   - **换镜像源重试前必须把版本目录重建出来**（`resetVersionDir`）：`npm install --prefix <dir>`
+     的目录不存在时 exec 直接 chdir 失败，那次换源就白丢了，错误还会被算到镜像源头上。
+     npm 失败与 verify 失败两条分支都要重建（回归测试
+     `TestInstallFallbackAfterVerifyFailureKeepsUsableDir`）。
+   - **安装入口也要校验 `dshMinVersion`**：列表已经过滤掉更早的版本，直接调
+     `/api/dsh/versions/install` 也必须拒绝（装出来在子路径挂载下必然 404）。
+   - **忙拒绝回 409**：`busyf(...)` 产生的错误经 `writeErrOperation` 映射成 409 Conflict，
+     其余参数/状态错误仍是 400 —— 前端不依赖状态码，但「稍后重试就行」与「请求本身有问题」
+     得区分开。
+
+13. **面向用户的文案一律「后端给 code + 参数，前端查 i18n」** —— 用户可见的每一句话
+   （toast / 弹窗 / 进度行 / 状态说明）都要能随界面语言切换，而语言只存在前端的
+   localStorage 里，后端并不知道。机制在 `backend/uimsg.go`：
+   - 后端只回**稳定 code + 参数**，中文原文作为「前端不认这个 code」时的兜底：
+     `uiErr("err_need_version", "缺少 %s", "field", "version")`（错误）、
+     `busyf("err_backup_running", "…")`（并发拒绝 → HTTP 409）、
+     `writeErrU(w, 400, "err_need_version", "缺少 version")`（handler 内的文案）、
+     `setMsgFields(&st.Message, &st.MessageRef, "msg_install_done", "dsh %s 安装完成", "version", v)`
+     （状态里的进度/说明文案）。
+   - code 就是前端 i18n 的 key（`frontend/src/composables/useI18n.ts` 的 zh / en 两份字典）。
+     命名：错误 `err_*`、进度/状态 `msg_*`，小写 snake_case；参数名用 `detail` / `version` /
+     `min` / `max` 这类，中文原文里用 `%s`（按参数顺序填），前端译文的占位符用 `{参数名}`。
+     参数是「k/v 成对展开」的实参列表，不要传 map。
+   - **只有面向用户的文案才带 code**：诊断类错误（会进日志、或只是 npm/exec 的原始输出）
+     保持英文原文；状态里的诊断文本（npm 尾行、平台返回的原始 msg）用 `setMsgFields(…, "", line)`
+     原样直出、**不带引用**（翻译原始输出没有意义）。
+   - 前端渲染一律走两个 helper（别自己拼 `st.error || fallback`）：
+     `uiText(text, ref, fallback)` 渲染「原文 + 引用」，`uiErrText(e, fallback)` 渲染抛出的
+     错误（`serverapi` 的 `ApiError` 带 code/params）。`useI18n` 的 `t()` 只用于前端自己的文案。
+   - 后端渲染的独立页面（登录页 / 等待页）用不了前端运行时，各自处理：登录页读
+     `localStorage['console-language']` 用页内脚本换 `data-zh`/`data-en`（`backend/auth.go`）；
+     等待页本身就是双语页，detail 给中英各一行（CSS `white-space:pre-line`）。
+   - 守卫：`backend/uimsg_test.go` —— 用语法树扫出所有用户文案调用点，断言
+     **每个 code 在前端 zh / en 两份字典里都有**、**占位符数量 == 参数个数**（防
+     `%!s(MISSING)` 出现在界面上）、以及 setErrFields/setMsgFields 成对写入语义。
+     新增一句提示 = 后端加 code + 前端补两条译文，跑一次 `go test` 就知道漏没漏。
+   - 反面教材（本次踩过）：前端用 `st.error.includes('用户取消')` 判断「用户取消了下载」——
+     语言一换就失效；现在后端在取消时置 `Cancelled` 标记 + code，前端只看结构化字段。
 
 ---
 
@@ -339,7 +405,11 @@
        经 `stopDshForReplacement`）、**切换 dsh 版本**（`ServerManager.Switch`）、
        **市场安装/卸载后重启 dsh**（`restartDshForMarket`）。被拒绝时不产生任何停机、不改盘。
      - 守卫来源：市场 `/dsh-market/status` 的 busy + `DshManager.PluginCmdRunning()`；
-       市场不回答视为不忙（回滚/恢复这类抢修不被挡）。
+       市场不回答视为不忙（恢复这类抢修不被挡）。**控制台自己发起的每一条插件命令都要
+       登记进这个计数** —— 插件页的 list/remove 与插件市场的 add/remove/list 都必须走
+       `DshManager.RunPluginCommand`（它顺带清陈旧锁）。曾经市场的 add 直接调
+       `runDshCmdTimeout` 绕过它，于是忙守卫对「控制台正在装市场」完全瞎；回归测试见
+       `backend/plugin_cmd_entry_test.go`（含一条源码守卫）。
      - 唯一例外是概览页的「停止/重启 dsh」按钮：那是用户的即时意图，**不挡**；改为在确认
        弹窗里提示 —— 弹窗打开时查 `GET /api/dsh/busy`（`AdminMux.dshBusySnapshot()`），
        有插件操作在跑就显示风险提示。这个端点刻意不塞进高频轮询的 `/api/dsh/status`。
@@ -513,3 +583,5 @@ cd frontend && npm run build    # 前端构建
 - [ ] 前端改动是否已重新构建并验证 URL？
 - [ ] 新增 Pinia store / composable 是否遵循现有结构？
 - [ ] 版本号改动是否经 `-ldflags` / `build.sh release V=...` 注入，而非改代码常量？
+- [ ] 新增的用户可见文案是否走「后端 code + 前端 i18n 两条译文」（见规则 13）？界面是用
+      `uiText` / `uiErrText` 渲染的，而不是直接拼 `st.error`？

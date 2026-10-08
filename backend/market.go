@@ -30,10 +30,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,17 +63,27 @@ const (
 // 返回 ok=false 表示输出里没有 dshmarket（= 未安装）。
 func (m *UpdateManager) marketInstalled() (version string, ok bool, err error) {
 	if m.dsh == nil {
-		return "", false, fmt.Errorf("dsh 管理器不可用")
+		return "", false, uiErr("err_dsh_manager_unavailable", "dsh 管理器不可用")
 	}
-	out, err := m.dsh.runDshCmdTimeout(marketCmdTimeout, "plugin", "--profile", marketProfile, "list")
+	// 只读检测，但仍走控制台侧插件命令的统一入口：它执行前会清「持有者已死」的陈旧
+	// profile 写锁（list 正是最容易被陈旧锁拖住 120 秒的那条），并把「插件命令进行中」
+	// 登记给忙守卫。超时用 pluginCmdTimeout（不是 marketCmdTimeout）—— 这条是只读命令，
+	// 不该允许它挂 10 分钟，否则忙守卫会被一次卡住的检测长期占住。
+	out, err := m.dsh.runPluginCmd("list")
 	if err != nil {
+		// 「本机没有选中的 dsh 版本」是最常见的失败原因，而且它的内部错误文本是英文的
+		// （会被日志打印，见 AGENTS 规则 7）—— 这里换成中文话术，用户才看得懂该去做什么。
+		// 这条错误只进界面（MarketDir 诊断 / 弹窗），不进日志。
+		if errors.Is(err, errNoDshVersion) {
+			return "", false, uiErr("err_no_dsh_version", "未安装 dsh 服务：请先在控制台「概览」页的版本列表里下载一个版本，再点「切换」")
+		}
 		// 命令整体失败（dsh 未安装 / pnpm 缺失 / profile 目录不存在等）：
 		// 把原因带上，前端在弹窗里能直接看到「为什么检测不到」。
 		msg := strings.TrimSpace(out)
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", false, fmt.Errorf("检测插件市场失败（dsh plugin --profile %s list）: %s", marketProfile, msg)
+		return "", false, uiErr("err_market_detect_failed", "检测插件市场失败（dsh plugin --profile %s list）: %s", "profile", marketProfile, "detail", msg)
 	}
 	for _, p := range parsePluginList(out) {
 		if p.Name == marketPackageName {
@@ -187,10 +197,10 @@ func (m *UpdateManager) refreshMarketStatus() {
 		if err != nil {
 			st.LatestVersion = ""
 			st.HasUpdate = false
-			st.Error = err.Error()
+			setErrFields(&st.Error, &st.ErrorRef, err)
 			return
 		}
-		st.Error = ""
+		setErrFields(&st.Error, &st.ErrorRef, nil)
 		st.LatestVersion = latest
 		st.HasUpdate = snap.Version != "" && compareVersion(latest, snap.Version) > 0
 	})
@@ -236,10 +246,11 @@ func (m *UpdateManager) runMarketPluginCmd(args []string) error {
 		full := append(marketCommand(args), "--registry="+mirror.URL)
 		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 			// 界面进度文案用中文显示名；日志用下面的 mirrorLogName()（英文标识）。
-			st.Message = fmt.Sprintf("正在从 %s 处理 %s", mirror.Name, marketPackageName)
+			setMsgFields(&st.Message, &st.MessageRef, "msg_market_from_mirror",
+				"正在从 %s 处理 %s", "mirror", mirror.Name, "pkg", marketPackageName)
 		})
 		logInfo("[market] running dsh %s (via %s)", strings.Join(full, " "), mirror.mirrorLogName())
-		out, err := m.dsh.runDshCmdTimeout(marketCmdTimeout, full...)
+		out, err := m.dsh.RunPluginCommand(marketCmdTimeout, full)
 		if err == nil {
 			return nil
 		}
@@ -249,7 +260,7 @@ func (m *UpdateManager) runMarketPluginCmd(args []string) error {
 	if lastErr == nil {
 		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
 	}
-	return fmt.Errorf("插件市场操作失败（%s 均失败，不重试、不使用官方源）: %v", mirrorLogNames(), lastErr)
+	return uiErr("err_market_op_failed", "插件市场操作失败（%s 均失败，不重试、不使用官方源）: %s", "mirrors", mirrorLogNames(), "detail", lastErr.Error())
 }
 
 // runMarketPluginCmdOnce 执行一次**与 registry 无关**的市场命令（`remove` 等）：
@@ -258,9 +269,9 @@ func (m *UpdateManager) runMarketPluginCmd(args []string) error {
 func (m *UpdateManager) runMarketPluginCmdOnce(args []string) error {
 	full := marketCommand(args)
 	logInfo("[market] running dsh %s", strings.Join(full, " "))
-	out, err := m.dsh.runDshCmdTimeout(marketCmdTimeout, full...)
+	out, err := m.dsh.RunPluginCommand(marketCmdTimeout, full)
 	if err != nil {
-		return fmt.Errorf("dsh %s 失败: %v", strings.Join(full, " "), tailLines(out, 3))
+		return uiErr("err_market_cmd_failed", "dsh %s 失败: %s", "cmd", strings.Join(full, " "), "detail", tailLines(out, 3))
 	}
 	return nil
 }
@@ -321,7 +332,8 @@ func (m *UpdateManager) addNewestMarketCmd() error {
 	}
 	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 		st.LatestVersion = version
-		st.Message = fmt.Sprintf("正在安装 %s@%s", marketPackageName, version)
+		setMsgFields(&st.Message, &st.MessageRef, "msg_market_installing",
+			"正在安装 %s@%s", "pkg", marketPackageName, "version", version)
 	})
 	return marketPluginCmdFn(m, []string{"add", marketPackageName + "@" + version})
 }
@@ -342,8 +354,11 @@ func (m *UpdateManager) RemoveMarket() error {
 // 里的英文动作名 —— 日志一律英文（见 AGENTS 第 4 节规则 7），别把 action 传进日志。
 func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) error {
 	if !m.applying.TryLock() {
-		return fmt.Errorf("正在执行其它更新/插件操作，请等它结束后再%s插件市场", action)
+		return busyf("err_market_busy", "正在执行其它更新/插件操作，请等它结束后再重试")
 	}
+	// 本次操作的序号：随状态一路带给前端，作为「结果只提示一次」的去重键
+	// （否则「装成功」之后再一次「装成功」的 phase 完全相同，会被静默吞掉）。
+	seq := m.marketOpSeq.Add(1)
 	go func() {
 		defer m.applying.Unlock()
 		phase := "installing"
@@ -351,9 +366,10 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 			phase = "removing"
 		}
 		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+			st.Seq = seq
 			st.Phase = phase
-			st.Error = ""
-			st.Message = ""
+			setErrFields(&st.Error, &st.ErrorRef, nil)
+			setMsgFields(&st.Message, &st.MessageRef, "", "")
 			st.Cancelled = false
 		})
 		err := run()
@@ -365,9 +381,10 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 		if err != nil {
 			logError("[market] %s failed: %v", actionLog, err)
 			m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+				st.Seq = seq
 				st.Phase = ""
-				st.Error = err.Error()
-				st.Message = ""
+				setErrFields(&st.Error, &st.ErrorRef, err)
+				setMsgFields(&st.Message, &st.MessageRef, "", "")
 			})
 			return
 		}
@@ -375,9 +392,10 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 		// force=true：刚装/卸完市场，本地版本确实变了，必须重查（不能吃缓存）。
 		snap := m.refreshMarketLocal(true)
 		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+			st.Seq = seq
 			st.Phase = "done"
-			st.Error = ""
-			st.Message = ""
+			setErrFields(&st.Error, &st.ErrorRef, nil)
+			setMsgFields(&st.Message, &st.MessageRef, "", "")
 			st.LocalVersion = snap.Version
 			if st.LatestVersion != "" {
 				st.HasUpdate = compareVersion(st.LatestVersion, snap.Version) > 0
@@ -391,8 +409,8 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 func (m *UpdateManager) DoneMarket() {
 	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 		st.Phase = ""
-		st.Message = ""
-		st.Error = ""
+		setMsgFields(&st.Message, &st.MessageRef, "", "")
+		setErrFields(&st.Error, &st.ErrorRef, nil)
 	})
 }
 
@@ -403,7 +421,7 @@ func (m *UpdateManager) DoneMarket() {
 // 并留下陈旧锁）。
 func (m *UpdateManager) restartDshForMarket() error {
 	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
-		st.Message = "正在重启 dsh 服务以使插件市场变更生效"
+		setMsgFields(&st.Message, &st.MessageRef, "msg_market_restarting", "正在重启 dsh 服务以使插件市场变更生效")
 	})
 	if err := m.replaceBusyGuard("重启 dsh 服务"); err != nil {
 		return err
@@ -546,9 +564,8 @@ var marketBusyFn = func(m *UpdateManager) (bool, string) {
 //   - 控制台自己的插件命令（插件页的列表/卸载、市场的安装/卸载）→ 查 DshManager 的命令计数。
 func (m *UpdateManager) replaceBusyGuard(action string) error {
 	if m.dsh != nil && m.dsh.PluginCmdRunning() {
-		return fmt.Errorf("控制台正在执行插件命令（dsh plugin …）。%s需要停止 dsh，"+
-			"会中断那次操作并留下陈旧的 profile 写锁（之后插件列表/安装都会失败）；"+
-			"请稍等它结束再重试", action)
+		return busyf("err_plugin_cmd_running", "控制台正在执行插件命令（dsh plugin …）。需要停止 dsh 的操作"+
+			"会中断它并留下陈旧的 profile 写锁（之后插件列表/安装都会失败）；请稍等它结束再重试")
 	}
 	busy, detail := marketBusyFn(m)
 	if !busy {
@@ -559,8 +576,8 @@ func (m *UpdateManager) replaceBusyGuard(action string) error {
 	} else {
 		detail = "正在安装/更新插件"
 	}
-	return fmt.Errorf("插件市场%s。%s需要停止 dsh，会中断那次操作并留下陈旧的 profile 写锁"+
-		"（之后插件列表/安装都会失败）；请等它完成或先在市场里取消，再重试", detail, action)
+	return busyf("err_market_op_running", "插件市场%s。需要停止 dsh 的操作会中断它并留下陈旧的 profile 写锁"+
+		"（之后插件列表/安装都会失败）；请等它完成或先在市场里取消，再重试", "detail", detail)
 }
 
 // stopDshForReplacement 为「替换 dsh 产物」停 dsh：先过忙守卫（拒绝时不产生任何停机），
@@ -618,16 +635,4 @@ func (m *UpdateManager) profileDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".dsh", "profiles", marketProfile)
-}
-
-// profileExists 判断 profile 目录是否已初始化（决定市场能否安装）。
-func (m *UpdateManager) profileExists() bool {
-	dir := m.profileDir()
-	if dir == "" {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err != nil {
-		return false
-	}
-	return true
 }

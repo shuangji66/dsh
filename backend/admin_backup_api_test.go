@@ -103,3 +103,33 @@ func TestDshBackupAPIEndToEnd(t *testing.T) {
 		t.Fatalf("已完成的备份不应被取消动作删掉: %v", names)
 	}
 }
+
+// 重置插件（会删掉整个 ~/.dsh/profiles 并重启 dsh）必须与备份互斥：备份是分钟级的
+// 异步任务，撞上就会打出一份「成功但缺 profiles」的包。同类拒绝用 409（与其它 busy 一致）。
+func TestResetPluginsRefusedWhileBackupRunning(t *testing.T) {
+	t.Setenv("TRIM_PKGVAR", t.TempDir())
+	home := t.TempDir()
+	upd := newBackupTestManager(t, home, t.TempDir())
+	resetDshBackupTracker(t)
+
+	profiles := filepath.Join(home, ".dsh", "profiles", "web")
+	if err := os.MkdirAll(profiles, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟「备份正在跑」：占住跟踪器 + applying（BackupDshData 拿的就是这两把）。
+	dshBackup.begin("dsh-data-1.0.0-20250101000000.tar.gz", filepath.Join(upd.backupDir(), "x"))
+	upd.applying.Lock()
+	defer upd.applying.Unlock()
+
+	m := &AdminMux{update: upd, renv: upd.renv, dsh: upd.dsh}
+	rec := httptest.NewRecorder()
+	m.handleResetPlugins(rec, httptest.NewRequest(http.MethodPost, "/api/dsh/reset-plugins", nil))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("备份进行中时重置插件应 409，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(profiles); err != nil {
+		t.Fatalf("被拒绝时不能删除 profiles: %v", err)
+	}
+}

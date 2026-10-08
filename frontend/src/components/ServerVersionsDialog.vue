@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { DshVersionEntry, ServerVersions } from '@/serverapi'
-import { useI18n } from '@/composables/useI18n'
+import { uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -120,7 +120,7 @@ useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.va
           <div class="flex items-center justify-between gap-3 mb-3">
             <span class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('dsh_ver_source') }}</span>
             <button
-              class="g-btn-secondary !h-7 !px-2.5 !text-xs"
+              class="g-btn-secondary h-7 px-2.5 text-xs"
               :disabled="loading || installing"
               @click="emit('refresh')"
             >{{ loading ? t('dsh_ver_refreshing') : t('dsh_ver_refresh') }}</button>
@@ -129,7 +129,7 @@ useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.va
           <!-- 列表拉取失败：只提示、不阻塞（本地已装版本仍可切换/删除） -->
           <div
             v-if="status?.error"
-            class="mb-3 rounded-lg px-3 py-2 text-xs break-words bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-[#B45309] dark:text-[#FBBF24]"
+            class="mb-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-[#B45309] dark:text-[#FBBF24]"
           >{{ status.error }}</div>
 
           <div v-if="loading && rows.length === 0" class="py-6 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
@@ -152,7 +152,7 @@ useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.va
                     <span
                       v-for="tag in row.tags || []"
                       :key="tag"
-                      class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
+                      class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
                     >{{ tag }}</span>
                     <span
                       v-if="row.active"
@@ -168,27 +168,27 @@ useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.va
                 <!-- 行内操作：未安装 → 下载；已安装且非当前 → 切换 + 删除；安装中 → 取消 -->
                 <div class="flex items-center gap-2 flex-shrink-0">
                   <template v-if="isInstalling(row.version)">
-                    <button class="g-btn-danger !h-8 !px-3 !text-xs" @click="cancelConfirm = true">
+                    <button class="g-btn-danger h-8 px-3 text-xs" @click="cancelConfirm = true">
                       {{ t('dsh_ver_cancel') }}
                     </button>
                   </template>
                   <template v-else-if="row.installed">
                     <button
                       v-if="!row.active"
-                      class="g-btn-secondary !h-8 !px-3 !text-xs"
+                      class="g-btn-secondary h-8 px-3 text-xs"
                       :disabled="installing"
                       @click="openSwitch(row.version)"
                     >{{ t('dsh_ver_switch') }}</button>
                     <button
                       v-if="!row.active"
-                      class="g-btn-danger !h-8 !px-3 !text-xs"
+                      class="g-btn-danger h-8 px-3 text-xs"
                       :disabled="installing"
                       @click="openDelete(row.version)"
                     >{{ t('dsh_ver_delete') }}</button>
                   </template>
                   <button
                     v-else
-                    class="g-btn-secondary !h-8 !px-3 !text-xs"
+                    class="g-btn-secondary h-8 px-3 text-xs"
                     :disabled="installing"
                     @click="emit('install', row.version)"
                   >{{ t('dsh_ver_download') }}</button>
@@ -206,9 +206,9 @@ useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.va
                 </div>
                 <div
                   v-if="install?.message"
-                  class="mt-0.5 font-mono text-[11px] text-ink-faint dark:text-[#8A8A92] break-all line-clamp-2"
-                >{{ install.message }}</div>
-                <div class="mt-0.5 text-[11px] text-ink-faint dark:text-[#8A8A92]">{{ t('dsh_ver_no_pause') }}</div>
+                  class="mt-0.5 font-mono text-xs text-ink-faint dark:text-[#8A8A92] break-all line-clamp-2 select-text"
+                >{{ uiText(install.message, install.messageRef) }}</div>
+                <div class="mt-0.5 text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('dsh_ver_no_pause') }}</div>
               </div>
             </div>
           </div>
@@ -217,12 +217,12 @@ useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.va
                （见 UpdateSection 的结果提示），「已完成」这种终态常驻弹窗没有意义。 -->
           <div
             v-if="!installing && install && (install.phase === 'error' || install.cancelled)"
-            class="mt-3 rounded-lg px-3 py-2 text-xs break-words"
+            class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text"
             :class="install.phase === 'error'
               ? 'bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]'
               : 'bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] text-ink-soft dark:text-[#A6A6AD]'"
           >
-            <template v-if="install.phase === 'error'">{{ install.error }}</template>
+            <template v-if="install.phase === 'error'">{{ uiText(install.error, install.errorRef) }}</template>
             <template v-else>{{ t('dsh_ver_cancelled') }}</template>
           </div>
         </div>

@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 import { api, type DshBackupStatus } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
-import { useI18n } from '@/composables/useI18n'
+import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 
 // useDshBackup —— dsh 数据备份的观察端。
 //
@@ -99,7 +99,7 @@ function adopt(st: DshBackupStatus, opts?: { announce?: boolean }) {
     toast().show(t('directory_backup_success', { name: st.name || '' }), 'success')
     return
   }
-  toast().show(st.error || t('directory_backup_failed'), 'error')
+  toast().show(uiText(st.error, st.errorRef, t('directory_backup_failed')), 'error')
 }
 
 // sync 拉一次后端快照：running 时顺带开始轮询，落定则停止。
@@ -141,7 +141,7 @@ async function start(): Promise<boolean> {
     // 若确实有备份在跑就顺手接上，而不是把它当成失败。
     await sync()
     if (running.value) return true
-    lastError.value = (e as Error).message || t('directory_backup_failed')
+    lastError.value = uiErrText(e, t('directory_backup_failed'))
     return false
   } finally {
     starting.value = false
@@ -157,7 +157,7 @@ async function cancel() {
     adopt(res.status, { announce: true })
   } catch (e) {
     cancelling.value = false
-    toast().show((e as Error).message || t('backup_cancel_failed'), 'error')
+    toast().show(uiErrText(e, t('backup_cancel_failed')), 'error')
   }
 }
 

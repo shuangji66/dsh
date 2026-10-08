@@ -630,7 +630,7 @@ const waitingPageHTML = `<!DOCTYPE html>
     <p class="sub" id="sub">服务就绪后本页会自动跳转，请稍候…
       <span class="en">This page jumps automatically once the service is ready.</span>
     </p>
-    <div class="err" id="detail"></div>
+    <div class="err" id="detail" style="white-space:pre-line"></div>
     <div class="hint" id="hint">
       已等待 <b id="elapsed">0</b> 秒仍未就绪。若长时间没有进展，请到控制台查看日志。
       <span class="en">Still not ready after <b id="elapsed-en">0</b>s. Check the console
@@ -1011,6 +1011,14 @@ func (p *reverseProxy) state() (proxyState, *BackendChecker) {
 	portUp := checker.quick(500 * time.Millisecond)
 	settled := p.dsh.SessionSettled()
 	phase, detail := p.boot.get()
+	// 「未安装」阶段一旦过期就作废：启动阶段只有 main.go 能写，而控制台起来之后很可能
+	// 是用户在概览页装好版本并点了「切换」——此后等待页再说「尚未安装 dsh 服务，请先下载
+	// 一个版本」就是错的（切换后 dsh 启动失败时更糟：那句指引会一直挂着，真正的原因只在
+	// 日志里）。已选中并装着版本时按常规阶段显示（启动中 / 已停止 / 换凭据）。
+	// 只在 phase 恰好是 not-installed 时多读一次配置，反代热路径上就不必每次 stat 版本目录。
+	if phase == phaseNotInstalled && p.dsh.selectedDshVersion() != "" {
+		phase, detail = phaseStarting, ""
+	}
 
 	switch {
 	case p.boot.booting():

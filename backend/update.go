@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -34,6 +35,12 @@ var harnessVersion = "1.0.0"
 // errUpdateCancelled 表示更新下载被用户主动取消（前端点“取消更新”触发）：
 // 半成品文件会被删除，状态回到空闲，下次从零开始。
 var errUpdateCancelled = errors.New("用户取消更新")
+
+// busyf 构造一条「并发拒绝」的用户错误（HTTP 层回 409，文案走前端 i18n）。
+// code 见 uimsg.go 的约定；zh 里的 %s 按 kv 的 value 顺序填充。
+func busyf(code, zh string, kv ...string) error {
+	return &userError{msg: uiMsg{Code: code, Params: kvMap(kv)}, text: formatKV(zh, kv), busy: true}
+}
 
 // errUpdatePaused 表示更新下载被用户暂停（前端点“暂停”触发）：半成品文件保留，
 // 状态置 paused，下次“继续下载”用 HTTP Range 从已下载字节续传。
@@ -94,9 +101,10 @@ func updateLogTag(k updateKind) string {
 	}
 }
 
-// pendingKind 从待安装包文件名（`harness-1.2.6.tar.gz` / `dsh-0.1.7.tar.xz` / `market-…`）
-// 反推更新目标；认不出时返回空串，日志退化为通用的 [update]。
-// 只看 `<kind>-` 前缀、不看扩展名：旧控制台留下的 `.tar.gz` 半成品同样要能认出来。
+// pendingKind 从待安装包文件名反推更新目标（现在只有 harness 还会落包：
+// `harness-1.2.6.tar.gz`）；认不出时返回空串，日志退化为通用的 [update]。
+// 旧控制台的 dsh-*/market-* 包不会再产生，但这里仍认它们 —— 那些残留文件要被
+// clearOrphanPending 回收，日志上得看得出原本是什么。只看 `<kind>-` 前缀、不看扩展名。
 func pendingKind(name string) updateKind {
 	for _, k := range []updateKind{updateKindHarness, updateKindDsh, updateKindMarket} {
 		if strings.HasPrefix(name, string(k)+"-") {
@@ -160,10 +168,17 @@ type UpdateStatus struct {
 	// 市场安装位置诊断（仅 kind=market）：`dsh plugin --profile web list` 的原始输出，
 	// 用于解释「没检测到市场」这类情况。
 	MarketDir string `json:"marketDir,omitempty"`
+	// Seq 是「第几次操作」的序号（目前只有插件市场写它，见 runMarketOp）：前端用它给
+	// 「操作结果只提示一次」去重 —— 只按 phase/error 去重时，第二次同样的结果
+	// （装成功后再卸成功，phase 都是 done/error 都为空）会被静默吞掉。
+	Seq int64 `json:"seq,omitempty"`
+	// ErrorRef / MessageRef 是 Error / Message 的「界面文案引用」（code + 参数）：
+	// 前端按 code 走 i18n，取不到才回退到原文。只给**面向用户**的文案设它们，
+	// 诊断类文本（npm/exec 原始输出）不设。见 uimsg.go 与 setErrFields/setMsgFields。
+	ErrorRef   *uiMsg `json:"errorRef,omitempty"`
+	MessageRef *uiMsg `json:"messageRef,omitempty"`
 }
 
-// PendingUpdate 记录某个 kind 已下载完成、等待用户确认安装的更新包。
-// 只会保留一个 kind 的一份待安装包；重新下载或安装完成后即被清理。
 // PendingUpdate 记录某个 kind 已下载完成、等待用户确认安装的更新包。
 // 只会保留一个 kind 的一份待安装包；重新下载或安装完成后即被清理。
 // 目前只有 harness 控制台会用到它（dsh 与插件市场都不再下载压缩包）。
@@ -185,6 +200,10 @@ type UpdateManager struct {
 	statuses map[updateKind]*UpdateStatus
 	// applying 用于防止并发执行自我更新（同一时刻只允许一个更新任务）。
 	applying sync.Mutex
+	// marketOpSeq 是市场操作的序号（每次安装/更新/卸载 +1），随状态推给前端用于
+	// 「结果只提示一次」的去重键。用原子量：它只在 runMarketOp 里自增，不需要参与
+	// statuses 的锁。
+	marketOpSeq atomic.Int64
 	// backupMu 保证「同一时刻只有一个 dsh 数据备份」在跑（备份本身与更新互斥走
 	// applying，见 BackupDshData）。单独一把锁只为把「已有备份在进行」和
 	// 「正在更新」区分成不同提示。
@@ -245,6 +264,9 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	m.server.refreshDshStatus()
 	// 启动时清理上次未能回收的更新包（自我更新 exec、异常退出等场景的残留）。
 	m.clearOrphanPending()
+	// 以及上次打包中途被杀留下的半成品备份（<名称>.part）：它不会被备份列表列出，
+	// 但一直占着磁盘 —— 备份是 GB 级，漏一个就够明显。
+	m.sweepPartialBackups()
 	return m
 }
 
@@ -742,7 +764,7 @@ func (m *UpdateManager) checkOnce() {
 			st.LatestVersion = ""
 			st.HasUpdate = false
 			st.CheckedAt = now
-			st.Error = err.Error()
+			setErrFields(&st.Error, &st.ErrorRef, err)
 			st.ReleaseNotes = ""
 		}
 		m.mu.Unlock()
@@ -769,7 +791,7 @@ func (m *UpdateManager) checkOnce() {
 		st.Kind = updateKindHarness
 		st.LocalVersion = harnessVersion
 		st.CheckedAt = now
-		st.Error = ""
+		setErrFields(&st.Error, &st.ErrorRef, nil)
 		st.ReleaseNotes = harnessNotes
 		if h != nil {
 			st.LatestVersion = h.version
@@ -1045,19 +1067,8 @@ func extractArchive(src, dest string) error {
 	return extractTarGz(src, dest)
 }
 
-// hasArchiveSuffix 报告文件名是否以给定后缀之一结尾（大小写不敏感）。
-func hasArchiveSuffix(name string, suffixes ...string) bool {
-	lower := strings.ToLower(name)
-	for _, s := range suffixes {
-		if strings.HasSuffix(lower, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// extractTarGz 解压 .tar.gz（.tgz 同理）到目标目录。用于发布资产（harness）、
-// 插件市场包，以及回滚时还原各版本备份。
+// extractTarGz 解压 .tar.gz（.tgz 同理）到目标目录。用于 harness 发布资产与
+// dsh 数据备份的还原（`dsh-data-*`）。
 func extractTarGz(src, dest string) error {
 	f, err := os.Open(src)
 	if err != nil {
@@ -1073,7 +1084,7 @@ func extractTarGz(src, dest string) error {
 }
 
 // extractTar 解压一个已解压的 tar 流到目标目录。保持 tar 内的相对路径不变
-// （不剥离顶层目录）。gz / xz 两条通路共用，因此路径越界与软链逃逸的防护只有一份。
+// （不剥离顶层目录）。解压器现在只有 gz 一条，路径越界与软链逃逸的防护也只有一份。
 func extractTar(rd io.Reader, dest string) error {
 	tr := tar.NewReader(rd)
 	// destRoot 用于「解析软链后仍在目标内」的判定；destLex 用于便宜的字符串前缀检查。
@@ -1284,6 +1295,12 @@ type tgzProgress struct {
 // 分开 —— 取消不是异常，不记 ERROR 日志、不向用户报失败。产物文件由错误路径删除。
 var errBackupCancelled = errors.New("备份已取消")
 
+// backupPartSuffix 是打包过程中的临时后缀：备份先写成 <目标文件名>.part，成功后再
+// 改名成最终文件名。这样「进程被杀 / 平台重启」留下的半成品不会与完成包同名 ——
+// 备份列表只认 -<14 位时间戳>.tar.gz（见 isBackupFile），恢复又是「先删 ~/.dsh 再解压」，
+// 拿半成包恢复等于直接丢数据。
+const backupPartSuffix = ".part"
+
 // tgzCopyChunk 是进度汇报与取消检查的块大小。取 255KB：既让 GB 级的大文件也能被及时
 // 取消（每块一检查），又不至于把进度回调打成高频热点（每块一次汇报）。
 const tgzCopyChunk = 255 * 1024
@@ -1305,20 +1322,38 @@ func tgzDirAs(srcDir, destFile, rootName string) error {
 
 // tgzDirAsProgress 是 tgzDirAs 的「带进度 + 可取消」版本，也是唯一的打包实现
 // （tgzDirAs 只是 prog=nil 的包装，别另写一份打包逻辑）。
+//
+// 产物是**分两步落盘**的：先写 destFile+backupPartSuffix，成功后再改名成 destFile。
+// 否则进程被杀/平台重启留下的半成品会与完成包同名同目录，而备份恢复是「先删 ~/.dsh
+// 再解压」，拿半成包恢复等于直接丢数据（见 BackupDshData / RestoreDshData）。
 func tgzDirAsProgress(srcDir, destFile, rootName string, prog *tgzProgress) error {
-	out, err := os.Create(destFile)
+	partFile := destFile + backupPartSuffix
+	out, err := os.Create(partFile)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
+	// 没走到「改名成功」的出口一律删掉半成品（失败、取消、进程内 panic 都算）。
+	committed := false
+	defer func() {
+		if !committed {
+			out.Close()
+			os.Remove(partFile)
+		}
+	}()
 	gz := gzip.NewWriter(out)
 	tw := tar.NewWriter(gz)
 	base := filepath.Clean(srcDir)
 	// destFile 可能是相对路径，而 walk 回调里的 p 基于 base（可能是绝对路径），
 	// 两侧都换算成绝对路径再比较，避免漏排除而把半写状态的备份包读进去。
+	// 产物自身（`.part` 与最终名）都要排除：正常部署下它们不在 srcDir 里，属防御性规则。
 	destAbs, derr := filepath.Abs(destFile)
 	if derr != nil {
 		destAbs = filepath.Clean(destFile)
+	}
+	partAbs, perr := filepath.Abs(partFile)
+	if perr != nil {
+		partAbs = filepath.Clean(partFile)
 	}
 	baseAbs, berr := filepath.Abs(base)
 	if berr != nil {
@@ -1345,7 +1380,7 @@ func tgzDirAsProgress(srcDir, destFile, rootName string, prog *tgzProgress) erro
 			name = root + "/" + rel
 		}
 		// 只排除本次备份产物自身（见函数注释），不要按扩展名整类排除。
-		if filepath.Join(baseAbs, rel) == destAbs {
+		if abs := filepath.Join(baseAbs, rel); abs == destAbs || abs == partAbs {
 			return nil
 		}
 		if info.IsDir() {
@@ -1389,19 +1424,28 @@ func tgzDirAsProgress(srcDir, destFile, rootName string, prog *tgzProgress) erro
 		return cerr
 	})
 	if err != nil {
-		// 失败与取消都会走到这里：关掉两个 writer 后删掉不完整的产物。
-		// （取消时也要删 —— 半个 .tar.gz 留在备份列表里比没有更糟。）
+		// 失败与取消都会走到这里：关掉两个 writer 后退出，半成品由上面的 defer 删掉
+		// （取消时也要删 —— 半个 .tar.gz 留在备份列表里比没有更糟）。
 		tw.Close()
 		gz.Close()
-		os.Remove(destFile)
 		return err
 	}
 	if err := tw.Close(); err != nil {
 		gz.Close()
-		os.Remove(destFile)
 		return err
 	}
-	return gz.Close()
+	if err := gz.Close(); err != nil {
+		return err
+	}
+	// 写句柄都关掉之后再改名：改名成功才算是「一份可用备份」。
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(partFile, destFile); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // cancelledNow 报告是否已请求取消（prog 为空时恒为 false）。
@@ -1449,7 +1493,7 @@ func (m *UpdateManager) harnessBinDir() string {
 	return "/var/apps/Harness/target/bin"
 }
 
-// harnessBinDirFn 是「控制台二进制装在哪」的唯一入口（与 serverDirFn 同一模式）：
+// harnessBinDirFn 是「控制台二进制装在哪」的唯一入口（与 serverRootFor 同一模式）：
 // 变量形式便于测试注入临时目录，否则测试会去写真实的 /var/apps/Harness/target/bin/harness。
 var harnessBinDirFn = func(m *UpdateManager) string { return m.harnessBinDir() }
 
@@ -1472,10 +1516,11 @@ func (m *UpdateManager) dataDir() string {
 
 // removeUnusedBackup 删除一次更新留下的备份包（收尾动作）。
 //
-// 只有 dsh server 的备份（`server-<版本>-<时间戳>.tar.gz`）需要长期保留：概览页有
-// 「dsh 服务回滚」，回滚之后还要能再回滚到别的版本。**harness 控制台与插件市场都没有
-// 回滚入口**，两者生成的备份包不会被任何代码读取，因此收尾时必须删掉，否则只会在
-// backup/ 里堆积垃圾（老版本留下的那些仍由每日清理按 30 天回收）。
+// **现在没有任何回滚入口**：dsh 版本靠「已安装的版本目录」回退（另一个目录就是另一个
+// 版本，见 server.go），harness 自我更新靠 exec 换映像，插件市场靠 `dsh plugin add`。
+// 因此更新过程生成的备份包不会被任何代码读取，收尾时必须删掉，否则只会在 backup/ 里
+// 堆积垃圾（老版本留下的 harness-/server-/market- 包仍由每日清理按 30 天回收）。
+// 唯一要长期保留的是**用户主动**的 dsh 数据备份（`dsh-data-*`，见 BackupDshData）。
 // 新增更新分支时按同一条规则处理：没有回滚入口就不要留备份。
 //
 // 删除失败只记警告：「更新已经成功」不该因为备份目录不可写而变成失败。
@@ -1563,8 +1608,9 @@ func (m *UpdateManager) clearPending(k updateKind) {
 // 两步之间传递，没有任何跨重启续用价值（版本号变化后也无法复用），因此在启动时
 // 整目录清理，避免每次自我更新都残留一个更新包。
 //
-// 注意：只清 pendingDir，不触碰 backupDir 里的 harness-*/server-* 备份（那些是回滚
-// 依据，由 30 天清理任务负责）。
+// 注意：只清 pendingDir，不触碰 backupDir —— 那里既有用户主动的 dsh 数据备份
+// （dsh-data-*，由用户自己管理），也有老版本留下的 harness-/server-/market- 包
+// （由 30 天清理任务回收）。
 func (m *UpdateManager) clearOrphanPending() {
 	dir := m.pendingDir()
 	entries, err := os.ReadDir(dir)
@@ -2142,7 +2188,7 @@ func drrLastN(dr *downloadReader) int64 {
 }
 
 // downloadUpdate 只下载更新包（第一步），不安装。可在下载过程中取消（CancelUpdate
-// 关闭 cancelCh 中断），下载成功后把包（dsh 为 .tar.xz，其余 .tar.gz）放到持久的
+// 关闭 cancelCh 中断），下载成功后把包（harness 的 .tar.gz）放到持久的
 // “待安装”目录并记入 pending，
 // 推送 phase=downloaded / readyToInstall=true，等待用户在弹窗里点“安装”。
 // 返回错误表示下载失败或被用户取消。
@@ -2202,7 +2248,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		s.ReadyToInstall = false
 		s.Cancelled = false
 		s.Paused = false
-		s.Error = ""
+		setErrFields(&s.Error, &s.ErrorRef, nil)
 		s.ErrorHint = ""
 		s.Downloading = true
 		s.DownloadedBytes = resumeBytes
@@ -2247,7 +2293,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 			s.Paused = true
 			s.Downloading = false
 			s.DownloadedBytes = partialSize(pkgPath)
-			s.Error = ""
+			setErrFields(&s.Error, &s.ErrorRef, nil)
 			s.ErrorHint = ""
 			s.Cancelled = false
 		})
@@ -2261,8 +2307,12 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 			s.DownloadPct = 0
 			s.DownloadedBytes = 0
 			s.TotalBytes = 0
+			// 取消是中性结果，**结构化**地告诉前端（Cancelled 标记 + code）：
+			// 前端不要再靠「错误文案里有没有『用户取消』」来判断（语言一换就失效）。
+			s.Cancelled = true
+			setErrFields(&s.Error, &s.ErrorRef, uiErr("err_update_cancelled", "用户取消更新"))
 		})
-		return fmt.Errorf("下载失败: %w", err)
+		return fmt.Errorf("download cancelled by user: %w", err)
 	default:
 		// 失败：失败位置之后会被删掉续传文件，保留半成品等下次重试。
 		m.updateStatus(k, func(s *UpdateStatus) {
@@ -2289,7 +2339,7 @@ func (m *UpdateManager) downloadUpdate(k updateKind) error {
 		if s.TotalBytes <= 0 {
 			s.TotalBytes = n
 		}
-		s.Error = ""
+		setErrFields(&s.Error, &s.ErrorRef, nil)
 		s.Cancelled = false
 	})
 	logInfo("%s package downloaded to %s (%d bytes), waiting to install", updateLogTag(k), pkgPath, n)
@@ -2333,7 +2383,7 @@ func (m *UpdateManager) installUpdate(k updateKind) error {
 		s.Phase = "installing"
 		s.ReadyToInstall = false
 		s.Cancelled = false
-		s.Error = ""
+		setErrFields(&s.Error, &s.ErrorRef, nil)
 	})
 
 	// 解压到临时目录。
@@ -2410,7 +2460,7 @@ func (m *UpdateManager) DiscardUpdate(k updateKind) error {
 		s.DownloadPct = 0
 		s.DownloadedBytes = 0
 		s.TotalBytes = 0
-		s.Error = ""
+		setErrFields(&s.Error, &s.ErrorRef, nil)
 		s.ErrorHint = ""
 		s.Cancelled = false
 	})
@@ -2472,7 +2522,7 @@ func (m *UpdateManager) ensureNodePtyAfterBoot() bool {
 // applyHarness 备份并替换控制台二进制，并停止 dsh 服务；**不**重启控制台，而是
 // 返回新二进制路径交由调用方在收尾之后 exec。
 //
-// 备份包只在本函数内存在：harness 没有回滚入口，替换结束（无论成败）就删掉它
+// 备份包只在本函数内存在：现在没有任何回滚入口，替换结束（无论成败）就删掉它
 // （见 removeUnusedBackup）。
 //
 // 之所以不在此处直接 exec：exec 会立刻用新映像替换当前进程，本进程的内存状态与
@@ -2507,9 +2557,9 @@ func (m *UpdateManager) applyHarness(extractDir string) (string, error) {
 	}
 	os.RemoveAll(stage)
 	logInfo("[harness] backed up current binary to %s", backupPath)
-	// harness 没有回滚入口（概览页只有「dsh 服务回滚」），这份备份包不会被任何路径读取：
-	// 替换成功或失败都删掉，别在 backup/ 里留垃圾。这里用 defer 是安全的 —— 本函数是
-	// 正常返回的，「永不返回」的是随后 exec 的 installHarness。
+	// 现在没有任何回滚入口，这份备份包不会被任何路径读取：替换成功或失败都删掉，
+	// 别在 backup/ 里留垃圾。这里用 defer 是安全的 —— 本函数是正常返回的，
+	// 「永不返回」的是随后 exec 的 installHarness。
 	defer m.removeUnusedBackup(backupPath, updateKindHarness)
 
 	// 替换二进制：在目标同目录下先写入临时文件，再 atomic rename 替换。
@@ -2551,13 +2601,13 @@ func (m *UpdateManager) restartHarness(newBin string) {
 
 // startDshCaptured 启动 dsh 并异步捕获新的一次性访问 token、换取 dsh 会话 cookie。
 // 每次 dsh 启动都会生成新的 token（Start 也会重置旧 token 与会话 cookie），因此
-// 更新 server / 回滚 / 数据恢复等“重启 dsh 后必须刷新会话凭据”的路径都必须经过
-// 本方法，否则反代仍携带旧 cookie（或空 cookie）转发到新启动的 dsh，导致会话失效。
+// 数据恢复 / 切换 dsh 版本 / 市场变更后重启等“重启 dsh 后必须刷新会话凭据”的路径都
+// 必须经过本方法，否则反代仍携带旧 cookie（或空 cookie）转发到新启动的 dsh，会话失效。
 func (m *UpdateManager) startDshCaptured() error {
 	if err := m.dsh.Start(); err != nil {
 		return err
 	}
-	// 异步等待捕获 token 并换取 cookie，不阻塞更新/回滚主流程（最多等 15 秒）。
+	// 异步等待捕获 token 并换取 cookie，不阻塞调用方主流程（最多等 15 秒）。
 	go captureDshSession(m.dsh)
 	return nil
 }
@@ -2586,7 +2636,7 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// --- Server 备份列表与回滚 ---
+// --- dsh 数据备份：列表 / 删除 / 恢复 ---
 
 // backupTimestampRe 匹配新格式备份文件名尾部的 -<YYYYMMDDHHMMSS>.tar.gz 时间戳后缀。
 // 新格式：<类型>-<版本号>-<时间戳>.tar.gz，如 harness-1.0.0-20260903154421.tar.gz。
@@ -2595,6 +2645,32 @@ var backupTimestampRe = regexp.MustCompile(`-\d{14}\.tar\.gz$`)
 // isBackupFile 判断文件名是否为指定类型的备份文件（以 prefix 开头，且以 -<14位时间戳>.tar.gz 结尾）。
 func isBackupFile(name, prefix string) bool {
 	return strings.HasPrefix(name, prefix) && backupTimestampRe.MatchString(name)
+}
+
+// sweepPartialBackups 删除 backupDir 下打包中途留下的半成品（<名称>.part）。
+//
+// 打包先写 .part、成功后改名（见 tgzDirAsProgress），因此 .part 一定是「没写完」的：
+// 进程被杀/平台重启/dsh 数据备份被强杀都会留下它，而它既不会被备份列表列出（名字不含
+// 合法的时间戳后缀），也不会被 30 天清理任务碰到。控制台启动时与每次开始新备份前各清一次。
+func (m *UpdateManager) sweepPartialBackups() {
+	dir := m.backupDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), backupPartSuffix) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			removed++
+			logInfo("[backup] removing partial backup file: %s", e.Name())
+		}
+	}
+	if removed > 0 {
+		logInfo("[backup] removed %d partial backup files", removed)
+	}
 }
 
 // DshDataBackup 描述一个 dsh 数据备份条目。
@@ -2641,7 +2717,13 @@ func (m *UpdateManager) DeleteDshDataBackup(name string) error {
 	dir := m.backupDir()
 	target := filepath.Join(dir, name)
 	if filepath.Dir(target) != dir || !isBackupFile(name, "dsh-data-") {
-		return fmt.Errorf("非法的备份文件名: %s", name)
+		return uiErr("err_backup_bad_name", "非法的备份文件名: %s", "name", name)
+	}
+	// 正在写的那一份不能删：备份是服务端异步跑的，删掉正在写的文件后这次备份仍会报
+	// 「成功」，盘上却查无此包（写的是已被 unlink 的 inode）。要中断它请走
+	// POST /api/dsh/backup/cancel（它会中止打包并删掉半成品）。
+	if st := dshBackup.status(); st.Running && st.Name == name {
+		return uiErr("err_backup_in_flight", "这份备份正在写入中，请等它结束或先取消这次备份")
 	}
 	return os.Remove(target)
 }
@@ -2668,6 +2750,8 @@ type DshBackupStatus struct {
 	Ok         bool   `json:"ok"`
 	Cancelled  bool   `json:"cancelled"`
 	Error      string `json:"error,omitempty"`
+	// ErrorRef 是 Error 的界面文案引用（code + 参数，见 uimsg.go）。
+	ErrorRef   *uiMsg `json:"errorRef,omitempty"`
 	Name       string `json:"name,omitempty"`
 	Path       string `json:"path,omitempty"`
 	Size       int64  `json:"size"`
@@ -2700,20 +2784,30 @@ func (t *dshBackupTracker) status() DshBackupStatus {
 }
 
 // begin 重置状态并进入「进行中」。
-func (t *dshBackupTracker) begin(name, path string, totalBytes int64, totalFiles int) {
+//
+// 总量（TotalBytes / TotalFiles）不在这里给：预扫描放在打包 goroutine 里做（接口要
+// 立刻返回，而 ~/.dsh 的目录遍历可能上千个文件），扫完由 setTotals 补上；在此之前
+// 前端按「总量未知」渲染不确定进度条。
+func (t *dshBackupTracker) begin(name, path string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.seq++
 	t.st = DshBackupStatus{
-		Seq:        t.seq,
-		Running:    true,
-		Name:       name,
-		Path:       path,
-		TotalBytes: totalBytes,
-		TotalFiles: totalFiles,
+		Seq:     t.seq,
+		Running: true,
+		Name:    name,
+		Path:    path,
 	}
 	t.active = true
 	t.wantCancel = false
+}
+
+// setTotals 补上预扫描得到的总量（0/0 = 总量未知）。
+func (t *dshBackupTracker) setTotals(totalBytes int64, totalFiles int) {
+	t.mu.Lock()
+	t.st.TotalBytes = totalBytes
+	t.st.TotalFiles = totalFiles
+	t.mu.Unlock()
 }
 
 // addBytes 累加已打包的原始字节数（打包循环按块调用，非常高频）。
@@ -2731,14 +2825,14 @@ func (t *dshBackupTracker) addFile() {
 }
 
 // finish 落定状态。size 只在成功时有意义（压缩后的包大小）。
-func (t *dshBackupTracker) finish(ok, cancelled bool, errMsg string, size int64) {
+func (t *dshBackupTracker) finish(ok, cancelled bool, err error, size int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.st.Running = false
 	t.st.Done = true
 	t.st.Ok = ok
 	t.st.Cancelled = cancelled
-	t.st.Error = errMsg
+	setErrFields(&t.st.Error, &t.st.ErrorRef, err)
 	t.st.Size = size
 	t.st.Cancelling = false
 	t.active = false
@@ -2765,6 +2859,19 @@ func (t *dshBackupTracker) cancelled() bool {
 	return t.wantCancel
 }
 
+// beginExclusiveDshDataOp 为「会删/改 ~/.dsh 内容」的短操作（插件页的重置插件）取得
+// 与备份 / 恢复 / 更新同一把互斥锁。备份与恢复都拿 applying，因此这里也拿才是**双向**
+// 互斥：备份在跑时重置插件会被拒（否则会打出一份「成功但缺 profiles」的包，或让那次
+// 备份在 walk 中途失败），重置插件进行中时备份同样会被拒（见 BackupDshData）。
+//
+// 用 TryLock：拿不到就立刻拒绝请求，不阻塞请求线程、不产生任何删除与停机。
+func (m *UpdateManager) beginExclusiveDshDataOp() (func(), error) {
+	if !m.applying.TryLock() {
+		return nil, busyf("err_data_op_busy", "正在执行其它更新/备份/恢复操作，请等它结束后再重试")
+	}
+	return m.applying.Unlock, nil
+}
+
 // GetDshBackupStatus 返回当前 dsh 数据备份的状态快照。
 func (m *UpdateManager) GetDshBackupStatus() DshBackupStatus {
 	return dshBackup.status()
@@ -2788,34 +2895,37 @@ func (m *UpdateManager) CancelDshBackup() DshBackupStatus {
 func (m *UpdateManager) BackupDshData() error {
 	home := m.dsh.effectiveHome()
 	if home == "" {
-		return fmt.Errorf("无法获取当前主目录")
+		return uiErr("err_backup_no_home", "无法获取当前主目录")
 	}
 	src := filepath.Join(home, ".dsh")
 	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
-		return fmt.Errorf(".dsh 目录不存在")
+		return uiErr("err_backup_no_dsh_dir", ".dsh 目录不存在")
 	}
 	// 一次只允许一个备份：并发打包会让共享的进度状态互相覆盖，也没人需要两份同样的包。
 	if !m.backupMu.TryLock() {
-		return fmt.Errorf("已有备份任务正在进行")
+		return busyf("err_backup_running", "已有备份任务正在进行")
 	}
-	// 备份要读整个 ~/.dsh，而“恢复 dsh 数据 / 回滚 / 安装更新”会删目录或替换产物。
+	// 备份要读整个 ~/.dsh，而“恢复 dsh 数据 / 重置插件 / 安装更新”会删目录或替换产物。
 	// 用与恢复同一把 applying 互斥（TryLock 不阻塞请求线程）：拿不到就拒绝，不产生副作用。
 	// 两者都拿 applying，互斥才是**双向**的（恢复侧另有友好提示，见 RestoreDshData）。
 	if !m.applying.TryLock() {
 		m.backupMu.Unlock()
-		return fmt.Errorf("正在执行其它更新/恢复操作，请等它结束后再备份")
+		return busyf("err_backup_busy", "正在执行其它更新/恢复操作，请等它结束后再备份")
 	}
 	dest := filepath.Join(m.backupDir(), fmt.Sprintf("dsh-data-%s-%s.tar.gz",
 		m.dshDataBackupVersion(), time.Now().Format("20060102150405")))
-	// 预扫描一遍待打包的原始总量（只 stat，不读内容）用于百分比；扫描失败不阻塞备份，
-	// 只是退化为「总量未知」（前端改用不确定进度条）。
-	totalBytes, totalFiles := scanDirSize(src, dest)
-	dshBackup.begin(filepath.Base(dest), dest, totalBytes, totalFiles)
+	// 上一次打包被杀留下的半成品先清掉：它们占着磁盘，而且不该与新备份混在一起。
+	m.sweepPartialBackups()
+	dshBackup.begin(filepath.Base(dest), dest)
 	logInfo("[backup] dsh data backup started: %s", filepath.Base(dest))
 
 	go func() {
 		defer m.applying.Unlock()
 		defer m.backupMu.Unlock()
+		// 预扫描一遍待打包的原始总量（只 stat，不读内容）用于百分比。刻意放在这里而不是
+		// 接口里：接口只做校验后立刻返回（弹窗只是观察者，关掉它不影响备份），而这次
+		// 全目录遍历在大 ~/.dsh 上要按秒计。扫描失败不阻塞备份，只是退化为「总量未知」。
+		dshBackup.setTotals(scanDirSize(src, dest))
 		prog := &tgzProgress{
 			onBytes:   dshBackup.addBytes,
 			onFile:    dshBackup.addFile,
@@ -2828,17 +2938,19 @@ func (m *UpdateManager) BackupDshData() error {
 			if fi, serr := os.Stat(dest); serr == nil {
 				size = fi.Size()
 			}
-			dshBackup.finish(true, false, "", size)
+			dshBackup.finish(true, false, nil, size)
 			logInfo("[backup] dsh data backed up to %s (%d bytes)", dest, size)
 		case errors.Is(err, errBackupCancelled):
-			// tgzDirAsProgress 的错误路径已经删过一次；这里再删一次是防御性的
-			// （例如取消发生在 gz.Close 之后）。留着半个包比没有更糟。
+			// tgzDirAsProgress 只写 .part、失败/取消时自己删掉；这里再清一次最终名与
+			// .part，纯属防御（留着半个包比没有更糟）。
 			os.Remove(dest)
-			dshBackup.finish(false, true, "", 0)
+			os.Remove(dest + backupPartSuffix)
+			dshBackup.finish(false, true, nil, 0)
 			logInfo("[backup] dsh data backup cancelled, partial file removed: %s", filepath.Base(dest))
 		default:
 			os.Remove(dest)
-			dshBackup.finish(false, false, err.Error(), 0)
+			os.Remove(dest + backupPartSuffix)
+			dshBackup.finish(false, false, err, 0)
 			logError("[backup] dsh data backup failed: %v", err)
 		}
 	}()
@@ -2869,6 +2981,10 @@ func scanDirSize(srcDir, destFile string) (int64, int) {
 	if derr != nil {
 		destAbs = filepath.Clean(destFile)
 	}
+	partAbs, perr := filepath.Abs(destFile + backupPartSuffix)
+	if perr != nil {
+		partAbs = filepath.Clean(destFile + backupPartSuffix)
+	}
 	_ = filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // 单个条目读不到就跳过：不能让一处权限问题打断统计
@@ -2876,7 +2992,7 @@ func scanDirSize(srcDir, destFile string) (int64, int) {
 		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
-		if abs, aerr := filepath.Abs(p); aerr == nil && abs == destAbs {
+		if abs, aerr := filepath.Abs(p); aerr == nil && (abs == destAbs || abs == partAbs) {
 			return nil
 		}
 		total += info.Size()
@@ -2892,14 +3008,17 @@ type DshRestoreStatus struct {
 	Done    bool   `json:"done"`
 	Ok      bool   `json:"ok"`
 	Error   string `json:"error,omitempty"`
+	// ErrorRef 是 Error 的界面文案引用（code + 参数，见 uimsg.go）。
+	ErrorRef *uiMsg `json:"errorRef,omitempty"`
 }
 
 // dsh restore 状态跟踪
 type dshRestoreTracker struct {
-	mu   sync.Mutex
-	done bool
-	ok   bool
-	err  string
+	mu     sync.Mutex
+	done   bool
+	ok     bool
+	err    string
+	errRef *uiMsg
 }
 
 var dshRestore dshRestoreTracker
@@ -2907,14 +3026,14 @@ var dshRestore dshRestoreTracker
 func (t *dshRestoreTracker) status() DshRestoreStatus {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return DshRestoreStatus{Running: !t.done, Done: t.done, Ok: t.ok, Error: t.err}
+	return DshRestoreStatus{Running: !t.done, Done: t.done, Ok: t.ok, Error: t.err, ErrorRef: t.errRef}
 }
 
-func (t *dshRestoreTracker) complete(ok bool, errMsg string) {
+func (t *dshRestoreTracker) complete(ok bool, err error) {
 	t.mu.Lock()
 	t.done = true
 	t.ok = ok
-	t.err = errMsg
+	setErrFields(&t.err, &t.errRef, err)
 	t.mu.Unlock()
 }
 
@@ -2927,41 +3046,42 @@ func (m *UpdateManager) GetDshRestoreStatus() DshRestoreStatus {
 func (m *UpdateManager) RestoreDshData(backupPath string) error {
 	dir := m.backupDir()
 	if filepath.Dir(backupPath) != dir {
-		return fmt.Errorf("非法的备份路径: %s", backupPath)
+		return uiErr("err_backup_bad_path", "非法的备份路径: %s", "path", backupPath)
 	}
 	name := filepath.Base(backupPath)
 	if !isBackupFile(name, "dsh-data-") {
-		return fmt.Errorf("非法的备份文件名: %s", name)
+		return uiErr("err_backup_bad_name", "非法的备份文件名: %s", "name", name)
 	}
 	if _, err := os.Stat(backupPath); err != nil {
-		return fmt.Errorf("备份文件不存在: %w", err)
+		return uiErr("err_backup_missing", "备份文件不存在: %s", "detail", err.Error())
 	}
 	// 备份正在读 ~/.dsh：此时删掉它再解压备份，会得到「一半备份前、一半恢复后」的
 	// 数据，而且那次备份还会「成功」。先给出明确提示（真正的互斥在下方的 applying：
 	// BackupDshData 同样要拿它，因此这里即使被抢跑也拦得住）。
 	if dshBackup.status().Running {
-		return fmt.Errorf("正在备份 dsh 数据，请先取消备份或等它结束后再恢复")
+		return busyf("err_restore_busy_backup", "正在备份 dsh 数据，请先取消备份或等它结束后再恢复")
 	}
 	// 互斥与重入保护：恢复会 RemoveAll(~/.dsh) 再解压备份，必须与「下载/安装更新」、
-	// 回滚以及另一次恢复串行 —— 交错执行会在同一个 HOME 上并发删目录/解压。
-	// 与 RollbackServer 一样用 TryLock：拿不到就拒绝，不阻塞请求线程。
+	// 数据备份以及另一次恢复串行 —— 交错执行会在同一个 HOME 上并发删目录/解压。
+	// 与备份一样用 TryLock：拿不到就拒绝，不阻塞请求线程。
 	if !m.applying.TryLock() {
-		return fmt.Errorf("正在执行其它更新/回滚操作，请等它结束后再恢复 dsh 数据")
+		return busyf("err_restore_busy", "正在执行其它更新/备份操作，请等它结束后再恢复 dsh 数据")
 	}
 	// 重置状态
 	dshRestore.mu.Lock()
 	dshRestore.done = false
 	dshRestore.ok = false
-	dshRestore.err = ""
+	setErrFields(&dshRestore.err, &dshRestore.errRef, nil)
 	dshRestore.mu.Unlock()
 
 	go func() {
 		defer m.applying.Unlock()
 		err := m.doRestoreDshData(backupPath)
 		if err != nil {
-			dshRestore.complete(false, err.Error())
+			logError("[restore] dsh data restore failed: %v", err)
+			dshRestore.complete(false, err)
 		} else {
-			dshRestore.complete(true, "")
+			dshRestore.complete(true, nil)
 		}
 	}()
 	return nil
@@ -2991,20 +3111,20 @@ func (m *UpdateManager) doRestoreDshData(backupPath string) error {
 	// 2. 删除当前 ~/.dsh 目录
 	logInfo("[restore] removing current ~/.dsh at %s", dshDir)
 	if err := os.RemoveAll(dshDir); err != nil {
-		return fmt.Errorf("删除 ~/.dsh 目录失败: %w", err)
+		return uiErr("err_restore_remove_failed", "删除 ~/.dsh 目录失败: %s", "detail", err.Error())
 	}
 
 	// 3. 解压备份到 HOME（tar 中顶层为 .dsh/，解压后在 HOME 下还原 ~/.dsh）。
 	//    数据备份恒为 .tar.gz（tgzDirAs），故直接用 gz 解压器。
 	logInfo("[restore] extracting backup to %s", home)
 	if err := extractTarGz(backupPath, home); err != nil {
-		return fmt.Errorf("解压备份失败: %w", err)
+		return uiErr("err_restore_extract_failed", "解压备份失败: %s", "detail", err.Error())
 	}
 
 	// 4. 启动 dsh 服务（并异步捕获新 token 换取会话 cookie，供反代转发）
 	logInfo("[restore] starting dsh service")
 	if err := m.startDshCaptured(); err != nil {
-		return fmt.Errorf("启动 dsh 失败: %w", err)
+		return uiErr("err_dsh_start_failed", "启动失败: %s", "detail", err.Error())
 	}
 
 	logInfo("[restore] dsh data restore finished")
@@ -3046,10 +3166,9 @@ func (m *UpdateManager) runBackupCleanup() {
 	removed := 0
 	for _, e := range entries {
 		name := e.Name()
-		// 自动清理 harness / server / 市场备份；dsh-data-* 不在自动清理范围内。
-		// 市场备份用 market- 前缀（不能用 server-，否则会出现在「dsh 服务回滚」
-		// 列表里 —— 见 market.go 文件头第 5 条），所以这里要显式带上它，
-		// 否则市场备份永远不会被回收。
+		// 自动清理 harness / server / 市场三种**老版本残留**的备份包；用户主动的
+		// dsh 数据备份（dsh-data-*）不在自动清理范围内 —— 那是用户自己要留的数据，
+		// 由用户在目录页里手动删。
 		if !isBackupFile(name, "harness-") && !isBackupFile(name, "server-") &&
 			!isBackupFile(name, marketBackupPrefix) {
 			continue

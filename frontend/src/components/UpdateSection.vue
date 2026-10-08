@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, sseUrl, type UpdateKind, type ServerVersions, type UpdateStatus } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
-import { useI18n } from '@/composables/useI18n'
+import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import MarkdownText from '@/components/MarkdownText.vue'
@@ -76,7 +76,7 @@ async function refreshServerVersions(force: boolean) {
     const snap = await api.updateStatus()
     merge(snap)
   } catch (e) {
-    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
   } finally {
     serverLoading.value = false
   }
@@ -88,7 +88,7 @@ async function onInstallVersion(version: string) {
   try {
     await api.dshVersionInstall(version)
   } catch (e) {
-    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
   }
 }
 
@@ -97,7 +97,7 @@ async function onCancelVersion() {
     await api.dshVersionCancel()
     toast.show(t('dsh_ver_cancelled'), 'info')
   } catch (e) {
-    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
   }
 }
 
@@ -117,7 +117,7 @@ async function onRemoveVersion(version: string) {
     await api.dshVersionDelete(version)
     toast.show(t('dsh_ver_deleted', { v: version }), 'success')
   } catch (e) {
-    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
   }
 }
 
@@ -128,7 +128,7 @@ async function onSwitchVersion(version: string) {
     // 切换会停 dsh 并用新版本重启：稍等片刻再刷新，避免刷新出启动等待页。
     setTimeout(() => window.location.reload(), 3000)
   } catch (e) {
-    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
   }
 }
 
@@ -145,7 +145,7 @@ async function runMarketAction(action: 'install' | 'update' | 'remove') {
     else await api.marketRemove()
   } catch (e) {
     pendingMarketAction.value = null
-    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
   }
 }
 
@@ -192,8 +192,12 @@ const cancelling = ref(false) // 取消请求是否已发出、等待后端中�
 // 安装二次确认
 const installConfirmVisible = ref(false)
 
-let reloadTimer: ReturnType<typeof setTimeout> | null = null
 // 进度兜底轮询计时器（见 startProgressPoll）：SSE 不可用时仍能显示真实进度。
+//
+// 注意：这里**不再**有「安装启动后 N 秒兜底整页刷新」的计时器（曾经有，30/60 秒）。
+// 终态现在都有明确来源：dsh 版本与市场的 done/error 经 SSE 推送，SSE 断线时由
+// startProgressPoll 的兜底轮询补上；harness 自更新由 startHarnessReadyPoll 轮询新进程。
+// 别再把兜底 reload 加回来 —— 它只会在状态正常抵达时也把页面刷一下。
 let progressPollTimer: ReturnType<typeof setInterval> | null = null
 // 安装前的控制台版本号与就绪轮询计时器（harness 自我更新专用，见
 // startHarnessReadyPoll）。
@@ -272,12 +276,12 @@ async function doCheck(kind: UpdateKind) {
     merge(snap)
     const st = statusOf(kind)
     if (st?.error) {
-      toast.show(st.error, 'error')
+      toast.show(uiText(st.error, st.errorRef), 'error')
     } else if (st && !st.hasUpdate) {
       toast.show(t('update_no_new'), 'success')
     }
   } catch (e) {
-    toast.show((e as Error).message || t('update_error_unknown'), 'error')
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
   } finally {
     checking.value[kind] = false
   }
@@ -321,7 +325,7 @@ async function doDownload() {
     startProgressPoll(kind)
   } catch (e) {
     // 请求阶段即失败（参数错误等）：回滚到待更新状态。
-    toast.show((e as Error).message || t('update_failed'), 'error')
+    toast.show(uiErrText(e, t('update_failed')), 'error')
     applyLocalReset()
   }
 }
@@ -416,7 +420,7 @@ async function doInstall() {
     startHarnessReadyPoll()
   } catch (e) {
     installing.value = false
-    toast.show((e as Error).message || t('update_failed'), 'error')
+    toast.show(uiErrText(e, t('update_failed')), 'error')
   }
 }
 
@@ -533,7 +537,7 @@ async function doPause() {
     // 进度兜底轮询会在 1 秒内看到 phase 变化并切换视图。
   } catch (e) {
     pausing.value = false
-    toast.show((e as Error).message || t('update_failed'), 'error')
+    toast.show(uiErrText(e, t('update_failed')), 'error')
   }
 }
 
@@ -568,7 +572,7 @@ async function doCancelUpdate() {
   } catch (e) {
     cancelling.value = false
     cancelConfirmVisible.value = false
-    toast.show((e as Error).message || t('update_failed'), 'error')
+    toast.show(uiErrText(e, t('update_failed')), 'error')
   }
 }
 
@@ -580,12 +584,16 @@ async function doCancelUpdate() {
 // 只提示一次的机制有两层：①组件内按「签名」去重，SSE 重复推同一份快照不会重复弹；
 // ②成功提示发出后立刻调 `dshVersionAck` 把后端那份终态收起 —— 概览页切走会卸载、切回会
 // 重新挂载，状态留着就会把同一条成功提示再弹一次。失败不清（错误详情要留在弹窗里）。
+//
+// 签名里必须带**后端给的运行序号**（install.seq / market.seq）：只按 version+phase 去重时，
+// 同一挂载内第二次相同结果会被静默吞掉（装成功 → 删掉 → 再装成功；市场装成功 → 卸载成功）。
+// 这两个序号都是后端每次操作自增的，前端不能自己数（SSE 可能只收到终态那一帧）。
 let announcedServerInstall = ''
 let announcedMarketOp = ''
 
 const serverInstallSig = computed(() => {
   const st = serverVersions.value?.install
-  return st ? `${st.version}|${st.phase || ''}|${st.cancelled ? 'c' : ''}` : ''
+  return st ? `${st.seq || 0}|${st.version}|${st.phase || ''}|${st.cancelled ? 'c' : ''}` : ''
 })
 
 watch(serverInstallSig, () => {
@@ -600,12 +608,14 @@ watch(serverInstallSig, () => {
     api.dshVersionAck().catch(() => { /* 忽略：只是清状态 */ })
   } else if (st.phase === 'error' && st.error) {
     announcedServerInstall = sig
-    toast.show(st.error, 'error')
+    toast.show(uiText(st.error, st.errorRef), 'error')
     // 失败不在这里清：错误详情要留在弹窗里给用户看，等用户关闭弹窗时再收起。
   }
 })
 
-const marketOpSig = computed(() => `${marketStatus.value.phase || ''}|${marketStatus.value.error || ''}`)
+const marketOpSig = computed(
+  () => `${marketStatus.value.seq || 0}|${marketStatus.value.phase || ''}|${marketStatus.value.error || ''}`
+)
 
 watch(marketOpSig, () => {
   const st = marketStatus.value
@@ -624,7 +634,7 @@ watch(marketOpSig, () => {
   } else if (st.error) {
     announcedMarketOp = sig
     pendingMarketAction.value = null
-    toast.show(st.error, 'error')
+    toast.show(uiText(st.error, st.errorRef), 'error')
     // 失败不清：错误详情留在弹窗里，等用户关闭弹窗时再收起。
   }
 })
@@ -660,7 +670,7 @@ async function doDiscard() {
     // 本地也主动复位，保证按钮立刻回到“下载更新”。
     patchStatus(dialogKind.value, { phase: '', readyToInstall: false, downloading: false })
   } catch (e) {
-    toast.show((e as Error).message || t('update_failed'), 'error')
+    toast.show(uiErrText(e, t('update_failed')), 'error')
   }
 }
 
@@ -668,10 +678,9 @@ async function doDiscard() {
 // 触发时机：phase 变化 / 进度字段变化 / 安装完成后的状态推送。
 function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   if (kind !== dialogKind.value) return
-  // 下载完成 → 进入 downloaded（readyToInstall=true）：清除兜底计时器，
+  // 下载完成 → 进入 downloaded（readyToInstall=true）：停掉兜底进度轮询，
   // 按钮自动变为“安装更新”。
   if (st.phase === 'downloaded') {
-    clearTimeout(reloadTimer ?? undefined)
     stopProgressPoll()
     return
   }
@@ -684,8 +693,9 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
     return
   }
   // 用户取消下载：退出进行中状态，可重新下载。
-  if (st.cancelled || (st.error && st.error.includes('用户取消'))) {
-    clearTimeout(reloadTimer ?? undefined)
+  // 只看结构化标记（后端在取消时置 cancelled + code）—— 不再匹配错误文案里的
+  // 「用户取消」：文案会随语言/措辞变，字符串匹配迟早失效。
+  if (st.cancelled) {
     stopProgressPoll()
     stopHarnessReadyPoll()
     installing.value = false
@@ -697,7 +707,6 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   }
   // 失败（下载失败 / 安装失败）：退出进行中状态。
   if (st.error) {
-    clearTimeout(reloadTimer ?? undefined)
     stopProgressPoll()
     // 若正在等 harness 新进程就绪，失败推送说明不会再就绪，立即停止轮询，
     // 避免 60 秒后再弹一次“请手动刷新”的重复提示。
@@ -707,7 +716,7 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
     pausing.value = false
     cancelConfirmVisible.value = false
     installConfirmVisible.value = false
-    toast.show(st.error || t('update_failed'), 'error')
+    toast.show(uiText(st.error, st.errorRef, t('update_failed')), 'error')
     return
   }
   // 安装成功：后端完成解压并推送明确成功信号 phase==="done"（非空，JSON
@@ -715,7 +724,6 @@ function watchForCompletion(kind: UpdateKind, st: UpdateStatus) {
   // 注意：只有 dsh 安装会走到这里；harness 自我更新时推送进程已被 exec 换掉，
   // 由 startHarnessReadyPoll 的轮询负责收尾。
   if (installing.value && st.phase === 'done') {
-    clearTimeout(reloadTimer ?? undefined)
     stopHarnessReadyPoll()
     installing.value = false
     updatingDone.value = true
@@ -740,7 +748,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   // SSE 连接由 useEventStream 自行释放（其内部注册了 onBeforeUnmount）。
-  if (reloadTimer) clearTimeout(reloadTimer)
   stopProgressPoll()
   stopHarnessReadyPoll()
 })
@@ -925,7 +932,7 @@ watch(
                   ? 'bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] text-ink-soft dark:text-[#A6A6AD]'
                   : 'bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]'"
               >
-                {{ dialogStatus.cancelled ? t('update_cancelled') : dialogStatus.error }}
+                {{ dialogStatus.cancelled ? t('update_cancelled') : uiText(dialogStatus.error, dialogStatus.errorRef) }}
                 <!-- 代理与直连各 2 次都失败时，后端给 errorHint=network，这里用当前语言提示 -->
                 <div v-if="dialogStatus.errorHint === 'network'" class="mt-1 font-medium">
                   {{ t('update_error_network_hint') }}

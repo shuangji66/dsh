@@ -3,13 +3,22 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
-import { useI18n } from '@/composables/useI18n'
+import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 
 // fnOS 侧的业务失败是 **HTTP 200 + {ok:false, error|msg}**（见 backend/admin.go 的 handleFnos），
 // 只有非 2xx 才会被 serverapi 的 request() 抛出。不判 ok === false 就会把失败当成功：
 // 拉取失败显示成「暂无授权目录」、删除失败卡片照样消失。
 // serverapi 的返回类型里个别分支没声明 error 字段（不改那个文件），这里用局部类型断言取用。
-type FnosResult = { ok?: boolean; paths?: string[]; msg?: string; error?: string }
+// 后端 /api/fnos/* 的失败响应是 200 + ok:false + error，并带 code/params（见 backend/uimsg.go）：
+// 有 code 的前端走 i18n，其余（平台诊断）原样显示。
+type FnosResult = {
+  ok?: boolean
+  paths?: string[]
+  msg?: string
+  error?: string
+  code?: string
+  params?: Record<string, string>
+}
 
 export const useDirectoriesStore = defineStore('directories', () => {
   const paths = ref<string[]>([])
@@ -26,7 +35,7 @@ export const useDirectoriesStore = defineStore('directories', () => {
       const p = (await api.fnosUserAccess(uid.value)) as unknown as FnosResult
       if (p.ok === false) {
         // 失败时**不动**本地 paths：否则页面会从「有目录」变成「暂无授权目录」，误导用户
-        toast.show(p.error || p.msg || t('directory_load_failed'), 'error')
+        toast.show(uiText(p.error, p, p.msg || t('directory_load_failed')), 'error')
         return
       }
       paths.value = p.paths || []
@@ -34,7 +43,7 @@ export const useDirectoriesStore = defineStore('directories', () => {
         await convertPaths(paths.value)
       }
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
     } finally {
       loading.value = false
     }
@@ -48,10 +57,12 @@ export const useDirectoriesStore = defineStore('directories', () => {
         result?: Array<{ path: string; semanticPath: string }>
         error?: string
         msg?: string
+        code?: string
+        params?: Record<string, string>
       }
       if (result?.ok === false) {
         // 转换失败不影响路径列表本身，保留既有映射（不要清空成「没有语义路径」）
-        toast.show(result.error || result.msg || t('directory_convert_failed'), 'error')
+        toast.show(uiText(result.error, result, result.msg || t('directory_convert_failed')), 'error')
         return
       }
       if (result?.result) {
@@ -71,13 +82,13 @@ export const useDirectoriesStore = defineStore('directories', () => {
       const r = (await api.fnosDeleteUserAccess(uid.value, path)) as unknown as FnosResult
       if (r.ok === false) {
         // 删除失败时保留卡片（本地列表不动），并说明原因
-        toast.show(r.error || r.msg || t('directory_remove_failed'), 'error')
+        toast.show(uiText(r.error, r, r.msg || t('directory_remove_failed')), 'error')
         return
       }
       paths.value = paths.value.filter((p) => p !== path)
       delete convertedPaths.value[path]
     } catch (e) {
-      toast.show((e as Error).message, 'error')
+      toast.show(uiErrText(e, t('common_op_failed')), 'error')
     }
   }
 

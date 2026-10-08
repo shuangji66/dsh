@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { useDirectoriesStore } from '@/stores/directories'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
-import { useI18n } from '@/composables/useI18n'
+import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { useDshBackup } from '@/composables/useDshBackup'
 import { api, type DshDataBackup } from '@/serverapi'
@@ -59,7 +59,7 @@ const backupResultText = computed(() => {
   if (!st || st.running) return ''
   if (st.cancelled) return t('backup_cancelled')
   if (st.ok) return t('directory_backup_success', { name: st.name || '' })
-  return st.error || t('directory_backup_failed')
+  return uiText(st.error, st.errorRef, t('directory_backup_failed'))
 })
 
 // dsh 数据备份恢复状态
@@ -190,13 +190,13 @@ async function doRestore() {
             // 恢复数据后刷新页面（dsh 已重启，加载新配置）
             setTimeout(() => window.location.reload(), 1000)
           } else {
-            restoreError.value = st.error || t('restore_failed')
+            restoreError.value = uiText(st.error, st.errorRef, t('restore_failed'))
           }
         }
       } catch { /* 继续轮询 */ }
     }, 2000)
   } catch (e) {
-    restoreError.value = (e as Error).message || t('restore_failed')
+    restoreError.value = uiErrText(e, t('restore_failed'))
     restoreBusy.value = false
   }
 }
@@ -214,7 +214,7 @@ async function doRestoreDelete() {
     restoreDeleteName.value = null
     fetchDshBackups()
   } catch (e) {
-    toast.show((e as Error).message, 'error')
+    toast.show(uiErrText(e, t('common_op_failed')), 'error')
   }
 }
 
@@ -324,7 +324,7 @@ async function openPicker() {
       }
     }
   } catch (err) {
-    toast.show((err as Error).message, 'error')
+    toast.show(uiErrText(err, t('common_op_failed')), 'error')
   }
 }
 
@@ -338,7 +338,7 @@ async function openFileManager(path: string) {
   try {
     await sdk.openFileManager(path)
   } catch (err) {
-    toast.show(t('directory_open_failed', { msg: (err as Error).message }), 'error')
+    toast.show(t('directory_open_failed', { msg: uiErrText(err) }), 'error')
   }
 }
 

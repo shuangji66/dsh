@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
-import { useI18n } from '@/composables/useI18n'
+import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -247,7 +247,7 @@ async function initialLoad() {
     const p = await api.visitors()
     visitors.value = p.visitors
   } catch (e) {
-    toast.show((e as Error).message, 'error')
+    toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     visitorsLoading.value = false
   }
@@ -276,9 +276,9 @@ async function removeVisitor(id: string) {
   deleting.value = id
   try {
     const p = await api.deleteVisitor(id)
-    toast.show(p.msg, p.deleted ? 'success' : 'info')
+    toast.show(uiText(p.msg, { code: p.msgCode }, p.deleted ? t('visitor_kicked_fallback') : ''), p.deleted ? 'success' : 'info')
   } catch (e) {
-    toast.show((e as Error).message, 'error')
+    toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     deleting.value = null
   }

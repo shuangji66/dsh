@@ -196,6 +196,14 @@ type DshInstallState struct {
 	Error string `json:"error,omitempty"`
 	// Cancelled 表示这次安装被用户取消（安装目录与下载缓存都已清除）。
 	Cancelled bool `json:"cancelled,omitempty"`
+	// Seq 是「第几次安装」的序号（每次 Install +1）：前端拿它做「结果只提示一次」的
+	// 去重键。只按 version+phase 去重时，「同一个版本装成功两次」（装成功 → 删掉 →
+	// 再装成功）的第二次会被静默吞掉。
+	Seq int64 `json:"seq,omitempty"`
+	// ErrorRef / MessageRef 是 Error / Message 的界面文案引用（code + 参数，见 uimsg.go）：
+	// 前端按 code 走 i18n，取不到才回退原文。npm 原始输出尾行这类诊断文本不设引用。
+	ErrorRef   *uiMsg `json:"errorRef,omitempty"`
+	MessageRef *uiMsg `json:"messageRef,omitempty"`
 }
 
 // ServerVersions 是给前端/接口的 dsh 版本快照（列表 + 选中 + 安装进度）。
@@ -225,7 +233,7 @@ type ServerManager struct {
 	upd  *UpdateManager
 
 	// mu 保护下面的缓存字段与 install 状态。
-	mu        sync.Mutex
+	mu       sync.Mutex
 	versions []DshVersionEntry
 	tags     map[string]string
 	// newest 是列表里版本号最高的一版（红点与「最新版本」的唯一基准）。
@@ -245,6 +253,8 @@ type ServerManager struct {
 	// installDone 在安装 goroutine 结束时关闭（安装收尾要清理目录/缓存，
 	// 取消后前端刷新要能看到「已取消」而不是又看到半成品）。
 	installDone chan struct{}
+	// installSeq 是安装序号（每次 Install 自增，写进 DshInstallState.Seq 供前端去重）。
+	installSeq int64
 
 	// 节流 SSE 推送：npm 输出很密，逐行推送只会把连接刷满。
 	notifyMu   sync.Mutex
@@ -417,10 +427,10 @@ func fetchMirrorPackument(client *http.Client, registry, pkg string) (map[string
 		DistTags map[string]string          `json:"dist-tags"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, nil, fmt.Errorf("解析元数据失败: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse registry metadata: %w", err)
 	}
 	if len(doc.Versions) == 0 {
-		return nil, nil, fmt.Errorf("元数据里没有版本列表")
+		return nil, nil, fmt.Errorf("registry metadata carries no version list")
 	}
 	return doc.Versions, doc.DistTags, nil
 }
@@ -526,7 +536,7 @@ func (m *ServerManager) refreshVersions(force bool) error {
 		return nil
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
+		lastErr = fmt.Errorf("no npm mirror available")
 	}
 	m.mu.Lock()
 	m.verErr = fmt.Sprintf("获取 dsh 版本列表失败（%s 均不可用）: %v", mirrorLogNames(), lastErr)
@@ -560,6 +570,7 @@ func (m *ServerManager) refreshDshStatus() {
 		st.LatestVersion = newest
 		st.HasUpdate = selected != "" && newest != "" && compareVersion(newest, selected) > 0
 		st.Error = verErr
+		st.ErrorRef = nil
 		st.ReleaseNotes = ""
 	})
 }
@@ -590,21 +601,27 @@ func installInProgress(st *DshInstallState) bool {
 // 新状态直接覆盖，不需要调用方先清理。
 func (m *ServerManager) Install(version string) error {
 	if !validVersionArg(version) {
-		return fmt.Errorf("非法的版本号: %s", version)
+		return uiErr("err_version_invalid", "非法的版本号: %s", "version", version)
+	}
+	// 低于 dshMinVersion 的版本在列表里根本不展示；直接调 API 也必须拒绝 ——
+	// 更早的 dsh 前端不做文档相对路径，在控制台的子路径挂载下必然 404（见 dshMinVersion），
+	// 装出来只会是一个「装上了但打不开」的版本。
+	if compareVersion(version, dshMinVersion) < 0 {
+		return uiErr("err_version_below_min", "dsh %s 低于控制台支持的最低版本 %s", "version", version, "min", dshMinVersion)
 	}
 	m.mu.Lock()
 	if installInProgress(m.install) {
 		busy := m.install.Version
 		m.mu.Unlock()
-		return fmt.Errorf("已有 dsh 版本正在安装（%s），请等它结束或先取消", busy)
+		return busyf("err_version_install_running", "已有 dsh 版本正在安装（%s），请等它结束或先取消", "version", busy)
 	}
 	m.mu.Unlock()
 
 	if dshVersionInstalled(m.versionDir(version)) {
-		return fmt.Errorf("dsh %s 已安装，无需重复下载", version)
+		return uiErr("err_version_installed", "dsh %s 已安装，无需重复下载", "version", version)
 	}
 	if !m.applying.TryLock() {
-		return fmt.Errorf("正在执行其它 dsh 版本操作，请稍后再试")
+		return busyf("err_version_op_busy", "正在执行其它 dsh 版本操作，请稍后再试")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -612,7 +629,13 @@ func (m *ServerManager) Install(version string) error {
 	m.mu.Lock()
 	m.cancelInstall = cancel
 	m.installDone = done
-	m.install = &DshInstallState{Version: version, Phase: "downloading", Mirror: npmMirrors[0].Name}
+	m.installSeq++
+	m.install = &DshInstallState{
+		Version: version,
+		Phase:   "downloading",
+		Mirror:  npmMirrors[0].Name,
+		Seq:     m.installSeq,
+	}
 	m.mu.Unlock()
 	m.refreshDshStatus()
 	m.notify(true)
@@ -625,16 +648,28 @@ func (m *ServerManager) Install(version string) error {
 		st := m.install
 		m.cancelInstall = nil
 		m.mu.Unlock()
-		if st != nil && st.Phase != "done" {
-			// 终态：done 由 doInstall 自己置位（带「已安装」的收尾），其余都在这里收。
-			// 用户取消**不置 error** —— 那是中性结果，CancelInstall 会用 Cancelled 收尾，
-			// 置上 error 只会让前端闪一下红色报错。
-			if err != nil && !errors.Is(err, errUpdateCancelled) {
-				m.updateInstall(func(s *DshInstallState) {
-					s.Phase = "error"
-					s.Error = err.Error()
-				})
-			}
+		// 终态的**唯一写入者**就是这里（CancelInstall 只发取消信号、不写状态）：
+		// 否则「取消」紧跟在一次安装收尾之后时，会把随后新起的那次安装的界面状态
+		// 改写成「已取消」。done 由 doInstall 自己置位（带「已安装」的收尾）。
+		//
+		// 用户取消**不置 error** —— 那是中性结果，只置 Cancelled，置上 error 只会让
+		// 前端闪一下红色报错。
+		switch {
+		case st == nil:
+		case st.Phase == "done":
+		case err == nil:
+		case errors.Is(err, errUpdateCancelled) || ctx.Err() != nil:
+			m.updateInstall(func(s *DshInstallState) {
+				s.Phase = ""
+				setErrFields(&s.Error, &s.ErrorRef, nil)
+				s.Cancelled = true
+				setMsgFields(&s.Message, &s.MessageRef, "", "")
+			})
+		default:
+			m.updateInstall(func(s *DshInstallState) {
+				s.Phase = "error"
+				setErrFields(&s.Error, &s.ErrorRef, err)
+			})
 		}
 		// 本地已安装版本集合变了（新装成功 / 失败清理），状态跟着刷。
 		m.refreshDshStatus()
@@ -658,6 +693,11 @@ func (m *ServerManager) updateInstall(f func(*DshInstallState)) {
 //
 // 「取消必须清除下载缓存」是刻意的：半成品目录留着会让下次「重新下载」命中残缺的
 // node_modules，而 npm 缓存里那部分字节也不再可信。
+//
+// 这里**只发取消信号并等它收尾，自己不写状态** —— 终态由安装 goroutine 统一落定
+// （见 Install）。早期实现在这里无条件写 Cancelled=true，如果这次取消正好紧跟在一轮
+// 安装收尾之后（cancelInstall 还没被置空、而新一次安装已经拿到 applying），就会把
+// 新一轮安装的界面状态改写成「已取消」。
 func (m *ServerManager) CancelInstall() bool {
 	m.mu.Lock()
 	cancel := m.cancelInstall
@@ -673,21 +713,15 @@ func (m *ServerManager) CancelInstall() bool {
 	logInfo("[dsh] install cancelled by user (version %s)", ver)
 	cancel()
 	if done != nil {
+		// 等到安装 goroutine 真正收尾（它关 done 之前已经写好了终态并解锁 applying）。
 		select {
 		case <-done:
 		case <-time.After(30 * time.Second):
 			// 收尾超时：不阻塞请求线程，清理交给安装 goroutine（它一定会执行 defer）。
+			// 此时状态仍是「进行中」—— 前端会继续轮询，直到那次安装自己落定。
 			logWarn("[dsh] install cancel cleanup is still running")
 		}
 	}
-	m.updateInstall(func(s *DshInstallState) {
-		s.Phase = ""
-		s.Error = ""
-		s.Cancelled = true
-		s.Message = ""
-		s.Fetched = 0
-	})
-	m.notify(true)
 	return true
 }
 
@@ -703,20 +737,10 @@ func (m *ServerManager) clearInstallState() {
 func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 	dir := m.versionDir(version)
 	// 半成品残留（上次失败/异常退出留下）先清掉：npm 遇到残缺 node_modules 可能直接
-	// 复用坏树，装出来的东西不可信。
-	if _, err := os.Stat(dir); err == nil {
-		if rerr := os.RemoveAll(dir); rerr != nil {
-			return fmt.Errorf("清理 %s 失败: %w", dir, rerr)
-		}
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("创建版本目录失败: %w", err)
-	}
-	// npm install --prefix 需要一个 package.json 才会把依赖写进去（与 dsh 官方安装
-	// 形态一致，也让「这个目录是哪一版」在磁盘上直接可读）。
+	// 复用坏树，装出来的东西不可信。同时重建 npm install 需要的骨架。
 	pkgJSON := fmt.Sprintf("{\n  \"name\": \"dsh-server\",\n  \"version\": \"1.0.0\",\n  \"private\": true\n}\n")
-	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkgJSON), 0644); err != nil {
-		return fmt.Errorf("写入 package.json 失败: %w", err)
+	if err := m.resetVersionDir(dir, pkgJSON); err != nil {
+		return err
 	}
 
 	var lastErr error
@@ -729,7 +753,8 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 			// 日志一律用下面的 mirrorLogName()（英文标识）。
 			s.Mirror = mirror.Name
 			s.Phase = "downloading"
-			s.Message = fmt.Sprintf("正在从 %s 下载 %s@%s", mirror.Name, dshPackageName, version)
+			setMsgFields(&s.Message, &s.MessageRef, "msg_install_from_mirror",
+				"正在从 %s 下载 %s@%s", "mirror", mirror.Name, "pkg", dshPackageName, "version", version)
 		})
 		logInfo("[dsh] installing %s from %s", version, mirror.mirrorLogName())
 		err := npmInstallFn(m, ctx, dir, version, mirror)
@@ -740,16 +765,21 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 		}
 		if err == nil {
 			if verr := m.verifyInstall(ctx, version); verr != nil {
-				os.RemoveAll(dir)
+				// 换下一个镜像源前必须把目录重建出来：npm install 的 --prefix 目录
+				// 不存在时 exec 会直接以 chdir 失败，那次「换源」就白丢了，错误信息
+				// 还会被算到镜像源头上（掩盖真正的校验失败原因）。
+				if rerr := m.resetVersionDir(dir, pkgJSON); rerr != nil {
+					return rerr
+				}
 				lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), verr)
 				logWarn("[dsh] %s install from %s verified failed: %v", version, mirror.mirrorLogName(), verr)
 				continue
 			}
 			m.updateInstall(func(s *DshInstallState) {
 				s.Phase = "done"
-				s.Error = ""
+				setErrFields(&s.Error, &s.ErrorRef, nil)
 				s.Cancelled = false
-				s.Message = fmt.Sprintf("dsh %s 安装完成", version)
+				setMsgFields(&s.Message, &s.MessageRef, "msg_install_done", "dsh %s 安装完成", "version", version)
 			})
 			logInfo("[dsh] %s installed to %s (%s)", version, dir, mirror.mirrorLogName())
 			m.refreshDshStatus()
@@ -758,19 +788,36 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 		lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
 		logWarn("[dsh] install %s from %s failed: %v", version, mirror.mirrorLogName(), err)
 		// 换下一个镜像源前清掉这次的半成品：npm 会在残缺树上续装，跨源混装不可信。
-		os.RemoveAll(dir)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("重建版本目录失败: %w", err)
-		}
-		if werr := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkgJSON), 0644); werr != nil {
-			return fmt.Errorf("重建 package.json 失败: %w", werr)
+		if rerr := m.resetVersionDir(dir, pkgJSON); rerr != nil {
+			return rerr
 		}
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
+		lastErr = fmt.Errorf("no npm mirror available")
 	}
 	os.RemoveAll(dir)
-	return fmt.Errorf("从 %s 下载 dsh %s 均失败（不重试、不使用官方源）: %v", mirrorLogNames(), version, lastErr)
+	return uiErr("err_install_all_mirrors_failed",
+		"从 %s 下载 dsh %s 均失败（不重试、不使用官方源）: %s",
+		"mirrors", mirrorLogNames(), "version", version, "detail", lastErr.Error())
+}
+
+// resetVersionDir 把版本目录恢复成「npm install 可以往里装」的干净骨架：
+// 删掉旧目录（半成品/落选镜像源的残骸），重建目录与 npm install --prefix 需要的
+// package.json（与 dsh 官方安装形态一致，也让「这个目录是哪一版」在磁盘上直接可读）。
+//
+// 换镜像源重试前**必须**调用：`npm install --prefix <dir>` 的 dir 不存在时 exec 直接
+// 以 chdir 失败，那次换源就白丢了，而且错误会被算到镜像源头上（掩盖真正的原因）。
+func (m *ServerManager) resetVersionDir(dir, pkgJSON string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return uiErr("err_install_prepare_failed", "准备安装目录失败: %s", "detail", err.Error())
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return uiErr("err_install_prepare_failed", "准备安装目录失败: %s", "detail", err.Error())
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkgJSON), 0644); err != nil {
+		return uiErr("err_install_prepare_failed", "准备安装目录失败: %s", "detail", err.Error())
+	}
+	return nil
 }
 
 // cleanCancelledInstall 删除取消留下的安装目录与 npm 下载缓存。
@@ -893,17 +940,17 @@ func (m *ServerManager) consumeNpmOutput(r io.Reader) {
 			m.updateInstall(func(s *DshInstallState) {
 				s.Phase = "downloading"
 				s.Fetched++
-				s.Message = line
+				setMsgFields(&s.Message, &s.MessageRef, "", line)
 			})
 		case npmBuildRe.MatchString(line):
 			m.updateInstall(func(s *DshInstallState) {
 				s.Phase = "installing"
-				s.Message = line
+				setMsgFields(&s.Message, &s.MessageRef, "", line)
 			})
 		default:
 			// 其它行（npm notice / warn / error）只更新尾行，不改阶段：npm 的
 			// 告警没有可靠的阶段含义，用它们推断阶段只会误导。
-			m.updateInstall(func(s *DshInstallState) { s.Message = line })
+			m.updateInstall(func(s *DshInstallState) { setMsgFields(&s.Message, &s.MessageRef, "", line) })
 		}
 	}
 }
@@ -948,11 +995,11 @@ func (m *ServerManager) installEnv() []string {
 func (m *ServerManager) verifyInstall(ctx context.Context, version string) error {
 	bin := versionDshBinFor(m.renv, version)
 	if fi, err := os.Stat(bin); err != nil || !fi.Mode().IsRegular() {
-		return fmt.Errorf("安装目录里没有可执行的 dsh（%s）", bin)
+		return uiErr("err_verify_no_binary", "no runnable dsh binary in the version dir (%s)", "path", bin)
 	}
 	m.updateInstall(func(s *DshInstallState) {
 		s.Phase = "verifying"
-		s.Message = "正在校验安装并应用兼容补丁"
+		setMsgFields(&s.Message, &s.MessageRef, "msg_verifying", "正在校验安装并应用兼容补丁")
 	})
 	// 1. 附件 fsync 补丁（不打的话 fnOS 上上传文件/图片会整体失败，见文件头第 3 条）。
 	if err := m.patchAttachmentFsync(m.versionDir(version)); err != nil {
@@ -965,11 +1012,11 @@ func (m *ServerManager) verifyInstall(ctx context.Context, version string) error
 	defer cancel()
 	out, err := exec.CommandContext(vctx, bin, "-V").Output()
 	if err != nil {
-		return fmt.Errorf("执行 dsh -V 失败: %w", err)
+		return uiErr("err_verify_exec_failed", "dsh -V failed: %s", "detail", err.Error())
 	}
 	got := strings.TrimSpace(string(out))
 	if got != version {
-		return fmt.Errorf("安装后的版本号是 %q，与请求的 %s 不一致", got, version)
+		return uiErr("err_verify_version_mismatch", "installed version is %q, want %s", "got", got, "want", version)
 	}
 	return nil
 }
@@ -1013,9 +1060,9 @@ func (m *ServerManager) patchAttachmentFsync(versionDir string) error {
 	loc := fsyncAnchorRe.FindStringSubmatchIndex(text)
 	if loc == nil {
 		if strings.Contains(text, "parse(home).root") {
-			return fmt.Errorf("锚点缺失，但仍存在「上溯到文件系统根」的耐久化逻辑: %s（请人工核对上游改动）", path)
+			return fmt.Errorf("the durability anchor is missing while the walk-up-to-root logic still exists: %s (check the upstream change by hand)", path)
 		}
-		return fmt.Errorf("上游似已移除「上溯到 /」的耐久化逻辑，跳过补丁: %s", path)
+		return fmt.Errorf("upstream seems to have dropped the walk-up-to-root logic, patch skipped: %s", path)
 	}
 	// loc 的分组：1 = 循环头（含缩进），2 = 循环体缩进，3 = await syncDirectory(parent);，
 	// 4 = 换行。替换体是「循环头 + try/catch 包住的 fsync」，与 CI 的补丁逐字一致。
@@ -1036,7 +1083,7 @@ func (m *ServerManager) patchAttachmentFsync(versionDir string) error {
 		indent + "}" + nl +
 		text[loc[1]:]
 	if !strings.Contains(out, fsyncPatchMarker) {
-		return fmt.Errorf("补丁写入后校验失败: %s", path)
+		return fmt.Errorf("patched file failed its marker check: %s", path)
 	}
 	if err := os.WriteFile(path, []byte(out), 0644); err != nil {
 		return err
@@ -1074,7 +1121,7 @@ func findAttachmentLocalIndex(versionDir string) (string, error) {
 	if found != "" {
 		return found, nil
 	}
-	return "", fmt.Errorf("未找到 @deepseek-ai/dsh-attachment-local 的 lib/index.js（请确认 dsh 包布局是否变化）")
+	return "", fmt.Errorf("lib/index.js of @deepseek-ai/dsh-attachment-local not found (did the dsh package layout change?)")
 }
 
 // --- 删除与切换 ---
@@ -1082,22 +1129,22 @@ func findAttachmentLocalIndex(versionDir string) (string, error) {
 // Delete 删除一个已安装的版本目录（同步执行，返回时目录已移除）。
 func (m *ServerManager) Delete(version string) error {
 	if !validVersionArg(version) {
-		return fmt.Errorf("非法的版本号: %s", version)
+		return uiErr("err_version_invalid", "非法的版本号: %s", "version", version)
 	}
 	if !m.applying.TryLock() {
-		return fmt.Errorf("正在执行其它 dsh 版本操作，请稍后再试")
+		return busyf("err_version_op_busy", "正在执行其它 dsh 版本操作，请稍后再试")
 	}
 	defer m.applying.Unlock()
 
 	if selected := m.selectedVersion(); selected != "" && selected == version {
-		return fmt.Errorf("dsh %s 是当前正在使用的版本，请先切换到其它版本再删除", version)
+		return uiErr("err_version_in_use", "dsh %s 是当前正在使用的版本，请先切换到其它版本再删除", "version", version)
 	}
 	dir := m.versionDir(version)
 	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("dsh %s 未安装", version)
+		return uiErr("err_version_missing", "dsh %s 未安装", "version", version)
 	}
 	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("删除 dsh %s 失败: %w", version, err)
+		return uiErr("err_version_delete_failed", "删除 dsh %s 失败: %s", "version", version, "detail", err.Error())
 	}
 	// 删完把这一轮的安装状态清掉：否则前端会看到「上一轮 done」和「这个版本没了」并存。
 	m.clearInstallState()
@@ -1110,16 +1157,16 @@ func (m *ServerManager) Delete(version string) error {
 // Switch 切换到某个已安装的版本：写配置 → 停 dsh → 用新版本启动 dsh（异步换凭据）。
 func (m *ServerManager) Switch(version string) error {
 	if !validVersionArg(version) {
-		return fmt.Errorf("非法的版本号: %s", version)
+		return uiErr("err_version_invalid", "非法的版本号: %s", "version", version)
 	}
 	if !dshVersionInstalled(m.versionDir(version)) {
-		return fmt.Errorf("dsh %s 尚未安装，请先下载", version)
+		return uiErr("err_version_not_installed", "dsh %s 尚未安装，请先下载", "version", version)
 	}
 	if m.selectedVersion() == version {
-		return fmt.Errorf("dsh %s 已经是当前版本", version)
+		return uiErr("err_version_current", "dsh %s 已经是当前版本", "version", version)
 	}
 	if !m.applying.TryLock() {
-		return fmt.Errorf("正在执行其它 dsh 版本操作，请稍后再试")
+		return busyf("err_version_op_busy", "正在执行其它 dsh 版本操作，请稍后再试")
 	}
 	defer m.applying.Unlock()
 

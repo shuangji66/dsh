@@ -263,6 +263,27 @@ export interface DshRestoreStatus {
   error?: string
 }
 
+// dsh 数据备份状态（后端异步打包，弹窗只是观察者）。
+// 进度按**原始字节**统计：bytes/totalBytes 是待打包的 .dsh 原始大小，
+// totalBytes=0 表示总量未知（此时不显示百分比，用不确定进度条）。
+// size 只在结束时有效（压缩后的包大小）；seq 是本次备份的序号，用于对同一份终态快照去重。
+export interface DshBackupStatus {
+  seq: number
+  running: boolean
+  cancelling: boolean
+  done: boolean
+  ok: boolean
+  cancelled: boolean
+  error?: string
+  name?: string
+  path?: string
+  size: number
+  bytes: number
+  totalBytes: number
+  files: number
+  totalFiles: number
+}
+
 // 新增一个带自定义 headers 的 request 函数
 async function requestWithHeaders<T>(path: string, init?: RequestInit, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(runtimeBase() + path, {
@@ -287,12 +308,19 @@ export const api = {
   dshStart: () => request<DshStatus>('/api/dsh/start', { method: 'POST' }),
   dshStop: () => request<DshStatus>('/api/dsh/stop', { method: 'POST' }),
   dshRestart: () => request<DshStatus>('/api/dsh/restart', { method: 'POST' }),
-  // 目录页：备份当前 HOME 的 ~/.dsh 到统一备份目录 dsh-data-backup-<时间戳>.tar.gz
+  // 目录页：备份当前 HOME 的 ~/.dsh 到统一备份目录 dsh-data-<版本>-<时间戳>.tar.gz。
+  // 后端异步执行（立刻返回 started），进度轮询 dshBackupStatus、取消走 dshBackupCancel；
+  // 弹窗关闭/页面刷新都不会终止这次备份。
   dshBackup: () =>
-    request<{ ok: boolean; name?: string; path?: string; size?: number; error?: string }>(
+    request<{ ok: boolean; started?: boolean; status?: DshBackupStatus; error?: string }>(
       '/api/dsh/backup',
       { method: 'POST' }
     ),
+  // dsh 数据备份进度快照（弹窗渲染进度条、重新打开弹窗时追平进度都用它）
+  dshBackupStatus: () => request<{ ok: boolean; status: DshBackupStatus }>('/api/dsh/backup/status'),
+  // 取消 dsh 数据备份（不完整的备份文件会被删除）；没有备份在跑时是空操作
+  dshBackupCancel: () =>
+    request<{ ok: boolean; status: DshBackupStatus }>('/api/dsh/backup/cancel', { method: 'POST' }),
   // dsh 数据备份：列表 / 删除 / 恢复 / 恢复状态（对应目录页“恢复备份”）
   listDshDataBackups: () =>
     request<{ ok: boolean; backups: DshDataBackup[] }>('/api/dsh/data-backups'),

@@ -92,6 +92,12 @@
   包留在盘上。发布资产还要过 **sha256 校验**（`releaseChecksum` / `verifyFileSHA256`）：
   校验文件是 Release 里与包同名的 `.sha256`，**静默校验**（不写更新状态、不记成功日志），
   失败才进更新弹窗并删掉坏包；**缺失/取不到只记 WARN、不阻塞更新**。
+  **dsh 数据备份是异步的**（`BackupDshData` + `dshBackup` 跟踪器）：接口只做校验后立刻
+  返回，打包在 goroutine 里跑，进度走 `GET /api/dsh/backup/status`、取消走
+  `POST /api/dsh/backup/cancel`（取消删除不完整的备份文件）—— **别把 handler 改回同步**，
+  前端「关掉弹窗不终止备份、重开弹窗同步进度」全靠这条边界。打包只有一份实现
+  `tgzDirAsProgress`（`tgzDirAs` 是它的 `prog=nil` 包装），与「更新/恢复」用同一把
+  `applying` 双向互斥。
   **dsh 服务更新与插件市场更新都不再走这里**（没有可下载的压缩包）。
 - `server.go` — **dsh 服务的多版本管理**：`${TRIM_PKGVAR}/server/<版本>/` 下的
   `npm install --prefix` 安装产物；镜像源取自 `npmMirrors`（阿里云 → 腾讯云 → 华为云，

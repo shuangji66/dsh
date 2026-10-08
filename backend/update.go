@@ -185,6 +185,10 @@ type UpdateManager struct {
 	statuses map[updateKind]*UpdateStatus
 	// applying 用于防止并发执行自我更新（同一时刻只允许一个更新任务）。
 	applying sync.Mutex
+	// backupMu 保证「同一时刻只有一个 dsh 数据备份」在跑（备份本身与更新互斥走
+	// applying，见 BackupDshData）。单独一把锁只为把「已有备份在进行」和
+	// 「正在更新」区分成不同提示。
+	backupMu sync.Mutex
 	renv     *RuntimeEnv
 	dsh      *DshManager // 用于执行 `dsh plugin …` / `dsh -V` 等命令（复用其运行环境）
 	// server 管理 dsh 服务的多版本（列表/安装/删除/切换），见 server.go。
@@ -1262,6 +1266,27 @@ func tgzDir(srcDir, destFile string) error {
 	return gz.Close()
 }
 
+// tgzProgress 是打包过程中的进度与取消回调（nil = 既不汇报进度也不可取消）。
+//   - onBytes：每写完一块（tgzCopyChunk）汇报一次本次新增的**原始字节数**（未压缩），
+//     调用方自己累加即得进度；
+//   - onFile：每开始打包一个常规文件时调用一次；
+//   - cancelled：返回 true 时立刻中止打包并返回 errBackupCancelled。
+//
+// 三个回调都是可选的，打包本身的正确性不依赖它们。
+type tgzProgress struct {
+	onBytes   func(n int64)
+	onFile    func()
+	cancelled func() bool
+}
+
+// errBackupCancelled 是「用户取消备份」的哨兵错误：调用方据此把**取消**与**失败**
+// 分开 —— 取消不是异常，不记 ERROR 日志、不向用户报失败。产物文件由错误路径删除。
+var errBackupCancelled = errors.New("备份已取消")
+
+// tgzCopyChunk 是进度汇报与取消检查的块大小。取 255KB：既让 GB 级的大文件也能被及时
+// 取消（每块一检查），又不至于把进度回调打成高频热点（每块一次汇报）。
+const tgzCopyChunk = 255 * 1024
+
 // tgzDirAs 将 srcDir 目录内容压缩，tar 中的条目以 rootName 作为顶层前缀。
 // 例：tgzDirAs("/home/user/.dsh", "b.tar.gz", ".dsh") 生成 ".dsh/KEY"、".dsh/..." 等条目，
 // 仅包含 .dsh 目录自身（不含 HOME 其它内容），解压到 /home/user 可还原完整的 ~/.dsh。
@@ -1274,6 +1299,12 @@ func tgzDir(srcDir, destFile string) error {
 // 两者正常部署下互不包含，因此「排除产物自身」这条规则在正常路径上根本不触发，
 // 它只是防御性的；真要防的也只有这一个文件。
 func tgzDirAs(srcDir, destFile, rootName string) error {
+	return tgzDirAsProgress(srcDir, destFile, rootName, nil)
+}
+
+// tgzDirAsProgress 是 tgzDirAs 的「带进度 + 可取消」版本，也是唯一的打包实现
+// （tgzDirAs 只是 prog=nil 的包装，别另写一份打包逻辑）。
+func tgzDirAsProgress(srcDir, destFile, rootName string, prog *tgzProgress) error {
 	out, err := os.Create(destFile)
 	if err != nil {
 		return err
@@ -1296,6 +1327,11 @@ func tgzDirAs(srcDir, destFile, rootName string) error {
 	err = filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+		// 每个条目（目录/文件）都查一次取消：大目录里点取消能立刻停下，
+		// 不必等到下一个大文件读完。
+		if prog.cancelledNow() {
+			return errBackupCancelled
 		}
 		rel, rerr := filepath.Rel(base, p)
 		if rerr != nil {
@@ -1344,11 +1380,16 @@ func tgzDirAs(srcDir, destFile, rootName string) error {
 		if ferr != nil {
 			return ferr
 		}
-		_, cerr := io.Copy(tw, f)
+		if prog != nil && prog.onFile != nil {
+			prog.onFile()
+		}
+		cerr := tgzCopy(tw, f, prog)
 		f.Close()
 		return cerr
 	})
 	if err != nil {
+		// 失败与取消都会走到这里：关掉两个 writer 后删掉不完整的产物。
+		// （取消时也要删 —— 半个 .tar.gz 留在备份列表里比没有更糟。）
 		tw.Close()
 		gz.Close()
 		os.Remove(destFile)
@@ -1360,6 +1401,38 @@ func tgzDirAs(srcDir, destFile, rootName string) error {
 		return err
 	}
 	return gz.Close()
+}
+
+// cancelledNow 报告是否已请求取消（prog 为空时恒为 false）。
+func (p *tgzProgress) cancelledNow() bool {
+	return p != nil && p.cancelled != nil && p.cancelled()
+}
+
+// tgzCopy 把 src 写进 dst，按块汇报进度并响应取消。用自写的循环而非 io.Copy，
+// 正是为了在**单个大文件内部**也能检查取消（io.Copy 只在读返回后才有可能中断，
+// 而在 gzip 写入时不返回错误就会一路把整个文件写完）。
+func tgzCopy(dst io.Writer, src io.Reader, prog *tgzProgress) error {
+	buf := make([]byte, tgzCopyChunk)
+	for {
+		if prog.cancelledNow() {
+			return errBackupCancelled
+		}
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			if prog != nil && prog.onBytes != nil {
+				prog.onBytes(int64(n))
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
 }
 
 // harnessBinPath 返回控制台二进制所在目录与路径。优先用 /var/apps/Harness/target，
@@ -2557,6 +2630,246 @@ func (m *UpdateManager) DeleteDshDataBackup(name string) error {
 	return os.Remove(target)
 }
 
+// --- dsh 数据备份：异步 + 进度 + 可取消 ---
+//
+// 备份在**服务端 goroutine** 里跑，与前端弹窗的生命周期无关：关掉弹窗（甚至刷新页面、
+// 换一个浏览器标签）都不终止备份，重新打开弹窗时用 GetDshBackupStatus 的快照追平进度。
+// 唯一的产出目录仍是 backupDir（见 tgzDirAs 的排除规则说明），唯一的打包实现是
+// tgzDirAsProgress。
+
+// DshBackupStatus 是一次 dsh 数据备份的状态快照（空闲时各字段为零值）。
+//
+// Bytes/TotalBytes/Files/TotalFiles 用于渲染进度：TotalBytes 是**预扫描**得到的原始
+// 总字节数，0 表示未知（此时前端用不确定进度条，不伪造百分比）；Files 是已开始打包的
+// 常规文件数。Size 只在结束时有效（压缩后的包大小）。
+type DshBackupStatus struct {
+	// Seq 是本次备份的序号（进程内自增）：前端用它去重「同一次备份的终态提示」——
+	// 取消请求与轮询可能同时把同一份 done 快照送回去，没有它就会弹两次 toast。
+	Seq        int64  `json:"seq"`
+	Running    bool   `json:"running"`
+	Cancelling bool   `json:"cancelling"` // 已请求取消，还在收尾
+	Done       bool   `json:"done"`
+	Ok         bool   `json:"ok"`
+	Cancelled  bool   `json:"cancelled"`
+	Error      string `json:"error,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Size       int64  `json:"size"`
+	Bytes      int64  `json:"bytes"`
+	TotalBytes int64  `json:"totalBytes"`
+	Files      int    `json:"files"`
+	TotalFiles int    `json:"totalFiles"`
+}
+
+// dshBackupTracker 跟踪当前这一次 dsh 数据备份（全局单例 + 互斥锁，与 dshRestore
+// 同一套写法）。状态是**进程级**的：前端弹窗只是观察者，因此它的读写必须加锁。
+type dshBackupTracker struct {
+	mu         sync.Mutex
+	st         DshBackupStatus
+	seq        int64 // 已开始的备份次数（每次 begin 自增，写进 st.Seq）
+	active     bool  // 本次进程里是否有一次备份正在进行
+	wantCancel bool
+}
+
+var dshBackup dshBackupTracker
+
+// status 返回当前状态快照。Running 由 active 派生，而不是由 Done 派生：开始前各字段
+// 都是零值，用 !Done 会让「从没跑过」被误读成「正在运行」。
+func (t *dshBackupTracker) status() DshBackupStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.st
+	st.Running = t.active
+	return st
+}
+
+// begin 重置状态并进入「进行中」。
+func (t *dshBackupTracker) begin(name, path string, totalBytes int64, totalFiles int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.seq++
+	t.st = DshBackupStatus{
+		Seq:        t.seq,
+		Running:    true,
+		Name:       name,
+		Path:       path,
+		TotalBytes: totalBytes,
+		TotalFiles: totalFiles,
+	}
+	t.active = true
+	t.wantCancel = false
+}
+
+// addBytes 累加已打包的原始字节数（打包循环按块调用，非常高频）。
+func (t *dshBackupTracker) addBytes(n int64) {
+	t.mu.Lock()
+	t.st.Bytes += n
+	t.mu.Unlock()
+}
+
+// addFile 记一个已开始打包的常规文件。
+func (t *dshBackupTracker) addFile() {
+	t.mu.Lock()
+	t.st.Files++
+	t.mu.Unlock()
+}
+
+// finish 落定状态。size 只在成功时有意义（压缩后的包大小）。
+func (t *dshBackupTracker) finish(ok, cancelled bool, errMsg string, size int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.st.Running = false
+	t.st.Done = true
+	t.st.Ok = ok
+	t.st.Cancelled = cancelled
+	t.st.Error = errMsg
+	t.st.Size = size
+	t.st.Cancelling = false
+	t.active = false
+	t.wantCancel = false
+}
+
+// requestCancel 请求取消当前备份，返回是否确有一次备份在跑（供日志区分）。
+// 打包循环在下一块的边界上察觉并中止，因此这里只置标志、不做任何等待。
+func (t *dshBackupTracker) requestCancel() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.active {
+		return false
+	}
+	t.wantCancel = true
+	t.st.Cancelling = true
+	return true
+}
+
+// cancelled 供打包循环轮询（高频路径，必须短小）。
+func (t *dshBackupTracker) cancelled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.wantCancel
+}
+
+// GetDshBackupStatus 返回当前 dsh 数据备份的状态快照。
+func (m *UpdateManager) GetDshBackupStatus() DshBackupStatus {
+	return dshBackup.status()
+}
+
+// CancelDshBackup 取消正在进行的 dsh 数据备份（不完整的备份文件会被删除）。
+// 没有备份在跑时是空操作（幂等），返回取消后的状态快照。
+func (m *UpdateManager) CancelDshBackup() DshBackupStatus {
+	if dshBackup.requestCancel() {
+		logInfo("[backup] dsh data backup cancel requested")
+	}
+	return dshBackup.status()
+}
+
+// BackupDshData 启动一次 dsh 数据备份（异步）：
+// 把当前 HOME 下的 ~/.dsh 打包为 dsh-data-<版本>-<时间戳>.tar.gz 放进统一备份目录。
+//
+// 立即返回：只做「主目录 / .dsh 存在性」与互斥检查，打包在 goroutine 里进行。
+// 因此前端请求超时、弹窗关闭、页面刷新都不会影响这次备份；进度与结果经
+// GetDshBackupStatus 读取，取消走 CancelDshBackup。
+func (m *UpdateManager) BackupDshData() error {
+	home := m.dsh.effectiveHome()
+	if home == "" {
+		return fmt.Errorf("无法获取当前主目录")
+	}
+	src := filepath.Join(home, ".dsh")
+	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
+		return fmt.Errorf(".dsh 目录不存在")
+	}
+	// 一次只允许一个备份：并发打包会让共享的进度状态互相覆盖，也没人需要两份同样的包。
+	if !m.backupMu.TryLock() {
+		return fmt.Errorf("已有备份任务正在进行")
+	}
+	// 备份要读整个 ~/.dsh，而“恢复 dsh 数据 / 回滚 / 安装更新”会删目录或替换产物。
+	// 用与恢复同一把 applying 互斥（TryLock 不阻塞请求线程）：拿不到就拒绝，不产生副作用。
+	// 两者都拿 applying，互斥才是**双向**的（恢复侧另有友好提示，见 RestoreDshData）。
+	if !m.applying.TryLock() {
+		m.backupMu.Unlock()
+		return fmt.Errorf("正在执行其它更新/恢复操作，请等它结束后再备份")
+	}
+	dest := filepath.Join(m.backupDir(), fmt.Sprintf("dsh-data-%s-%s.tar.gz",
+		m.dshDataBackupVersion(), time.Now().Format("20060102150405")))
+	// 预扫描一遍待打包的原始总量（只 stat，不读内容）用于百分比；扫描失败不阻塞备份，
+	// 只是退化为「总量未知」（前端改用不确定进度条）。
+	totalBytes, totalFiles := scanDirSize(src, dest)
+	dshBackup.begin(filepath.Base(dest), dest, totalBytes, totalFiles)
+	logInfo("[backup] dsh data backup started: %s", filepath.Base(dest))
+
+	go func() {
+		defer m.applying.Unlock()
+		defer m.backupMu.Unlock()
+		prog := &tgzProgress{
+			onBytes:   dshBackup.addBytes,
+			onFile:    dshBackup.addFile,
+			cancelled: dshBackup.cancelled,
+		}
+		err := tgzDirAsProgress(src, dest, ".dsh", prog)
+		switch {
+		case err == nil:
+			var size int64
+			if fi, serr := os.Stat(dest); serr == nil {
+				size = fi.Size()
+			}
+			dshBackup.finish(true, false, "", size)
+			logInfo("[backup] dsh data backed up to %s (%d bytes)", dest, size)
+		case errors.Is(err, errBackupCancelled):
+			// tgzDirAsProgress 的错误路径已经删过一次；这里再删一次是防御性的
+			// （例如取消发生在 gz.Close 之后）。留着半个包比没有更糟。
+			os.Remove(dest)
+			dshBackup.finish(false, true, "", 0)
+			logInfo("[backup] dsh data backup cancelled, partial file removed: %s", filepath.Base(dest))
+		default:
+			os.Remove(dest)
+			dshBackup.finish(false, false, err.Error(), 0)
+			logError("[backup] dsh data backup failed: %v", err)
+		}
+	}()
+	return nil
+}
+
+// dshDataBackupVersion 返回备份文件名里的 dsh 版本号（= 当前选中版本的目录名），
+// 没装版本时为 unknown。server 为 nil 只出现在单测里（那些测试不碰版本目录）。
+func (m *UpdateManager) dshDataBackupVersion() string {
+	if m.server == nil {
+		return "unknown"
+	}
+	if v := m.server.selectedVersion(); v != "" {
+		return v
+	}
+	return "unknown"
+}
+
+// scanDirSize 统计 srcDir 下待打包的原始字节数与常规文件数，供备份进度用。
+// 排除规则与 tgzDirAsProgress 保持一致（跳过本次的产物文件 destFile），只 stat、不读内容，
+// 因此代价是「一次目录遍历」。遍历失败时返回已统计到的部分 —— 进度条宁可不精确，
+// 也不能因此拦住备份。
+func scanDirSize(srcDir, destFile string) (int64, int) {
+	var total int64
+	var files int
+	base := filepath.Clean(srcDir)
+	destAbs, derr := filepath.Abs(destFile)
+	if derr != nil {
+		destAbs = filepath.Clean(destFile)
+	}
+	_ = filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // 单个条目读不到就跳过：不能让一处权限问题打断统计
+		}
+		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if abs, aerr := filepath.Abs(p); aerr == nil && abs == destAbs {
+			return nil
+		}
+		total += info.Size()
+		files++
+		return nil
+	})
+	return total, files
+}
+
 // DshRestoreStatus 是 dsh 数据恢复状态。
 type DshRestoreStatus struct {
 	Running bool   `json:"running"`
@@ -2606,6 +2919,12 @@ func (m *UpdateManager) RestoreDshData(backupPath string) error {
 	}
 	if _, err := os.Stat(backupPath); err != nil {
 		return fmt.Errorf("备份文件不存在: %w", err)
+	}
+	// 备份正在读 ~/.dsh：此时删掉它再解压备份，会得到「一半备份前、一半恢复后」的
+	// 数据，而且那次备份还会「成功」。先给出明确提示（真正的互斥在下方的 applying：
+	// BackupDshData 同样要拿它，因此这里即使被抢跑也拦得住）。
+	if dshBackup.status().Running {
+		return fmt.Errorf("正在备份 dsh 数据，请先取消备份或等它结束后再恢复")
 	}
 	// 互斥与重入保护：恢复会 RemoveAll(~/.dsh) 再解压备份，必须与「下载/安装更新」、
 	// 回滚以及另一次恢复串行 —— 交错执行会在同一个 HOME 上并发删目录/解压。

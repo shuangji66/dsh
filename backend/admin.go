@@ -854,46 +854,33 @@ func (m *AdminMux) nodeVersionsInfo() []map[string]interface{} {
 	return info
 }
 
-// handleDshBackup 把当前 HOME 的 ~/.dsh 目录整体压缩打包为
-// dsh-data-<版本>-<YYYYMMDDHHMMSS>.tar.gz，保存在统一备份目录下。
+// handleDshBackup 启动一次 dsh 数据备份（异步）：把当前 HOME 的 ~/.dsh 整体压缩打包为
+// dsh-data-<版本>-<YYYYMMDDHHMMSS>.tar.gz 放进统一备份目录。
+//
+// 打包在服务端的 goroutine 里进行，本接口立刻返回 —— 弹窗关闭、页面刷新都不会终止它；
+// 进度由前端轮询 /api/dsh/backup/status 得到，取消走 /api/dsh/backup/cancel。
 func (m *AdminMux) handleDshBackup(w http.ResponseWriter, r *http.Request) {
-	home := m.dsh.effectiveHome()
-	if home == "" {
-		writeErr(w, "无法获取当前主目录", http.StatusBadRequest)
+	if err := m.update.BackupDshData(); err != nil {
+		writeErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	src := filepath.Join(home, ".dsh")
-	if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
-		writeErr(w, ".dsh 目录不存在", http.StatusNotFound)
-		return
-	}
-	// 确保备份目录存在
-	bkpDir := m.update.backupDir()
-	os.MkdirAll(bkpDir, 0755)
-	// 文件名带上当前 dsh 版本号（= 选中的版本目录名；没装版本时为 unknown）
-	dshVer := m.update.server.selectedVersion()
-	if dshVer == "" {
-		dshVer = "unknown"
-	}
-	name := fmt.Sprintf("dsh-data-%s-%s.tar.gz", dshVer, time.Now().Format("20060102150405"))
-	dest := filepath.Join(bkpDir, name)
-	// 仅备份 HOME 下的 .dsh 目录；tar 顶层保留 ".dsh/" 前缀，
-	// 解压到 HOME 时能还原完整的 ~/.dsh 路径（不包含 HOME 其它内容）。
-	if err := tgzDirAs(src, dest, ".dsh"); err != nil {
-		writeErr(w, "备份失败: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var size int64
-	if fi, err := os.Stat(dest); err == nil {
-		size = fi.Size()
-	}
-	logInfo("[backup] dsh data backed up to %s (%d bytes)", dest, size)
 	writeJSON(w, map[string]interface{}{
-		"ok":   true,
-		"name": name,
-		"path": dest,
-		"size": size,
+		"ok":      true,
+		"started": true,
+		"status":  m.update.GetDshBackupStatus(),
 	})
+}
+
+// handleDshBackupStatus 返回当前 dsh 数据备份的进度快照（供弹窗渲染进度条；
+// 重新打开弹窗时也用它把进度追平）。
+func (m *AdminMux) handleDshBackupStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]interface{}{"ok": true, "status": m.update.GetDshBackupStatus()})
+}
+
+// handleDshBackupCancel 取消正在进行的 dsh 数据备份：打包循环在下一块边界中止，
+// 不完整的备份文件被删除。没有备份在跑时是空操作（幂等）。
+func (m *AdminMux) handleDshBackupCancel(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]interface{}{"ok": true, "status": m.update.CancelDshBackup()})
 }
 
 // zipDir 将 srcDir 目录树递归压缩写入 destZip（zip 文件），保留相对路径。
@@ -1102,6 +1089,10 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleDshRestart(w, r)
 		case p == "/api/dsh/backup" && r.Method == http.MethodPost:
 			m.handleDshBackup(w, r)
+		case p == "/api/dsh/backup/status" && r.Method == http.MethodGet:
+			m.handleDshBackupStatus(w, r)
+		case p == "/api/dsh/backup/cancel" && r.Method == http.MethodPost:
+			m.handleDshBackupCancel(w, r)
 		case p == "/api/dsh/data-backups" && r.Method == http.MethodGet:
 			m.handleListDshDataBackups(w, r)
 		case p == "/api/dsh/data-backups" && r.Method == http.MethodDelete:

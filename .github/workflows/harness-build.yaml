@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（例如 1.1.0）'
+        description: '版本号（例如 1.4.2）'
         required: true
         type: string
       notes:
@@ -63,8 +63,6 @@ jobs:
           else
             PLATFORM="arm"
           fi
-          # harness 只用 .tar.gz（发布与自更新两侧都不变，assetURL 里 harness 也仍拼
-          # .tar.gz）。只有 dsh 服务的 server 包才额外发 .tar.xz，见 server-build.yaml。
           ARCHIVE="harness-${VERSION}-${PLATFORM}.tar.gz"
           tar czf "$ARCHIVE" harness
           # 校验文件与包同名 + .sha256 后缀（控制台自更新时按同一规则取回，
@@ -88,7 +86,7 @@ jobs:
     needs: build-harness
     runs-on: ubuntu-latest
     env:
-      VERSION: ${{ github.event.inputs.version }}   # 版本号用于 tag 和文件名
+      VERSION: ${{ github.event.inputs.version }}
     steps:
       - name: 下载所有架构的压缩包
         uses: actions/download-artifact@v7

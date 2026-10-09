@@ -261,46 +261,10 @@ async function onAuthToggle() {
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
-    <!-- 六个卡片自适应分栏：代理 / 端口与兼容 / node 版本与内存 / 登录鉴权 / 快捷访问 / 控制台设置。
+    <!-- 六个卡片自适应分栏：端口与兼容 / node 版本与内存 / 登录鉴权 / 代理 / 快捷访问 / 控制台设置。
          列数由容器宽度自动决定（见 style.css 的 .g-card-grid），窄屏自动降为单列。 -->
     <div class="g-card-grid g-fade-in">
-      <!-- ① 代理：「代理dsh」与「代理harness更新」两个开关 + 共用的代理地址（任一开启时显示） -->
-      <section class="g-card g-card-hover p-5 flex flex-col">
-        <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
-          {{ t('settings_card_proxy') }}
-        </h2>
-
-        <label class="flex items-center justify-between gap-3 cursor-pointer select-none">
-          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_enable_proxy') }}</span>
-          <span class="relative inline-flex items-center flex-shrink-0">
-            <input type="checkbox" v-model="config.proxyEnabled" class="sr-only peer" @change="onProxyToggle">
-            <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
-            <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
-          </span>
-        </label>
-        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_enable_proxy_hint') }}</p>
-
-        <!-- 代理harness更新：只控制 **harness 控制台自身** 的更新是否先从代理走
-             （探测不通自动回退直连），与上面的「代理dsh」相互独立。
-             dsh 版本安装与插件市场安装都是直连 npm 镜像源，不受这个开关影响。 -->
-        <label class="mt-4 flex items-center justify-between gap-3 cursor-pointer select-none">
-          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_proxy_update') }}</span>
-          <span class="relative inline-flex items-center flex-shrink-0">
-            <input type="checkbox" v-model="config.proxyUpdate" class="sr-only peer" @change="onProxyUpdateToggle">
-            <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
-            <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
-          </span>
-        </label>
-
-        <!-- 代理地址：两个开关共用，任一开启即显示 -->
-        <div v-if="config.proxyEnabled || config.proxyUpdate" class="mt-4">
-          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
-          <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" @change="onPendingChange" />
-          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>
-        </div>
-      </section>
-
-      <!-- ② 端口与兼容：dsh 端口 / 反代监听端口 / 浏览器兼容模式 -->
+      <!-- ① 端口与兼容：dsh 端口 / 反代监听端口 / 浏览器兼容模式 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_port') }}
@@ -354,7 +318,7 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ③ node 版本与内存：node 版本切换 + node 堆内存上限（含自动设置） -->
+      <!-- ② node 版本与内存：node 版本切换 + node 堆内存上限（含自动设置） -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_node') }}
@@ -414,7 +378,7 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ④ 登录鉴权：开关 + 访问密码 + 登录有效期 -->
+      <!-- ③ 登录鉴权：开关 + 访问密码 + 登录有效期 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_auth') }}
@@ -474,6 +438,43 @@ async function onAuthToggle() {
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
             {{ t('settings_auth_ttl_hint') }}
           </p>
+        </div>
+      </section>
+
+      <!-- ④ 代理：「代理dsh」与「代理harness更新」两个开关 + 共用的代理地址（任一开启时显示）。
+           位置在「登录鉴权」之后、「快捷访问」之前（用户指定的卡片顺序）。 -->
+      <section class="g-card g-card-hover p-5 flex flex-col">
+        <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
+          {{ t('settings_card_proxy') }}
+        </h2>
+
+        <label class="flex items-center justify-between gap-3 cursor-pointer select-none">
+          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_enable_proxy') }}</span>
+          <span class="relative inline-flex items-center flex-shrink-0">
+            <input type="checkbox" v-model="config.proxyEnabled" class="sr-only peer" @change="onProxyToggle">
+            <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
+            <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
+          </span>
+        </label>
+        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_enable_proxy_hint') }}</p>
+
+        <!-- 代理harness更新：只控制 **harness 控制台自身** 的更新是否先从代理走
+             （探测不通自动回退直连），与上面的「代理dsh」相互独立。
+             dsh 版本安装与插件市场安装都是直连 npm 镜像源，不受这个开关影响。 -->
+        <label class="mt-4 flex items-center justify-between gap-3 cursor-pointer select-none">
+          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_proxy_update') }}</span>
+          <span class="relative inline-flex items-center flex-shrink-0">
+            <input type="checkbox" v-model="config.proxyUpdate" class="sr-only peer" @change="onProxyUpdateToggle">
+            <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
+            <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
+          </span>
+        </label>
+
+        <!-- 代理地址：两个开关共用，任一开启即显示 -->
+        <div v-if="config.proxyEnabled || config.proxyUpdate" class="mt-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
+          <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" @change="onPendingChange" />
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>
         </div>
       </section>
 

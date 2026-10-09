@@ -360,6 +360,14 @@ const zh: Record<string, string> = {
   update_store_required: '新版本 {v} 是跨主要/次要版本的升级，控制台不支持就地更新（只支持同一版本线内的小版本，如 1.4.3 → 1.4.9）。请更新本应用的 fpk 安装包。',
   update_store_toast: '新版本 {v} 需要更新 fpk 安装包',
   update_release_notes: '更新内容',
+  // 点版本号打开的「更新日志」弹窗（只有 dsh 版本列表用，见 ReleaseNotesDialog.vue）。
+  // 两个「没有内容」的提示刻意分开：前者是**这次没取到**（断网 / 限流，可重试），
+  // 后者是拉到了但该版本确实没有 release 正文。空文案里要写明**覆盖范围**：日志只拉最近
+  // 10 个版本（见后端 dshNotesReleases），更早的版本本来就查不到，别让用户以为上游没写。
+  release_notes_title: '更新日志',
+  release_notes_loading: '正在获取更新日志…',
+  release_notes_unavailable: '暂时取不到该版本的更新日志（网络不可达或 GitHub 接口限流）。关闭本弹窗后可以再点一次重试。',
+  release_notes_empty: '该版本没有更新日志（更新日志只覆盖最近 10 个版本）。',
   update_button: '更新',
   update_updating: '更新中…',
   update_done: '更新成功，正在刷新…',
@@ -882,6 +890,15 @@ const en: Record<string, string> = {
   update_store_required: 'Version {v} is a major/minor upgrade, which the console cannot install in place (it only self-updates patch releases within the same version line, e.g. 1.4.3 → 1.4.9). Please update the fpk package for this app.',
   update_store_toast: 'Version {v} requires updating the fpk package',
   update_release_notes: 'Release notes',
+  // The "release notes" dialog opened by clicking a version number (dsh version list only,
+  // see ReleaseNotesDialog.vue). The two "no content" messages are deliberately distinct:
+  // fetch failed now (retryable) vs. nothing published for that version. The empty message
+  // must state the coverage — notes are only fetched for the 10 most recent releases
+  // (backend dshNotesReleases), so older versions can never show anything.
+  release_notes_title: 'Release notes',
+  release_notes_loading: 'Loading release notes…',
+  release_notes_unavailable: 'Could not fetch the release notes for this version (network unreachable or GitHub API rate limited). Close this dialog and click again to retry.',
+  release_notes_empty: 'No release notes for this version (notes only cover the 10 most recent releases).',
   update_button: 'Update',
   update_updating: 'Updating…',
   update_done: 'Update succeeded, refreshing…',

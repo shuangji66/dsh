@@ -1214,6 +1214,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 		// dsh 服务多版本：列表 / 下载安装 / 取消 / 删除 / 切换（见 server.go）
 		case p == "/api/dsh/versions" && r.Method == http.MethodGet:
 			m.handleDshVersions(w, r)
+		case p == "/api/dsh/versions/notes" && r.Method == http.MethodGet:
+			m.handleDshVersionNotes(w, r)
 		case p == "/api/dsh/versions/install" && r.Method == http.MethodPost:
 			m.handleDshVersionInstall(w, r)
 		case p == "/api/dsh/versions/cancel" && r.Method == http.MethodPost:
@@ -1698,6 +1700,32 @@ func (m *AdminMux) handleDshVersionSwitch(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "switched": body.Version})
+}
+
+// handleDshVersionNotes 返回某个 dsh 版本的更新日志（上游 deepseek-ai/deepseek-harness
+// 的 GitHub Release 正文，见 server.go 的 LookupVersionNotes）。
+//
+// 为什么是「点开才查」的独立接口、而不是塞进版本列表快照：日志只在用户点版本号时才要看，
+// 塞进列表会让每次刷新版本列表都多打一次 GitHub API（未认证限流 60 次/小时），而版本列表
+// 是高频刷新的。整仓 release 拉一次后会按版本号缓存在 notesIndex 里，后续点击直接命中。
+//
+// available=false 表示「这次没取到」（断网 / 限流），与「取到了但该版本没有日志」
+// （available=true + 两个 body 都是空串）区分开，前端据此说不同的话。
+func (m *AdminMux) handleDshVersionNotes(w http.ResponseWriter, r *http.Request) {
+	version := r.URL.Query().Get("version")
+	// 版本号会被拼进 GitHub URL 的 tag，一律先过 validVersionArg（与安装/切换共用）。
+	if !validVersionArg(version) {
+		writeErrU(w, http.StatusBadRequest, "err_need_version", "缺少 version")
+		return
+	}
+	notes, available := m.update.server.LookupVersionNotes(version)
+	writeJSON(w, map[string]interface{}{
+		"ok":        true,
+		"version":   version,
+		"available": available,
+		"note":      notes.Note,
+		"noteEn":    notes.NoteEn,
+	})
 }
 
 // --- 插件市场（dshmarket）API（见 market.go） ---

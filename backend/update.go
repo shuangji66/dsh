@@ -250,6 +250,13 @@ type UpdateManager struct {
 	// 只在某个目标的结论发生变化时才记一行，避免每小时自动检测重复输出同样的内容。
 	checkLogMu   sync.Mutex
 	lastCheckSig map[updateKind]string
+
+	// dshNotes 是「按版本号查更新日志」的索引（见 notesIndex）：dsh 版本列表里点某个
+	// 版本号时按需拉取，结果缓存在这里。客户端用 httpClientForUpdate() 现取（它跟随
+	// 「代理更新」开关，而开关可以随时改），因此存的是构造函数而不是客户端实例。
+	// 插件市场**不用索引**：它和 harness 一样只取「要装的那一版」的正文（见
+	// market.go 的 refreshMarketStatus）——一个 tag 一次请求，不需要整仓日志。
+	dshNotes *notesIndex
 }
 
 // newUpdateManager 创建更新管理器并依据运行时环境填充本地版本。
@@ -262,6 +269,11 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 		dsh:      dsh,
 	}
 	m.statuses[updateKindHarness] = &UpdateStatus{Kind: updateKindHarness, LocalVersion: harnessVersion}
+	// 「按版本号查更新日志」的索引（只有 dsh 版本列表用）。超时 15 秒：更新日志是点开才
+	// 看的次要内容，不能像版本检测那样握着请求慢慢等。
+	// **只拉最近 dshNotesReleases 个 release**：版本列表本身也只有最近这些版本（更早的
+	// 被 dshMinVersion 挡掉），一次请求就能覆盖，不必把整个仓库的日志都拖回来。
+	m.dshNotes = newNotesIndex(dshReleaseRepo, dshReleaseTag, dshNotesReleases, m.httpClientForUpdate, 15*time.Second)
 	// dsh 的本地版本号 = 当前选中版本的目录名（server.go），不联网、不执行命令：
 	// 「哪个版本装着」是磁盘上的事实，`dsh -V` 只用于安装完成后的校验。
 	m.server = newServerManager(renv, dsh, m)
@@ -650,8 +662,7 @@ func fetchTagsViaHTML(client *http.Client) ([]string, error) {
 	return names, nil
 }
 
-// releaseRepo 描述「更新日志取自哪个 GitHub 仓库」：控制台与 dsh 服务来自本仓库，
-// 插件市场（dshmarket）来自它自己的仓库（见 market.go 的 marketReleaseRepo）。
+// releaseRepo 描述「更新日志取自哪个 GitHub 仓库」。
 type releaseRepo struct {
 	owner string
 	name  string
@@ -662,8 +673,29 @@ func (r releaseRepo) url() string {
 	return "https://github.com/" + r.owner + "/" + r.name
 }
 
-// harnessReleaseRepo 是本控制台与 dsh 服务的发布仓库。
+// harnessReleaseRepo 是本控制台的发布仓库（harness-* 两类发布资产在这里）。
 var harnessReleaseRepo = releaseRepo{owner: updateRepoOwner, name: updateRepoName}
+
+// dshReleaseRepo / marketReleaseRepo 是 dsh 服务与插件市场各自的**上游**发布仓库。
+// 二者与 npm 包一一对应（包元数据里的 repository.url 就是它们），因此版本号的来源
+// （npm 镜像源）与更新日志的来源（GitHub Release）不会漂移，不必再去解析包元数据：
+//   - @deepseek-ai/dsh     → deepseek-ai/deepseek-harness，tag 形如 `dsh-v0.2.1-alpha.2`；
+//   - dshmarket           → dsh-market/dsh-market，tag 形如 `v1.66.14`。
+//
+// tag 前缀的差异集中在 dshReleaseTag / marketReleaseTag，别在别处再拼一份。
+var (
+	dshReleaseRepo    = releaseRepo{owner: "deepseek-ai", name: "deepseek-harness"}
+	marketReleaseRepo = releaseRepo{owner: "dsh-market", name: "dsh-market"}
+)
+
+// dshReleaseTag / marketReleaseTag 把 npm 版本号还原成对应仓库的 release tag。
+func dshReleaseTag(version string) string    { return "dsh-v" + version }
+func marketReleaseTag(version string) string { return "v" + version }
+
+// dshNotesReleases 是 dsh 版本列表的更新日志**一次拉取的 release 数量上限**：只覆盖
+// 最近 10 个版本。版本列表本身也只列最近这些版本，所以正常情况下每个能点的版本号都查得到；
+// 超出这个窗口的版本会得到「没有更新日志」，该文案里已写明覆盖范围（release_notes_empty）。
+const dshNotesReleases = 10
 
 // fetchReleaseNotes 获取指定仓库、指定 tag 的 release 正文（不含标题 name）。优先走
 // GitHub Releases API（取 body 字段）；API 受速率限制或不可用时，回退到非 API
@@ -680,8 +712,8 @@ func fetchReleaseNotes(client *http.Client, repo releaseRepo, tag string) string
 
 // fetchReleaseNotesViaAPI 通过 GitHub Releases API 的 body 字段获取正文。
 func fetchReleaseNotesViaAPI(client *http.Client, repo releaseRepo, tag string) string {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
-		repo.owner, repo.name, url.PathEscape(tag))
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s",
+		githubAPIBase, repo.owner, repo.name, url.PathEscape(tag))
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return ""
@@ -777,6 +809,246 @@ func stripHTMLToText(seg string) string {
 			continue
 		}
 		lines = append(lines, ln)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// --- 按版本查更新日志（dsh 版本列表 / 插件市场） ---
+
+// githubAPIBase 是 GitHub REST API 的根地址。抽成变量只为单测能把请求打到假服务器
+// （见 release_notes_test.go）；运行时不会被改，也没有对应的环境变量。
+var githubAPIBase = "https://api.github.com"
+
+// releaseNotes 是一个版本的中英双语更新日志（任一为空串表示该语言没有对应段落）。
+type releaseNotes struct {
+	// Note 是中文正文（界面语言为中文时显示）。
+	Note string `json:"note"`
+	// NoteEn 是英文正文（界面语言为英文时显示）。取不到英文段落时**留空**，
+	// 前端会回退显示中文 —— 不在这里复制一份，免得同一份文本在两个字段里各存一遍。
+	NoteEn string `json:"noteEn"`
+}
+
+// notesIndex 按「npm 版本号」索引某个 GitHub 仓库的 release 更新日志（目前只有 dsh
+// 版本列表在用；插件市场的日志走 harness 那套「只取最新一版」的单 tag 拉取）。
+//
+// 为什么要按版本号索引、而不是每次都去问 GitHub：一个版本点一次就发一次请求，
+// 用户来回点几下就会撞上未认证 API 的限流（60 次/小时）。这里把**最近 perPage 个
+// release 一次拉全**（dsh 用 10 个，见 dshNotesReleases）并按版本号建索引，之后所有
+// 查询都命中缓存；索引里没有的版本号由 loaded 一次性判定为「没有日志」，不会被反复重查。
+//
+// 并发：一把互斥锁 + inFlight/done（单飞）——并发的同一个拉取合并成一次，且**不在持锁
+// 期间发网络请求**（否则首次拉取失败时 15 秒超时会让所有等锁的人一起卡住）。
+type notesIndex struct {
+	// repo 是索引对应的 GitHub 仓库；tag 把版本号还原成该仓库的 release tag。
+	repo releaseRepo
+	tag  func(version string) string
+	// perPage 是一次拉取的 release 数量上限（= 索引覆盖的版本数）。
+	// 只覆盖最近这些版本：更早的版本查不到日志时会得到「没有更新日志」，
+	// 因此前端的空文案必须说清这个覆盖范围（见 useI18n 的 release_notes_empty）。
+	perPage int
+	// client 与 timeout 由调用方给（与更新检测共用「代理更新」开关的客户端）。
+	client  func() *http.Client
+	timeout time.Duration
+
+	mu       sync.Mutex
+	versions map[string]releaseNotes
+	// loaded 表示「索引已经成功拉过一次」。为真时**任何**未命中的版本号都可以直接
+	// 判定为「该版本没有更新日志」，不必再打一次 GitHub（这是限流下最关键的一条）；
+	// 为假（还没拉过 / 上次拉失败）时未命中才需要真去拉。
+	loaded bool
+	// inFlight 记录「已有一次拉取在跑」：并发的第二次调用直接等它跑完，
+	// 避免同时打两次 API（限流下这是双重浪费）。
+	inFlight bool
+	done     chan struct{}
+}
+
+func newNotesIndex(repo releaseRepo, tag func(string) string, perPage int, client func() *http.Client, timeout time.Duration) *notesIndex {
+	if perPage <= 0 {
+		perPage = 10
+	}
+	return &notesIndex{
+		repo:     repo,
+		tag:      tag,
+		perPage:  perPage,
+		client:   client,
+		timeout:  timeout,
+		versions: map[string]releaseNotes{},
+	}
+}
+
+// Lookup 返回某个版本的更新日志。第二个返回值表示「拉取是否成功」：
+//   - 成功但没有该版本的 release → (空 releaseNotes, true)：界面显示「该版本没有更新日志」；
+//   - 拉取失败（断网 / 限流）→ (空 releaseNotes, false)：界面显示「暂时取不到」，
+//     且**不写缓存**，下次点还能重试。
+func (ix *notesIndex) Lookup(version string) (releaseNotes, bool) {
+	if version == "" {
+		return releaseNotes{}, true
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		ix.mu.Lock()
+		if n, ok := ix.versions[version]; ok {
+			ix.mu.Unlock()
+			return n, true
+		}
+		if ix.loaded {
+			// 整仓索引已拉全，缓存里没有就是「该版本没有更新日志」—— 不必再去问 GitHub。
+			ix.mu.Unlock()
+			return releaseNotes{}, true
+		}
+		if ix.inFlight {
+			// 已有一次拉取在跑：等它结束，然后回头再按缓存/loaded 判定一次
+			// （这一轮不发请求，也不占着锁等网络）。
+			done := ix.done
+			ix.mu.Unlock()
+			select {
+			case <-done:
+			case <-time.After(ix.timeout + 5*time.Second):
+				// 等超时（理论上不该发生）：当作这次没取到，让前端可以重试。
+				return releaseNotes{}, false
+			}
+			continue
+		}
+		ix.inFlight = true
+		ix.done = make(chan struct{})
+		ix.mu.Unlock()
+
+		fetched, err := ix.fetchAll()
+
+		ix.mu.Lock()
+		if err == nil {
+			ix.loaded = true
+			// **合并**拉到的版本，而不是整份替换：并发查询的请求在等这次拉取期间，
+			// 可能已经把某个「拉取成功但确实没有 release」的版本号记成空日志（负缓存）；
+			// 整份替换会把这些记录连同结论一起丢掉，下一个请求又会重查一遍。
+			for v, n := range fetched {
+				ix.versions[v] = n
+			}
+		}
+		delete(ix.versions, "")
+		ix.inFlight = false
+		close(ix.done)
+		// 缓存里没有这个版本 → 零值 releaseNotes + 下面的 true，即「成功但该版本没有日志」。
+		n := ix.versions[version]
+		ix.mu.Unlock()
+		if err != nil {
+			return releaseNotes{}, false
+		}
+		return n, true
+	}
+	return releaseNotes{}, false
+}
+
+// fetchAll 拉取该仓库**最近 perPage 个 release**（dsh 用 10 个，见 dshNotesReleases）
+// 并按版本号建索引。
+// Release 正文里可能带未展开的 HTML（上游用 <h3 id="…"> 做中英锚点、用 <details>
+// 收起长内容），这里统一用 stripHTMLToText 压成纯文本，前端按纯文本展示（不解析 HTML）。
+func (ix *notesIndex) fetchAll() (map[string]releaseNotes, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=%d",
+		githubAPIBase, ix.repo.owner, ix.repo.name, ix.perPage)
+	client := ix.client()
+	if client == nil {
+		client = &http.Client{Timeout: ix.timeout}
+	}
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "harness-console")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("releases API returned %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	var rels []struct {
+		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
+		Draft   bool   `json:"draft"`
+	}
+	if err := json.Unmarshal(raw, &rels); err != nil {
+		return nil, err
+	}
+	out := make(map[string]releaseNotes, len(rels))
+	prefix := ix.tag("")
+	for _, r := range rels {
+		if r.Draft {
+			continue
+		}
+		v := r.TagName
+		if prefix != "" && strings.HasPrefix(v, prefix) {
+			v = strings.TrimPrefix(v, prefix)
+		}
+		if !validVersionArg(v) {
+			continue
+		}
+		cn, en := splitBilingualNotes(r.Body)
+		out[v] = releaseNotes{Note: cn, NoteEn: en}
+	}
+	logInfo("[update] release notes index for %s/%s: %d versions", ix.repo.owner, ix.repo.name, len(out))
+	return out, nil
+}
+
+// splitBilingualNotes 把 dsh release 正文切成中文 / 英文两块。
+//
+// 上游正文形如（见 https://github.com/deepseek-ai/deepseek-harness/releases）：
+//
+//	[中文](#cn-<版本>-community) | [English](#en-<版本>-community)
+//	<h3 id="cn-<版本>-community">新增功能</h3>
+//	- …
+//	<h3 id="en-<版本>-community">New Features</h3>
+//	- …
+//
+// 因此按两个**锚点 id**（不是标题文字）切分：中文块从 cn 锚点开始，英文块从 en 锚点
+// 开始。顶部那行导航链接在 cn 锚点之前，会被自然排除。
+//
+// 两种退化形态：
+//   - 只有 cn 锚点（英文段落缺失或旧格式没有锚点）→ 中文块 = 全文，英文留空，
+//     前端按界面语言回退到中文；
+//   - 两个锚点都没有（极早期版本的 id 是 `chinese` / `english`，与 `cn-` / `en-` 不一致）
+//     → 无法判定语言，中文块 = 全文（那是 0.1.7-rc.1 之前的版本，控制台根本不允许安装，
+//     见 dshMinVersion，所以不会再出现在这个弹窗里）。
+//
+// 刻意不按标题文字（如「新增功能」/「New Features」）判断：那是会变的展示文本，
+// 判错会把整段日志吞掉。
+func splitBilingualNotes(body string) (cn, en string) {
+	b := strings.TrimSpace(body)
+	if b == "" {
+		return "", ""
+	}
+	cnRe := regexp.MustCompile(`(?i)<h[1-6][^>]*id="cn-`)
+	enRe := regexp.MustCompile(`(?i)<h[1-6][^>]*id="en-`)
+	cnIdx := cnRe.FindStringIndex(b)
+	enIdx := enRe.FindStringIndex(b)
+	switch {
+	case cnIdx != nil && enIdx != nil && enIdx[0] > cnIdx[0]:
+		return stripNotesNav(stripHTMLToText(b[cnIdx[0]:enIdx[0]])), stripNotesNav(stripHTMLToText(b[enIdx[0]:]))
+	case enIdx != nil && (cnIdx == nil || enIdx[0] < cnIdx[0]):
+		// 只有英文锚点：整段当英文，中文留空（前端会回退到英文）。
+		return "", stripNotesNav(stripHTMLToText(b[enIdx[0]:]))
+	case cnIdx != nil:
+		return stripNotesNav(stripHTMLToText(b[cnIdx[0]:])), ""
+	default:
+		return stripNotesNav(stripHTMLToText(b)), ""
+	}
+}
+
+// stripNotesNav 去掉正文开头的「语言导航」行（`[中文](#…) | [English](#…)`）。
+//
+// 正常情况下它在 cn 锚点之前、切分时就已被排除；但对**没有语言锚点**的旧正文，
+// 整段都会落到中文块里，于是导航行成了正文第一行（真机上实测到过：0.1.3-alpha.2 的
+// 正文以 `[中文](#chinese) | [English](#english)` 开头）。它不是更新内容，去掉。
+func stripNotesNav(block string) string {
+	lines := strings.Split(block, "\n")
+	navRe := regexp.MustCompile(`^\s*\[中文\]\(#[^)]*\)\s*\|\s*\[English\]\(#[^)]*\)\s*$`)
+	for len(lines) > 0 && navRe.MatchString(lines[0]) {
+		lines = lines[1:]
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }

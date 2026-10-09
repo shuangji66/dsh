@@ -253,6 +253,20 @@ export interface ServerVersions {
   install?: DshInstallState
 }
 
+// 某个版本的更新日志（dsh 服务 → 上游 GitHub Release；插件市场 → 自己的 GitHub Release）。
+// 纯文本（后端已把 release 正文里的 HTML 压平），前端按纯文本展示，不解析 HTML。
+export interface ReleaseNotesPayload {
+  ok: boolean
+  version: string
+  // false 表示**这次没取到**（断网 / 限流），此时 note / noteEn 必为空 —— 界面说
+  // 「暂时取不到，可重试」，而不是「该版本没有更新日志」（那是 available=true + 空正文）。
+  available: boolean
+  // note 是中文正文；noteEn 是英文正文。取不到英文段落时 noteEn 为空，界面回退到 note
+  // （不在这里复制一份，避免同一份文本在两个字段里各存一遍）。
+  note: string
+  noteEn: string
+}
+
 // 自我更新 SSE 推送与 REST 接口的载荷（server 是 dsh 版本快照，见 server.go）
 export interface UpdatePayload {
   harness: UpdateStatus
@@ -522,6 +536,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ version })
     }),
+  // 某个 dsh 版本的更新日志（上游 GitHub Release 正文，中英双语）。点开才查，
+  // 后端按版本缓存整仓 release（见 backend/update.go 的 notesIndex）。
+  // available=false 表示**这次没取到**（断网 / 限流），与「取到了但该版本没有日志」
+  // （available=true + 两个正文都是空串）是两回事，界面要说不同的话。
+  dshVersionNotes: (version: string) =>
+    request<ReleaseNotesPayload>(`/api/dsh/versions/notes?version=${encodeURIComponent(version)}`),
   // 插件市场（dshmarket）：安装 / 更新 / 卸载 / 收起结果提示
   marketInstall: () =>
     request<{ ok: boolean; started: boolean; action: string }>('/api/market/install', { method: 'POST' }),

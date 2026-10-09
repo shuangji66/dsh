@@ -218,12 +218,20 @@ func (m *UpdateManager) refreshMarketStatus() {
 	snap := m.detectMarketLocal(true)
 	now := time.Now()
 	latest, _, err := m.marketLatest()
+	// 更新日志：与 harness 同一套做法 —— 只取**要装的那一版**（最新版）的 release 正文，
+	// 按 tag 单次请求（`v<版本>`，见 marketReleaseTag），不做整仓索引。
+	// 只在「确实有更新」时才取：没更新时弹窗不显示日志块，取回来也没人看，白打一次 GitHub。
+	// 必须在这里取 —— updateStatus 的回调在 m.mu 里执行，不能在里面发网络请求。
+	notes := ""
+	if err == nil && latest != "" && snap.Version != "" && compareVersion(latest, snap.Version) > 0 {
+		notes = fetchReleaseNotes(m.httpClientForUpdate(), marketReleaseRepo, marketReleaseTag(latest))
+	}
 	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
 		st.Kind = updateKindMarket
 		st.CheckedAt = now
 		// 本地那一半走同一个入口：查不了 → Unavailable（界面「—」）并保留旧版本号。
 		applyMarketLocalResult(st, snap)
-		st.ReleaseNotes = ""
+		st.ReleaseNotes = notes
 		if err != nil {
 			st.LatestVersion = ""
 			// 镜像源没答上时无法比较版本，红点必须熄掉（本地状态仍由上面维护）。

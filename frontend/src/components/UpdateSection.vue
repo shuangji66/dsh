@@ -9,6 +9,7 @@ import MarkdownText from '@/components/MarkdownText.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import CheckUpdateButton from '@/components/CheckUpdateButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
+import { repoSlugs, repoURL } from '@/constants/repos'
 import ServerVersionsDialog from '@/components/ServerVersionsDialog.vue'
 import MarketDialog from '@/components/MarketDialog.vue'
 
@@ -232,18 +233,10 @@ const dialogTitle = computed(() => {
   return t('update_dialog_title_market')
 })
 
-// 三个更新目标各自的 GitHub 仓库（更新弹窗标题右侧那个裸图标外链指向的地址）：
-//   - harness 控制台 = 本仓库（harness-* 与 dsh-* 两类发布资产都在这里）；
-//   - dsh 服务 = 上游 deepseek-ai/deepseek-harness（server 包按上游 dsh 版本构建）；
-//   - 插件市场 = dsh-market/dsh-market。
-// 只作为展示用的常量，与后端更新链路用的仓库地址（update.go 的 updateRepoURL）无关。
-const repoSlugs: Record<UpdateKind, string> = {
-  harness: 'shuangji66/dsh',
-  dsh: 'deepseek-ai/deepseek-harness',
-  market: 'dsh-market/dsh-market',
-}
+// 弹窗标题右侧那个裸图标外链指向的仓库地址。三个目标的仓库集中定义在
+// `constants/repos.ts`，dsh 版本弹窗与市场弹窗也用同一份（它们各自挂自己的图标）。
 const dialogRepoSlug = computed(() => repoSlugs[dialogKind.value])
-const dialogRepoURL = computed(() => `https://github.com/${dialogRepoSlug.value}`)
+const dialogRepoURL = computed(() => repoURL(dialogRepoSlug.value))
 
 // 版本号右上角红点：有更新时显示。两种「有更新」都算 —— 可就地下载安装的（hasUpdate），
 // 以及跨主要/次要版本、只能更新 fpk 安装包的（storeUpdate，目前只有 harness）。

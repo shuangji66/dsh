@@ -5,6 +5,9 @@ import { uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import GithubIconLink from '@/components/GithubIconLink.vue'
+import MarkdownText from '@/components/MarkdownText.vue'
+import { repoSlugs, repoURL } from '@/constants/repos'
 
 // 插件市场（dshmarket）弹窗：未安装 → 安装最新版；已安装 → 更新 / 卸载。
 //
@@ -81,7 +84,12 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
         <div class="g-modal-mask" @click="close"></div>
         <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
           <DialogCloseButton :label="t('dialog_close')" @close="close" />
-          <h3 class="g-dialog-title mb-3">{{ t('market_dialog_title') }}</h3>
+          <!-- 标题 + 插件市场仓库（dsh-market/dsh-market）的 GitHub 裸图标外链，紧靠标题；
+               右侧留出 X 的位置。与 harness 弹窗、dsh 版本弹窗同一形态。 -->
+          <div class="flex items-center gap-2 pr-11 mb-3">
+            <h3 class="g-dialog-title !pr-0">{{ t('market_dialog_title') }}</h3>
+            <GithubIconLink :href="repoURL(repoSlugs.market)" :label="repoSlugs.market" />
+          </div>
 
           <!-- 进行中：安装/卸载都在跑插件命令，成功后会重启 dsh 让新 bundle 生效 -->
           <div v-if="busy" class="py-4">
@@ -126,6 +134,17 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
             <p v-if="!installed && !unknown && !latest" class="mt-2 text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
               {{ t('market_latest_unknown') }}
             </p>
+
+            <!-- 更新内容（release 正文，不含标题）：与 harness 更新弹窗**同一套显示逻辑**
+                 ——正文由后端在状态里给（只取要装的那一版，见 market.go 的 refreshMarketStatus），
+                 这里 Markdown 渲染、超长可滚动、不撑破弹窗，字号与其它弹窗正文同档。
+                 没有正文时整块不渲染（不再有「市场包说明」那种兜底文案）。 -->
+            <div v-if="hasUpdate && status.releaseNotes" class="mt-3">
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mb-1">{{ t('update_release_notes') }}</div>
+              <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-sm text-ink-soft dark:text-[#A6A6AD] max-h-44 overflow-y-auto leading-relaxed">
+                <MarkdownText :source="status.releaseNotes" />
+              </div>
+            </div>
 
             <!-- 失败提示 -->
             <div

@@ -137,6 +137,28 @@
   `RefreshMarketAfterDshStart()` 补查一次（启动流水线收尾 / 概览页启动·重启 dsh /
   切换 dsh 版本），否则「—」会挂到下一次小时级检测。回归测试见
   `backend/market_unavailable_test.go`。
+- `release-notes` — **两条链路取日志的路子刻意不同，别混**：
+  1. **dsh 版本列表**（`update.go` 的 `notesIndex` + `/api/dsh/versions/notes`）：取上游
+     `deepseek-ai/deepseek-harness` 的 GitHub Release 正文（tag `dsh-v<版本>`，见
+     `dshReleaseTag`）。它是「点某个版本号看那一版」的列表，因此**按版本号索引**：把
+     **最近 `dshNotesReleases`（10）个 release 一次拉全**并按版本号建表，之后每次点击都命中
+     缓存。不是「一个版本查一次 API」（未认证的 GitHub API 只有 60 次/小时，连点几下就撞
+     限流），也**不是把整个仓库的 release 都拉回来**（只覆盖最近 10 个版本，够用：版本列表
+     本身也只列最近这些版本）。`Lookup` 的 `loaded` 标志才是「命中不了就是没有」的依据
+     （只按 map 命中判会把未知版本反复重查），拉取失败**不置 loaded、也不写缓存**，所以重试
+     仍能拿到内容。
+  2. **插件市场**（`market.go` 的 `refreshMarketStatus`）：与 harness **完全同一套** —— 只取
+     「要装的那一版」（镜像源上的最新版）的正文，按 tag `v<版本>`（`marketReleaseTag`）
+     **单次请求**，写进 `UpdateStatus.ReleaseNotes` 随状态一起推送；**没有索引、没有单独的
+     接口、也没有「点版本号才显示」**（前端把它内联在更新弹窗里，和 harness 一样）。
+     只在确实有更新时才拉（没更新时弹窗不显示日志块）。
+  **`available=false` 与「空正文」是两回事**（仅 dsh 那条有 available 字段）：前者是**这次
+  没取到**（断网/限流，前端让用户重试），后者是拉到了、但该版本确实没有 release 正文 ——
+  混成一句会让用户白等或白点。dsh 的正文是**中英双语**（`<h3 id="cn-…">` / `<h3 id="en-…">`
+  两段），`splitBilingualNotes` 按**锚点 id** 切分（不按标题文字：那是会变的展示文本），
+  英文段落缺失时留空、由前端按界面语言回退中文；dsh 正文统一用 `stripHTMLToText` 压成纯文本
+  （前端 `whitespace-pre-wrap` 直出，不解析 HTML），而 harness / 市场那份是**原样 Markdown**
+  （前端 `MarkdownText` 渲染）。回归测试见 `backend/release_notes_test.go`。
 - `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
 - `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`）。
@@ -170,6 +192,24 @@
   `text-sm` + `text-ink-soft dark:text-[#A6A6AD]`（多行配 `leading-relaxed`）；次要信息
   （字节数、版本号等元信息、小标题、标签）用 `text-xs` + `text-ink-faint dark:text-[#8A8A92]`。
   更新弹窗的 release 正文曾写成 `text-xs`（比同屏的版本行还小），现已与其它弹窗同档。
+  **更新类弹窗的标题右侧要挂对应仓库的 GitHub 裸图标**（`components/GithubIconLink.vue`）：
+  标题与图标同处一个 `flex items-center gap-2 pr-11` 的行里，标题用 `.g-dialog-title !pr-0`
+  （把 `.g-dialog-title` 自带的 `pr-11` 让给外层容器，否则图标会被推到 X 底下），图标不套
+  `g-btn-*`。三个目标的仓库地址**只有一份**，在 `constants/repos.ts`（`repoSlugs` / `repoURL`）
+  —— 弹窗是三个独立组件（harness 在 `UpdateSection`、dsh 在 `ServerVersionsDialog`、市场在
+  `MarketDialog`），地址别再各写一份。dsh 版本弹窗与市场弹窗是后来拆出来的，曾整段漏掉图标，
+  新增弹窗时记得一起挂上。
+  **「更新日志」弹窗**（`components/ReleaseNotesDialog.vue`，**只有 dsh 版本列表在用**；
+  插件市场的日志和 harness 一样内联在更新弹窗里，不走这个组件）：把版本号做成**带下划线的
+  按钮**（悬停变品牌色 = 全站「可点」的统一提示，与概览页的版本行一致），点开一个只读弹窗
+  —— 它**只有右上角的关闭按钮**、没有底部操作行（没有任何可执行动作），正文按纯文本展示
+  （`whitespace-pre-wrap`，后端已把 release 里的 HTML 压平）。取数 / 缓存 / 「迟到的响应不
+  覆盖当前内容」都在 `composables/useReleaseNotes.ts`，**成功才缓存**（限流/断网那次不记，
+  否则用户重试也永远看不到内容）。空文案必须写明「只覆盖最近 10 个版本」（`release_notes_empty`）。
+  **更新内容的内联展示**（harness 在 `UpdateSection.vue`、插件市场在 `MarketDialog.vue`，
+  两处结构刻意保持一致）：`v-if="hasUpdate && releaseNotes"` → 次要小标题
+  `update_release_notes` + `max-h-44 overflow-y-auto` 的盒子 + `MarkdownText`；正文用
+  `text-sm` + `ink-soft` + `leading-relaxed`（见上面「正文只分两档」）。没有正文时整块不渲染。
   **弹窗打开时必须锁背景滚动**：`useBodyScrollLock(可见性)`（`composables/useBodyScrollLock.ts`，
   模块级引用计数 —— 叠加的弹窗/二次确认各加一层，全部关闭才解锁），否则移动端能拖拽弹窗
   背后的控制台页面。实现是「body 固定定位 + 负 top 抵消」，**别退化成给 html/body 加

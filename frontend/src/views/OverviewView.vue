@@ -10,6 +10,7 @@ import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
+import { repoSlugs, repoURL } from '@/constants/repos'
 import UpdateSection from '@/components/UpdateSection.vue'
 import AccessCard from '@/components/AccessCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -482,7 +483,7 @@ onBeforeUnmount(() => {
             <!-- 标题 + 本仓库的 GitHub 裸图标（紧靠标题；右侧留出 X 的位置） -->
             <div class="flex items-center gap-2 pr-11 mb-5">
               <h3 class="g-dialog-title !pr-0">{{ t('about_title') }}</h3>
-              <GithubIconLink href="https://github.com/shuangji66/dsh" :label="t('about_github')" />
+              <GithubIconLink :href="repoURL(repoSlugs.harness)" :label="t('about_github')" />
             </div>
 
             <!-- 特性介绍：按类别分组，条目双列排布（窄弹窗里省高度） -->

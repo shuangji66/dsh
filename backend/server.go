@@ -265,6 +265,17 @@ func newServerManager(renv *RuntimeEnv, dsh *DshManager, upd *UpdateManager) *Se
 	return &ServerManager{renv: renv, dsh: dsh, upd: upd}
 }
 
+// LookupVersionNotes 取某个 dsh 版本的更新日志（来自上游 deepseek-ai/deepseek-harness
+// 的 GitHub Release，tag 形如 `dsh-v0.2.1-alpha.2`）。第二个返回值为 false 表示
+// **这次没取到**（断网 / 限流）—— 与「取到了但该版本没有日志」（true + 空）区分开，
+// 前端据此决定说「暂时取不到，稍后重试」还是「该版本没有更新日志」。
+func (m *ServerManager) LookupVersionNotes(version string) (releaseNotes, bool) {
+	if m.upd == nil || m.upd.dshNotes == nil {
+		return releaseNotes{}, false
+	}
+	return m.upd.dshNotes.Lookup(version)
+}
+
 // notify 广播一次状态变更（默认节流 300ms；phase 变化等关键节点用 force=true）。
 func (m *ServerManager) notify(force bool) {
 	m.notifyMu.Lock()

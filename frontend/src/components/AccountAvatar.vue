@@ -7,9 +7,9 @@
 //   「复制授权链接」换设备/浏览器打开）→ 授权后浏览器会停在一条**打不开的** 127.0.0.1
 //   地址上（那一步跳转本身已经表示授权成功）→ 把那条地址粘进「回调链接」→ 完成登录。
 //
-// 头像状态：未登录是灰色圆形占位图 + 下方「未登录」；登录后换成平台头像（没给头像就
-// 品牌色占位图）并刷新，下方显示余额。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+// 头像状态：未登录是灰色圆形占位图 + 下方「未登录」；登录后换成平台头像，平台没给
+// avatarUrl（或图片拉不下来）就退回 DeepSeek 图标（icons.deepseek），下方显示余额。
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, type AccountEntryView, type AccountLoginState, type AccountStatusPayload } from '@/serverapi'
 import { useI18n, uiText, uiErrText } from '@/composables/useI18n'
 import { useToastStore } from '@/stores/toast'
@@ -70,6 +70,13 @@ const avatarLabel = computed(() => {
   if (!signedIn.value) return t('account_signed_out')
   return balanceText.value || t('account_signed_in')
 })
+
+// 头像：平台给了 avatarUrl 就用图片；**没给**（平台侧账号本身没有头像）或**拉不下来**
+// （离线 / URL 失效）都退回 DeepSeek 图标 —— 否则圆框里会是一个破图占位。
+// avatarBroken 在地址变化（切换账号 / 重新拉状态）时复位，好让新地址重新试一次。
+const avatarBroken = ref(false)
+watch(() => status.value?.avatarUrl, () => { avatarBroken.value = false })
+const showAvatarImage = computed(() => signedIn.value && !!status.value?.avatarUrl && !avatarBroken.value)
 
 // 发起方身份：平台侧只用于记录（语言/时区），版本留空由后端补控制台版本。
 function clientMeta() {
@@ -301,7 +308,9 @@ onBeforeUnmount(stopPoll)
         ? 'bg-brand/10 text-brand ring-1 ring-brand/30'
         : 'bg-black/[0.08] text-ink-faint dark:bg-white/10 dark:text-[#8A8A92] group-hover:text-ink-soft dark:group-hover:text-[#A6A6AD]'"
     >
-      <img v-if="signedIn && status?.avatarUrl" :src="status.avatarUrl" alt="" class="w-full h-full object-cover" />
+      <img v-if="showAvatarImage" :src="status?.avatarUrl" alt="" class="w-full h-full object-cover" @error="avatarBroken = true" />
+      <!-- 已登录但平台没给头像（或图片拉不下来）：用 DeepSeek 图标顶上 -->
+      <span v-else-if="signedIn" class="w-4 h-4" v-html="icons.deepseek"></span>
       <span v-else class="w-4 h-4" v-html="icons.user"></span>
     </span>
     <span class="text-[10px] leading-none text-ink-faint dark:text-[#8A8A92] whitespace-nowrap">
@@ -332,7 +341,8 @@ onBeforeUnmount(stopPoll)
               class="w-12 h-12 rounded-full flex items-center justify-center overflow-hidden flex-shrink-0"
               :class="signedIn ? 'bg-brand/10 text-brand ring-1 ring-brand/30' : 'bg-black/[0.08] text-ink-faint dark:bg-white/10 dark:text-[#8A8A92]'"
             >
-              <img v-if="signedIn && status?.avatarUrl" :src="status.avatarUrl" alt="" class="w-full h-full object-cover" />
+              <img v-if="showAvatarImage" :src="status?.avatarUrl" alt="" class="w-full h-full object-cover" @error="avatarBroken = true" />
+              <span v-else-if="signedIn" class="w-6 h-6" v-html="icons.deepseek"></span>
               <span v-else class="w-6 h-6" v-html="icons.user"></span>
             </span>
             <div class="min-w-0">
@@ -417,6 +427,10 @@ onBeforeUnmount(stopPoll)
                 class="g-input w-full font-mono !text-xs"
                 @keydown.enter="completeLogin"
               />
+              <!-- 地址打不开是正常的这一步，就在这里说（授权流程中也要看得到） -->
+              <p class="mt-1 text-xs font-medium text-warning dark:text-[#F59E0B] leading-relaxed">
+                {{ t('account_desc_callback') }}
+              </p>
             </div>
             <p class="text-xs text-ink-faint dark:text-[#8A8A92] leading-relaxed">{{ t('account_login_tip') }}</p>
           </div>
@@ -426,9 +440,15 @@ onBeforeUnmount(stopPoll)
               {{ uiText(login.message, login.messageRef, t('account_login_failed')) }}
             </p>
           </div>
-          <p v-if="!signedIn && !waiting" class="text-xs text-ink-faint dark:text-[#8A8A92] leading-relaxed mb-2">
-            {{ t('account_desc') }}
-          </p>
+          <div v-if="!signedIn && !waiting" class="mb-2">
+            <p class="text-xs text-ink-faint dark:text-[#8A8A92] leading-relaxed">
+              {{ t('account_desc') }}
+            </p>
+            <!-- 回调那一步（地址打不开是正常的）单独高亮：整段说明里最容易做错的一步 -->
+            <p class="mt-1 text-xs font-medium text-warning dark:text-[#F59E0B] leading-relaxed">
+              {{ t('account_desc_callback') }}
+            </p>
+          </div>
 
           <div class="g-dialog-actions">
             <template v-if="waiting">

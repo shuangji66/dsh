@@ -69,7 +69,15 @@ const aboutFeatureGroups = [
   },
   {
     title: 'about_group_access',
-    features: ['about_feature_auth', 'about_feature_proxy', 'about_feature_dirs'],
+    // 账号与「凭据/快捷指令加密存储」都归在这里：它们解决的正是「谁拿着这台设备上的凭据」
+    // （账号见 AccountAvatar.vue / backend/account.go，加密见 backend/secret.go 的威胁模型）。
+    features: [
+      'about_feature_auth',
+      'about_feature_account',
+      'about_feature_secrets',
+      'about_feature_proxy',
+      'about_feature_dirs',
+    ],
   },
   {
     title: 'about_group_tools',

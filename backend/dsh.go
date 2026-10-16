@@ -311,6 +311,37 @@ func (m *DshManager) effectiveHome() string {
 	return m.renv.Home
 }
 
+// agentsHomeDir 返回 dsh 的「共享 agent 配置根」目录（$HOME/.agents）。
+//
+// dsh 用它解析技能 / 全局指令等**跨 agent 工具共享**的配置，而这条共享根刻意与
+// dsh 自己的数据目录（~/.dsh）分开（见 @deepseek-ai/dsh-home-paths 的
+// resolveAgentsHome：显式配置 > $DSH_AGENTS_HOME > ~/.agents）。主目录不可切换
+// （见 effectiveHome），所以它恒为当前主目录下的 .agents。home 为空（开发环境没给
+// HOME）时返回空串，调用方据此不下发 / 不创建。
+func agentsHomeDir(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".agents")
+}
+
+// ensureAgentsHome 检测并创建共享 agent 配置根（$HOME/.agents）。
+//
+// dsh 启动时不会自己创建这个目录（缺失时技能与全局指令静默为空），所以由控制台
+// 启动时建好 —— 控制台是 dsh 的守护者，dsh 每次启动都晚于它。
+// 创建成功不输出日志（基础成功操作不记日志，见 AGENTS 规则 7）；失败只记 ERROR 并
+// 继续启动 —— 控制台是这个设备的带外入口，不该为一个目录起不来。
+func ensureAgentsHome(home string) {
+	dir := agentsHomeDir(home)
+	if dir == "" {
+		return
+	}
+	// MkdirAll 自带「检测 + 创建」：目录已存在时是空操作，不是错误。
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logError("[agents] failed to create agents home %s: %v", dir, err)
+	}
+}
+
 // Running reports whether dsh is currently active.
 func (m *DshManager) Running() bool {
 	m.mu.Lock()
@@ -889,10 +920,15 @@ func (m *DshManager) buildEnv() []string {
 		}
 		set("PATH=", pathVal)
 	}
-	// HOME 使用“当前主目录”（可能已在资源页被切换为某个已授权目录的实际路径），
-	// 默认为主机启动时的 HOME（/var/apps/Harness/shares/Harness 的实际路径）。
+	// HOME 使用本应用的主目录（主目录不可切换，见 effectiveHome），默认为进程启动时的
+	// HOME（/var/apps/Harness/shares/Harness 的实际路径）。
+	// 同时显式下发 DSH_AGENTS_HOME = $HOME/.agents —— dsh 的「共享 agent 配置根」
+	// （技能 / 全局指令等，见 agentsHomeDir）。不显式下发时 dsh 靠 os.homedir()
+	// 兜底：HOME 缺失会回落到 /etc/passwd 里的主目录，跑到平台共享目录之外。
+	// 该目录由控制台启动时创建（见 ensureAgentsHome），dsh 启动时不会自建。
 	if h := m.effectiveHome(); h != "" {
 		set("HOME=", h)
+		set("DSH_AGENTS_HOME=", agentsHomeDir(h))
 	}
 	if m.renv.PnpmHome != "" {
 		set("PNPM_HOME=", m.renv.PnpmHome)

@@ -233,6 +233,12 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 **例外**：pnpm 目录不在数据目录下，仍由 `PNPM_HOME` 单独指定（dsh 进程与终端都
 按它设置环境变量）。
 
+dsh 进程还会拿到 **`DSH_AGENTS_HOME=$HOME/.agents`**（共享 agent 配置根：技能 /
+全局指令等跨 agent 工具共享的配置，见 `@deepseek-ai/dsh-home-paths` 的
+`resolveAgentsHome`）。它由 `DshManager.buildEnv` 显式下发，免得 dsh 用
+`os.homedir()` 兜底而跑到平台共享目录之外；目录本身由**控制台启动时检测并创建**
+（`ensureAgentsHome`，创建成功不记日志），dsh 启动时不会自建。
+
 运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、`proxyUpdate`、
 `proxyAddr`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
 `nodeVersion`、`dshVersion`、`accessUrls`、`browserCompat`。其中 `dshVersion` 是**当前选中的

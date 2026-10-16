@@ -102,6 +102,11 @@ func main() {
 	// 这里兜底处理异常退出路径）。
 	defer removePidFile(renv.DshPidFile)
 
+	// 共享 agent 配置根（$HOME/.agents）：dsh 从这里读技能与全局指令等共享配置，
+	// 但启动时不会自己创建它，所以在控制台启动时检测并创建；同一个路径以
+	// DSH_AGENTS_HOME 下发给 dsh 进程（见 DshManager.buildEnv）。创建成功不输出日志。
+	ensureAgentsHome(renv.Home)
+
 	if _, err := net.Dial("unix", renv.AdminSock); err == nil {
 		logError("admin socket %s already in use, another instance is running - exiting", renv.AdminSock)
 		os.Exit(1)

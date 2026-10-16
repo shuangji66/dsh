@@ -452,14 +452,14 @@ func (m *AdminMux) accountLoginComplete(callback, code, state string, meta accou
 
 	userID, contact, name, avatar := accountUserFields(data["user"])
 	now := time.Now().Format(time.RFC3339)
-	if vault, vaultErr := loadAccountVault(); vaultErr != nil {
+	if vault, vaultErr := loadAccountVault(m.crypt); vaultErr != nil {
 		logWarn("[account] account vault unreadable: %v", vaultErr)
 	} else {
 		vault.upsert(accountVaultEntry{
 			ID: accountVaultID(userID, token), Contact: contact, Name: name, AvatarURL: avatar,
 			Token: token, Issuer: accountPlatformOrigin, AddedAt: now, LastUsedAt: now,
 		})
-		if err := saveAccountVault(vault); err != nil {
+		if err := saveAccountVault(m.crypt, vault); err != nil {
 			logWarn("[account] account vault save failed: %v", err)
 		} else {
 			logInfo("[account] account saved to the vault (%s)", accountVaultDebug(vault))
@@ -1062,10 +1062,13 @@ func (m *AdminMux) handleAccountStatus(w http.ResponseWriter, r *http.Request) {
 // 顺带做一次**自愈导入**：如果 dsh 现在用的是某个 token、而账号库里没有它（老设备上先登录
 // 后升级控制台，或凭据是别的途径写进去的），就把它补进库里 —— 否则列表里看不到「正在用的
 // 那个账号」，切换过去以后就再也切不回来了。
+//
+// 库读不出来（主密钥不可用 / 密文被换过 / 旧明文库还在）时列表为空、**且绝不自愈导入**：
+// 那次导入是这条只读路径上唯一的写操作，拿一份空库去写会把原始密文覆盖掉。
 func (m *AdminMux) accountStatusSnapshot() accountStatus {
 	st := accountStatus{}
 	activeToken := m.accountActiveToken()
-	vault, vaultErr := loadAccountVault()
+	vault, vaultErr := loadAccountVault(m.crypt)
 	if vaultErr != nil {
 		logWarn("[account] account vault unreadable: %v", vaultErr)
 	}
@@ -1122,7 +1125,7 @@ func (m *AdminMux) accountStatusSnapshot() accountStatus {
 			AvatarURL: st.AvatarURL, Token: activeToken, Issuer: accountPlatformOrigin,
 			AddedAt: now, LastUsedAt: now,
 		})
-		if err := saveAccountVault(vault); err != nil {
+		if err := saveAccountVault(m.crypt, vault); err != nil {
 			logWarn("[account] account vault save failed: %v", err)
 		} else {
 			logInfo("[account] imported the account in use into the vault (%s)", accountVaultDebug(vault))
@@ -1247,7 +1250,7 @@ func (m *AdminMux) handleAccountSwitch(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式不正确")
 		return
 	}
-	vault, err := loadAccountVault()
+	vault, err := loadAccountVault(m.crypt)
 	if err != nil {
 		logWarn("[account] account vault unreadable: %v", err)
 		writeErrFrom(w, accountVaultError(err), http.StatusInternalServerError)
@@ -1284,7 +1287,7 @@ func (m *AdminMux) handleAccountSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	entry.LastUsedAt = time.Now().Format(time.RFC3339)
 	vault.upsert(*entry)
-	if err := saveAccountVault(vault); err != nil {
+	if err := saveAccountVault(m.crypt, vault); err != nil {
 		logWarn("[account] account vault save failed: %v", err)
 	}
 	logInfo("[account] switched to account %s (dsh state=%s)", entry.ID, firstNonEmpty(status, "unverified"))
@@ -1301,7 +1304,7 @@ func (m *AdminMux) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式不正确")
 		return
 	}
-	vault, err := loadAccountVault()
+	vault, err := loadAccountVault(m.crypt)
 	if err != nil {
 		logWarn("[account] account vault unreadable: %v", err)
 		writeErrFrom(w, accountVaultError(err), http.StatusInternalServerError)
@@ -1329,7 +1332,7 @@ func (m *AdminMux) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	vault.remove(entry.ID)
-	if err := saveAccountVault(vault); err != nil {
+	if err := saveAccountVault(m.crypt, vault); err != nil {
 		logWarn("[account] account vault save failed: %v", err)
 	}
 	logInfo("[account] removed account %s (%s)", entry.ID, accountVaultDebug(vault))

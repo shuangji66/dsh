@@ -142,12 +142,13 @@ func main() {
 	// 再失败，见 cleanStaleProfileLocks。
 	dsh.startStaleLockWatch()
 
-	// 快捷指令命令内容的加密（主密钥缺失时自动生成 0600 的 master.key，见 secret.go）。
-	// 失败**不退出**：控制台是这个 NAS 的带外访问入口，为一条快捷指令的密钥把整个控制台
-	// 停掉不划算——照常启动，但快捷指令的保存会明确报错，绝不退化成写明文（见 quickcmds.go）。
+	// 快捷指令命令内容与**账号库 token** 的落盘加密（主密钥缺失时自动生成 0600 的
+	// master.key，见 secret.go）。失败**不退出**：控制台是这个 NAS 的带外访问入口，为一把
+	// 主密钥把整个控制台停掉不划算——照常启动，但快捷指令的保存与账号库的读写（含自愈导入）
+	// 都会明确报错，绝不退化成写明文（见 quickcmds.go / accountvault.go）。
 	crypt, cryptErr := loadCryptor(masterKeyPath(&renv), renv.MasterKey)
 	if cryptErr != nil {
-		logError("[quickcmds] command content encryption unavailable: %v - saving quick commands will fail", cryptErr)
+		logError("[secrets] master key unavailable: %v - saving quick commands and the account vault will fail", cryptErr)
 	}
 	// 一次性迁移：把旧版本留在磁盘上的**明文**命令内容加密（见 migrateQuickCmdsAtStartup）。
 	// 放在这里而不是等用户打开弹窗：前端只在弹窗打开时才加载列表，用户几个月不点它，

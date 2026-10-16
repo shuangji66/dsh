@@ -185,6 +185,12 @@
   而 dsh 正在用的会在查询状态时自动导入；退出登录只让 dsh 不再用它（账号留在库里），移除才作废
   平台 token。凭据记录键名/格式与 `0.2.0-rc.2` 一致（同 `credentialKey(...)`），写入对老版本
   同样成立（更早没有该插件的版本只当普通记录存着）。回归测试见 `backend/account_test.go`。
+  **库文件整份是密文**（AES-256-GCM，与快捷指令同一把主密钥，磁盘形态 `{"version":2,"vault":{…}}`；
+  dsh 那份 `.credentials.yaml` 则必须明文，别混）：`loadAccountVault(crypt)` **解不开一律报错、
+  绝不返回空库** —— 状态查询里的自愈导入是这条只读路径上唯一的写，拿空库去写就把原始密文抹了；
+  主密钥不可用时读写都拒绝（`saveAccountVault` 由 `encrypt` 挡住，没有写明文的分支）。
+  旧版明文库（version 1）**不迁移**（该版本未对外发布）：明确报错提示删掉重登，也绝不被覆盖。
+  回归测试见 `backend/accountvault_crypt_test.go`。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
 - `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`，**命令内容加密落盘**）。
   - 磁盘格式**版本 2**：`content` 是密文信封 `{"v":1,"ct":"…"}`，`id` / `name` / `auto` 仍是

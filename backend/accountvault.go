@@ -11,6 +11,12 @@ package main
 // 刻意不往 dsh 的凭据文件里塞额外记录 —— 那个文件里装着用户其它密钥、格式也属于 dsh，
 // 我们只写它认识的那两条（default / device）。
 //
+// **整份库是密文落盘**（AES-256-GCM，主密钥与快捷指令同一把，见 secret.go 的威胁模型）：
+// dsh 只认一条凭据记录，所以「多账号」意味着库里同时躺着若干个**没在生效**的 token ——
+// 拿到磁盘快照/备份的人不该因此一次拿走全部账号。这与 dsh 那份 `.credentials.yaml` 是两回事：
+// 那个文件**必须**明文（dsh 逐字读 payload 里的 token 当 Bearer 用，塞密文进去等于把密文发给
+// 平台），而这份文件完全由控制台拥有，格式也由控制台定义。
+//
 // 「当前生效的账号」不额外记状态，而是**推导**出来的：拿 dsh 凭据里的 token 与库里各条目
 // 比对，命中的那条就是在用的。token 每次登录都会换新，所以条目按平台的 user.id 归并
 // （见 accountLoginComplete 的 upsert）；id 缺失时退回按 token 摘要生成的本地 id。
@@ -19,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -26,7 +33,34 @@ import (
 // accountVaultFile 是账号库文件名（拼在控制台数据目录下，见 config.go 的 dataPath）。
 const accountVaultFile = "dsh-accounts.json"
 
-// accountVaultEntry 是一个已保存的账号（含 token —— 库文件权限 0600，见 saveAccountVault）。
+// accountVaultVersion 是账号库**明文文档**的版本（信封里面的那份）。
+const accountVaultVersion = 1
+
+// accountVaultDocVersion 是磁盘文档的版本：2 = 整份列表是一个密文信封。
+//
+// 版本 1（明文 JSON）**没有兼容路径**：这一版还没对外发布过，旧文件直接删掉、重新登录即可。
+// 因此读到 version 1 会明确报错，而不是当空库读 —— 那会让「旧文件还在」被当成「库里没有
+// 账号」，紧接着任何一次保存都会把明文库覆盖掉（用户重新登录前就先丢一次数据）。
+const accountVaultDocVersion = 2
+
+// accountVaultAADField / accountVaultAADScope 是库密文的 AAD 组成（形态见 secret.go 的 aad）。
+//
+// 整份文档只用一个信封，所以 field 只标「这是账号库」：把快捷指令那条密文剪到这里（或反过来）
+// 会直接解密失败，而不是把一段无关密文当成账号 token 用。
+const (
+	accountVaultAADField = "accountvault"
+	accountVaultAADScope = "global"
+)
+
+// accountVaultStored 是账号库在磁盘上的形态：`{"version":2,"vault":{"v":1,"ct":"…"}}`。
+// Vault 为 nil = 文档里没有信封（旧格式 / 被截断），由 loadAccountVault 分流报错。
+type accountVaultStored struct {
+	Version int             `json:"version"`
+	Vault   *secretEnvelope `json:"vault"`
+}
+
+// accountVaultEntry 是一个已保存的账号（含 token —— 磁盘上是密文，见 loadAccountVault /
+// saveAccountVault；内存里与接口收发的始终是明文）。
 type accountVaultEntry struct {
 	ID         string `json:"id"`
 	Contact    string `json:"contact,omitempty"`
@@ -54,32 +88,77 @@ type accountVaultView struct {
 }
 
 // loadAccountVault 读账号库；文件不存在时返回空库（不报错）。
-func loadAccountVault() (*accountVault, error) {
+//
+// 解不开**必须**报错，绝不返回空库：调用方（状态查询的自愈导入、登录成功后的 upsert）拿到
+// 空库就会把原始密文覆盖掉，而真正的原因（主密钥换了 / 密文被搬了 / 文件被截断）再也查不出来。
+// 主密钥不可用（crypt == nil）同样在这里报错，语义见 secret.go。
+func loadAccountVault(crypt *cryptor) (*accountVault, error) {
 	text, err := accountReadFileText(dataPath(accountVaultFile))
 	if err != nil {
 		return nil, err
 	}
-	v := &accountVault{Version: 1}
 	if strings.TrimSpace(text) == "" {
+		return &accountVault{Version: accountVaultVersion}, nil
+	}
+	var stored accountVaultStored
+	if err := json.Unmarshal([]byte(text), &stored); err != nil {
+		return nil, fmt.Errorf("account vault is not a readable JSON document: %w", err)
+	}
+	if stored.Vault == nil {
+		if accountVaultLooksLegacy(text) {
+			return nil, fmt.Errorf("account vault is still in the legacy plaintext format (version 1); delete %s and sign in again", accountVaultFile)
+		}
+		return nil, fmt.Errorf("account vault has no encrypted envelope (version %d, probably truncated)", stored.Version)
+	}
+	plain, err := crypt.decrypt(accountVaultAADField, accountVaultAADScope, stored.Vault)
+	if err != nil {
+		return nil, fmt.Errorf("account vault decryption failed: %w", err)
+	}
+	v := &accountVault{Version: accountVaultVersion}
+	if strings.TrimSpace(plain) == "" {
 		return v, nil
 	}
-	if err := json.Unmarshal([]byte(text), v); err != nil {
-		return nil, err
+	if err := json.Unmarshal([]byte(plain), v); err != nil {
+		return nil, fmt.Errorf("account vault content is not a readable JSON document: %w", err)
 	}
 	if v.Version == 0 {
-		v.Version = 1
+		v.Version = accountVaultVersion
 	}
 	return v, nil
 }
 
-// saveAccountVault 原子落盘（临时文件 + rename + 0600，复用凭据文件的写实现）。
-func saveAccountVault(v *accountVault) error {
-	v.Version = 1
-	raw, err := json.MarshalIndent(v, "", "  ")
+// accountVaultLooksLegacy 判断这份文档是不是旧版（明文）账号库：按旧结构解得出 accounts 键。
+// 只用来把错误说得更明白（普通 JSON 坏文件走另一条分支）。
+func accountVaultLooksLegacy(text string) bool {
+	var legacy struct {
+		Accounts json.RawMessage `json:"accounts"`
+	}
+	return json.Unmarshal([]byte(text), &legacy) == nil && legacy.Accounts != nil
+}
+
+// saveAccountVault 原子落盘：整份列表加密成一个信封，临时文件 → 0600 → rename
+// （复用凭据文件的写实现）。
+//
+// 主密钥不可用时 encrypt 直接报错，**绝不退化成写明文**（见 secret.go / main.go 的语义）。
+func saveAccountVault(crypt *cryptor, v *accountVault) error {
+	v.Version = accountVaultVersion
+	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return accountWriteFileText(dataPath(accountVaultFile), string(raw)+"\n")
+	env, err := crypt.encrypt(accountVaultAADField, accountVaultAADScope, string(raw))
+	if err != nil {
+		return err
+	}
+	if env == nil {
+		// encrypt("") 返回 nil；账号库永远不是空的（至少是 `{"version":1}`）。
+		return errors.New("encrypting the account vault returned an empty envelope")
+	}
+	out, err := json.MarshalIndent(accountVaultStored{Version: accountVaultDocVersion, Vault: env}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return accountWriteFileText(dataPath(accountVaultFile), string(out)+"\n")
 }
 
 // find 按 id 取条目（返回指针，改它等于改库里的条目）。

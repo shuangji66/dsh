@@ -42,7 +42,9 @@ func writeAccountCreds(t *testing.T, body string) string {
 func newAccountTestMux(t *testing.T, home string) *AdminMux {
 	t.Helper()
 	renv := &RuntimeEnv{Home: home, AdminBaseURL: "/app/Harness", ProxySock: "/x/dsh.sock", ProxyBaseURL: "/app/Harness/dsh"}
-	return newAdminMux(renv, &DshManager{renv: renv, logf: func(logLevel, string, ...interface{}) {}}, nil, nil, nil, nil)
+	// 账号库是密文落盘（见 accountvault.go），所以测试里也得有一把主密钥
+	// （临时目录里的一把，见 quickcmds_crypt_test.go 的 testCryptor）。
+	return newAdminMux(renv, &DshManager{renv: renv, logf: func(logLevel, string, ...interface{}) {}}, nil, nil, nil, testCryptor(t))
 }
 
 // 记录写入：两条记录都要出现，且除它们之外的字节逐字不变；块式旧记录要能被删干净。
@@ -578,10 +580,12 @@ func TestAccountCallbackMountPaths(t *testing.T) {
 	}
 }
 
-// 账号库：落盘/读回/权限/按 id 归并/删除/「当前生效」推导。
+// 账号库：落盘/读回/权限/按 id 归并/删除/「当前生效」推导（密文形态的断言见
+// accountvault_crypt_test.go）。
 func TestAccountVaultRoundTrip(t *testing.T) {
 	t.Setenv("HARNESS_DATA_DIR", t.TempDir())
-	v, err := loadAccountVault()
+	crypt := testCryptor(t)
+	v, err := loadAccountVault(crypt)
 	if err != nil {
 		t.Fatalf("空库应可读: %v", err)
 	}
@@ -598,14 +602,14 @@ func TestAccountVaultRoundTrip(t *testing.T) {
 	if got := v.find("a"); got == nil || got.Token != "t1-new" || got.AddedAt != "2026-01-01T00:00:00Z" {
 		t.Fatalf("归并结果不对: %+v", got)
 	}
-	if err := saveAccountVault(v); err != nil {
+	if err := saveAccountVault(crypt, v); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	path := dataPath(accountVaultFile)
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("账号库权限应为 0600: %v (%v)", fi.Mode().Perm(), err)
 	}
-	back, err := loadAccountVault()
+	back, err := loadAccountVault(crypt)
 	if err != nil || len(back.Accounts) != 2 || back.find("a").Token != "t1-new" {
 		t.Fatalf("读回不一致: %+v (%v)", back, err)
 	}
@@ -627,7 +631,7 @@ func TestAccountVaultRoundTrip(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadAccountVault(); err == nil {
+	if _, err := loadAccountVault(crypt); err == nil {
 		t.Fatal("坏库应报错")
 	}
 }
@@ -665,10 +669,10 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	t.Cleanup(func() { accountVerifyPollTimeout, accountVerifyPollInterval = prevTimeout, prevInterval })
 
 	// 库里两条账号，凭据文件里是第一条 → 快照应标出它 active。
-	v, _ := loadAccountVault()
+	v, _ := loadAccountVault(m.crypt)
 	v.upsert(accountVaultEntry{ID: "acc-1", Contact: "139******59", Token: "tok-1"})
 	v.upsert(accountVaultEntry{ID: "acc-2", Contact: "138******00", Token: "tok-2"})
-	if err := saveAccountVault(v); err != nil {
+	if err := saveAccountVault(m.crypt, v); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.accountStoreGrant("tok-1"); err != nil {
@@ -689,7 +693,7 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	if tok := m.accountActiveToken(); tok != "tok-2" {
 		t.Fatalf("切换后凭据里的 token = %q", tok)
 	}
-	back, _ := loadAccountVault()
+	back, _ := loadAccountVault(m.crypt)
 	if e := back.find("acc-2"); e == nil || e.LastUsedAt == "" {
 		t.Fatalf("切换后未记录 LastUsedAt: %+v", e)
 	}
@@ -729,7 +733,7 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	if tok := m.accountActiveToken(); tok != "" {
 		t.Fatalf("退出登录后凭据仍在: %q", tok)
 	}
-	if back, _ := loadAccountVault(); len(back.Accounts) != 2 {
+	if back, _ := loadAccountVault(m.crypt); len(back.Accounts) != 2 {
 		t.Fatalf("退出登录不该删库里的账号: %+v", back.Accounts)
 	}
 
@@ -743,7 +747,7 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	if revoked != "tok-1" {
 		t.Fatalf("未请平台作废 token，收到 %q", revoked)
 	}
-	if back, _ := loadAccountVault(); len(back.Accounts) != 1 || back.find("acc-1") != nil {
+	if back, _ := loadAccountVault(m.crypt); len(back.Accounts) != 1 || back.find("acc-1") != nil {
 		t.Fatalf("移除后库里不对: %+v", back.Accounts)
 	}
 
@@ -782,7 +786,7 @@ func TestAccountStatusImportsActiveAccount(t *testing.T) {
 	if len(st.Accounts) != 1 || !st.Accounts[0].Active {
 		t.Fatalf("应把在用的账号导入库: %+v", st.Accounts)
 	}
-	if back, _ := loadAccountVault(); back.activeID("tok-existing") == "" {
+	if back, _ := loadAccountVault(m.crypt); back.activeID("tok-existing") == "" {
 		t.Fatalf("库未落盘: %+v", back)
 	}
 	// 再查一次不应重复导入。

@@ -13,18 +13,24 @@ import (
 	"strings"
 )
 
-// secret.go —— 快捷指令「命令内容」的落盘加密（AES-256-GCM）与主密钥管理。
+// secret.go —— 落盘加密（AES-256-GCM）与主密钥管理。当前两处用到它：
+//
+//   - 快捷指令的「命令内容」（quickcmds.go，逐条一个信封，名称/开关仍是明文）；
+//   - 控制台的 **DeepSeek 账号库**（accountvault.go，整份文档一个信封）。
 //
 // 参考实现：terminal / webssh 两个项目的同名文件（`secret.go` / `internal/secret`）。
 //
 // **威胁模型（如实写清，别夸大）**：这一层防的是「拿到磁盘快照 / 备份 / 卷拷贝的人直接
-// 读到明文命令」。它**不防**「已经能以同权限读取数据目录的攻击者」——master.key 就躺在
-// 密文旁边，能读密文的人多半也能读密钥。想避免密钥与密文同放，用 HARNESS_MASTER_KEY
+// 读到明文命令 / 账号 token」。它**不防**「已经能以同权限读取数据目录的攻击者」——master.key
+// 就躺在密文旁边，能读密文的人多半也能读密钥。想避免密钥与密文同放，用 HARNESS_MASTER_KEY
 // 从外部注入（平台启动脚本 / 容器 secret 提供），这样数据目录的备份里就没有可用密钥。
+// 也**不防** dsh 侧那份 `.credentials.yaml`：那个文件必须明文（dsh 逐字读 payload 里的 token
+// 当 Bearer 用，塞密文进去等于把密文发给平台），见 accountvault.go 的说明。
 //
 // AAD 绑定 `harness:v1:quickcmd:<指令 id>:<作用域>`：把某条指令的密文剪到另一条指令上
 // 会直接解密失败（GCM 的认证标签覆盖 AAD），而不是悄悄把甲的命令接到乙的按钮上（按钮上
-// 写的是乙的名字，点下去跑的是甲的内容）。
+// 写的是乙的名字，点下去跑的是甲的内容）。账号库用 `harness:v1:accountvault:<作用域>`，
+// 于是两份文件之间剪贴密文同样解不开（见 accountVaultAADField）。
 
 const (
 	// masterKeyLen 是 AES-256 的密钥长度。

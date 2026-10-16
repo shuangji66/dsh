@@ -123,6 +123,12 @@ type RuntimeEnv struct {
 	Lang          string
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（DataDir/quickcmds.json）
 	SessionDir    string // 终端会话临时镜像目录（DataDir/terminal-sessions，停止时整目录清除）
+	// MasterKey / MasterKeyFile：快捷指令「命令内容」加密用的主密钥（见 secret.go）。
+	// MasterKey 来自 HARNESS_MASTER_KEY（外部注入，优先），它不是路径而是密钥本身——
+	// 「不让密钥与密文同放」靠它；MasterKeyFile 恒为 DataDir/master.key（缺失时自动生成 0600），
+	// 与其它后端自产文件一样只跟着 DataDir 走（AGENTS.md 规则 2）。
+	MasterKey     string
+	MasterKeyFile string
 	// ProxySock/ProxyBaseURL 是反代的「子路径挂载」监听：平台网关（fnOS
 	// open-gateway）把 http://<fnip>:<port>/app/Harness/dsh 整段转发到该 unix
 	// socket，反代剥掉前缀后再转发给 dsh，于是 dsh 前端按文档相对路径发起的
@@ -196,6 +202,10 @@ func loadRuntimeEnv() RuntimeEnv {
 		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
 		QuickCmdsFile: filepath.Join(dataDir, "quickcmds.json"),
 		SessionDir:    filepath.Join(dataDir, "terminal-sessions"),
+		// 主密钥：优先 HARNESS_MASTER_KEY（外部注入的 32 字节 base64/hex），
+		// 否则用数据目录里的 master.key（缺失时自动生成 0600）。
+		MasterKey:     os.Getenv("HARNESS_MASTER_KEY"),
+		MasterKeyFile: filepath.Join(dataDir, masterKeyFileName),
 		ProxySock:     envOr("HARNESS_PROXY_SOCK", proxySock),
 		// 默认挂在控制台 baseurl（/app/Harness）之下的一层：控制台 SPA 走 admin
 		// socket 占据 /app/Harness，dsh GUI 走 dsh.sock 占据 /app/Harness/dsh，

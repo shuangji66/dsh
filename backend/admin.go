@@ -32,10 +32,15 @@ type AdminMux struct {
 	// boot 是启动阶段状态机：反代用它决定等待页/放行，设置页切换反代端口时
 	// 重建监听也要复用它（见 rebindProxyPort）。
 	boot *bootState
+	// crypt 是快捷指令命令内容的落盘加密器（AES-256-GCM，见 secret.go）。
+	// **可能为 nil**：主密钥读不到/解不出时进程照常启动（控制台是这个 NAS 的带外访问
+	// 入口，不该为一条快捷指令把整个控制台停掉），但写路径一律拒绝，绝不退化成写明文。
+	crypt *cryptor
 }
 
-// newAdminMux wires the admin SPA mux onto the unix socket.
-func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManager, boot *bootState) *AdminMux {
+// newAdminMux wires the admin SPA mux onto the unix socket. crypt 可以为 nil，
+// 语义见 AdminMux.crypt。
+func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManager, boot *bootState, crypt *cryptor) *AdminMux {
 	if boot == nil {
 		boot = newBootState()
 	}
@@ -47,6 +52,7 @@ func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManag
 		update:   upd,
 		sessions: NewSessionManager(renv),
 		boot:     boot,
+		crypt:    crypt,
 	}
 }
 

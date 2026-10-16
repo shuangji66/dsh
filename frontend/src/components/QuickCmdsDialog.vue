@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
@@ -9,6 +9,8 @@ const props = defineProps<{
   visible: boolean
   commands: QuickCmd[]
   loading?: boolean
+  /** 加载失败：列表可能不是服务端真实内容，此时禁止增删改（后端是整表覆盖）。 */
+  failed?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -18,9 +20,18 @@ const emit = defineEmits<{
   (e: 'delete', cmd: QuickCmd): void
   (e: 'run', cmd: QuickCmd): void
   (e: 'reorder', ordered: QuickCmd[]): void
+  (e: 'retry'): void
 }>()
 
 const { t } = useI18n()
+
+/**
+ * 只有**成功加载过**才允许改动。
+ *
+ * 后端是「整表保存」：本地列表还没拿到（加载中），或拿到的是加载失败后留下的上一次结果，
+ * 这时新增/删除再保存上去，等于用本地那一份覆盖掉服务端已有的全部指令。加载中同样禁用。
+ */
+const ready = computed(() => !props.loading && !props.failed)
 
 const open = ref(props.visible)
 const reordering = ref(false)
@@ -81,7 +92,13 @@ function moveDown(idx: number) {
                只是图标不同），右侧留出 pr-14 给绝对定位的 X，避免两个按钮叠在一起。 -->
           <div class="flex items-center justify-between px-5 py-3 pr-14 border-b border-line dark:border-[#2A2A32] shrink-0">
             <h3 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('qc_title') }}</h3>
-            <button class="g-btn-secondary !h-8 !w-8 !p-0" :title="t('qc_add_title')" :aria-label="t('qc_add_title')" @click="emit('add')">
+            <button
+              class="g-btn-secondary !h-8 !w-8 !p-0"
+              :title="t('qc_add_title')"
+              :aria-label="t('qc_add_title')"
+              :disabled="!ready"
+              @click="emit('add')"
+            >
               <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
             </button>
           </div>
@@ -91,75 +108,84 @@ function moveDown(idx: number) {
             <div v-if="props.loading" class="text-sm text-ink-soft dark:text-[#8A8A92] text-center py-8">
               {{ t('loading') }}
             </div>
+            <!-- 加载失败：**不能**退回「暂无快捷指令」——那会让用户以为自己的指令被删了，
+                 转头重建一份，而保存是整表覆盖，会把服务端那份盖掉。所以这里只有失败说明 +
+                 重试，列表整块不渲染（那份本地数据不可信，不该允许在它上面增删改）。 -->
+            <div v-else-if="props.failed" class="text-center py-8">
+              <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed">{{ t('qc_load_failed') }}</p>
+              <button class="g-btn-secondary mt-3" @click="emit('retry')">{{ t('qc_retry') }}</button>
+            </div>
             <div v-else-if="!props.commands.length" class="text-sm text-ink-soft dark:text-[#8A8A92] text-center py-8">
               {{ t('qc_empty') }}
             </div>
-            <div
-              v-for="(c, idx) in props.commands"
-              :key="c.id"
-              class="group rounded-lg border border-[#E8E8EC] dark:border-[#2A2A32] hover:border-brand/50 dark:hover:border-brand/50 cursor-pointer transition-colors"
-              :title="c.content"
-              @click="emit('run', c)"
-            >
-              <div class="px-3.5 py-2.5">
-                <!-- 第一行：命令名称 + 自动执行标签，右侧同一行右对齐四个图标按钮（编辑/删除/上移/下移）；
-                     紧凑化前「编辑/删除/上移/下移」独占第二行，卡片高度白白多一行 -->
-                <div class="flex items-center gap-2 min-w-0">
-                  <span class="min-w-0 text-sm font-semibold text-ink dark:text-white truncate">{{ c.name }}</span>
-                  <span
-                    v-if="c.auto"
-                    class="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
-                  >{{ t('qc_auto_tag') }}</span>
-                  <div class="flex-1"></div>
-                  <div class="flex items-center gap-1 shrink-0">
-                    <!-- 编辑（铅笔） -->
-                    <button class="g-btn-ghost !h-7 !px-2" @click.stop="emit('edit', c)">
-                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                      </svg>
-                    </button>
-                    <!-- 删除（垃圾桶，红色） -->
-                    <button
-                      class="g-btn-ghost !h-7 !px-2 !text-danger hover:!bg-danger/10"
-                      @click.stop="emit('delete', c)"
-                    >
-                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M3 6h18" />
-                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                        <path d="M10 11v6M14 11v6" />
-                        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                      </svg>
-                    </button>
-                    <!-- 上移（第一项不可上移） -->
-                    <button
-                      v-if="idx > 0"
-                      class="g-btn-ghost !h-7 !px-2"
-                      :title="t('qc_move_up')"
-                      :disabled="reordering"
-                      @click.stop="moveUp(idx)"
-                    >
-                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M18 15l-6-6-6 6" />
-                      </svg>
-                    </button>
-                    <!-- 下移（最后一项不可下移） -->
-                    <button
-                      v-if="idx < props.commands.length - 1"
-                      class="g-btn-ghost !h-7 !px-2"
-                      :title="t('qc_move_down')"
-                      :disabled="reordering"
-                      @click.stop="moveDown(idx)"
-                    >
-                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M6 9l6 6 6-6" />
-                      </svg>
-                    </button>
+            <template v-else>
+              <div
+                v-for="(c, idx) in props.commands"
+                :key="c.id"
+                class="group rounded-lg border border-[#E8E8EC] dark:border-[#2A2A32] hover:border-brand/50 dark:hover:border-brand/50 cursor-pointer transition-colors"
+                :title="c.content"
+                @click="emit('run', c)"
+              >
+                <div class="px-3.5 py-2.5">
+                  <!-- 第一行：命令名称 + 自动执行标签，右侧同一行右对齐四个图标按钮（编辑/删除/上移/下移）；
+                       紧凑化前「编辑/删除/上移/下移」独占第二行，卡片高度白白多一行 -->
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="min-w-0 text-sm font-semibold text-ink dark:text-white truncate">{{ c.name }}</span>
+                    <span
+                      v-if="c.auto"
+                      class="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand"
+                    >{{ t('qc_auto_tag') }}</span>
+                    <div class="flex-1"></div>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <!-- 编辑（铅笔） -->
+                      <button class="g-btn-ghost !h-7 !px-2" @click.stop="emit('edit', c)">
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                        </svg>
+                      </button>
+                      <!-- 删除（垃圾桶，红色） -->
+                      <button
+                        class="g-btn-ghost !h-7 !px-2 !text-danger hover:!bg-danger/10"
+                        @click.stop="emit('delete', c)"
+                      >
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M3 6h18" />
+                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                          <path d="M10 11v6M14 11v6" />
+                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                        </svg>
+                      </button>
+                      <!-- 上移（第一项不可上移） -->
+                      <button
+                        v-if="idx > 0"
+                        class="g-btn-ghost !h-7 !px-2"
+                        :title="t('qc_move_up')"
+                        :disabled="reordering"
+                        @click.stop="moveUp(idx)"
+                      >
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M18 15l-6-6-6 6" />
+                        </svg>
+                      </button>
+                      <!-- 下移（最后一项不可下移） -->
+                      <button
+                        v-if="idx < props.commands.length - 1"
+                        class="g-btn-ghost !h-7 !px-2"
+                        :title="t('qc_move_down')"
+                        :disabled="reordering"
+                        @click.stop="moveDown(idx)"
+                      >
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M6 9l6 6 6-6" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
+                  <!-- 命令内容：单行省略，绝不溢出卡片 -->
+                  <p class="mt-1 text-xs font-mono text-ink-soft dark:text-[#A6A6AD] truncate">{{ c.content }}</p>
                 </div>
-                <!-- 命令内容：单行省略，绝不溢出卡片 -->
-                <p class="mt-1 text-xs font-mono text-ink-soft dark:text-[#A6A6AD] truncate">{{ c.content }}</p>
               </div>
-            </div>
+            </template>
           </div>
         </div>
       </div>

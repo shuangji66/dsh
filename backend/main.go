@@ -141,9 +141,24 @@ func main() {
 	// 巡检并清理陈旧的 dsh 写锁（持有者已死）：这类锁会让插件列表/安装白等 120 秒
 	// 再失败，见 cleanStaleProfileLocks。
 	dsh.startStaleLockWatch()
+
+	// 快捷指令命令内容的加密（主密钥缺失时自动生成 0600 的 master.key，见 secret.go）。
+	// 失败**不退出**：控制台是这个 NAS 的带外访问入口，为一条快捷指令的密钥把整个控制台
+	// 停掉不划算——照常启动，但快捷指令的保存会明确报错，绝不退化成写明文（见 quickcmds.go）。
+	crypt, cryptErr := loadCryptor(masterKeyPath(&renv), renv.MasterKey)
+	if cryptErr != nil {
+		logError("[quickcmds] command content encryption unavailable: %v - saving quick commands will fail", cryptErr)
+	}
+	// 一次性迁移：把旧版本留在磁盘上的**明文**命令内容加密（见 migrateQuickCmdsAtStartup）。
+	// 放在这里而不是等用户打开弹窗：前端只在弹窗打开时才加载列表，用户几个月不点它，
+	// 明文就会一直躺在磁盘上。失败只记日志、不拦住启动。
+	if merr := migrateQuickCmdsAtStartup(&renv, crypt); merr != nil {
+		logWarn("[quickcmds] migrating plaintext command contents failed (will retry when the dialog is opened or on the next start): %v", merr)
+	}
+
 	// 启动阶段状态机在此创建：反代（两条监听）与设置页的端口切换都要用它。
 	boot := newBootState()
-	admin := newAdminMux(&renv, dsh, auth, upd, boot)
+	admin := newAdminMux(&renv, dsh, auth, upd, boot, crypt)
 	admin.SetSPA(embeddedFrontend())
 
 	// 准备终端会话临时镜像目录（进程停止时整目录清除）

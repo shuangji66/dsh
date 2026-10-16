@@ -49,7 +49,12 @@
 - **移动端滚动区** — 页面滚动区止于底部导航栏上沿（滚动条不会滑进/压在 fixed 底栏上），
   底栏恒定贴底不动；软键盘弹起时底栏隐去，滚动区与终端页一起贴到键盘上沿。
 - **快捷指令** — 持久化的终端快捷命令（数据目录下的 `quickcmds.json`）；列表弹窗为紧凑卡片
-  （新增/关闭为纯图标按钮，编辑/删除/上移/下移与命令名同一行）。
+  （新增/关闭为纯图标按钮，编辑/删除/上移/下移与命令名同一行）。**命令内容加密落盘**
+  （AES-256-GCM，密钥为 `master.key` 或 `HARNESS_MASTER_KEY`）：快捷指令里常放
+  `mysql -uroot -p<密码>`、带 token 的 curl 这类东西，拿到磁盘快照/备份的人不该顺手读到它们；
+  旧版本留在盘上的明文会在启动时（以及第一次打开弹窗时）自动加密重写，名称仍是明文以便排查。
+  加载失败时弹窗给「重试」而不是显示「暂无快捷指令」—— 后端是整表保存，让用户在不可信的
+  空列表上新增会把服务端已有的指令整表覆盖掉。
 - **日志** — 查看 / 下载 / SSE 实时流式输出 dsh 与主进程日志（数据目录下的 `harness.log`）。
   后端日志统一走 `backend/logging.go` 这一个出口，分三级：`[INFO]`（白）/ `[WARN]`（黄）/
   `[ERROR]`（红）；终端（stdout 是 TTY）用 ANSI 着色，日志文件保持纯文本，由控制台日志页
@@ -107,7 +112,8 @@
 │   ├── server.go            # dsh 服务多版本：镜像源列表 / npm 安装 / 取消 / 删除 / 切换
 │   ├── market.go            # 插件市场（dshmarket）：检测 / 安装 / 更新 / 卸载
 │   ├── install.go           # node-pty 自动安装
-│   ├── quickcmds.go         # 终端快捷指令持久化 API
+│   ├── quickcmds.go         # 终端快捷指令持久化 API（命令内容加密落盘 + 旧明文迁移）
+│   ├── secret.go            # 命令内容加密：AES-256-GCM 信封 + 主密钥（master.key / HARNESS_MASTER_KEY）
 │   ├── visitors.go          # 访客跟踪 / 踢出 / SSE
 │   ├── sse.go               # Server-Sent Events 推送
 │   └── fnos.go              # fnOS open-gateway 客户端（路径转换等）
@@ -198,6 +204,7 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_PROXY_SOCK` | 反向代理的子路径挂载 Unix socket（空或 `off` 关闭） | `$TRIM_APPDEST/dsh.sock` |
 | `HARNESS_PROXY_BASEURL` | 该 socket 对外占据的子路径（反代剥掉后再转发给 dsh） | `/app/Harness/dsh` |
 | `HARNESS_DSH_DIAG` | 设为 `1`/`true`/`yes` 时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
+| `HARNESS_MASTER_KEY` | 快捷指令命令内容的**主密钥**（32 字节 base64 或 hex）。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
 | `PROXY_PORT` | **已废弃**：反代监听端口改为设置页配置项（`config.json` 的 `proxyPort`，默认 `3079`），此环境变量不再生效 | — |
 | `dsh_port` / `TARGET_PORT` | dsh web 端口 | `13080` |
 | `proxy_mode` | 设为 `1` 时默认打开设置页的「代理dsh」（只影响 dsh 进程自身的出网） | `0` |
@@ -217,7 +224,8 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `<数据目录>/harness.pid` | harness 控制台自身 PID（恒不变） |
 | `<数据目录>/dsh.pid` | dsh 服务实时 PID（随 dsh 启动/自重启刷新，dsh 停止时移除） |
 | `<数据目录>/session.key` | 会话 cookie 签名密钥（0600，跨重启保住登录态） |
-| `<数据目录>/quickcmds.json` | 终端快捷指令持久化文件 |
+| `<数据目录>/quickcmds.json` | 终端快捷指令持久化文件（0600；命令内容是密文，名称/是否自动回车仍是明文） |
+| `<数据目录>/master.key` | 快捷指令命令内容的加密主密钥（0600，缺失时自动生成）；删掉它 = 已存的命令内容再也解不开 |
 | `<数据目录>/terminal-sessions/` | 终端会话历史临时镜像（停止时整目录清除） |
 | `<数据目录>/backup/` | 备份包：`dsh-data-*`（用户主动的 dsh 数据备份）与 `pending/` 下「已下载待安装」的 harness 更新包 |
 | `<数据目录>/server/<版本>/` | 每个已安装的 dsh 版本（`npm install --prefix` 装出来的目录，可用版本就在 `node_modules/.bin/dsh`） |

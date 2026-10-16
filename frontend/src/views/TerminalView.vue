@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import '@xterm/xterm/css/xterm.css'
-import { useI18n } from '@/composables/useI18n'
+import { useI18n, uiErrText } from '@/composables/useI18n'
 import { useTheme } from '@/composables/useTheme'
 import { useToastStore } from '@/stores/toast'
 import { api, type QuickCmd } from '@/serverapi'
@@ -140,6 +140,9 @@ const quickCmds = ref<QuickCmd[]>([])
 const deleteTarget = ref<QuickCmd | null>(null)
 const deleteDialogVisible = ref(false)
 const cmdLoading = ref(false)
+// 加载失败标志：后端返回的是整表，**没加载成功就不能改**（本地那份可能是空的/过期的，
+// 保存上去等于用一条指令覆盖掉服务端已有的全部指令），所以弹窗要据此禁用「新增」并给重试入口。
+const cmdFailed = ref(false)
 
 function wsUrl(): string {
   const u = new URL(wsEndpoint, location.href)
@@ -698,11 +701,16 @@ function clearTerminal() {
 // ---------- 快捷指令：列表 / 新增 / 编辑 / 删除 / 执行 ----------
 async function loadQuickCmds() {
   cmdLoading.value = true
+  cmdFailed.value = false
   try {
     const res = await api.listQuickCmds()
     quickCmds.value = res.commands || []
   } catch (e) {
-    toast.show(t('qc_load_failed'), 'error')
+    // 失败要**留下痕迹**：不能只在 toast 里闪一下，然后让弹窗显示「暂无快捷指令」——
+    // 那会让用户以为自己的指令被删了，转头重建一份（而保存是整体覆盖，会把服务端那份盖掉）。
+    // 文案带后端原文（诊断信息，如「解密失败」），既有诊断价值又不随语言漂移。
+    cmdFailed.value = true
+    toast.show(uiErrText(e, t('qc_load_failed')), 'error')
     console.warn('load quick cmds error:', e)
   } finally {
     cmdLoading.value = false
@@ -917,11 +925,13 @@ function showToast(msg: string) {
     v-model:visible="quickCmdsVisible"
     :commands="quickCmds"
     :loading="cmdLoading"
+    :failed="cmdFailed"
     @add="onQuickCmdAdd"
     @edit="onQuickCmdEdit"
     @delete="onQuickCmdDelete"
     @run="runQuickCmd"
     @reorder="onQuickCmdReorder"
+    @retry="loadQuickCmds"
   />
 
   <!-- 新增 / 编辑快捷指令弹窗 -->

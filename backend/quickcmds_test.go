@@ -9,6 +9,9 @@ package main
 // 说明：本包内 saveQuickCmds 由 quickCmdsMu 串行化，所以「同一进程内两次保存互相
 // 覆盖临时文件」在今天并非可直接触发的路径；这次改动消除的是共用名字这个隐患
 // （跨进程/未来去掉锁的实现都会踩），同时把权限收到 0600 并补上 fsync。
+//
+// 命令内容**加密落盘**之后（见 secret.go / quickcmds_crypt_test.go），落盘与读回
+// 都要带 crypt；本文件只关心原子写与权限，因此用 testCryptor(t) 造一把临时主密钥。
 
 import (
 	"encoding/json"
@@ -24,8 +27,9 @@ import (
 func TestSaveQuickCmdsUsesPrivateModeAndCleansUp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "quickcmds.json")
+	crypt := testCryptor(t)
 	cmds := []QuickCmd{{ID: "1", Name: "列表", Content: "ls -la", Auto: true}}
-	if err := saveQuickCmds(path, cmds); err != nil {
+	if err := saveQuickCmds(path, crypt, cmds); err != nil {
 		t.Fatalf("saveQuickCmds: %v", err)
 	}
 
@@ -47,7 +51,7 @@ func TestSaveQuickCmdsUsesPrivateModeAndCleansUp(t *testing.T) {
 		}
 	}
 
-	got, err := loadQuickCmds(path)
+	got, err := loadQuickCmds(path, crypt)
 	if err != nil {
 		t.Fatalf("loadQuickCmds: %v", err)
 	}
@@ -66,7 +70,8 @@ func TestSaveQuickCmdsCleansTempFileOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := saveQuickCmds(path, []QuickCmd{{ID: "1", Name: "n", Content: "ls"}}); err == nil {
+	crypt := testCryptor(t)
+	if err := saveQuickCmds(path, crypt, []QuickCmd{{ID: "1", Name: "n", Content: "ls"}}); err == nil {
 		t.Fatal("rename 到目录上应失败")
 	}
 
@@ -86,6 +91,7 @@ func TestSaveQuickCmdsCleansTempFileOnFailure(t *testing.T) {
 func TestSaveQuickCmdsConcurrentStaysParseable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "quickcmds.json")
+	crypt := testCryptor(t)
 
 	const writers, rounds = 6, 15
 	var wg sync.WaitGroup
@@ -99,7 +105,7 @@ func TestSaveQuickCmdsConcurrentStaysParseable(t *testing.T) {
 					Name:    "n",
 					Content: strings.Repeat("x", 2048),
 				}}
-				if err := saveQuickCmds(path, cmds); err != nil {
+				if err := saveQuickCmds(path, crypt, cmds); err != nil {
 					t.Errorf("并发保存失败: %v", err)
 					return
 				}
@@ -143,7 +149,9 @@ func TestSaveQuickCmdsConcurrentStaysParseable(t *testing.T) {
 	default:
 	}
 
-	if _, err := loadQuickCmds(path); err != nil {
+	if _, err := loadQuickCmds(path, crypt); err != nil {
 		t.Fatalf("最终文件不可解析: %v", err)
 	}
 }
+
+// 落盘文件的权限与 config.json 同档（0600），且不残留任何临时文件。

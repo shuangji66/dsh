@@ -53,9 +53,12 @@ function onSave() {
   nameError.value = name.value.trim() ? '' : t('qc_name_required')
   contentError.value = content.value.trim() ? '' : t('qc_content_required')
   if (nameError.value || contentError.value) return
+  // 名称 trim，**命令内容原样提交**：前导/行尾空格与换行都是命令的一部分（多行脚本、
+  // heredoc、`printf '  x'`），trim 掉就是改用户写下的命令，也会让后端「加密前后内容逐字节
+  // 不变」那条承诺失去意义。这里只判「全是空白 = 空」（与后端 sanitizeQuickCmds 同一口径）。
   emit('save', {
     name: name.value.trim(),
-    content: content.value.trim(),
+    content: content.value,
     auto: auto.value
   })
   close()

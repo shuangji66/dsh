@@ -186,7 +186,28 @@
   平台 token。凭据记录键名/格式与 `0.2.0-rc.2` 一致（同 `credentialKey(...)`），写入对老版本
   同样成立（更早没有该插件的版本只当普通记录存着）。回归测试见 `backend/account_test.go`。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
-- `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`）。
+- `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`，**命令内容加密落盘**）。
+  - 磁盘格式**版本 2**：`content` 是密文信封 `{"v":1,"ct":"…"}`，`id` / `name` / `auto` 仍是
+    明文（用户往快捷指令里放的常是 `mysql -uroot -p<密码>`、带 token 的 curl，拿到磁盘快照/
+    备份的人不该顺手读到；名称是给人看的标签，加密它反而让文件没法排查）。**加密只在落盘这
+    一层**：接口收发的始终是明文 `content`，前端不需要知道这件事。
+  - 密钥在 `secret.go`：AES-256-GCM，主密钥取 `HARNESS_MASTER_KEY`（外部注入，32 字节
+    base64/hex）或数据目录下的 `master.key`（自动生成 0600）。**主密钥不可用时进程照常启动，
+    但写路径一律拒绝**（绝不退化成写明文），见 `AdminMux.crypt` 可为 nil 的语义。
+  - **旧明文文件会被主动迁移**（读时就地加密重写 + 启动时再迁一次
+    `migrateQuickCmdsAtStartup`）：前端只在打开弹窗时才加载列表，光靠读时迁移兜不住「用户
+    几个月没点过它」。迁移不了（空内容/加密失败）就换成**加密后的**占位文案并关掉 `auto`；
+    连占位都写不出（或主密钥不可用）时**报错且一个字节都不写**。
+  - AAD 绑定 `harness:v1:quickcmd:<指令 id>:<作用域>`：同一张表里两条指令的密文互换位置会
+    直接解密失败；`id` 非法（含冒号/空格）或表内重复时由 `reassignQuickCmdID` 重发（**内容
+    跟着新 id 重新加密**，否则 AAD 立刻对不上）。
+  - **`quickCmdsMu` 必须覆盖整段「读 → 迁移 → 重写」**，不只是单次写：迁移那份过期快照会把
+    刚保存的表整表盖回去（前端已乐观更新，用户看到的是「命令莫名消失」）。纪律是**不许重入**。
+  - 名称 trim、**命令内容原样保留**（只判「全是空白 = 空」）：内容里的前导/行尾空白与换行都是
+    命令的一部分，trim 掉会让「加密前后逐字节不变」这条承诺失去意义。前端
+    `QuickCmdEditDialog` 也只 trim 名称，两边口径必须一致。
+  - 回归测试见 `backend/quickcmds_crypt_test.go` / `backend/secret_test.go`（密文落盘、明文
+    迁移、占位替换、解密失败必须报错、丢失更新、id 重发）。
 - `fnos.go` — fnOS open-gateway 客户端（`/var/run/trim_open_gateway_apiscope.socket`）。
 
 **前端（Vue 3，`frontend/`）**

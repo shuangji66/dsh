@@ -42,7 +42,7 @@ func writeAccountCreds(t *testing.T, body string) string {
 func newAccountTestMux(t *testing.T, home string) *AdminMux {
 	t.Helper()
 	renv := &RuntimeEnv{Home: home, AdminBaseURL: "/app/Harness", ProxySock: "/x/dsh.sock", ProxyBaseURL: "/app/Harness/dsh"}
-	return newAdminMux(renv, &DshManager{renv: renv, logf: func(logLevel, string, ...interface{}) {}}, nil, nil, nil)
+	return newAdminMux(renv, &DshManager{renv: renv, logf: func(logLevel, string, ...interface{}) {}}, nil, nil, nil, nil)
 }
 
 // 记录写入：两条记录都要出现，且除它们之外的字节逐字不变；块式旧记录要能被删干净。

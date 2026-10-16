@@ -481,67 +481,32 @@ func injectIntoHTML(body []byte, diag bool) []byte {
 	return []byte(inject + s)
 }
 
-// nativeFunctionFormatPair 修复 dsh 的 V8-only 原生函数格式判断。
+// 转发路径上不再改写 JS 产物，这里保留一段来龙去脉，避免以后有人重新发明。
 //
-// dsh-util-values 的 hasIntrinsicConstructor（被内联进 dsh-api-session-controller
-// 客户端 bundle）用精确字符串比较判断“这是不是本 realm 的原生构造器”：
+// 历史：dsh 客户端 bundle 里曾有一处只适配 V8 的原生函数格式判断
 //
 //	Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`
 //
-// 该字面量只适配 V8 的单行格式。SpiderMonkey（Firefox/Zen）把原生函数源码格式化为
-// 多行（实测 Firefox 156："function Object() {\n    [native code]\n}"），于是精确比较
-// 恒为 false → isIntrinsicObjectPrototype 对任何普通对象都返回 false →
-// snapshotJsonValue 对普通 JSON 返回 undefined → 客户端 assistant-stream 校验抛
-// TypeError("Assistant stream raw chunk must be a lossless JSON object")，历史渲染在
-// 首条消息前中止，界面停在“载入历史…”。
+// SpiderMonkey（Firefox / Zen）与 JavaScriptCore（Safari / WebKit）把原生函数源码格式化为
+// 多行，精确比较恒为 false → isIntrinsicObjectPrototype 对普通对象返回 false →
+// snapshotJsonValue 返回 undefined → 客户端 assistant-stream 校验抛
+// TypeError("Assistant stream raw chunk must be a lossless JSON object")，界面停在
+// 「载入历史…」。反代曾把该比较替换成「运行时按 window.__DSH_BROWSER_COMPAT__ 折叠空白」
+// 的等价表达式（替换结果与开关状态无关，因此对 immutable 缓存安全）。
 //
-// 该错误是普通 TypeError，不是 RemoteError，因此 doOpen() 的 catch 不会把它归类为
-// remote failure（isRemoteFailure 只看 isDSHRemoteError 标记），openState 就永久停在
-// "loading"，且没有任何重试路径 —— 这正是刷新/切换会话才能恢复的原因。
+// 移除原因（0.2.1-alpha.5 起核对）：**上游已自行修掉这处判断**，客户端产物现在写成引擎
+// 无关的形式
 //
-// 修复：比较前把空白折叠为单个空格，使各引擎的原生函数格式统一到 V8 形态。该比较是
-// “重复安装/跨 realm”启发式而非安全边界，折叠空白只会让原本在 V8 下本就通过的值继续
-// 通过，不会放宽任何实际约束。
-const (
-	nativeFnCheckV8Only = "Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`"
-	// nativeFnCheckGated 是同一比较的“运行时开关”形态：
-	//   - 开关关闭（未定义或非 true）时求值为原始表达式，与官方 dsh 完全一致；
-	//   - 开关开启时先折叠空白再比较，修复 SpiderMonkey / JavaScriptCore。
-	// 该替换本身与开关状态无关、对同一份 bundle 恒定，因此 bundle 字节在开关切换
-	// 前后保持不变（对 immutable 缓存安全）；真正的开关判定发生在浏览器运行时，
-	// 由 HTML 注入的 window.__DSH_BROWSER_COMPAT__ 提供。
-	nativeFnCheckGated = "(globalThis.__DSH_BROWSER_COMPAT__ === true ? Function.prototype.toString.call(constructor).replace(/\\s+/gu, \" \") : Function.prototype.toString.call(constructor)) === `function ${name}() { [native code] }`"
-)
-
-// rewriteJSBundle 对转发路径上的 JS 产物做一类改写：原生函数格式判断的引擎兼容修复
-// （Firefox/Zen 历史不加载的直接原因）。
+//	Function.prototype.toString.call(constructor) === Function.prototype.toString.call(name === "Array" ? Array : Object)
 //
-// 该改写以“锚点未命中则原样返回”为前提，保证 dsh 版本变化时只会退化为不生效，
-// 而不会破坏页面。
+// （见 dsh-api-session-controller / dsh-experimental-session-inspector 的 client.js）。
+// 原锚点在 0.2.x 的客户端产物里零命中（0.2.0-rc.2 / 0.2.1-alpha.4 / 0.2.1-alpha.5 实测均无，
+// 带该字面量的只剩服务端产物），而改写以「锚点未命中即原样返回」为前提，于是长期静默空转
+// —— 留着只会让人误以为「浏览器兼容模式」还在替某个引擎打补丁。
 //
-// 已移除的两处历史改写（均为恒不生效的死代码，且其目标已由别的机制覆盖）：
-//   - settings 作用域字面量替换（`connection.isLoopback ? "host" : "memory"` → `"host"`）：
-//     该形态仅存在于 dsh ≤0.1.1-rc.2；自 0.1.2-alpha.5 起改为
-//     `ctx.remote.$host.isLoopback ? "host" : "memory"`，四处 pattern 全部零匹配。
-//     而 dsh ≥0.1.2-alpha.5 的 `$host.isLoopback` 派生自 `connection.isLoopback`，
-//     已由 bootstrapScript 的 ownsHost 注入置为 true，无需再改写字节。
-//     注：dsh-client-ui-settings-general 的同名判断是 `? new SettingsDocumentStore(...)
-//     : void 0` 形态，本就不在替换范围内。
-//   - 会话窗口自愈探针（依赖旧版 sessions.list 快照的 `current` 字段与
-//     `followCurrent()`）：新版 session-controller 已删除该字段与方法，改用显式
-//     sessions.retain(target, {source:"mainView"}) 打开窗口，探针入口条件恒不成立。
-func rewriteJSBundle(buf []byte) []byte {
-	s := string(buf)
-
-	// 引擎兼容修复：替换为“运行时受开关控制”的等价表达式。
-	// 替换结果与开关状态无关（同一份 bundle 恒定输出），因此对 immutable 缓存安全；
-	// 是否真正归一化空白由 HTML 注入的 window.__DSH_BROWSER_COMPAT__ 在运行时决定。
-	if strings.Contains(s, nativeFnCheckV8Only) {
-		s = strings.ReplaceAll(s, nativeFnCheckV8Only, nativeFnCheckGated)
-	}
-
-	return []byte(s)
-}
+// 反代仍然注入 window.__DSH_BROWSER_COMPAT__（见 browserCompatFlagScript）：开关还管着
+// bootstrapScript 第 6 段的 iOS 模型菜单失焦守卫。将来若真要再改写 bundle 字节，先复核
+// 它的缓存语义（bundle 带一年期 immutable，开关状态因此只能放在每次回源的 HTML 里）。
 
 // waitingPageHTML 是反代在「dsh 尚未就绪」时对外提供的等待页。
 //
@@ -1298,10 +1263,10 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request, via
 // dsh 端口切换（设置页改 dshPort）不需要重建 transport：连接按 hostPort 复用，
 // 旧 hostPort 上的空闲连接在 IdleConnTimeout 后自然过期，新端口的连接按需新建。
 //
-// DisableCompression 必须保持 true：反代要自行改写 HTML / JS（见 forward 里的
-// encoded 判断与 injectIntoHTML / rewriteJSBundle），若让 Go 自动补
-// Accept-Encoding: gzip 并透明解压，改写面对的就是解压后的字节、还会与 dsh 原本的
-// Content-Encoding 语义打架；反代已显式发 accept-encoding: identity。
+// DisableCompression 必须保持 true：反代要自行改写 HTML（见 forward 里的 encoded
+// 判断与 injectIntoHTML），若让 Go 自动补 Accept-Encoding: gzip 并透明解压，改写面对
+// 的就是解压后的字节、还会与 dsh 原本的 Content-Encoding 语义打架；反代已显式发
+// accept-encoding: identity。
 var proxyTransport = &http.Transport{
 	DisableCompression: true,
 	// dsh 前端会并发拉取多个插件 bundle、SSE 与轮询请求，单 host 的空闲连接给足，
@@ -1396,27 +1361,24 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 		return
 	}
 
+	// 只有 HTML 需要改写（注入兼容开关标记 + bootstrapScript + 诊断打点），JS 产物一律
+	// 原样透传：反代已不再改写 bundle 字节（原因见上面那段说明），为原样写回而把一份
+	// 几百 KB 的 bundle 读进内存只是白付一次拷贝。
 	isHTML := strings.Contains(ct, "text/html")
-	isJS := strings.Contains(ct, "javascript") || strings.Contains(ct, "text/javascript")
 	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
 
-	if (isHTML || isJS) && ok && !encoded {
+	if isHTML && ok && !encoded {
 		body, rerr := io.ReadAll(resp.Body)
 		if rerr != nil {
 			// 上游中途断开（chunked 编码出错、dsh 被杀）时绝不能把已读到的截断字节当成
 			// 「完整响应」返回：下面会把 Content-Length 重设为读到的长度，客户端因此
-			// 拿到一份看起来完整、实际被截断的 HTML/JS。而插件 bundle 带一年期
-			// immutable 缓存，浏览器会把坏字节长期留在本地（普通刷新不回源），故障
-			// 会固化成「清缓存才能恢复」。这里宁可 502。
+			// 拿到一份看起来完整、实际被截断的页面 —— 注入脚本被截掉半截、界面白屏，
+			// 而控制台毫无线索。这里宁可 502。
 			logWarn("[proxy] failed to read upstream body for %s: %v", r.URL.Path, rerr)
 			http.Error(w, "Bad upstream body", http.StatusBadGateway)
 			return
 		}
-		if isHTML {
-			body = injectIntoHTML(body, dshDiagEnabled(r))
-		} else if isJS {
-			body = rewriteJSBundle(body)
-		}
+		body = injectIntoHTML(body, dshDiagEnabled(r))
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)

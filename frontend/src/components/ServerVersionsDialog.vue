@@ -36,8 +36,31 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
-// 版本行 = 镜像源列表 + 本地独有版本（后端已合并、已过滤、已降序）。
+// 版本行 = 镜像源列表 + 本地独有版本（后端已合并、已过滤、已降序；
+// 停止维护的已装旧版排在最后并带 deprecated 标记）。
 const rows = computed<DshVersionEntry[]>(() => props.status?.versions ?? [])
+
+// 列表里版本号最高的一版（后端算好）：停止维护的旧版行只提供「切到它」这一个切换方向，
+// 永远不给「切到本版本」的入口 —— 切回旧版在后端也会被拒绝（见 server.go 的 Switch）。
+const latestVersion = computed(() => props.status?.latest || '')
+
+// 最新版那一行（用来判断它是否已经装在本地）：没装就没有可切换的目标 —— 那时旧版行
+// 不显示切换按钮，用户先到最新版那行点「下载」，装完再切。
+const latestEntry = computed(() => rows.value.find((r) => r.version === latestVersion.value) ?? null)
+
+// 当前正在使用的版本是不是「停止维护的旧版」：是的话，切换确认弹窗要额外说明
+// 「切走后无法再切回」，因为列表里不会再给这一版切换入口。
+const switchingFromDeprecated = computed(() => {
+  const cur = props.status?.selected || ''
+  return cur !== '' && rows.value.some((r) => r.version === cur && r.deprecated)
+})
+
+// 切换确认文案：从停止维护的旧版切走时，多一句「不能切回」的说明。
+const switchConfirmMessage = computed(() =>
+  switchingFromDeprecated.value
+    ? t('dsh_ver_switch_from_deprecated_msg', { v: pendingVersion.value, cur: props.status?.selected || '' })
+    : t('dsh_ver_switch_confirm_msg', { v: pendingVersion.value })
+)
 
 // 正在安装的那一份（同一时刻只有一个）：只有它这一行显示进度。
 const install = computed(() => props.status?.install ?? null)
@@ -200,10 +223,16 @@ const {
                       v-else-if="row.installed"
                       class="g-status bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]"
                     >{{ t('dsh_ver_installed') }}</span>
+                    <span
+                      v-if="row.deprecated"
+                      class="g-status bg-[#F59E0B]/10 text-[#B45309] dark:bg-[#F59E0B]/15 dark:text-[#FBBF24]"
+                    >{{ t('dsh_ver_deprecated') }}</span>
                   </div>
                 </div>
 
-                <!-- 行内操作：未安装 → 下载；已安装且非当前 → 切换 + 删除；安装中 → 取消 -->
+                <!-- 行内操作：未安装 → 下载；已安装且非当前 → 切换 + 删除；
+                     停止维护的旧版 → 当前正在用它时给「切到最新版」，否则只给「删除」；
+                     安装中 → 取消 -->
                 <div class="flex items-center gap-2 flex-shrink-0">
                   <template v-if="isInstalling(row.version)">
                     <button class="g-btn-danger h-8 px-3 text-xs" @click="cancelConfirm = true">
@@ -211,8 +240,16 @@ const {
                     </button>
                   </template>
                   <template v-else-if="row.installed">
+                    <!-- 停止维护的旧版：正在用它时只给「切到最新版」这一条路
+                         （列表里不允许切回旧版；后端 Switch 同样会拒绝）。 -->
                     <button
-                      v-if="!row.active"
+                      v-if="row.deprecated && row.active && latestVersion !== row.version && latestEntry?.installed"
+                      class="g-btn-secondary h-8 px-3 text-xs"
+                      :disabled="installing"
+                      @click="openSwitch(latestVersion)"
+                    >{{ t('dsh_ver_switch_to_latest', { v: latestVersion }) }}</button>
+                    <button
+                      v-if="!row.active && !row.deprecated"
                       class="g-btn-secondary h-8 px-3 text-xs"
                       :disabled="installing"
                       @click="openSwitch(row.version)"
@@ -293,7 +330,7 @@ const {
     <ConfirmDialog
       v-model:visible="switchConfirm"
       :title="t('dsh_ver_switch_confirm_title')"
-      :message="t('dsh_ver_switch_confirm_msg', { v: pendingVersion })"
+      :message="switchConfirmMessage"
       :confirm-text="t('dsh_ver_switch_confirm_ok')"
       :cancel-text="t('confirm_cancel')"
       @confirm="confirmSwitch"

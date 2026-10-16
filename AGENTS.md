@@ -118,12 +118,18 @@
   **dsh 服务更新与插件市场更新都不再走这里**（没有可下载的压缩包）。
 - `server.go` — **dsh 服务的多版本管理**：`${TRIM_PKGVAR}/server/<版本>/` 下的
   `npm install --prefix` 安装产物；镜像源取自 `npmMirrors`（阿里云 → 腾讯云 → 华为云，
-  不试官方源），版本列表按 `dshMinVersion`（**0.1.7-rc.1**）过滤，下载/删除/切换与
+  不试官方源），版本列表按 `dshMinVersion`（**0.2.0-rc.1**）过滤，下载/删除/切换与
   「未安装」状态都在这里。**版本号会变成目录名与 npm 参数**，一律先过
   `validVersionArg`（与市场版本共用；`newestVersion` 取「版本号最高的一版」，见 market.go）。
   **「有更新」的红点只看版本号大小**（列表里最高的一版比选中的高就亮），不区分 `dist-tags`
   —— 基准是列表最高版本（`newestOf`），标签只作为列表里的标注展示，见 `refreshDshStatus`。
   启动与 CLI 用选中版本的**绝对路径**（`DshManager.dshBinPath`）。
+  **低于 `dshMinVersion` 的已装旧版**走一条窄路：`filterDshVersions` 照旧把它们滤掉、
+  `Install` 照旧拒绝，但 `snapshot()` 会把本地装着的老版本以 `Deprecated` 补到列表**最底部**，
+  `Switch` 一律拒绝切过去（含从新版切回，错误码 `err_version_deprecated`），前端在那一行只给
+  「删除」和「切到已安装的最新版」。**别把这条拒绝或那段沉底排序去掉**：控制台不再维护 0.2.0
+  之前的客户端，但也不该让用户面对一个看不见、又删不掉的目录。回归测试见 `server_test.go`
+  的 `TestSnapshotPutsDeprecatedInstalledVersionsAtBottom` 与 `TestSwitchRejectsDeprecatedVersion`。
 - `market.go` — **插件市场（dshmarket）**：它是普通的 profile 插件（不是 dsh 包自带的
   bundle），检测靠 `dsh plugin --profile web list`，安装/更新/卸载靠
   `dsh plugin --profile web add|remove`，镜像源与 `server.go` 同一套；没有备份/回滚。
@@ -705,10 +711,10 @@
 - **dsh 的插件 bundle 带一年期 `immutable` 强缓存且无 `ETag`/`Last-Modified`** ——
   响应头为 `Cache-Control: public, max-age=31536000, immutable`；`rev` 由 dsh 自身生成、
   不随 harness 升级变化，且该路由严格校验 `rev`（改写/省略一律 404），故 URL 无法被
-  harness 击穿。**普通刷新不回源**，升级后必须清除浏览器缓存或强制刷新才能拿到新字节。
-  因此 `proxy.go` 里的注入刻意保持「与开关无关的恒定形态」，把开关状态放到每次回源的
-  HTML 中（`window.__DSH_BROWSER_COMPAT__`），详见 README「浏览器兼容模式」一节。
-  调试注入时：前端/注入改动看不到效果，先排查缓存，不要直接怀疑代码。
+  harness 击穿。**普通刷新不回源**：调 dsh 插件资源时看不到效果，先排查缓存，不要直接
+  怀疑代码。注意反代**已不再改写任何 JS 产物**（曾经的 V8-only 比较改写随 dsh 上游自修
+  整体移除，见 README「浏览器兼容模式」），现在只有 HTML 会被改写 —— 它每次刷新都回源，
+  注入的 `window.__DSH_BROWSER_COMPAT__` 等「切开关 → 普通刷新」即生效。
 - **控制台自己的前端资源缓存策略**（`admin.go` 的 `serveBytes`）—— 与上面 dsh 那套刻意相反，
   按「文件名有没有内容哈希」分成两类，**不要合并**：
   - `assets/**` 是 Vite 的内容哈希产物 → `public, max-age=31536000, immutable` 长期强缓存

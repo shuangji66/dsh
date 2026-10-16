@@ -79,8 +79,8 @@ const zh: Record<string, string> = {
   settings_dsh_mem_auto: '自动设置',
   settings_dsh_mem_auto_hint: '当前自动分配的堆内存上限，如 dsh 内存占用接近上限，建议手动增大上限避免频繁 GC',
   settings_browser_compat: '浏览器兼容模式',
-  settings_browser_compat_hint: '使用 Firefox / 苹果设备（WebKit 内核）的用户建议开启：修复会话历史无法加载，以及苹果设备上模型与推理等级无法切换。开启后建议清除浏览器缓存并刷新页面',
-  settings_browser_compat_saved: '已保存。刷新页面即可生效（iPhone 的模型菜单即刻生效）；若此前访问过，首次生效可能还需清除浏览器缓存或强制刷新（Ctrl+Shift+R）',
+  settings_browser_compat_hint: '使用苹果设备（iOS / WebKit）的用户建议开启：修复模型与推理等级菜单点选项没反应的问题。开启后刷新页面即可生效',
+  settings_browser_compat_saved: '已保存。刷新页面即可生效，无需清除浏览器缓存',
   settings_show_password: '显示密码',
   settings_hide_password: '隐藏密码',
   // 设置页卡片标题（六个卡片：代理 / 端口与兼容 / node 版本与内存 / 登录鉴权 / 快捷访问 / 控制台设置）
@@ -445,6 +445,9 @@ const zh: Record<string, string> = {
   dsh_ver_switch_confirm_title: '切换 dsh 版本',
   dsh_ver_switch_confirm_msg: '确定要切换到 dsh {v} 吗？切换会停止 dsh 服务并以该版本重新启动，期间服务短暂中断。',
   dsh_ver_switch_confirm_ok: '切换并重启',
+  dsh_ver_deprecated: '停止维护',
+  dsh_ver_switch_to_latest: '切换到 {v}',
+  dsh_ver_switch_from_deprecated_msg: '当前使用的 dsh {cur} 已停止维护，切换后无法再切回。确定切换到 dsh {v} 吗？切换会停止 dsh 服务并以该版本重新启动，期间服务短暂中断。',
 
   // 插件市场（dshmarket）：普通 profile 插件，未安装时由控制台装上
   market_dialog_title: '插件市场',
@@ -524,6 +527,7 @@ const zh: Record<string, string> = {
   err_version_invalid: '非法的版本号: {version}',
   err_version_installed: 'dsh {version} 已安装，无需重复下载',
   err_version_below_min: 'dsh {version} 低于控制台支持的最低版本 {min}',
+  err_version_deprecated: 'dsh {version} 已停止维护（低于控制台支持的最低版本 {min}），不能切换',
   err_version_not_installed: 'dsh {version} 尚未安装，请先下载',
   err_version_current: 'dsh {version} 已经是当前版本',
   err_version_in_use: 'dsh {version} 是当前正在使用的版本，请先切换到其它版本再删除',
@@ -673,8 +677,8 @@ const en: Record<string, string> = {
   settings_dsh_mem_auto: 'Auto',
   settings_dsh_mem_auto_hint: 'Currently allocated automatically. If dsh memory usage approaches this limit, raise it manually to avoid frequent GC',
   settings_browser_compat: 'Browser compatibility mode',
-  settings_browser_compat_hint: 'Recommended for Firefox / Apple (WebKit) devices — fixes session history failing to load, and the model / reasoning-effort selector not switching on Apple devices. After enabling, clear the browser cache and reload the page',
-  settings_browser_compat_saved: 'Saved. Reload to apply (the iPhone model menu applies immediately); if you have used it before, the first time may also need clearing the browser cache or a hard reload (Ctrl+Shift+R).',
+  settings_browser_compat_hint: 'Recommended for Apple devices (iOS / WebKit) — fixes the model / reasoning-effort selector not responding to taps. Reload the page after enabling.',
+  settings_browser_compat_saved: 'Saved. Reload the page to apply; clearing the browser cache is no longer needed.',
   settings_show_password: 'Show password',
   settings_hide_password: 'Hide password',
   // Settings page card titles (proxy / ports & compatibility / node version & memory / auth / quick access / console)
@@ -1034,6 +1038,9 @@ const en: Record<string, string> = {
   dsh_ver_switch_confirm_title: 'Switch dsh version',
   dsh_ver_switch_confirm_msg: 'Switch to dsh {v}? The dsh service is stopped and restarted with that version, so the service is briefly interrupted.',
   dsh_ver_switch_confirm_ok: 'Switch and restart',
+  dsh_ver_deprecated: 'Unsupported',
+  dsh_ver_switch_to_latest: 'Switch to {v}',
+  dsh_ver_switch_from_deprecated_msg: 'The dsh {cur} in use is no longer supported, and you cannot switch back to it. Switch to dsh {v}? This stops the dsh service and restarts it with that version, so expect a short interruption.',
 
   // Plugin market (dshmarket): a plain profile plugin, installed by the console when missing
   market_dialog_title: 'Plugin market',
@@ -1113,6 +1120,7 @@ const en: Record<string, string> = {
   err_version_invalid: 'Invalid version: {version}',
   err_version_installed: 'dsh {version} is already installed',
   err_version_below_min: 'dsh {version} is below the oldest version the console supports ({min})',
+  err_version_deprecated: 'dsh {version} is no longer supported (below the oldest version the console supports, {min}), so it cannot be switched to',
   err_version_not_installed: 'dsh {version} is not installed yet; download it first',
   err_version_current: 'dsh {version} is already the current version',
   err_version_in_use: 'dsh {version} is in use; switch to another version before deleting it',

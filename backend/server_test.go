@@ -3,7 +3,9 @@ package main
 // server_test.go —— dsh 多版本管理（列表 / 安装 / 取消 / 删除 / 切换）的回归测试。
 //
 // 这里钉住的都是「改一处就会静默出错」的契约：
-//   - 版本列表必须过滤掉 0.1.7-rc.1 之前的版本（用户要求；更早的 dsh 本来也跑不了子路径）；
+//   - 版本列表必须过滤掉 0.2.0-rc.1 之前的版本（新版控制台锚定 0.2.0-rc.1 及更新版本）；
+//   - **已装着**的更老版本仍要出现在列表**底部**（标 Deprecated，只给删除 / 切到更新版本），
+//     并且绝不允许切回去（Switch 拒绝）；
 //   - 版本号会变成目录名、也会拼进 npm 参数，必须拒绝路径穿越字符；
 //   - 「有更新」的红点**只按版本号大小**判：列表里最高的一版比选中的高就亮，
 //     不区分 dist-tags（标签只用作列表里的标注）；
@@ -121,7 +123,7 @@ func waitInstallPhase(t *testing.T, srv *ServerManager, want ...string) *DshInst
 func TestFilterDshVersions(t *testing.T) {
 	raw := map[string]json.RawMessage{}
 	for _, v := range []string{
-		"0.1.5-rc.3", "0.1.6-alpha.2", "0.1.7-alpha.1", "0.1.7-rc.1",
+		"0.1.5-rc.3", "0.1.7-rc.1", "0.2.0-alpha.4", "0.2.0-rc.1",
 		"0.2.0-rc.2", "0.2.1-alpha.1", "garbage!!",
 	} {
 		raw[v] = json.RawMessage(`{}`)
@@ -133,9 +135,9 @@ func TestFilterDshVersions(t *testing.T) {
 	for _, e := range got {
 		versions = append(versions, e.Version)
 	}
-	want := []string{"0.2.1-alpha.1", "0.2.0-rc.2", "0.1.7-rc.1"}
+	want := []string{"0.2.1-alpha.1", "0.2.0-rc.2", "0.2.0-rc.1"}
 	if strings.Join(versions, ",") != strings.Join(want, ",") {
-		t.Fatalf("版本列表 = %v, want %v（必须降序且隐藏 0.1.7-rc.1 之前，含 alpha.1）", versions, want)
+		t.Fatalf("版本列表 = %v, want %v（必须降序、隐藏 0.2.0-rc.1 之前的版本（含 0.2.0-alpha.4），边界 rc.1 本身保留）", versions, want)
 	}
 	// 列表最高版本 = 「最新版本」与红点的判定基准
 	if got := newestOf(got); got != "0.2.1-alpha.1" {
@@ -152,8 +154,68 @@ func TestFilterDshVersions(t *testing.T) {
 	if strings.Join(tagOf["0.2.1-alpha.1"], ",") != "alpha" {
 		t.Errorf("0.2.1-alpha.1 的标签 = %v, want [alpha]", tagOf["0.2.1-alpha.1"])
 	}
-	if len(tagOf["0.1.7-rc.1"]) != 0 {
-		t.Errorf("无 dist-tag 的版本不应带标签，实得 %v", tagOf["0.1.7-rc.1"])
+	if len(tagOf["0.2.0-rc.1"]) != 0 {
+		t.Errorf("无 dist-tag 的版本不应带标签，实得 %v", tagOf["0.2.0-rc.1"])
+	}
+}
+
+// 低于锚定版本的**已装**老版本：仍然要出现在列表里（否则用户既看不到它、也删不掉它，
+// 磁盘却被它占着），但必须① 排在列表最底部 ② 带 Deprecated 标记 —— 前端据此只给
+// 「删除」与「切到更新版本」，不给切回它的入口。
+func TestSnapshotPutsDeprecatedInstalledVersionsAtBottom(t *testing.T) {
+	dataDir := t.TempDir()
+	_, srv := newServerTestManager(t, dataDir)
+
+	fakeInstalledVersion(t, dataDir, "0.1.9")      // 低于锚定版本，已停止维护
+	fakeInstalledVersion(t, dataDir, "0.2.0-rc.2") // 正常版本
+
+	// 模拟一次镜像源拉取的结果（比本地多一版）。
+	srv.mu.Lock()
+	srv.versions = []DshVersionEntry{{Version: "0.2.1-alpha.1"}, {Version: "0.2.0-rc.2"}}
+	srv.newest = "0.2.1-alpha.1"
+	srv.mu.Unlock()
+
+	var order []string
+	byVersion := map[string]DshVersionEntry{}
+	for _, e := range srv.snapshot().Versions {
+		order = append(order, e.Version)
+		byVersion[e.Version] = e
+	}
+	if got := strings.Join(order, ","); got != "0.2.1-alpha.1,0.2.0-rc.2,0.1.9" {
+		t.Fatalf("列表顺序 = %v，want 停止维护的 0.1.9 排在最后", order)
+	}
+	old := byVersion["0.1.9"]
+	if !old.Deprecated || !old.Installed {
+		t.Fatalf("0.1.9 应标 Deprecated + Installed，实得 %+v", old)
+	}
+	if byVersion["0.2.0-rc.2"].Deprecated {
+		t.Fatalf("0.2.0-rc.2 不该标 Deprecated: %+v", byVersion["0.2.0-rc.2"])
+	}
+}
+
+// 停止维护的老版本一律不允许切换 —— 包括「从新版切回去」。盘上装着、列表里也看得到，
+// 但那是为了让它能被删掉，不是为了让它还能被启用。
+func TestSwitchRejectsDeprecatedVersion(t *testing.T) {
+	dataDir := t.TempDir()
+	_, srv := newServerTestManager(t, dataDir)
+	fakeInstalledVersion(t, dataDir, "0.1.9")
+	fakeInstalledVersion(t, dataDir, "0.2.0-rc.2")
+
+	cfg := GetConfig()
+	cfg.DshVersion = "0.2.0-rc.2"
+	if err := SaveConfig(srv.renv, &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+
+	err := srv.Switch("0.1.9")
+	if err == nil {
+		t.Fatal("低于锚定版本的旧版不该允许切换")
+	}
+	if !strings.Contains(err.Error(), dshMinVersion) {
+		t.Fatalf("拒绝理由应点明最低版本 %s，实得 %v", dshMinVersion, err)
+	}
+	if got := GetConfig().DshVersion; got != "0.2.0-rc.2" {
+		t.Fatalf("被拒绝的切换不该改配置，实得 %q", got)
 	}
 }
 
@@ -803,12 +865,12 @@ func TestCancelInstallNeverOverwritesTerminalState(t *testing.T) {
 	}
 }
 
-// 低于 dshMinVersion 的版本不允许安装：列表里已经过滤掉它们（子路径挂载下必 404），
-// 直接调 API 也必须拒绝，否则会装出一个控制台用不了的版本。
+// 低于 dshMinVersion 的版本不允许安装：列表里已经过滤掉它们（0.2.0 之前的客户端控制台
+// 不再维护），直接调 API 也必须拒绝，否则会装出一个控制台用不了的版本。
 func TestInstallRejectsVersionBelowMin(t *testing.T) {
 	dataDir := t.TempDir()
 	_, srv := newServerTestManager(t, dataDir)
-	for _, v := range []string{"0.1.6", "0.1.7-alpha.1", "0.1.6-rc.9"} {
+	for _, v := range []string{"0.1.6", "0.1.7-rc.2", "0.2.0-alpha.4"} {
 		if err := srv.Install(v); err == nil {
 			t.Fatalf("低于 %s 的版本（%s）不该被安装", dshMinVersion, v)
 		} else if !strings.Contains(err.Error(), dshMinVersion) {

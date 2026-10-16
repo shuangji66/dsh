@@ -51,11 +51,13 @@ const (
 	// dshPackageName 是 dsh 在 npm 上的包名。
 	dshPackageName = "@deepseek-ai/dsh"
 	// dshMinVersion 是控制台允许下载/切换的最低 dsh 版本：**列表里更早的版本一律隐藏**
-	// （用户要求从 0.1.7-rc.1 起，见 filterDshVersions）。
+	// （锚定 0.2.0-rc.1 及更新版本，见 filterDshVersions）。
 	// 技术背景：0.1.7-alpha.1 起 dsh 前端才全部走文档相对路径（靠 <base href="./"> 自己
 	// 拼出挂载前缀），更早的版本在控制台的子路径挂载（HARNESS_PROXY_BASEURL，默认
-	// /app/Harness/dsh）下必然 404；这条底线现在抬到 rc.1，比「能跑」的最低要求更严。
-	dshMinVersion = "0.1.7-rc.1"
+	// /app/Harness/dsh）下必然 404；这条线现在抬到 0.2.0-rc.1 —— 0.2.0 之前的客户端
+	// 已不再维护（当年针对它们的反代兼容代码也随 dsh 上游自修陆续移除，见 README
+	// 「浏览器兼容模式」），控制台只对 0.2.0-rc.1 及更新的版本负责。
+	dshMinVersion = "0.2.0-rc.1"
 	// dshMirrorTimeout 是单次镜像源请求的超时（「5 秒没反应就换下一个」）。
 	dshMirrorTimeout = 5 * time.Second
 	// dshInstallCancelGrace 是取消安装时先 SIGTERM、再 SIGKILL 的宽限时间。
@@ -176,6 +178,10 @@ type DshVersionEntry struct {
 	Installed bool `json:"installed,omitempty"`
 	// Active 表示它正是当前选中的版本。
 	Active bool `json:"active,omitempty"`
+	// Deprecated 表示这一版低于控制台锚定的最低版本（dshMinVersion），已停止维护。
+	// 只有「本地已安装」的老版本才会带着它出现在列表里（前端据此把它们排在列表底部，
+	// 只给「删除」与「切到更新版本」两个动作），**不允许切回这一版**（见 Switch）。
+	Deprecated bool `json:"deprecated,omitempty"`
 }
 
 // DshInstallState 描述一次「下载并安装某个 dsh 版本」的进行中状态。
@@ -354,15 +360,23 @@ func (m *ServerManager) snapshot() ServerVersions {
 	}
 	// 镜像源已下架、但本地装着的版本也要出现在列表里：否则用户既看不到它、也没法
 	// 删掉它（磁盘会一直占着 500MB）。
+	//
+	// 低于 dshMinVersion 的老版本同样只从这里补进来（版本列表本身已把它们滤掉），并标
+	// Deprecated —— 它们已停止维护，只留「删除」与「切到更新版本」两条路，不允许切回。
 	for _, v := range installed {
 		if seen[v] {
 			continue
 		}
 		versions = append(versions, DshVersionEntry{
 			Version: v, Installed: true, Active: selected == v,
+			Deprecated: compareVersion(v, dshMinVersion) < 0,
 		})
 	}
+	// 排序：停止维护的旧版一律沉到列表底部（组内仍按版本号降序），其余按版本号降序。
 	sort.SliceStable(versions, func(i, j int) bool {
+		if versions[i].Deprecated != versions[j].Deprecated {
+			return versions[j].Deprecated
+		}
 		return compareVersion(versions[i].Version, versions[j].Version) > 0
 	})
 
@@ -1169,6 +1183,12 @@ func (m *ServerManager) Delete(version string) error {
 func (m *ServerManager) Switch(version string) error {
 	if !validVersionArg(version) {
 		return uiErr("err_version_invalid", "非法的版本号: %s", "version", version)
+	}
+	// 停止维护的老版本一律拒绝切换（包括从别的新版本「切回去」）：控制台只对
+	// dshMinVersion 及更新的版本负责，切过去只会得到一个没人维护、也没法回退的状态。
+	// 已装在盘上的老版本仍会出现在列表底部，但那里只给「删除」与「切到更新版本」。
+	if compareVersion(version, dshMinVersion) < 0 {
+		return uiErr("err_version_deprecated", "dsh %s 已停止维护（低于控制台支持的最低版本 %s），不能切换", "version", version, "min", dshMinVersion)
 	}
 	if !dshVersionInstalled(m.versionDir(version)) {
 		return uiErr("err_version_not_installed", "dsh %s 尚未安装，请先下载", "version", version)

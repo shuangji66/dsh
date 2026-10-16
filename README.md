@@ -22,9 +22,8 @@
   **控制台启动的第一刻就监听**：dsh 还没起来时不再“无响应”，而是先给登录页、再给
   带阶段的等待页，dsh 完成启动（含换取凭据、安装依赖）后等待页自动跳转。
   （见下文「启动期间的等待页与放行门禁」一节）
-- **浏览器兼容模式** — 可开关的反代注入，修复 Firefox / Zen / Safari 等非 V8 引擎上
-  「会话历史无法加载」的问题；默认关闭，Chromium 开启无副作用。
-  （见上文「浏览器兼容模式」一节）
+- **浏览器兼容模式** — 可开关的反代注入，用来武装下一条的 iOS 兼容守卫；默认关闭，
+  桌面与 Chromium 开启无副作用。（见下文「浏览器兼容模式」一节）
 - **移动端模型 / 推理等级菜单** — 反代注入：修复 iPhone（WKWebView）上「模型 / 推理等级
   菜单能打开、点选项却毫无反应」；随「浏览器兼容模式」开关、只对触屏设备生效，桌面行为不变。
   （见下文「移动端模型 / 推理等级菜单（iOS）」一节）
@@ -300,8 +299,9 @@ RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式�
 
 部署时注意：
 
-- **dsh 需 ≥ 0.1.7-alpha.1**。更早版本注入的是 `<base href="/">` 且 API/SSE/WS
-  用绝对根路径，在子路径下必然 404（正是该版本的修复项）。
+- **dsh 需 ≥ 0.1.7-alpha.1**（控制台现在只允许安装/切换 **0.2.0-rc.1 及更新版本**，见
+  「dsh 服务的多版本管理」）。更早版本注入的是 `<base href="/">` 且 API/SSE/WS 用绝对根路径，
+  在子路径下必然 404（正是该版本的修复项）。
 - 网关若**不**剥离前缀（原样把 `/app/Harness/dsh/...` 交给本 socket），反代也能
   正确剥离——前缀本来就由反代处理，网关只需保证路径原样透传、不额外改写。
 - **网关/nginx 必须按更长的前缀优先匹配**：控制台那条规则（admin socket，
@@ -447,77 +447,68 @@ dsh 服务的地址，无需用户配置：控制台的当前访问地址（由�
 
 ## 浏览器兼容模式（`browserCompat`）
 
-**用途** — 一处开关、两处**只影响特定引擎**的兼容修复，默认**关闭**，在设置页
-「node 堆内存上限」与「启用登录鉴权」之间切换；Chromium 内核（Chrome / Edge）开启无副作用：
+**用途** — 一处开关、一处**只影响触屏 iOS（WebKit）** 的兼容修复，默认**关闭**，在设置页
+「node 堆内存上限」与「启用登录鉴权」之间切换；桌面与 Chromium 内核（Chrome / Edge）开启无副作用：
 
-1. **会话历史无法加载** —— **Firefox / Zen（SpiderMonkey）** 与 **Safari / 苹果设备
-   （JavaScriptCore）** 上「会话历史一直显示『载入历史…』、且 AI 输出后无法恢复实时对话」；
-2. **iPhone 上模型 / 推理等级菜单点选项没反应** —— WKWebView 在菜单内搬家焦点时
-   `focusout` 的 `relatedTarget` 为 null 触发上游守卫误关菜单（见下文
-   「移动端模型 / 推理等级菜单（iOS）」一节，该注入同样只在触屏设备上武装）。
+- **iPhone 上模型 / 推理等级菜单点选项没反应** —— WKWebView 在菜单内搬家焦点时
+  `focusout` 的 `relatedTarget` 为 null，触发上游守卫误关菜单（见下文
+  「移动端模型 / 推理等级菜单（iOS）」一节，该注入只在触屏设备上武装）。
 
-下面第 1 项的成因与生效时机（含缓存）说明对两项都适用：第 1 项改写的是 bundle 字节，
-升级 harness 后若浏览器仍缓存着旧字节，需要清缓存/强制刷新；第 2 项是 HTML 注入，普通刷新即生效。
+它曾经还管着另一项（**Firefox / Zen / Safari 等非 V8 引擎上「会话历史一直显示『载入历史…』」**），
+该修复已随 dsh 上游的变化从控制台移除 —— 原因见本节末尾。
 
-### 问题成因
+### 生效时机
 
-dsh 客户端 bundle 中有一处只适配 V8 的原生函数格式判断：
+开关状态不写进任何资源字节，而是由**每次都回源的 HTML** 注入
+`window.__DSH_BROWSER_COMPAT__`（`browserCompatFlagScript`），`bootstrapScript` 的守卫在页面
+加载阶段读它，所以「**切换开关 → 普通刷新**」即可生效。
 
-```js
-Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`
-```
+这与 dsh 插件资源（`/plugins/??…&rev=<dsh 自己的 rev>`，响应带
+`Cache-Control: public, max-age=31536000, immutable` 且无 `ETag`，`rev` 由 dsh 生成、URL 无法被
+harness 改写）无关 —— 那条缓存约束只在反代**改写 bundle 字节**的年代才存在，现在已是历史。
+页面可用 `window.__DSH_MODEL_MENU_FOCUS_GUARD__ === true` 确认守卫已武装。
 
-非 V8 引擎把原生函数源码格式化为**多行**（实测 Firefox 156 与 WebKit 均为
-`"function Object() {\n    [native code]\n}"`），该比较恒为 `false`，于是普通对象被判为
-「非本 realm 原生原型」→ `snapshotJsonValue` 返回 `undefined` → 客户端抛
-`TypeError: Assistant stream raw chunk must be a lossless JSON object`，历史渲染在首条消息
-前中止。
+### 已经移除的两处反代注入
 
-由于该错误是普通 `TypeError` 而非 `RemoteError`，dsh 不会把它归类为可重试的远端失败，
-`openState` 永久停留在 `"loading"`，因此**必须刷新页面或切换会话**才能恢复。
+两处都随 dsh 上游的变化失去目标，留着只会让人误判「兼容模式到底还在补什么」：
 
-触发条件是「**流式进行中刷新**」：该校验（`expandAssistantStream`）只在处理
-`assistantStream.activeAttempt.stream`（正在进行的尝试的 baseline）时执行，已完成的
-历史记录不走这条路径。所以在 Chromium 上难以复现，长会话即便含大量 chunk 记录也正常。
+1. **bundle 里的 V8-only 原生函数格式判断改写**（原「浏览器兼容模式」第 1 项）。dsh 客户端
+   曾用精确字符串比较判断「这是不是本 realm 的原生构造器」：
 
-### 修复方式
+   ```js
+   Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`
+   ```
 
-在反代转发路径上把该比较替换为**运行时受开关控制**的等价表达式（比较前把空白折叠为
-单个空格，使各引擎统一到 V8 形态）。该变换对 V8 是恒等变换，V8 下原本通过的判断依旧
-通过，不会放宽任何实际约束（该判断是「重复安装 / 跨 realm」启发式，非安全边界）。
+   非 V8 引擎把原生函数源码格式化为**多行**（实测 Firefox 156 与 WebKit 均为
+   `"function Object() {\n    [native code]\n}"`），该比较恒为 `false` → 普通对象被判为
+   「非本 realm 原生原型」→ `snapshotJsonValue` 返回 `undefined` → 客户端抛
+   `TypeError: Assistant stream raw chunk must be a lossless JSON object`，历史渲染在首条消息
+   前中止；而它是普通 `TypeError` 而非 `RemoteError`，dsh 不会归类为可重试的远端失败，
+   `openState` 永久停在 `"loading"`（必须刷新页面或切换会话才能恢复）。触发条件是
+   「**流式进行中刷新**」：该校验（`expandAssistantStream`）只在处理
+   `assistantStream.activeAttempt.stream` 时执行，已完成的历史不走这条路，所以在 Chromium 上
+   难以复现。
 
-### 生效时机与缓存（重要）
+   **上游现在把该判断改成了引擎无关的形式**：
 
-dsh 的插件资源（`/plugins/??…&rev=<dsh 自己的 rev>`）响应带：
+   ```js
+   Function.prototype.toString.call(constructor) === Function.prototype.toString.call(name === "Array" ? Array : Object)
+   ```
 
-```
-Cache-Control: public, max-age=31536000, immutable
-```
+   （比较两端都取自当前引擎，格式自然一致；见 `dsh-api-session-controller` /
+   `dsh-experimental-session-inspector` 的 `client.js`）。原来那个字面量锚点在 0.2.x 的**客户端**
+   产物里零命中（0.2.0-rc.2 / 0.2.1-alpha.4 / 0.2.1-alpha.5 实测均无；带该字面量的只剩服务端
+   产物），而这类改写以「锚点未命中即原样返回」为前提，于是长期静默空转 —— 已整体删除。
+   **今后若又在非 V8 浏览器上看到「载入历史…」，不要再指望反代这层改写**，需要重新定位
+   （方向是 dsh 客户端报错与上游产物，而不是网关 / 代理）。
 
-且**无 `ETag` / `Last-Modified`**；`rev` 由 dsh 自身生成，**不随 harness 升级而改变**，
-且该路由严格校验 `rev`（改写或省略一律 404），因此 URL 无法被 harness 改写以击穿缓存。
-实测结论：
+2. **会话自愈探针**（旧 `sessionWatchdogInit`）—— 针对 dsh `ClientSessions.followCurrent()`
+   只在 `current !== watched` 时打开事件窗口、`open()` 失败便无重试路径的缺陷。新版 dsh 已重构
+   该机制：`sessions.list` 快照不再有 `current` 字段、`followCurrent()` 方法已被删除，改由视图层
+   显式 `sessions.retain(target, { source: "mainView" })` 打开窗口 —— 探针的入口条件恒不成立，
+   只剩一个空转定时器，故已移除。
 
-| 场景 | 资源字节 | 普通刷新（F5） |
-| --- | --- | --- |
-| **切换开关**（开 ↔ 关） | 不变 | ✅ 生效 |
-| **升级 harness 后**（首次引入 / 变更该修复） | 变化 | ❌ 不生效，需清缓存 |
-
-开关状态不写进 bundle 字节，而是由**每次都回源的 HTML** 注入
-`window.__DSH_BROWSER_COMPAT__`，所以「切开关 → 普通刷新」即可生效；但若浏览器本地缓存
-仍是**升级前**的旧 bundle 字节，普通刷新不会回源，**必须清除浏览器缓存或强制刷新
-（Ctrl+Shift+R）**才能拿到新字节。设置页的开关提示中已说明这一点。
-
-### 与「会话自愈探针」的关系（已移除）
-
-反代曾额外注入一处与本开关无关、始终启用的「会话自愈探针」（旧 `sessionWatchdogInit`）：
-它针对的是 dsh `ClientSessions.followCurrent()` 仅在 `current !== watched` 时打开事件窗口、
-一旦 `open()` 失败便无重试路径的缺陷。
-
-新版 dsh 已重构该机制：`sessions.list` 快照不再有 `current` 字段，`followCurrent()` 方法
-已被删除，改由视图层显式 `sessions.retain(target, { source: "mainView" })` 打开窗口。
-探针的入口条件（`snapshot.current`）因此恒不成立，只剩一个空转定时器，故**已移除**。
-详见 `backend/proxy.go` 的 `rewriteJSBundle` 注释。
+两处的完整来龙去脉见 `backend/proxy.go` 中「转发路径上不再改写 JS 产物」那段说明。
 
 ---
 
@@ -729,7 +720,7 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 
 | 环节 | 做法 |
 | --- | --- |
-| 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.1.7-rc.1` 之前的所有版本**（用户要求；更早的 dsh 前端也不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**「有更新」的红点/「最新版本」取列表里版本号最高的一版**，标签只作展示、不参与判定（`refreshDshStatus`）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」与后台自动检测 / 手动「检查更新」会重拉（见下） |
+| 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.2.0-rc.1` 之前的所有版本**（新版控制台锚定 0.2.0-rc.1 及更新版本；更早的 dsh 前端也不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**「有更新」的红点/「最新版本」取列表里版本号最高的一版**，标签只作展示、不参与判定（`refreshDshStatus`）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」与后台自动检测 / 手动「检查更新」会重拉（见下） |
 | 镜像源 | 阿里云 `registry.npmmirror.com` → 腾讯云 `mirrors.cloud.tencent.com/npm` → 华为云 `repo.huaweicloud.com/repository/npm`；**不试官方源** |
 | 换源时机 | `npm install --fetch-timeout=5000 --fetch-retries=0`：任意一次 HTTP 请求 5 秒拿不到响应即失败 → 换下一个镜像源**整包重跑**；同一个源**不重试**，三个都失败就报错（错误里列出尝试过的镜像源） |
 | 安装命令 | `npm install --prefix <版本目录> @deepseek-ai/dsh@<版本> --save-exact --registry=<镜像源>`，用与 dsh 相同 node 版本自带的 npm；缓存在 `<数据目录>/npm-cache`（不写用户的 HOME） |
@@ -739,6 +730,12 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 | 切换 | 概览页版本列表里点「切换」→ 写 `config.json` 的 `dshVersion` → 停 dsh → 用该版本启动（`startDshCaptured` 重新换取会话凭据）。**切换前先过忙守卫**（正在装插件时拒绝） |
 | 删除 | 删除版本目录（磁盘占用约 500 MB / 版本）。**当前正在使用的版本不允许删除** |
 | 未安装 | 没有选中任何可用版本时：概览页版本行显示「未安装」，反代等待页显示「尚未安装 dsh 服务」并提示去概览页下载 + 切换（`boot.go` 的 `phaseNotInstalled`） |
+
+**停止维护的旧版本**（低于 `0.2.0-rc.1`）—— 列表里不展示、也不能下载或切换。但如果它
+**已经装在盘上**，会被标上「停止维护」单独补到列表**最底部**（`snapshot()` 里带 `Deprecated`
+的条目），行内只留两个动作：「删除」，以及它**正被使用时**的「切换到 <最新版>」（且最新版本地
+已装着才出现）。**不允许切回**：直接调接口 `Switch` 也会被拒（`err_version_deprecated`）。
+这样既不留下「看不见又删不掉」的 500 MB 目录，也不会把服务切回一个没人维护的版本。
 
 **版本数据的缓存策略**（`refreshVersions(force)` / `detectMarketLocal(force)`）：这两个来源
 都是「慢查询」——前者要打三个镜像源，后者要起一个 `dsh plugin --profile web list` 子进程
@@ -979,11 +976,13 @@ harness 的自我更新会一并取回校验文件并用**实际下载到的字�
   该补丁失败不会让安装失败，但会让上传功能不可用。
 - **CPU/内存读不到** — dsh 装插件自重启后 PID 变化，后端会自动在 `/proc` 中重新发现。
 - **Firefox / Safari 打开会话只有「载入历史…」（且一直显示「深度求索中…」）** —
-  非 V8 引擎的已知问题，开启设置页的「浏览器兼容模式」。若开启后仍无效，是浏览器
-  仍在使用升级前的旧 bundle 缓存：**清除浏览器缓存或强制刷新（Ctrl+Shift+R）**；
-  详见上文「浏览器兼容模式」一节。
-- **改动了反代注入 / 前端后刷新看不到变化** — dsh 插件资源带一年期 `immutable` 强缓存
-  且无 `ETag`，普通刷新不回源。清除浏览器缓存或强制刷新；必要时重启 dsh 使其 `rev` 变化。
+  dsh 客户端旧版的原生函数格式判断只适配 V8，**上游现已改成引擎无关的比较**，控制台那层
+  bundle 改写也随之移除（见「浏览器兼容模式」一节）。若仍出现，先确认 dsh 版本是否过旧
+  （新版控制台只允许 0.2.0-rc.1 及更新版本），再按 dsh 客户端的报错定位 —— 不要再指望反代的
+  兼容模式。
+- **改动前端（内嵌 dist）或 dsh 插件资源后刷新看不到变化** — 反代注入走 HTML，每次刷新都
+  回源，普通刷新即生效；但 dsh 插件资源带一年期 `immutable` 强缓存且无 `ETag`，普通刷新不回源，
+  需清除浏览器缓存或强制刷新；必要时重启 dsh 使其 `rev` 变化。
 - **`vue-tsc` 报 `baseUrl` 已废弃（TS5101）** — TypeScript 6 起 `baseUrl` 被标记废弃。
   本项目已移除 `baseUrl`，`paths` 改用相对本 tsconfig 的 `./src/*` 写法（`@/*` 别名
   在 vue-tsc 与 Vite 两侧均保持可用）。改回 `baseUrl` 会重新触发该报错。

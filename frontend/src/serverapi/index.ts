@@ -219,6 +219,9 @@ export interface DshVersionEntry {
   tags?: string[]
   installed?: boolean
   active?: boolean
+  // 低于控制台锚定最低版本的已装旧版（停止维护）：列表里排在最后，只给
+  // 「删除」与「切到更新版本」，不允许切回这一版。
+  deprecated?: boolean
 }
 
 // 一次 dsh 版本下载/安装的进行中状态（同一时刻只有一个）。

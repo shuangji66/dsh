@@ -222,8 +222,8 @@ const memLimit = computed<number | string>({
   }
 })
 
-// 浏览器兼容模式：即时保存。反代按该开关决定是否修正引擎兼容判断，
-// 该修正发生在页面加载阶段，因此提示用户刷新页面即可生效（无需重启 dsh）。
+// 浏览器兼容模式：即时保存。开关状态由反代注入到 HTML（window.__DSH_BROWSER_COMPAT__），
+// 守卫在页面加载阶段武装，因此提示用户刷新页面即可生效（无需重启 dsh）。
 async function onBrowserCompatToggle() {
   if (!(await store.save(false))) return
   toast.show(t('settings_browser_compat_saved'), 'success', 5000)
@@ -301,7 +301,7 @@ async function onAuthToggle() {
             <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_port_hint') }}</p>
           </div>
 
-          <!-- 浏览器兼容模式（开关）：修复 Firefox/Safari 会话历史无法加载 + iPhone 上模型/推理等级菜单点选项没反应 -->
+          <!-- 浏览器兼容模式（开关）：只修复 iPhone 上模型/推理等级菜单点选项没反应（原 Firefox/Safari 会话历史那项已随 dsh 上游自修而移除） -->
           <div>
             <div class="flex items-center justify-between gap-3">
               <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_browser_compat') }}</span>

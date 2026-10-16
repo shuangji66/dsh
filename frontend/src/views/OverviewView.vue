@@ -14,6 +14,7 @@ import { repoSlugs, repoURL } from '@/constants/repos'
 import UpdateSection from '@/components/UpdateSection.vue'
 import AccessCard from '@/components/AccessCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import AccountAvatar from '@/components/AccountAvatar.vue'
 import { icons } from '@/utils/icons'
 
 defineOptions({ name: 'OverviewView' })
@@ -339,18 +340,22 @@ onBeforeUnmount(() => {
     <div class="g-card-grid g-card-grid-2 g-fade-in">
       <!-- ① dsh 服务信息与启停 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
-        <div class="flex items-center justify-between gap-2">
-          <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-          <!-- 运行状态标记 -->
-          <span
-            class="g-status flex-shrink-0"
-            :class="running
-              ? 'bg-success/10 text-success'
-              : 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'"
-          >
-            <span class="w-1.5 h-1.5 rounded-full" :class="running ? 'bg-success' : 'bg-ink-faint'"></span>
-            {{ running ? t('status_running') : t('status_stopped') }}
-          </span>
+        <!-- 标题 + 运行状态 + 右上角的 DeepSeek 账号头像（点击开管理弹窗，见 AccountAvatar） -->
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex items-center gap-2 min-w-0 flex-wrap">
+            <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
+            <!-- 运行状态标记 -->
+            <span
+              class="g-status flex-shrink-0"
+              :class="running
+                ? 'bg-success/10 text-success'
+                : 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'"
+            >
+              <span class="w-1.5 h-1.5 rounded-full" :class="running ? 'bg-success' : 'bg-ink-faint'"></span>
+              {{ running ? t('status_running') : t('status_stopped') }}
+            </span>
+          </div>
+          <AccountAvatar />
         </div>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('overview_dsh_desc') }}</p>
 

@@ -851,6 +851,10 @@ type reverseProxy struct {
 	// 暴露，只有本机网关进程能连；TCP 端口线在局域网内可达，认这三个头等于把
 	// 端口鉴权交给客户端自己声明。
 	gatewayLine bool
+	// account 是控制台的账号管理（见 account.go）：账号登录的回调路径是**反代自留路径**
+	// （不转发给 dsh），由它与 admin 线共用同一个 handler —— 同一个登录尝试的进程内状态
+	// 只此一份，两条线谁收到回调都能完成它。nil 表示该实例不支持（测试用小实例）。
+	account *AdminMux
 }
 
 // proxyMount 描述反代对外的挂载点（baseurl）。
@@ -918,6 +922,14 @@ func (m proxyMount) strip(path string) (string, bool) {
 func newReverseProxy(a *Auth, dsh *DshManager, boot *bootState) *reverseProxy {
 	// TCP 端口监听（根挂载）：不认网关注入的身份头，见 gatewayLine。
 	return newReverseProxyMount(a, dsh, boot, "", false)
+}
+
+// withAccount 挂上控制台的账号管理（只为它自留的登录回调路径，见 account.go）。
+//
+// 不放进构造器参数：绝大多数构造点（各测试）不需要它，多一个参数只是噪声。
+func (p *reverseProxy) withAccount(account *AdminMux) *reverseProxy {
+	p.account = account
+	return p
 }
 
 // newReverseProxyAt 构造挂在 baseURL 下的反代（空串 = 根挂载，历史行为）。
@@ -1095,6 +1107,17 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
 		http.Redirect(w, r, p.mount.join(authLogin)+"?next="+url.QueryEscape(next), http.StatusFound)
 		return
+	}
+	// 账号登录回调是**反代自留路径**（不转发给 dsh）：放在就绪门禁之前 —— 回调本身只需要
+	// 控制台处理（核验并写凭据），dsh 没起来也能先落地。根挂载线不会剥挂载前缀，所以带
+	// 前缀的那条写法也要认（见 accountCallbackMountPaths）。
+	if p.account != nil && r.Method == http.MethodGet {
+		for _, cb := range accountCallbackMountPaths(mountRenv(p)) {
+			if r.URL.Path == cb {
+				p.account.handleAccountCallback(w, r)
+				return
+			}
+		}
 	}
 	if r.URL.Path == readyPath {
 		p.serveReadyState(w, st)
@@ -1410,4 +1433,12 @@ func ip(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return strings.TrimPrefix(host, "::ffff:")
+}
+
+// mountRenv 取反代所在进程的运行时环境（账号回调的挂载换算要用；测试实例可能没有）。
+func mountRenv(p *reverseProxy) *RuntimeEnv {
+	if p.dsh == nil {
+		return nil
+	}
+	return p.dsh.renv
 }

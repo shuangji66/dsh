@@ -543,7 +543,7 @@ func (m *AdminMux) rebindProxyPort(port int) error {
 	if port == old {
 		return nil
 	}
-	if err := startProxy(port, m.auth, m.dsh, m.boot); err != nil {
+	if err := startProxy(port, m.auth, m.dsh, m.boot, m); err != nil {
 		return fmt.Errorf("反代端口 %d 监听失败: %v", port, err)
 	}
 	logInfo("[proxy] reverse proxy port switched %d -> %d", old, port)
@@ -1235,6 +1235,26 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleMarketRemove(w, r)
 		case p == "/api/market/done" && r.Method == http.MethodPost:
 			m.handleMarketDone(w, r)
+		// DeepSeek 官方账号（控制台侧完成授权，见 account.go）
+		case p == "/api/account" && r.Method == http.MethodGet:
+			m.handleAccountStatus(w, r)
+		case p == "/api/account/login/start" && r.Method == http.MethodPost:
+			m.handleAccountLoginStart(w, r)
+		case p == "/api/account/login/status" && r.Method == http.MethodGet:
+			m.handleAccountLoginStatus(w, r)
+		case p == "/api/account/login/complete" && r.Method == http.MethodPost:
+			m.handleAccountLoginComplete(w, r)
+		case p == "/api/account/login/cancel" && r.Method == http.MethodPost:
+			m.handleAccountLoginCancel(w, r)
+		case p == "/api/account/logout" && r.Method == http.MethodPost:
+			m.handleAccountLogout(w, r)
+		case p == "/api/account/switch" && r.Method == http.MethodPost:
+			m.handleAccountSwitch(w, r)
+		case p == "/api/account/remove" && r.Method == http.MethodPost:
+			m.handleAccountRemove(w, r)
+		// OAuth 回调：浏览器/本地转发把 ?code=&state= 送到这里（自留路径，不转发给 dsh）
+		case p == accountCallbackPath && r.Method == http.MethodGet:
+			m.handleAccountCallback(w, r)
 		case p == "/api/quickcmds" && r.Method == http.MethodGet:
 			m.handleGetQuickCmds(w, r)
 		case p == "/api/quickcmds" && r.Method == http.MethodPost:

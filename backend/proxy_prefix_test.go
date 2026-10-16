@@ -286,7 +286,7 @@ func TestProxySocketEndToEnd(t *testing.T) {
 	boot.set(phaseReady, "")
 
 	sock := filepath.Join(t.TempDir(), "target", "dsh.sock")
-	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot)
+	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot, nil)
 	t.Cleanup(stopProxySocket)
 
 	if fi, err := os.Stat(sock); err != nil {
@@ -385,7 +385,7 @@ func TestProxyMountUpgradeStripsPrefix(t *testing.T) {
 	boot.set(phaseReady, "")
 
 	sock := filepath.Join(t.TempDir(), "dsh.sock")
-	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot)
+	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot, nil)
 	t.Cleanup(stopProxySocket)
 
 	conn, err := net.Dial("unix", sock)

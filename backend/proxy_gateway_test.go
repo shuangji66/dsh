@@ -294,7 +294,7 @@ func TestGatewaySocketEndToEndSkipsLogin(t *testing.T) {
 	boot.set(phaseReady, "")
 
 	sock := t.TempDir() + "/target/dsh.sock"
-	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot)
+	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot, nil)
 	t.Cleanup(stopProxySocket)
 
 	client := &http.Client{Transport: &http.Transport{

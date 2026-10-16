@@ -160,6 +160,31 @@
   （前端 `whitespace-pre-wrap` 直出，不解析 HTML），而 harness / 市场那份是**原样 Markdown**
   （前端 `MarkdownText` 渲染）。回归测试见 `backend/release_notes_test.go`。
 - `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
+- `account.go` — **DeepSeek 官方账号：登录/退出都在控制台侧完成**。平台只认 loopback 回调
+  （见「常见的坑」），dsh 自带入口在本部署不可用，所以控制台自己跑：
+  `auth_init`（自持 PKCE+state）→ 浏览器授权 → 回收 code（loopback 来源自动落到
+  `/oauth/callback`，否则用户在弹窗里粘回地址）→ `auth_exchange` → 按 dsh 的格式写
+  `<dsh home>/.dsh/.credentials.yaml`（`deepseek-account-platform/default` 的 grant +
+  `device`）→ 用 dsh 的 `account/getState|getProfile|getBalance` 核验与展示。
+  写入是**行级手术**（flow 风格一条记录，删旧插新，其它字节不变）+ 临时文件 rename + 0600，
+  写完核验、只有 dsh 明确说 `signed-out` 才回滚；dsh 的 credentials-local 监听该文件，
+  写入即生效（不用重启）。**但「立刻生效」只对模型侧成立**：`account/getState` 读的是
+  provider 内存里的文档，改文件后要过一拍（chokidar 去抖 ~100ms）才更新 —— 所以
+  **写入后与退出登录（删记录）后都必须轮询等它认账**（`accountWaitDshState` /
+  `accountVerifyStored` / `accountWaitSignedOut`，5s / 250ms），否则登录会被误判成失败
+  并回滚、退出登录会让界面停在「已登录」；前端退出登录还先做一次乐观更新再确认。
+  回调路径同时挂在 admin 线（`buildHandler`）与反代线
+  （`reverseProxy.account`，放在就绪门禁之前）—— **路径必须是 `/oauth/callback`**（平台
+  在授权那一步只认它，见「常见的坑」），且反代线自留它会遮蔽 dsh 自己的账号回调路由
+  （本部署里那条路走不通）。前端入口是概览页「DeepSeek Harness」卡片右上角的
+  `components/AccountAvatar.vue`（头像 + 管理弹窗：登录 / 复制授权链接 / 跳转登录 /
+  回调链接输入框 / 余额 / 退出登录），弹窗里**不自动开标签页** —— 跳转是用户点的按钮。
+  多账号在 `accountvault.go`：dsh 只认一条凭据记录，所以「多账号」= 控制台自己的账号库
+  （`$HARNESS_DATA_DIR/dsh-accounts.json`，0600）存多份 token，切换时把对应那份写进那条记录
+  并等 dsh 认账（失败回滚）；**当前生效的账号是推导的**（拿凭据 token 与库条目比对），库里没有
+  而 dsh 正在用的会在查询状态时自动导入；退出登录只让 dsh 不再用它（账号留在库里），移除才作废
+  平台 token。凭据记录键名/格式与 `0.2.0-rc.2` 一致（同 `credentialKey(...)`），写入对老版本
+  同样成立（更早没有该插件的版本只当普通记录存着）。回归测试见 `backend/account_test.go`。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
 - `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`）。
 - `fnos.go` — fnOS open-gateway 客户端（`/var/run/trim_open_gateway_apiscope.socket`）。
@@ -455,6 +480,43 @@
   官方 npm 包，**不再有任何注入**，市场就是一个普通 profile 插件（装它 = `dsh plugin add`）。
   别再把「市场由 server 包提供」当成前提 —— 老设备上 profile 里可能还留着 `dshmarket` 在
   `dsh.profile.bundles` 里但没有依赖，那种状态在控制台里就是「未安装」，装上依赖即可。
+- **dsh 0.2.1 把 host 服务 `webRuntime` 改名成 `webStartup`，老第三方插件会「静默挂起」** ——
+  0.2.0-rc.2 由 `dsh-web-app` 提供 `webRuntime`，0.2.1 线改为 `webStartup`（同一份
+  `trustedHosts` 语义，栅栏行也改成 `ctx.webStartup.trustedHosts`），且**没有留别名**。
+  `dsh-better-sidebar@0.26.1`（npm 最新版）的 `inject` 里写死 `"webRuntime"`，于是永远停在
+  dsh 启动输出的 `pending (waiting for service: webRuntime)`：它的 `/sidebar/api/*`、
+  `/sidebar/ws/*` 根本没注册 —— 前端看到**一串 405**（dsh webServer 对未匹配路径的 POST
+  默认回 405、GET 回 404），WS 升级无人应答、连接被静默关闭，经网关就是 **502**。
+  两个反直觉点：①**版本栅栏拦不住它** —— 该插件没声明 `engines.dsh`，peerDeps `^0.2.0-rc.2`
+  覆盖 0.2.1，栅栏放行后才挂起（0.2.1-alpha.4 起栅栏优先看 `engines.dsh`，作者没声明就仍按老
+  规则）；②控制台目前只是把 dsh 的 stdout 原样透传进日志，界面不提示这类激活失败。
+  排查口诀：**先看 dsh 启动输出里的 `pending (waiting for service: …)` /
+  `skipping profile bundle …`**（后者如 `@anweat/dsh-browser` 声明 `<0.2.1-0` 被整体跳过），
+  再怀疑代理与网关 —— 服务改名这类破坏栅栏是看不见的。已确认的适配方式：改插件那两处名字
+  （`webRuntime` → `webStartup`），或加一个把 `webStartup` 映射成 `webRuntime` 的兼容 shim。
+- **官方账号的 OAuth 回调只能落在 loopback 且路径固定 `/oauth/callback`（平台硬规则），
+  别再改 dsh 的产物去适配它** —— 实测 `auth_init`：只有 `http://` +
+  `{localhost,127.0.0.1,[::1]}` 的 `redirect_uri` 被接受，公网 https/http、局域网 IP、
+  甚至 `https://127.0.0.1:…` 一律 `50005 PAYLOAD_SCHEMA_MISMATCH`；`login_source` 无关，平台也
+  没有设备码轮询。**更隐蔽的一条：`auth_init` 对路径是宽松的（任意路径都能过），但用户点
+  「登录」真正授权时平台会拒掉非 `/oauth/callback` 的路径 —— 页面只显示「授权失败」**。
+  实测对照（同一台设备、同一时刻，只差路径/请求头）：`.../oauth/callback` 成功跳转，
+  `.../app/Harness/dsh/_account/callback` 授权失败；请求头换成浏览器风格无效、换成
+  `Mozilla/5.0 (compatible; harness-console)` 也不影响 → **路径是唯一变量**。因此排查这类
+  「授权失败」先怀疑路径，别怀疑 UA / 风控。也就是说**授权码只能落在发起登录那台浏览器的
+  loopback 上** —— 改 dsh 的 `loginOrigin`/回调路由都没用（那是 v1 补丁的错误，已废弃），
+  正解是控制台自己跑这套流程（见 `account.go`）；`authorize_id` **只能用一次**，用户在
+  授权页「后退再点一次登录」必然看到「授权失败」。
+  另：凭据文件 `<dsh home>/.dsh/.credentials.yaml` 里装着用户所有的密钥，写入只能做
+  **行级手术**（flow 风格一条记录 + 临时文件 rename + 0600），并且写完要向 dsh 核验
+  （`account/getState`）才算成功。
+- **`ConfirmDialog` 的 `confirm` 事件在「关闭」之后才发 —— 动作不能存在被关闭路径清掉的状态里** ——
+  它的 `onConfirm()` 是 `close(); emit('confirm')`，而 `close()` 会发 `update:visible(false)`
+  **和** `cancel`。因此 `@confirm="kind === 'x' ? doA() : doB()"` 这种「用弹窗可见性推导动作」
+  的写法必然出错：`update:visible` 先把 kind 清掉，confirm 到达时走的是 else 分支（实测：账号
+  弹窗里点「移除账号」执行成了「退出登录」，日志里只有 `signed out`、没有 `removed account`）。
+  安全写法是全仓库通用的那套：`v-model:visible="xxxVisible"` + **独立的 target ref**
+  （只在打开时赋值、动作自己收尾），`@confirm="target && doThing(target)"`。
 - **反代端口默认 `3079`（设置页可改，持久化在 `config.json` 的 `proxyPort`）、
   dsh 端口默认 `13080`** —— 冲突排查先看这两个；两者不可相同（设置页与后端都校验）。
 - **dsh 的跨进程写锁会因「持有者被杀」而残留，代价是 120 秒白等** ——

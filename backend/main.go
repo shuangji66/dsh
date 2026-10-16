@@ -168,11 +168,11 @@ func main() {
 	// 后等待页自动跳转。放行门禁见 reverseProxy.state()。
 	// 监听端口取自持久化配置（AppConfig.ProxyPort，默认 3079），绑定失败不致命：
 	// 控制台（admin socket）与 Unix Socket 挂载照常提供，仅这条 TCP 监听缺席。
-	if err := startProxy(cfg.ProxyPort, auth, dsh, boot); err != nil {
+	if err := startProxy(cfg.ProxyPort, auth, dsh, boot, admin); err != nil {
 		logError("reverse proxy listen on :%d failed: %v", cfg.ProxyPort, err)
 	}
 	// 第二条监听：unix socket + 子路径挂载（fnOS 网关把 /app/Harness/dsh 转发到这里）。
-	startProxySocket(renv.ProxySock, renv.ProxyBaseURL, auth, dsh, boot)
+	startProxySocket(renv.ProxySock, renv.ProxyBaseURL, auth, dsh, boot, admin)
 
 	// 所有核心服务已启动，现在处理 dsh 和 node-pty 安装
 	if os.Getenv("HARNESS_AUTOSTART") != "0" {
@@ -304,13 +304,13 @@ var (
 // 错误而不是只在 goroutine 里记日志 —— 设置页切换端口时需要先确认新端口可用，
 // 失败就必须保持旧监听不动（见 admin.go 的 applyProxyPortChange）。
 // 切换成功后旧监听随即关闭，端口改动无需重启控制台（进程退出时由操作系统回收）。
-func startProxy(port int, auth *Auth, dsh *DshManager, boot *bootState) error {
+func startProxy(port int, auth *Auth, dsh *DshManager, boot *bootState, account *AdminMux) error {
 	addr := ":" + strconv.Itoa(port)
 	ln, err := netListen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Addr: addr, Handler: newReverseProxy(auth, dsh, boot)}
+	srv := &http.Server{Addr: addr, Handler: newReverseProxy(auth, dsh, boot).withAccount(account)}
 
 	proxyMu.Lock()
 	oldSrv, oldLn := proxyServer, proxyLn
@@ -363,7 +363,7 @@ var (
 // socket 路径取自 HARNESS_PROXY_SOCK（默认 $TRIM_APPDEST/dsh.sock，即
 // /var/apps/Harness/target/dsh.sock）；取值为空或 "off"、目录不可创建、监听失败
 // 时只记日志并跳过——这条监听是可选的部署形态，不能因此让控制台起不来。
-func startProxySocket(sockPath, baseURL string, auth *Auth, dsh *DshManager, boot *bootState) {
+func startProxySocket(sockPath, baseURL string, auth *Auth, dsh *DshManager, boot *bootState, account *AdminMux) {
 	if sockPath == "" || sockPath == "off" {
 		logInfo("proxy unix socket disabled (HARNESS_PROXY_SOCK=%q)", sockPath)
 		return
@@ -389,7 +389,7 @@ func startProxySocket(sockPath, baseURL string, auth *Auth, dsh *DshManager, boo
 	if err := os.Chmod(sockPath, 0o660); err != nil {
 		logError("chmod proxy unix socket %s: %v", sockPath, err)
 	}
-	proxySockServer = &http.Server{Handler: newReverseProxyAt(auth, dsh, boot, baseURL)}
+	proxySockServer = &http.Server{Handler: newReverseProxyAt(auth, dsh, boot, baseURL).withAccount(account)}
 	proxySockPath = sockPath
 	go func() {
 		if err := proxySockServer.Serve(ln); err != nil && err != http.ErrServerClosed {

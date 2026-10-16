@@ -364,6 +364,57 @@ async function requestWithHeaders<T>(path: string, init?: RequestInit, headers?:
   return data as T
 }
 
+// --- DeepSeek 官方账号（控制台侧完成授权，见 backend/account.go） ---
+
+export interface AccountWallet {
+  currency: string
+  balance: string
+}
+
+// 账号库里的一个账号（多账号：切换 = 把它那份 token 重新写进 dsh 的凭据记录）
+export interface AccountEntryView {
+  id: string
+  contact?: string
+  name?: string
+  avatarUrl?: string
+  active: boolean
+  lastUsedAt?: string
+}
+
+export interface AccountStatusPayload {
+  // available=false 表示问不到 dsh（未就绪/已停止），与「未登录」不是一回事
+  available: boolean
+  signedIn: boolean
+  dshStatus?: string
+  contact?: string
+  name?: string
+  avatarUrl?: string
+  balance?: AccountWallet[]
+  bonus?: AccountWallet[]
+  accounts?: AccountEntryView[]
+  message?: string
+  messageRef?: UIRef
+}
+
+// 登录过程：waiting 时 authorizeUrl 有值（前端用它开标签页），其余阶段看 message/messageRef
+export type AccountLoginPhase = 'idle' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'expired'
+
+export interface AccountLoginState {
+  phase: AccountLoginPhase
+  authorizeUrl?: string
+  redirectUri?: string
+  expiresAt?: number
+  contact?: string
+  message?: string
+  messageRef?: UIRef
+}
+
+export interface AccountClientMeta {
+  version: string
+  locale: string
+  timezoneOffsetSeconds: number
+}
+
 // serverapi/index.ts
 export const api = {
   settings: () => request<SettingsPayload>('/api/settings'),
@@ -566,5 +617,32 @@ export const api = {
   closeSession: (id: string) =>
     request<{ ok: boolean; id: string }>('/api/session?id=' + encodeURIComponent(id), { method: 'DELETE' }),
   clearSessionHistory: (id: string) =>
-    request<{ ok: boolean; id: string }>('/api/session/clear?id=' + encodeURIComponent(id), { method: 'POST' })
+    request<{ ok: boolean; id: string }>('/api/session/clear?id=' + encodeURIComponent(id), { method: 'POST' }),
+  // DeepSeek 官方账号：状态 / 发起登录 / 轮询 / 用回调地址完成 / 取消 / 退出登录
+  account: () => request<AccountStatusPayload>('/api/account'),
+  accountLoginStart: (payload: { callbackOrigin: string } & AccountClientMeta) =>
+    request<AccountLoginState>('/api/account/login/start', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  accountLoginStatus: () => request<AccountLoginState>('/api/account/login/status'),
+  accountLoginComplete: (payload: { url?: string } & AccountClientMeta) =>
+    request<AccountLoginState>('/api/account/login/complete', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  accountLoginCancel: () => request<AccountLoginState>('/api/account/login/cancel', { method: 'POST' }),
+  // 退出登录 / 切换 / 移除都直接回**最新的状态快照**（列表、当前账号、余额一次到位），
+  // 后端内部已等到 dsh 认账再返回（见 backend/account.go）。
+  accountLogout: () => request<AccountStatusPayload>('/api/account/logout', { method: 'POST' }),
+  accountSwitch: (id: string) =>
+    request<AccountStatusPayload>('/api/account/switch', {
+      method: 'POST',
+      body: JSON.stringify({ id })
+    }),
+  accountRemove: (id: string) =>
+    request<AccountStatusPayload>('/api/account/remove', {
+      method: 'POST',
+      body: JSON.stringify({ id })
+    })
 }

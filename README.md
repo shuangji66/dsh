@@ -302,6 +302,82 @@ RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式�
 - 该监听是可选的：目录不可创建 / socket 被占用 / 监听失败时只记日志并跳过，
   不影响控制台与 TCP 反代启动。`HARNESS_PROXY_SOCK=off` 可显式关闭。
 
+## DeepSeek 官方账号登录（控制台侧完成授权）
+
+dsh 自带的账号登录在本部署下**用不了**，原因是**平台侧的硬规则**：`auth_init` 只接受
+`http://` + 主机名 ∈ {`localhost`, `127.0.0.1`, `[::1]`} 的 `redirect_uri`（路径任意）；
+公网 https/http、局域网 IP、甚至 `https://127.0.0.1:…` 一律 `50005 PAYLOAD_SCHEMA_MISMATCH`；
+`login_source` 取 `web`/`desktop`/空都一样；平台只有 `auth_init`/`auth_exchange`/`auth_cancel`
+三个端点，**没有设备码轮询**。而浏览器经平台网关访问时 `window.location.origin` 是公网地址 ——
+dsh 的 `loginOrigin()` 与平台一样只认 loopback，于是「点登录不跳转」。
+
+控制台因此**自己完成这套 OAuth**（`backend/account.go` + 概览页「DeepSeek Harness」卡片右上角的账号头像/弹窗）：
+
+| 步骤 | 谁做 |
+|---|---|
+| ① `POST /auth-api/v0/dsh/auth_init`（控制台自持 PKCE verifier/challenge 与 state） | 控制台 |
+| ② 打开平台授权页并完成授权 | 浏览器（用户点一下） |
+| ③ 回收 `?code=&state=`：loopback 来源会自动落到 `/oauth/callback`；否则把地址栏那条地址粘回控制台 | 控制台（admin 线与反代线共用同一个 handler） |
+| ④ `POST auth_exchange` 换 token（校 state、单次有效、10 分钟过期） | 控制台 |
+| ⑤ 按 dsh 的格式写入 `<dsh home>/.dsh/.credentials.yaml`：`deepseek-account-platform/default` 的 grant + `device` 记录 | 控制台 |
+| ⑥ 用 dsh 自己的 `account/getState` / `getProfile` / `getBalance` 核验并展示状态 | 控制台 → dsh |
+
+要点：
+
+- **写入/删除都要等 dsh 认账**：dsh 的 credentials-local 用 chokidar 监听该文件（去抖
+  ~100ms），写完（或退出登录删完）**立刻**查询会拿到旧状态 —— 登录会被误判成失败并回滚，
+  退出登录会让界面停在「已登录」只能手动刷新。两处都在窗口内（5s / 250ms）轮询
+  `account/getState` 直到 dsh 给出新状态；问不到 dsh（未就绪）不算失败，只记日志。
+- **写入立刻生效，不需要重启 dsh**：`dsh-credentials-local` 用 chokidar 监听该文件，且模型侧
+  每次请求现读凭据（`dsh-llm-deepseek-account` 的 `resolveToken` → `readRecord`）。真机验证：
+  写入后 `account/getState` 立刻从 `signed-out` 变成 `credential-stored`，`getProfile`/`getBalance`
+  随即可用。
+- 写入是**行级手术**：只在 `records:` 下删/插那两条记录（flow 风格一行），文件里用户自己的
+  其它 `refs`/`records` 逐字节不变；临时文件 + rename 落盘、权限强制 0600（dsh 会拒绝属主之外
+  可读的凭据文档）。写完立即向 dsh 核验，**只有 dsh 明确回答 `signed-out` 才回滚并报错**；
+  问不到 dsh（未就绪）不算失败。
+- **回调路径必须是 `/oauth/callback`**（`accountCallbackPath`）：平台只在 `auth_init` 那一步
+  宽松地接受任意路径，**用户点「登录」真正授权时会拒掉别的路径**，页面只显示「授权失败」
+  （实测对照：`/oauth/callback` 成功、`/app/Harness/dsh/_account/callback` 授权失败，请求头无关）。
+  反代线因此自留 `/oauth/callback`，**等于遮蔽 dsh 自己的账号回调路由** —— 本部署里 dsh 自己
+  那条路本来就走不通，但将来若要恢复原生流程，得先撤掉这处自留。
+- 回调地址的选择（`accountRedirectURI`）：浏览器来源是 loopback（同机 / SSH 本地转发 /
+  飞牛客户端把网页代理到 `127.0.0.1:<port>`）时用 `<origin><控制台 baseurl>/oauth/callback`；
+  否则用 `http://127.0.0.1:<proxyPort>/oauth/callback` 作占位 —— 平台接受、授权页能拉起；
+  有到该端口的本地转发时回调自动落到控制台（`ssh -L <proxyPort>:127.0.0.1:<proxyPort>`），
+  没有时用户把地址栏那条地址粘回来即可（或把 host 换成设备后打开，三种写法都自留）。
+### 多账号（添加 / 切换 / 移除）
+
+dsh **自己没有多账号概念**：账号凭据只有一条固定键（`deepseek-account-platform/default`），
+谁在里面谁就是「当前账号」。所以控制台的做法是：自己存一份**账号库**，切换时把对应那份 token
+重新写进那条记录。
+
+- 账号库在**控制台自己的数据目录**：`$HARNESS_DATA_DIR/dsh-accounts.json`（0600）。
+  刻意不往 dsh 的凭据文件里塞额外记录 —— 那个文件里装着用户其它密钥、格式也属于 dsh，
+  控制台只写它认识的那两条（`default` / `device`）。
+- **「当前生效的账号」是推导出来的**：拿凭据文件里的 token 与库里各条目比对（token 每次登录
+  都会换新，条目按平台 `user.id` 归并）。库里没有、而 dsh 正在用的 token，会在查询状态时
+  **自动导入**（老设备先登录后升级控制台的情况，否则列表里看不到在用的账号、切成别的就再也
+  切不回来）。
+- **切换** = 把该账号的 token 写进凭据记录 + 等 dsh 认账（同登录的写入路径，失败回滚到切换前
+  的凭据）。凭据变更会让账号插件清掉资料/余额缓存（它订阅 `credentials/record-updated`），
+  所以切完立刻就是新账号的余额与联系方式。
+- **退出登录**只是让 dsh 不再使用当前凭据，**账号仍留在库里**（可以随时切回，不用重新授权）；
+  **移除**才会请平台作废 token 并从库里删除。
+- 兼容性：`0.2.0-rc.2` 与 `0.2.1-alpha.4` 的账号插件用的是**同一个键名与同样的 grant 格式**
+  （`credentialKey("deepseek-account-platform", "default")` / `"device"`），所以凭据写入对两者
+  都成立；更早、没有该插件的版本只会把它当普通记录存着（`credentials-local` 是通用键值存储，
+  支持 `grant` / `api-key` 两种 kind），不影响启动。
+
+- **dsh 自己的账号入口仍然不可用**（平台规则使然）：请用概览页「DeepSeek Harness」卡片右上角的
+  账号头像（未登录是灰色圆形头像 + 「未登录」，点开弹窗里有「登录」/「复制授权链接」/「跳转登录」/
+  回调链接输入框；登录后头像换成平台头像、下方显示余额）。
+- 授权页是**一次性**的：同一个 `authorize_id` 授权成功后浏览器会跳到那条打不开的 `127.0.0.1`
+  地址上（**跳到那里就已经表示授权成功了**，把地址粘回控制台即可完成）；此时按「后退」再点一次
+  「登录」必然「授权失败」——那不是配置问题。
+- 退出登录：先请平台作废 token（`POST /auth-api/v0/users/logout` + `x-dsh-auth-token`），再删本地
+  凭据记录；平台侧失败不阻塞本机退出。
+
 ### 概览页的「飞牛入口」
 
 概览页「快捷访问」的第一行固定显示**飞牛入口**——当前访问环境下经平台网关访问

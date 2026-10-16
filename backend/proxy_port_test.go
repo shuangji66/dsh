@@ -138,7 +138,7 @@ func TestSaveSettingsProxyPortRebind(t *testing.T) {
 
 	renv := &RuntimeEnv{ConfigFile: filepath.Join(t.TempDir(), "config.json")}
 	boot := newBootState()
-	if err := startProxy(oldPort, NewAuth(), dsh, boot); err != nil {
+	if err := startProxy(oldPort, NewAuth(), dsh, boot, nil); err != nil {
 		t.Fatalf("初始监听 :%d 失败: %v", oldPort, err)
 	}
 	if !proxyPortDialable(oldPort) {

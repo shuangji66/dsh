@@ -178,7 +178,8 @@
   provider 内存里的文档，改文件后要过一拍（chokidar 去抖 ~100ms）才更新 —— 所以
   **写入后与退出登录（删记录）后都必须轮询等它认账**（`accountWaitDshState` /
   `accountVerifyStored` / `accountWaitSignedOut`，5s / 250ms），否则登录会被误判成失败
-  并回滚、退出登录会让界面停在「已登录」；前端退出登录还先做一次乐观更新再确认。
+  并回滚、退出登录会让界面停在「已登录」；前端的退出/切换/移除都再用一次短轮询确认快照
+  （`confirmSnapshot`，最多 5×400ms），不等用户手动刷新。
   回调路径同时挂在 admin 线（`buildHandler`）与反代线
   （`reverseProxy.account`，放在就绪门禁之前）—— **路径必须是 `/oauth/callback`**（平台
   在授权那一步只认它，见「常见的坑」），且反代线自留它会遮蔽 dsh 自己的账号回调路由
@@ -192,10 +193,19 @@
   平台 token。凭据记录键名/格式与 `0.2.0-rc.2` 一致（同 `credentialKey(...)`），写入对老版本
   同样成立（更早没有该插件的版本只当普通记录存着）。回归测试见 `backend/account_test.go`。
   **库文件整份是密文**（AES-256-GCM，与快捷指令同一把主密钥，磁盘形态 `{"version":2,"vault":{…}}`；
-  dsh 那份 `.credentials.yaml` 则必须明文，别混）：`loadAccountVault(crypt)` **解不开一律报错、
+  dsh 那份 `.credentials.yaml` 则必须明文，别混）：`loadAccountVault(path, crypt)` **解不开一律报错、
   绝不返回空库** —— 状态查询里的自愈导入是这条只读路径上唯一的写，拿空库去写就把原始密文抹了；
   主密钥不可用时读写都拒绝（`saveAccountVault` 由 `encrypt` 挡住，没有写明文的分支）。
   旧版明文库（version 1）**不迁移**（该版本未对外发布）：明确报错提示删掉重登，也绝不被覆盖。
+  **库的每次变更都必须走 `accountVaultMutate`**（锁内重读 → 改 → 落盘）：切换要等 dsh 认账、
+  移除要请平台作废 token，中间隔着最长几秒，直接「load 一份快照、改完 save 回去」会把这期间
+  别人的改动（新加的账号、刚移除的账号）静默覆盖（与 `quickCmdsMu` 同一个坑，回归测试
+  `TestAccountVaultMutateNoLostUpdate`）。`saveAccountVault` 只该由它调用；锁内不许重入、
+  也不许做平台请求/等 dsh 这类慢操作。「移除」在库写失败时**如实报错**（账号还在库里，
+  凭据已删），不假报成功。
+  库路径走 `accountVaultPath(m.renv)`（与 quickCmdsPath 同构：renv 优先、dataPath 兜底）；
+  凭据文件走 `$DSH_HOME`（`RuntimeEnv.DshHome`，见 config.go），不再假定 `$HOME/.dsh`
+  —— dsh 自己认 `DSH_HOME`，位置写错会让登录「写入成功但 dsh 不认」。
   回归测试见 `backend/accountvault_crypt_test.go`。
 - `auth.go` / `visitors.go` / `sse.go` — 登录鉴权、访客跟踪（SSE 推送）、事件流。
 - `quickcmds.go` — 终端快捷指令持久化（数据目录下的 `quickcmds.json`，**命令内容加密落盘**）。

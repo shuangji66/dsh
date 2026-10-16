@@ -99,13 +99,20 @@ type RuntimeEnv struct {
 	// DshPidFile 是 dsh 服务进程的 PID 文件路径（DataDir/dsh.pid）。二者用途不同：
 	// 前者标识控制台进程，dsh 装插件自重启等场景下保持不变；后者跟随 dsh 实时
 	// PID，dsh 停止时移除。
-	PidFile       string
-	DshPidFile    string
-	TRIMApiToken  string
-	TRIMAppDest   string
-	TRIMAppName   string
-	Path          string
-	Home          string
+	PidFile      string
+	DshPidFile   string
+	TRIMApiToken string
+	TRIMAppDest  string
+	TRIMAppName  string
+	Path         string
+	Home         string
+	// DshHome 是 dsh 的**数据根**（`$DSH_HOME`，dsh 自己解析为「显式配置 > $DSH_HOME >
+	// ~/.dsh」，见 @deepseek-ai/dsh-home-paths 的 resolveDshHome）。平台启动脚本会注入它
+	// （实测本机为 $HOME/.dsh），控制台里只有凭据文件按它定位（见 accountCredentialsPath）——
+	// 凭据必须写在 dsh 真正读的那个文件上，否则登录会「成功但 dsh 说没登录」。
+	// 其余 `<home>/.dsh/...`（profiles、备份包）仍按 Home 拼：备份包的条目名就是 `.dsh`，
+	// 改它等于改备份格式，目前没有理由动。为空时调用方回退 `<Home>/.dsh`。
+	DshHome       string
 	PnpmHome      string
 	Lang          string
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（DataDir/quickcmds.json）
@@ -172,6 +179,13 @@ func loadRuntimeEnv() RuntimeEnv {
 		proxySock = filepath.Join(appDest, "dsh.sock")
 	}
 	dataDir := dataDirFromEnv()
+	home := os.Getenv("HOME")
+	// dsh 数据根：$DSH_HOME 优先，否则 <HOME>/.dsh；主目录也拿不到时留空（由调用方处理，
+	// 绝不能拼出 ".dsh" 这种**相对**路径 —— 那会落到进程当前工作目录）。
+	dshHome := os.Getenv("DSH_HOME")
+	if dshHome == "" && home != "" {
+		dshHome = filepath.Join(home, ".dsh")
+	}
 	return RuntimeEnv{
 		DataDir:       dataDir,
 		ConfigFile:    filepath.Join(dataDir, "config.json"),
@@ -184,7 +198,8 @@ func loadRuntimeEnv() RuntimeEnv {
 		TRIMAppDest:   appDest,
 		TRIMAppName:   appName,
 		Path:          os.Getenv("PATH"),
-		Home:          os.Getenv("HOME"),
+		Home:          home,
+		DshHome:       dshHome,
 		PnpmHome:      os.Getenv("PNPM_HOME"),
 		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
 		QuickCmdsFile: filepath.Join(dataDir, "quickcmds.json"),

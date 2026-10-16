@@ -44,6 +44,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -163,14 +164,41 @@ var accountAttempts struct {
 //
 // 出网策略与 dsh 对齐：走设置页的「代理dsh」（换来的 token 就是给 dsh 用的，dsh 自己也是
 // 经那套环境变量出网）；关闭时直连（探针实测本机可直连 platform.deepseek.com）。
+//
+// **包级复用同一个 client**：核验轮询在 5 秒窗口里最多打 20 次请求、状态查询一次要打 2 次，
+// 每次新建 Transport 就等于每次新建一个连接池（且都不关）。代理配置变化时按 key 重建，
+// 并把旧 client 的空闲连接收掉。
+var accountHTTPClientCache struct {
+	sync.Mutex
+	key    string
+	client *http.Client
+}
+
 func accountHTTPClient() *http.Client {
+	cfg := GetConfig()
+	key := ""
+	if cfg.ProxyEnabled {
+		key = strings.TrimSpace(cfg.ProxyAddr)
+	}
+	accountHTTPClientCache.Lock()
+	defer accountHTTPClientCache.Unlock()
+	if accountHTTPClientCache.client != nil && accountHTTPClientCache.key == key {
+		return accountHTTPClientCache.client
+	}
 	tr := &http.Transport{MaxIdleConns: 4, IdleConnTimeout: 30 * time.Second}
-	if cfg := GetConfig(); cfg.ProxyEnabled && strings.TrimSpace(cfg.ProxyAddr) != "" {
-		if u, err := url.Parse(strings.TrimSpace(cfg.ProxyAddr)); err == nil {
+	if key != "" {
+		if u, err := url.Parse(key); err == nil {
 			tr.Proxy = http.ProxyURL(u)
 		}
 	}
-	return &http.Client{Timeout: accountHTTPTimeout, Transport: tr}
+	if old := accountHTTPClientCache.client; old != nil {
+		if oldTr, ok := old.Transport.(*http.Transport); ok {
+			oldTr.CloseIdleConnections()
+		}
+	}
+	accountHTTPClientCache.key = key
+	accountHTTPClientCache.client = &http.Client{Timeout: accountHTTPTimeout, Transport: tr}
+	return accountHTTPClientCache.client
 }
 
 // accountPlatformPost 调一个平台端点，并按 dsh 的 envelope 约定取 biz_data。
@@ -452,18 +480,22 @@ func (m *AdminMux) accountLoginComplete(callback, code, state string, meta accou
 
 	userID, contact, name, avatar := accountUserFields(data["user"])
 	now := time.Now().Format(time.RFC3339)
-	if vault, vaultErr := loadAccountVault(m.crypt); vaultErr != nil {
-		logWarn("[account] account vault unreadable: %v", vaultErr)
-	} else {
+	// 写账号库走 accountVaultMutate（锁内重读最新库再落盘）：本函数前面刚做过最长 5 秒的
+	// 核验轮询，手里直接攒一份快照再整份写回去，会把这期间别人的改动覆盖掉（见 accountVaultMu）。
+	// 库写失败**不算登录失败**：凭据已经落盘且 dsh 认过了，而状态查询里的自愈导入下次就会
+	// 把它补进库里（那条路径只在「库读得出来」时才动手，不会反过来抹掉库）。
+	var saved *accountVault
+	if err := accountVaultMutate(accountVaultPath(m.renv), m.crypt, func(vault *accountVault) error {
 		vault.upsert(accountVaultEntry{
 			ID: accountVaultID(userID, token), Contact: contact, Name: name, AvatarURL: avatar,
 			Token: token, Issuer: accountPlatformOrigin, AddedAt: now, LastUsedAt: now,
 		})
-		if err := saveAccountVault(m.crypt, vault); err != nil {
-			logWarn("[account] account vault save failed: %v", err)
-		} else {
-			logInfo("[account] account saved to the vault (%s)", accountVaultDebug(vault))
-		}
+		saved = vault
+		return nil
+	}); err != nil {
+		logWarn("[account] storing the account in the vault failed (the credential itself is stored and verified): %v", err)
+	} else {
+		logInfo("[account] account saved to the vault (%s)", accountVaultDebug(saved))
 	}
 	accountAttempts.Lock()
 	att.contact = contact
@@ -656,16 +688,33 @@ func accountRandomB64(n int) (string, error) {
 
 // --- 凭据文件（dsh 的 credentials-local 格式） ---
 
-// accountCredentialsPath 返回 dsh 的凭据文件（$DSH_HOME/.credentials.yaml）。
+// accountCredentialsPath 返回 dsh 的凭据文件（`$DSH_HOME/.credentials.yaml`）。
+//
+// 必须按 dsh 真正读的那个位置写：它认 `$DSH_HOME`，只在没设时才退回 `~/.dsh`
+// （见 @deepseek-ai/dsh-home-paths 的 resolveDshHome），而平台启动脚本会注入 DSH_HOME。
+// 位置对不上时，登录会在「写完核验」那一步被拦下并回滚（不会静默），但排查起来很难 ——
+// 所以位置解析只此一处，见 dshHomeDir。
 func (m *AdminMux) accountCredentialsPath() (string, error) {
-	home := ""
-	if m.renv != nil {
-		home = m.renv.Home
-	}
-	if strings.TrimSpace(home) == "" {
+	dir := dshHomeDir(m.renv)
+	if dir == "" {
 		return "", fmt.Errorf("dsh home is unknown")
 	}
-	return filepath.Join(home, ".dsh", ".credentials.yaml"), nil
+	return filepath.Join(dir, ".credentials.yaml"), nil
+}
+
+// dshHomeDir 返回 dsh 的数据根：RuntimeEnv.DshHome（= $DSH_HOME，默认 <HOME>/.dsh），
+// 拿不到时回退 <HOME>/.dsh，都没有则返回空串（调用方据此报错，**不要**拼出相对路径）。
+func dshHomeDir(renv *RuntimeEnv) string {
+	if renv == nil {
+		return ""
+	}
+	if d := strings.TrimSpace(renv.DshHome); d != "" {
+		return d
+	}
+	if h := strings.TrimSpace(renv.Home); h != "" {
+		return filepath.Join(h, ".dsh")
+	}
+	return ""
 }
 
 const (
@@ -713,7 +762,7 @@ func accountInsertRecords(text string, records map[string]string) string {
 	for k := range records {
 		keys = append(keys, k)
 	}
-	sortStrings(keys)
+	sort.Strings(keys)
 	var ins strings.Builder
 	for _, k := range keys {
 		ins.WriteString("  " + k + ": " + records[k] + "\n")
@@ -727,15 +776,6 @@ func accountInsertRecords(text string, records map[string]string) string {
 		text = "version: 1\n"
 	}
 	return text + "records:\n" + ins.String()
-}
-
-// sortStrings 是给 map 键排序用的小工具（保持输出稳定，便于测试与 diff）。
-func sortStrings(v []string) {
-	for i := 1; i < len(v); i++ {
-		for j := i; j > 0 && v[j] < v[j-1]; j-- {
-			v[j], v[j-1] = v[j-1], v[j]
-		}
-	}
 }
 
 // accountQuoteYAML 把字符串包成 YAML 双引号标量（token 是 \x21-\x7e 的可打印 ASCII，
@@ -1068,7 +1108,7 @@ func (m *AdminMux) handleAccountStatus(w http.ResponseWriter, r *http.Request) {
 func (m *AdminMux) accountStatusSnapshot() accountStatus {
 	st := accountStatus{}
 	activeToken := m.accountActiveToken()
-	vault, vaultErr := loadAccountVault(m.crypt)
+	vault, vaultErr := loadAccountVault(accountVaultPath(m.renv), m.crypt)
 	if vaultErr != nil {
 		logWarn("[account] account vault unreadable: %v", vaultErr)
 	}
@@ -1114,20 +1154,36 @@ func (m *AdminMux) accountStatusSnapshot() accountStatus {
 	}
 
 	// 自愈导入：dsh 正在用的 token 不在库里 → 补一条（id 优先取平台 user id）。
+	//
+	// 判断与写入都在 accountVaultMutate 的锁内：拿一份几秒前的快照去 upsert，会把这期间
+	// 别人的改动（新加的账号、刚移除的账号）整份覆盖掉。锁内重读的那份顺便用来渲染列表 ——
+	// 否则刚导入的账号这一拍还不会出现在 st.Accounts 里（界面上看不到「使用中」）。
 	if vaultErr == nil && activeToken != "" && vault.activeID(activeToken) == "" {
 		profileID := ""
 		if prof.Value != nil {
 			profileID = prof.Value.ID
 		}
 		now := time.Now().Format(time.RFC3339)
-		vault.upsert(accountVaultEntry{
-			ID: accountVaultID(profileID, activeToken), Contact: st.Contact, Name: st.Name,
-			AvatarURL: st.AvatarURL, Token: activeToken, Issuer: accountPlatformOrigin,
-			AddedAt: now, LastUsedAt: now,
+		imported := false
+		next := vault
+		importErr := accountVaultMutate(accountVaultPath(m.renv), m.crypt, func(v *accountVault) error {
+			next = v
+			if v.activeID(activeToken) != "" { // 并发请求刚导过同一条：不重复写
+				return nil
+			}
+			v.upsert(accountVaultEntry{
+				ID: accountVaultID(profileID, activeToken), Contact: st.Contact, Name: st.Name,
+				AvatarURL: st.AvatarURL, Token: activeToken, Issuer: accountPlatformOrigin,
+				AddedAt: now, LastUsedAt: now,
+			})
+			imported = true
+			return nil
 		})
-		if err := saveAccountVault(m.crypt, vault); err != nil {
-			logWarn("[account] account vault save failed: %v", err)
-		} else {
+		switch {
+		case importErr != nil:
+			logWarn("[account] importing the account in use into the vault failed: %v", importErr)
+		case imported:
+			vault = next
 			logInfo("[account] imported the account in use into the vault (%s)", accountVaultDebug(vault))
 		}
 	}
@@ -1250,7 +1306,7 @@ func (m *AdminMux) handleAccountSwitch(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式不正确")
 		return
 	}
-	vault, err := loadAccountVault(m.crypt)
+	vault, err := loadAccountVault(accountVaultPath(m.renv), m.crypt)
 	if err != nil {
 		logWarn("[account] account vault unreadable: %v", err)
 		writeErrFrom(w, accountVaultError(err), http.StatusInternalServerError)
@@ -1286,9 +1342,16 @@ func (m *AdminMux) handleAccountSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entry.LastUsedAt = time.Now().Format(time.RFC3339)
-	vault.upsert(*entry)
-	if err := saveAccountVault(m.crypt, vault); err != nil {
-		logWarn("[account] account vault save failed: %v", err)
+	// 只更新「最近使用」这一格，且在锁内按 id 重新定位：整份 upsert 会把这几秒里被移除的
+	// 账号复活（凭据已经切换完成，库这一格写失败不该让切换整体失败——界面上的「使用中」
+	// 是根据凭据文件推导的，不受这里影响）。
+	if err := accountVaultMutate(accountVaultPath(m.renv), m.crypt, func(v *accountVault) error {
+		if e := v.find(entry.ID); e != nil {
+			e.LastUsedAt = entry.LastUsedAt
+		}
+		return nil
+	}); err != nil {
+		logWarn("[account] updating the account vault after switching failed: %v", err)
 	}
 	logInfo("[account] switched to account %s (dsh state=%s)", entry.ID, firstNonEmpty(status, "unverified"))
 	writeJSON(w, m.accountStatusSnapshot())
@@ -1304,7 +1367,7 @@ func (m *AdminMux) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式不正确")
 		return
 	}
-	vault, err := loadAccountVault(m.crypt)
+	vault, err := loadAccountVault(accountVaultPath(m.renv), m.crypt)
 	if err != nil {
 		logWarn("[account] account vault unreadable: %v", err)
 		writeErrFrom(w, accountVaultError(err), http.StatusInternalServerError)
@@ -1315,6 +1378,9 @@ func (m *AdminMux) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusNotFound, "err_account_not_found", "账号库里没有这个账号")
 		return
 	}
+	// 本机凭据先摘掉、平台 token 也作废了，**最后**才从库里删 —— 这一步失败必须如实报错：
+	// 账号还在库里，而界面上「移除」的位置只剩一次重试（早先只记一行日志 + 返回 200，
+	// 前端会弹「已移除账号 X」，用户以为删掉了）。
 	if entry.Token != "" && entry.Token == m.accountActiveToken() {
 		if err := m.accountRemoveGrant(); err != nil {
 			logWarn("[account] credential removal failed: %v", err)
@@ -1331,11 +1397,19 @@ func (m *AdminMux) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
 			logWarn("[account] platform logout failed: %v", err)
 		}
 	}
-	vault.remove(entry.ID)
-	if err := saveAccountVault(m.crypt, vault); err != nil {
-		logWarn("[account] account vault save failed: %v", err)
+	// 锁内按 id 重删：这几秒里可能有人已经删过它（或重新添加了同名 id 的新条目，
+	// 那种情况下 upsert 的 AddedAt 会不同 —— 反正这里只认 id）。
+	var after *accountVault
+	if err := accountVaultMutate(accountVaultPath(m.renv), m.crypt, func(v *accountVault) error {
+		v.remove(entry.ID)
+		after = v
+		return nil
+	}); err != nil {
+		logWarn("[account] removing the account from the vault failed: %v", err)
+		writeErrU(w, http.StatusInternalServerError, "err_account_vault_failed", "账号库读写失败：%s", "detail", err.Error())
+		return
 	}
-	logInfo("[account] removed account %s (%s)", entry.ID, accountVaultDebug(vault))
+	logInfo("[account] removed account %s (%s)", entry.ID, accountVaultDebug(after))
 	writeJSON(w, m.accountStatusSnapshot())
 }
 

@@ -585,7 +585,7 @@ func TestAccountCallbackMountPaths(t *testing.T) {
 func TestAccountVaultRoundTrip(t *testing.T) {
 	t.Setenv("HARNESS_DATA_DIR", t.TempDir())
 	crypt := testCryptor(t)
-	v, err := loadAccountVault(crypt)
+	v, err := loadAccountVault(accountVaultDiskPath(), crypt)
 	if err != nil {
 		t.Fatalf("空库应可读: %v", err)
 	}
@@ -602,14 +602,14 @@ func TestAccountVaultRoundTrip(t *testing.T) {
 	if got := v.find("a"); got == nil || got.Token != "t1-new" || got.AddedAt != "2026-01-01T00:00:00Z" {
 		t.Fatalf("归并结果不对: %+v", got)
 	}
-	if err := saveAccountVault(crypt, v); err != nil {
+	if err := saveAccountVault(accountVaultDiskPath(), crypt, v); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	path := dataPath(accountVaultFile)
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("账号库权限应为 0600: %v (%v)", fi.Mode().Perm(), err)
 	}
-	back, err := loadAccountVault(crypt)
+	back, err := loadAccountVault(accountVaultDiskPath(), crypt)
 	if err != nil || len(back.Accounts) != 2 || back.find("a").Token != "t1-new" {
 		t.Fatalf("读回不一致: %+v (%v)", back, err)
 	}
@@ -631,7 +631,7 @@ func TestAccountVaultRoundTrip(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadAccountVault(crypt); err == nil {
+	if _, err := loadAccountVault(accountVaultDiskPath(), crypt); err == nil {
 		t.Fatal("坏库应报错")
 	}
 }
@@ -669,10 +669,10 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	t.Cleanup(func() { accountVerifyPollTimeout, accountVerifyPollInterval = prevTimeout, prevInterval })
 
 	// 库里两条账号，凭据文件里是第一条 → 快照应标出它 active。
-	v, _ := loadAccountVault(m.crypt)
+	v, _ := loadAccountVault(accountVaultDiskPath(), m.crypt)
 	v.upsert(accountVaultEntry{ID: "acc-1", Contact: "139******59", Token: "tok-1"})
 	v.upsert(accountVaultEntry{ID: "acc-2", Contact: "138******00", Token: "tok-2"})
-	if err := saveAccountVault(m.crypt, v); err != nil {
+	if err := saveAccountVault(accountVaultDiskPath(), m.crypt, v); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.accountStoreGrant("tok-1"); err != nil {
@@ -693,7 +693,7 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	if tok := m.accountActiveToken(); tok != "tok-2" {
 		t.Fatalf("切换后凭据里的 token = %q", tok)
 	}
-	back, _ := loadAccountVault(m.crypt)
+	back, _ := loadAccountVault(accountVaultDiskPath(), m.crypt)
 	if e := back.find("acc-2"); e == nil || e.LastUsedAt == "" {
 		t.Fatalf("切换后未记录 LastUsedAt: %+v", e)
 	}
@@ -733,7 +733,7 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	if tok := m.accountActiveToken(); tok != "" {
 		t.Fatalf("退出登录后凭据仍在: %q", tok)
 	}
-	if back, _ := loadAccountVault(m.crypt); len(back.Accounts) != 2 {
+	if back, _ := loadAccountVault(accountVaultDiskPath(), m.crypt); len(back.Accounts) != 2 {
 		t.Fatalf("退出登录不该删库里的账号: %+v", back.Accounts)
 	}
 
@@ -747,7 +747,7 @@ func TestAccountMultiAccountFlow(t *testing.T) {
 	if revoked != "tok-1" {
 		t.Fatalf("未请平台作废 token，收到 %q", revoked)
 	}
-	if back, _ := loadAccountVault(m.crypt); len(back.Accounts) != 1 || back.find("acc-1") != nil {
+	if back, _ := loadAccountVault(accountVaultDiskPath(), m.crypt); len(back.Accounts) != 1 || back.find("acc-1") != nil {
 		t.Fatalf("移除后库里不对: %+v", back.Accounts)
 	}
 
@@ -786,12 +786,235 @@ func TestAccountStatusImportsActiveAccount(t *testing.T) {
 	if len(st.Accounts) != 1 || !st.Accounts[0].Active {
 		t.Fatalf("应把在用的账号导入库: %+v", st.Accounts)
 	}
-	if back, _ := loadAccountVault(m.crypt); back.activeID("tok-existing") == "" {
+	if back, _ := loadAccountVault(accountVaultDiskPath(), m.crypt); back.activeID("tok-existing") == "" {
 		t.Fatalf("库未落盘: %+v", back)
 	}
 	// 再查一次不应重复导入。
 	st = m.accountStatusSnapshot()
 	if len(st.Accounts) != 1 {
 		t.Fatalf("重复导入: %+v", st.Accounts)
+	}
+}
+
+// errorCodeOf 从错误响应体里取 code（写法见 admin.go 的 writeErrBody）。
+func errorCodeOf(t *testing.T, body []byte) string {
+	t.Helper()
+	var out struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("响应体不是 JSON: %v\n%s", err, body)
+	}
+	return out.Code
+}
+
+// 凭据文件按 dsh 自己的数据根定位：$DSH_HOME 优先（平台启动脚本会注入），拿不到时才退回
+// <HOME>/.dsh；两者都没有时报错 —— 绝不拼出 ".dsh" 这种**相对**路径（那会落到进程 CWD）。
+func TestAccountCredentialsPathFollowsDshHome(t *testing.T) {
+	home := t.TempDir()
+
+	// ① 显式 DshHome（= $DSH_HOME）优先：凭据写在它下面，而不是 <HOME>/.dsh。
+	custom := filepath.Join(t.TempDir(), "dsh-home")
+	m := newAccountTestMux(t, home)
+	m.renv.DshHome = custom
+	path, err := m.accountCredentialsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(custom, ".credentials.yaml"); path != want {
+		t.Fatalf("accountCredentialsPath = %q, want %q", path, want)
+	}
+	// 端到端：真的写在那里（设备记录会被创建）。
+	if _, err := m.accountEnsureDeviceID(); err != nil {
+		t.Fatalf("写设备记录失败: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("凭据没落在 $DSH_HOME 下: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".dsh", ".credentials.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("<HOME>/.dsh 下不该出现凭据文件: %v", err)
+	}
+
+	// ② 没有 DshHome：退回 <HOME>/.dsh（平台没注入 DSH_HOME 时的默认形态）。
+	m2 := newAccountTestMux(t, home)
+	m2.renv.DshHome = ""
+	if p2, err := m2.accountCredentialsPath(); err != nil {
+		t.Fatal(err)
+	} else if want := filepath.Join(home, ".dsh", ".credentials.yaml"); p2 != want {
+		t.Fatalf("回退路径 = %q, want %q", p2, want)
+	}
+
+	// ③ 两个都没有：报错，而不是返回 ".credentials.yaml" 这种相对路径。
+	m3 := &AdminMux{renv: &RuntimeEnv{}}
+	if p, err := m3.accountCredentialsPath(); err == nil {
+		t.Fatalf("主目录与 DSH_HOME 都为空时应报错，实得 %q", p)
+	}
+}
+
+// loadRuntimeEnv 里的 DshHome：$DSH_HOME 优先，否则 <HOME>/.dsh（与 dsh 的 resolveDshHome 一致）。
+func TestLoadRuntimeEnvDshHome(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "custom-dsh")
+	t.Setenv("DSH_HOME", custom)
+	if got := loadRuntimeEnv().DshHome; got != custom {
+		t.Fatalf("$DSH_HOME 注入时 DshHome = %q, want %q", got, custom)
+	}
+	t.Setenv("DSH_HOME", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, want := loadRuntimeEnv().DshHome, filepath.Join(home, ".dsh"); got != want {
+		t.Fatalf("没有 DSH_HOME 时 DshHome = %q, want %q", got, want)
+	}
+	// 主目录也没有：留空，交给调用方报错（不能拼出相对路径）。
+	t.Setenv("HOME", "")
+	if got := loadRuntimeEnv().DshHome; got != "" {
+		t.Fatalf("HOME 与 DSH_HOME 都为空时 DshHome 应留空，实得 %q", got)
+	}
+}
+
+// 「移除账号」在账号库写盘失败时必须**如实报错**（本机凭据已删、账号还在库里，用户可重试）：
+// 返回 200 会让前端弹「已移除账号 X」，而列表里它还在（修复前就是这个表现）。
+func TestAccountRemoveReportsVaultWriteFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("以 root 运行时目录权限不生效，构造不出「读得到、写不进」")
+	}
+	home := writeAccountCreds(t, accountCredsFixture)
+	dataDir := t.TempDir()
+	t.Setenv("HARNESS_DATA_DIR", dataDir)
+	m := newAccountTestMux(t, home)
+	prevCfg := GetConfig()
+	initConfig(&AppConfig{ProxyPort: 3079})
+	t.Cleanup(func() { initConfig(&prevCfg) })
+	// 假平台：本用例不该真的去打 platform.deepseek.com（移除会请平台作废 token）。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	prevOrigin := accountPlatformOrigin
+	accountPlatformOrigin = srv.URL
+	t.Cleanup(func() { accountPlatformOrigin = prevOrigin })
+	prevState := accountDshStateFn
+	accountDshStateFn = func(*AdminMux) (string, error) { return "signed-out", nil }
+	t.Cleanup(func() { accountDshStateFn = prevState })
+
+	if err := accountVaultMutate(accountVaultDiskPath(), m.crypt, func(v *accountVault) error {
+		v.upsert(accountVaultEntry{ID: "acc-keep", Token: "tok-keep"})
+		v.upsert(accountVaultEntry{ID: "acc-drop", Token: "tok-drop", Contact: "139******02"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 让**写**失败而**读**照常：数据目录只读（save 的 CreateTemp 必然 EACCES）。
+	if err := os.Chmod(dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dataDir, 0o700) })
+
+	rec := httptest.NewRecorder()
+	m.handleAccountRemove(rec, httptest.NewRequest(http.MethodPost, "/api/account/remove",
+		strings.NewReader(`{"id":"acc-drop"}`)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("库写失败时应报错（不能回 200），实得 %d: %s", rec.Code, rec.Body.String())
+	}
+	if code := errorCodeOf(t, rec.Body.Bytes()); code != "err_account_vault_failed" {
+		t.Fatalf("应带 err_account_vault_failed（前端按它查译文），实得 %q", code)
+	}
+
+	// 账号仍在库里（没被半删）—— 前端据此让用户重试。
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	back, err := loadAccountVault(accountVaultDiskPath(), m.crypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.find("acc-drop") == nil || back.find("acc-keep") == nil {
+		t.Fatalf("库内容不对（不该丢条目）: %+v", back.Accounts)
+	}
+}
+
+// 「切换」时那次库写入（只更新最近使用时间）失败**不**让切换整体失败：凭据已经换好、dsh 也认了，
+// 界面上的「使用中」是按凭据推导的。这个刻意的不对称在此钉住 —— 别把它改成报错。
+func TestAccountSwitchKeepsWorkingWhenVaultWriteFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("以 root 运行时目录权限不生效，构造不出「读得到、写不进」")
+	}
+	home := writeAccountCreds(t, accountCredsFixture)
+	dataDir := t.TempDir()
+	t.Setenv("HARNESS_DATA_DIR", dataDir)
+	m := newAccountTestMux(t, home)
+	prevCfg := GetConfig()
+	initConfig(&AppConfig{ProxyPort: 3079})
+	t.Cleanup(func() { initConfig(&prevCfg) })
+	prevState := accountDshStateFn
+	accountDshStateFn = func(*AdminMux) (string, error) { return "credential-stored", nil }
+	t.Cleanup(func() { accountDshStateFn = prevState })
+	prevVerify := accountVerifyStoreFn
+	accountVerifyStoreFn = func(*AdminMux) (string, error) { return "credential-stored", nil }
+	t.Cleanup(func() { accountVerifyStoreFn = prevVerify })
+	prevTimeout, prevInterval := accountVerifyPollTimeout, accountVerifyPollInterval
+	accountVerifyPollTimeout, accountVerifyPollInterval = 20*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { accountVerifyPollTimeout, accountVerifyPollInterval = prevTimeout, prevInterval })
+
+	if err := accountVaultMutate(accountVaultDiskPath(), m.crypt, func(v *accountVault) error {
+		v.upsert(accountVaultEntry{ID: "acc-1", Contact: "139******59", Token: "tok-1"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dataDir, 0o700) })
+
+	rec := httptest.NewRecorder()
+	m.handleAccountSwitch(rec, httptest.NewRequest(http.MethodPost, "/api/account/switch",
+		strings.NewReader(`{"id":"acc-1"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("库写失败不该让切换失败，实得 %d: %s", rec.Code, rec.Body.String())
+	}
+	if tok := m.accountActiveToken(); tok != "tok-1" {
+		t.Fatalf("切换后凭据里的 token = %q，want tok-1", tok)
+	}
+	var st accountStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("响应不是 status 快照: %v\n%s", err, rec.Body.String())
+	}
+	if len(st.Accounts) != 1 || !st.Accounts[0].Active {
+		t.Fatalf("切换后的快照应标出 acc-1 使用中: %+v", st.Accounts)
+	}
+}
+
+// 平台请求的 client 必须复用（核验轮询 5 秒内最多 20 次请求、每次状态查询 2 次），
+// 只有代理配置变化时才重建（并收掉旧连接池）。
+func TestAccountHTTPClientReused(t *testing.T) {
+	prevCfg := GetConfig()
+	t.Cleanup(func() { initConfig(&prevCfg) })
+	initConfig(&AppConfig{ProxyPort: 3079})
+
+	first := accountHTTPClient()
+	if again := accountHTTPClient(); again != first {
+		t.Fatal("同一配置下应复用同一个 client")
+	}
+
+	proxied := GetConfig()
+	proxied.ProxyEnabled = true
+	proxied.ProxyAddr = "http://127.0.0.1:7890"
+	initConfig(&proxied)
+	withProxy := accountHTTPClient()
+	if withProxy == first {
+		t.Fatal("代理配置变化后应重建 client")
+	}
+	if tr, ok := withProxy.Transport.(*http.Transport); !ok || tr.Proxy == nil {
+		t.Fatal("开了代理的 client 应装上 Proxy")
+	}
+
+	initConfig(&AppConfig{ProxyPort: 3079})
+	off := accountHTTPClient()
+	if off == withProxy {
+		t.Fatal("代理关掉后应回到无代理的 client")
+	}
+	if tr, ok := off.Transport.(*http.Transport); !ok || tr.Proxy != nil {
+		t.Fatal("关闭代理的 client 不该带 Proxy")
 	}
 }

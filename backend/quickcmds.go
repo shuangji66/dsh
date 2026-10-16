@@ -190,7 +190,9 @@ func (m *AdminMux) handleGetQuickCmds(w http.ResponseWriter, r *http.Request) {
 	path := quickCmdsPath(m.renv)
 	cmds, err := loadQuickCmds(path, m.crypt)
 	if err != nil {
-		writeErr(w, "failed to load quick commands: "+err.Error(), http.StatusInternalServerError)
+		// 失败原因必须让用户看到（诊断信息是英文原文，见 AGENTS 规则 13）：解不开的原因是
+		// 「换了主密钥」「密文被搬过」这类只有用户能动手的事，前端把它带在 toast 与弹窗里。
+		writeErrU(w, http.StatusInternalServerError, "err_quickcmds_load_failed", "加载快捷指令失败：%s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "path": path, "commands": cmds})
@@ -219,7 +221,9 @@ func (m *AdminMux) handleSaveQuickCmds(w http.ResponseWriter, r *http.Request) {
 	}
 	path := quickCmdsPath(m.renv)
 	if err := saveQuickCmds(path, m.crypt, cmds); err != nil {
-		writeErr(w, "failed to save quick commands: "+err.Error(), http.StatusInternalServerError)
+		// 主密钥不可用（master key unavailable）也会走到这里：文案带 code，前端能跟着界面
+		// 语言切换，而 detail 里的英文诊断串说明是哪一步失败（见 AGENTS 规则 13）。
+		writeErrU(w, http.StatusInternalServerError, "err_quickcmds_save_failed", "保存快捷指令失败：%s", "detail", err.Error())
 		return
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "path": path, "commands": cmds})

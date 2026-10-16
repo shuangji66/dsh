@@ -15,6 +15,7 @@ import { useI18n, uiText, uiErrText } from '@/composables/useI18n'
 import { useToastStore } from '@/stores/toast'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { copyText } from '@/utils/clipboard'
+import { formatWallets } from '@/utils/money'
 import { icons } from '@/utils/icons'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -53,17 +54,11 @@ function accountLabel(a: AccountEntryView) {
   return a.name || a.contact || t('account_unknown')
 }
 
-// 头像下方那行：未登录「未登录」；登录后优先显示余额（平台余额是「分/元」的十进制字符串）。
-function walletText(list?: { currency: string; balance: string }[]) {
-  return (list ?? [])
-    .map((w) => {
-      const n = Number(w.balance)
-      return `${w.currency} ${Number.isFinite(n) ? n.toFixed(2) : w.balance}`
-    })
-    .join(' / ')
-}
-const balanceText = computed(() => walletText(status.value?.balance))
-const bonusText = computed(() => walletText(status.value?.bonus))
+// 头像下方那行：未登录「未登录」；登录后优先显示余额。格式规则抄 dsh 自己的账号面板
+// （截断两位 + 千分位 + 货币符号 + 子分显示，见 utils/money.ts），否则同一个账号在
+// dsh 与控制台里会显示成两个数。
+const balanceText = computed(() => formatWallets(status.value?.balance))
+const bonusText = computed(() => formatWallets(status.value?.bonus))
 const avatarLabel = computed(() => {
   if (!status.value) return ''
   if (!status.value.available) return t('account_unavailable_short')

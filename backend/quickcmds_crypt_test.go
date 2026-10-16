@@ -15,6 +15,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -626,5 +628,53 @@ func TestSanitizeQuickCmdsKeepsCommandContent(t *testing.T) {
 	}
 	if _, err := sanitizeQuickCmds([]QuickCmd{{ID: "a", Name: "n", Content: " \n\t "}}); err == nil {
 		t.Error("全是空白的内容应当被拒")
+	}
+}
+
+// 读写失败要回「code + 英文诊断原文」：前端才拿得到能随界面语言切换的文案
+// （AGENTS 规则 13）。这里把两条失败路径的 HTTP 响应钉住。
+func TestQuickCmdsHandlerErrorsCarryCode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quickcmds.json")
+	enc := testCryptorAt(t, filepath.Join(dir, masterKeyFileName))
+	if err := saveQuickCmds(path, enc, []QuickCmd{{ID: "db-01", Name: "disk", Content: "df -h"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 解不开（换了一把主密钥）→ 500 + err_quickcmds_load_failed，diagnostic 在 detail 里。
+	other := &AdminMux{renv: &RuntimeEnv{QuickCmdsFile: path}, crypt: testCryptor(t)}
+	rec := httptest.NewRecorder()
+	other.handleGetQuickCmds(rec, httptest.NewRequest(http.MethodGet, "/api/quickcmds", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("解不开时应 500，实得 %d: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Code   string            `json:"code"`
+		Params map[string]string `json:"params"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应体不是 JSON: %v\n%s", err, rec.Body.String())
+	}
+	if got.Code != "err_quickcmds_load_failed" {
+		t.Fatalf("应带 err_quickcmds_load_failed，实得 %q", got.Code)
+	}
+	if got.Params["detail"] == "" {
+		t.Fatalf("detail 参数不该为空（诊断原文要能看到）: %+v", got.Params)
+	}
+
+	// ② 主密钥不可用（crypt == nil）→ 保存 500 + err_quickcmds_save_failed，且盘上一个字节都不动。
+	before := readFileStr(t, path)
+	noKey := &AdminMux{renv: &RuntimeEnv{QuickCmdsFile: path}}
+	rec2 := httptest.NewRecorder()
+	noKey.handleSaveQuickCmds(rec2, httptest.NewRequest(http.MethodPost, "/api/quickcmds",
+		strings.NewReader(`{"commands":[{"id":"db-01","name":"disk","content":"df -h"}]}`)))
+	if rec2.Code != http.StatusInternalServerError {
+		t.Fatalf("主密钥不可用时应 500，实得 %d: %s", rec2.Code, rec2.Body.String())
+	}
+	if code := errorCodeOf(t, rec2.Body.Bytes()); code != "err_quickcmds_save_failed" {
+		t.Fatalf("应带 err_quickcmds_save_failed，实得 %q", code)
+	}
+	if after := readFileStr(t, path); after != before {
+		t.Fatalf("主密钥不可用时不该改写文件：\n%s", after)
 	}
 }

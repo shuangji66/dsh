@@ -27,10 +27,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 )
 
-// accountVaultFile 是账号库文件名（拼在控制台数据目录下，见 config.go 的 dataPath）。
+// accountVaultFile 是账号库文件名（默认拼在控制台数据目录下，见 config.go 的 dataPath）。
 const accountVaultFile = "dsh-accounts.json"
 
 // accountVaultVersion 是账号库**明文文档**的版本（信封里面的那份）。
@@ -87,13 +89,58 @@ type accountVaultView struct {
 	LastUsedAt string `json:"lastUsedAt,omitempty"`
 }
 
+// accountVaultPath 解析账号库路径：已解析的运行时路径优先，否则退回统一数据目录下的
+// dsh-accounts.json（与 quickCmdsPath / masterKeyPath 同一套兜底写法，单测会构造空的
+// RuntimeEnv）。控制台自产文件一律跟着 DataDir 走（AGENTS.md 规则 2）。
+func accountVaultPath(renv *RuntimeEnv) string {
+	if renv != nil && renv.DataDir != "" {
+		return filepath.Join(renv.DataDir, accountVaultFile)
+	}
+	return dataPath(accountVaultFile)
+}
+
+// accountVaultMu 串行化账号库的**整段「读 → 改 → 写」**（accountVaultMutate）。
+//
+// 为什么必须覆盖整段、而不是只锁单次写：调用方拿到库之后往往还要做几秒钟的事
+// （切换账号要等 dsh 认账最多 5 秒、移除要先请平台作废 token），这期间别的入口
+// （另一个标签页的「添加账号」、状态查询的自愈导入）完全可能已经改过库；最后那次
+// save 把**几秒前的快照**整份写回去，就是静默的数据丢失 —— 被移除的账号复活、
+// 新加的账号消失，双方都不报错（快捷指令那边踩过同一个坑，见 quickcmds.go 的
+// quickCmdsMu；回归测试见 accountvault_crypt_test.go 的 TestAccountVaultMutateNoLostUpdate）。
+//
+// 纪律：**不许重入** —— 锁内只允许做纯内存操作（含读文件），不许再调 accountVaultMutate，
+// 也不许做平台请求 / 等 dsh 认账这类慢操作（那些必须在取锁之前做完）。
+var accountVaultMu sync.Mutex
+
+// accountVaultMutate 是账号库**唯一**的写入入口：在锁内重读最新库、应用 fn、落盘。
+//
+// 这样调用方就不用（也不该）自己「先 load 一个快照、改完再 save」：每次变更都基于锁内
+// 重读的那一份，谁都不会覆盖谁的改动。fn 返回错误或 load 失败时**一个字节都不写**。
+func accountVaultMutate(path string, crypt *cryptor, fn func(*accountVault) error) error {
+	accountVaultMu.Lock()
+	defer accountVaultMu.Unlock()
+	if fn == nil {
+		return errors.New("accountVaultMutate requires a mutation function")
+	}
+	v, err := loadAccountVault(path, crypt)
+	if err != nil {
+		return err
+	}
+	if err := fn(v); err != nil {
+		return err
+	}
+	return saveAccountVault(path, crypt, v)
+}
+
 // loadAccountVault 读账号库；文件不存在时返回空库（不报错）。
 //
 // 解不开**必须**报错，绝不返回空库：调用方（状态查询的自愈导入、登录成功后的 upsert）拿到
 // 空库就会把原始密文覆盖掉，而真正的原因（主密钥换了 / 密文被搬了 / 文件被截断）再也查不出来。
 // 主密钥不可用（crypt == nil）同样在这里报错，语义见 secret.go。
-func loadAccountVault(crypt *cryptor) (*accountVault, error) {
-	text, err := accountReadFileText(dataPath(accountVaultFile))
+//
+// 热路径上的「读 → 改 → 写」请走 accountVaultMutate（它自己会读）；本函数只给只读用途。
+func loadAccountVault(path string, crypt *cryptor) (*accountVault, error) {
+	text, err := accountReadFileText(path)
 	if err != nil {
 		return nil, err
 	}
@@ -139,8 +186,11 @@ func accountVaultLooksLegacy(text string) bool {
 // saveAccountVault 原子落盘：整份列表加密成一个信封，临时文件 → 0600 → rename
 // （复用凭据文件的写实现）。
 //
+// 生产路径上**只应由 accountVaultMutate 在锁内调用**（它已经握着最新那份库）——直接调用
+// 就是「拿一份可能过期的快照整份覆盖」，见 accountVaultMu 的说明。
+//
 // 主密钥不可用时 encrypt 直接报错，**绝不退化成写明文**（见 secret.go / main.go 的语义）。
-func saveAccountVault(crypt *cryptor, v *accountVault) error {
+func saveAccountVault(path string, crypt *cryptor, v *accountVault) error {
 	v.Version = accountVaultVersion
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -158,7 +208,7 @@ func saveAccountVault(crypt *cryptor, v *accountVault) error {
 	if err != nil {
 		return err
 	}
-	return accountWriteFileText(dataPath(accountVaultFile), string(out)+"\n")
+	return accountWriteFileText(path, string(out)+"\n")
 }
 
 // find 按 id 取条目（返回指针，改它等于改库里的条目）。
@@ -257,8 +307,11 @@ func accountUserFields(user interface{}) (id, contact, name, avatar string) {
 }
 
 // accountVaultError 把库的读写错误包成面向用户的文案（错误原文进 detail 参数，便于排查）。
+//
+// 刻意不复用 err_account_store_failed（那句文案是「写入账号凭据失败」，说的是 dsh 的凭据
+// 文件）：库读不出来时说「写入凭据失败」会让用户往错误的方向查（去翻 credentials.yaml）。
 func accountVaultError(err error) error {
-	return uiErr("err_account_store_failed", "账号库读写失败：%s", "detail", err.Error())
+	return uiErr("err_account_vault_failed", "账号库读写失败：%s", "detail", err.Error())
 }
 
 // accountVaultDebug 只给日志用：库里有几条账号（不泄露 token）。

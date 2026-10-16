@@ -203,7 +203,8 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_PROXY_SOCK` | 反向代理的子路径挂载 Unix socket（空或 `off` 关闭） | `$TRIM_APPDEST/dsh.sock` |
 | `HARNESS_PROXY_BASEURL` | 该 socket 对外占据的子路径（反代剥掉后再转发给 dsh） | `/app/Harness/dsh` |
 | `HARNESS_DSH_DIAG` | 设为 `1`/`true`/`yes` 时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
-| `HARNESS_MASTER_KEY` | 快捷指令命令内容的**主密钥**（32 字节 base64 或 hex）。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
+| `HARNESS_MASTER_KEY` | 落盘加密的**主密钥**（32 字节 base64 或 hex）：加密 `quickcmds.json` 的命令内容与 `dsh-accounts.json` 账号库。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
+| `DSH_HOME` | dsh 的**数据根**（dsh 自己的解析规则：`$DSH_HOME` > `~/.dsh`；平台启动脚本会注入）。控制台只按它定位凭据文件 `<DSH_HOME>/.credentials.yaml` —— 位置写错会让登录「写入成功但 dsh 不认」；其余 `<HOME>/.dsh/...`（profiles、备份）仍按 `HOME` 拼 | `<HOME>/.dsh` |
 | `PROXY_PORT` | **已废弃**：反代监听端口改为设置页配置项（`config.json` 的 `proxyPort`，默认 `3079`），此环境变量不再生效 | — |
 | `dsh_port` / `TARGET_PORT` | dsh web 端口 | `13080` |
 | `proxy_mode` | 设为 `1` 时默认打开设置页的「代理dsh」（只影响 dsh 进程自身的出网） | `0` |
@@ -224,7 +225,8 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `<数据目录>/dsh.pid` | dsh 服务实时 PID（随 dsh 启动/自重启刷新，dsh 停止时移除） |
 | `<数据目录>/session.key` | 会话 cookie 签名密钥（0600，跨重启保住登录态） |
 | `<数据目录>/quickcmds.json` | 终端快捷指令持久化文件（0600；命令内容是密文，名称/是否自动回车仍是明文） |
-| `<数据目录>/master.key` | 快捷指令命令内容的加密主密钥（0600，缺失时自动生成）；删掉它 = 已存的命令内容再也解不开 |
+| `<数据目录>/dsh-accounts.json` | 控制台的 **DeepSeek 账号库**（0600；整份列表是一个密文信封，多账号的 token 都在里面） |
+| `<数据目录>/master.key` | **落盘加密的主密钥**（0600，缺失时自动生成）：`quickcmds.json` 的命令内容与 `dsh-accounts.json` 都是它加密的；删掉它 = 这两份密文再也解不开（想避免密钥与密文同放，用 `HARNESS_MASTER_KEY` 注入） |
 | `<数据目录>/terminal-sessions/` | 终端会话历史临时镜像（停止时整目录清除） |
 | `<数据目录>/backup/` | 备份包：`dsh-data-*`（用户主动的 dsh 数据备份）与 `pending/` 下「已下载待安装」的 harness 更新包 |
 | `<数据目录>/server/<版本>/` | 每个已安装的 dsh 版本（`npm install --prefix` 装出来的目录，可用版本就在 `node_modules/.bin/dsh`） |
@@ -377,20 +379,28 @@ dsh **自己没有多账号概念**：账号凭据只有一条固定键（`deeps
   的凭据）。凭据变更会让账号插件清掉资料/余额缓存（它订阅 `credentials/record-updated`），
   所以切完立刻就是新账号的余额与联系方式。
 - **退出登录**只是让 dsh 不再使用当前凭据，**账号仍留在库里**（可以随时切回，不用重新授权）；
-  **移除**才会请平台作废 token 并从库里删除。
+  **移除**才会请平台作废 token 并从库里删除。移除时若账号库写盘失败会**如实报错**（本机凭据
+  已经删掉，但账号还在库里，可以重试），不会假报「已移除」。
+- **账号库的每次变更都在锁内重读再落盘**（`accountVaultMutate`）：切换要等 dsh 认账、移除要请
+  平台作废 token，中间隔着最长几秒；拿那一刻的库快照整份写回去，会把这期间别人的改动（新加的
+  账号、刚移除的账号）静默覆盖掉。判断与写入因此在同一把锁内完成（与快捷指令的 `quickCmdsMu` 同一取舍）。
 - 兼容性：`0.2.0-rc.2` 与 `0.2.1-alpha.4` 的账号插件用的是**同一个键名与同样的 grant 格式**
   （`credentialKey("deepseek-account-platform", "default")` / `"device"`），所以凭据写入对两者
   都成立；更早、没有该插件的版本只会把它当普通记录存着（`credentials-local` 是通用键值存储，
   支持 `grant` / `api-key` 两种 kind），不影响启动。
 
+- 凭据写在 `$DSH_HOME/.credentials.yaml`（dsh 自己解析的数据根，默认 `~/.dsh`）：位置与 dsh 一致
+  （见上表 `DSH_HOME`），写入后向 dsh 核验，只有它明确说「没这笔凭据」才回滚。余额按 dsh 自己的
+  规则显示（截断两位 + 千分位 + 货币符号 + 子分显示 `<$0.01`，见 `frontend/src/utils/money.ts`）。
 - **dsh 自己的账号入口仍然不可用**（平台规则使然）：请用概览页「DeepSeek Harness」卡片右上角的
   账号头像（未登录是灰色圆形头像 + 「未登录」，点开弹窗里有「登录」/「复制授权链接」/「跳转登录」/
   回调链接输入框；登录后头像换成平台头像、下方显示余额）。
 - 授权页是**一次性**的：同一个 `authorize_id` 授权成功后浏览器会跳到那条打不开的 `127.0.0.1`
   地址上（**跳到那里就已经表示授权成功了**，把地址粘回控制台即可完成）；此时按「后退」再点一次
   「登录」必然「授权失败」——那不是配置问题。
-- 退出登录：先请平台作废 token（`POST /auth-api/v0/users/logout` + `x-dsh-auth-token`），再删本地
-  凭据记录；平台侧失败不阻塞本机退出。
+- 退出登录：**只删本地凭据记录**（让 dsh 不再使用这个账号），账号留在库里可随时切回，
+  不碰平台侧；只有「移除」才请平台作废 token（`POST /auth-api/v0/users/logout` +
+  `x-dsh-auth-token`），平台侧失败不阻塞本机删除。
 
 ### 概览页的「飞牛入口」
 

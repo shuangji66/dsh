@@ -330,7 +330,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
     <!-- 页头（图标 + 标题 + 右侧操作，统一卡片式标题栏） -->
-    <PageHeader class="mb-3" :title="t('overview_title')" :icon="icons.overview">
+    <PageHeader sticky class="mb-3" :title="t('overview_title')" :icon="icons.overview">
       <button class="g-btn-secondary h-8 px-3 text-xs" @click="openAbout()">{{ t('about') }}</button>
     </PageHeader>
 

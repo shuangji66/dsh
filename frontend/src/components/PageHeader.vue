@@ -21,18 +21,41 @@
 // 是通栏例外，它在那层内缩之外）。
 //
 // 间距由调用方控制：flex 布局的页面（终端 / 日志，父级用 gap）不要再加 margin，
-// 普通滚动页传 class="mb-3" 即可（单根组件上的 class 会落到 <header> 上）。
-defineProps<{ title: string; icon?: string }>()
+// 普通滚动页传 class="mb-3" 即可（单根组件上的 class 会落到最外层 <div> 上）。
+//
+// ===== sticky：顶栏不参与滚动（概览 / 设置 / 插件 / 目录传它，终端 / 日志不要传） =====
+// 后两者是整屏定高布局、自身不滚动，标题栏本来就不会跑掉。四个可滚动子页面传 `sticky`
+// 后，标题栏停在视口顶部不动，内容从它后面滚过去。要点：
+//   1. 根节点是**一层 div**（终端 / 日志页里这层不带任何类，对布局完全透明：它是父级
+//      flex/块级容器里的普通块，卡片照旧撑满宽度、高度不变）；
+//   2. 移动端与桌面端的滚动容器不同（前者是 App.vue 的 <main>，后者是文档），而
+//      `position: sticky` 粘的是**最近的滚动容器**，所以两端一套规则、不需要写断点；
+//   3. `-mt-3 sm:-mt-4` + `pt-3 sm:pt-4`：负外边距先把这层提到外壳顶部留白之上，再用
+//      同值内边距把卡片推回原位 —— 于是**静止位与固定位重合**（卡片滚动前后相对视口
+//      一动不动，不会先上移 12px 再粘住），且这层的背景连卡片上方那条留白一起盖住。
+//      这组数值与各页外壳的 `pt-3 sm:pt-4` 绑死，改外壳顶部留白要一起改；
+//   4. 这层必须是不透明的**页面底色**（`bg-bg dark:bg-[#0B0B0F]`，同 App.vue 根节点）：
+//      内容从标题栏后面经过，底色把卡片圆角与四周留白都盖住，否则会从缝里漏出内容。
+//      它的宽度就是外壳内容宽（= 卡片宽 = 内容宽），所以左右不需要再额外铺满；
+//   5. z-20：卡片悬浮（.g-card-hover 的 transform）与 .g-fade-in 会自建层叠上下文，
+//      不抬起来就会被内容压住；弹窗（z-50 / z-[60]）与 toast（z-[100]）仍在它之上。
+defineProps<{ title: string; icon?: string; sticky?: boolean }>()
+
+// 背景层只在 sticky 时存在，避免给终端 / 日志页多套一层视觉无关的底色。
+const wrapperClass = 'sticky top-0 z-20 -mt-3 sm:-mt-4 pt-3 sm:pt-4 bg-bg dark:bg-[#0B0B0F]'
 </script>
 
 <template>
-  <header class="g-card px-5 py-3 min-h-14 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-    <h2 class="font-display text-base font-semibold text-ink dark:text-white flex items-center gap-2.5 min-w-0">
-      <span v-if="icon" class="w-5 h-5 flex-shrink-0 inline-block text-brand" v-html="icon"></span>
-      <span class="truncate">{{ title }}</span>
-    </h2>
-    <div class="flex flex-wrap items-center gap-2">
-      <slot />
-    </div>
-  </header>
+  <!-- sticky 时这一层是标题栏的「遮罩层」；非 sticky 时它是纯结构层（不带类） -->
+  <div :class="sticky ? wrapperClass : ''">
+    <header class="g-card px-5 py-3 min-h-14 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <h2 class="font-display text-base font-semibold text-ink dark:text-white flex items-center gap-2.5 min-w-0">
+        <span v-if="icon" class="w-5 h-5 flex-shrink-0 inline-block text-brand" v-html="icon"></span>
+        <span class="truncate">{{ title }}</span>
+      </h2>
+      <div class="flex flex-wrap items-center gap-2">
+        <slot />
+      </div>
+    </header>
+  </div>
 </template>

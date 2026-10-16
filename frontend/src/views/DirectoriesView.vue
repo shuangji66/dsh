@@ -354,7 +354,7 @@ onBeforeUnmount(() => {
   <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
     <!-- 页头（图标 + 标题 + 恢复备份 / 备份 / 添加；标题栏按钮统一样式：
          小一号字号 + 细边框 + 不填充底色） -->
-    <PageHeader class="mb-3" :title="t('nav_directory')" :icon="icons.folder">
+    <PageHeader sticky class="mb-3" :title="t('nav_directory')" :icon="icons.folder">
       <!-- 恢复备份（红色边框红色文字，位于备份按钮左侧） -->
       <button class="g-btn-danger h-8 px-3 text-xs flex-shrink-0" @click="onRestoreClick()">{{ t('directory_restore') }}</button>
       <!-- 备份：备份进行中时按钮不置灰（点开就是进度视图），只加一个小转圈 -->

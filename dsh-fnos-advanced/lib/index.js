@@ -23,15 +23,19 @@ const CALLBACK_PATH = `${ROUTE_PREFIX}/auth-callback.html`;
 const CALLBACK_PATH_ALT = `${ROUTE_PREFIX}/auth-callback`;
 const RESULT_PATH = `${ROUTE_PREFIX}/auth-result`;
 const SETTINGS_PATH = `${ROUTE_PREFIX}/settings`;
+const WORKSPACE_PATH = `${ROUTE_PREFIX}/workspace-path`;
 const HEALTH_PATH = `${ROUTE_PREFIX}/health`;
 
 /** Package version shown by the config endpoint; keep in sync with package.json. */
-const VERSION = '0.2.1';
+const VERSION = '0.2.3';
 
 /**
  * The fnOS app identity is injected by the system when it starts the app.
  * `Harness` is the shipped console app and also the fallback for source runs.
  */
+/** Optional live host registry; the storage file is only a fallback. */
+let workspaceRegistry = null;
+
 function appName() {
   return process.env.TRIM_APPNAME || 'Harness';
 }
@@ -165,6 +169,32 @@ function writeSettings(settings) {
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify({ version: 1, ...settings }, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(tmp, file);
+}
+
+function workspaceFromDisk(id) {
+  try {
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    const file = path.join(home, 'storages', 'workspace.json');
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const record = data?.tables?.workspaces?.[id];
+    if (record && typeof record.path === 'string') {
+      return { id, path: record.path, title: typeof record.title === 'string' ? record.title : '' };
+    }
+  } catch { /* storage may be absent or mid-write */ }
+  return null;
+}
+
+function lookupWorkspace(id) {
+  try {
+    const list = workspaceRegistry && typeof workspaceRegistry.list === 'function'
+      ? workspaceRegistry.list()
+      : [];
+    const found = list.find((workspace) => String(workspace.id) === id);
+    if (found && typeof found.path === 'string') {
+      return { id, path: found.path, title: typeof found.title === 'string' ? found.title : '' };
+    }
+  } catch { /* fall through to the disk registry */ }
+  return workspaceFromDisk(id);
 }
 
 function writeJSON(res, status, body) {
@@ -372,6 +402,26 @@ async function handle(req, res) {
     return;
   }
 
+  if (pathname === WORKSPACE_PATH) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { Allow: 'GET, HEAD', 'Cache-Control': 'no-store' });
+      res.end();
+      return;
+    }
+    const id = new URL(req.url || '/', 'http://localhost').searchParams.get('id') || '';
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) {
+      writeJSON(res, 400, { ok: false, error: 'invalid workspace id' });
+      return;
+    }
+    const workspace = lookupWorkspace(id);
+    if (!workspace) {
+      writeJSON(res, 404, { ok: false, error: 'workspace not found' });
+      return;
+    }
+    writeJSON(res, 200, { ok: true, ...workspace });
+    return;
+  }
+
   if (pathname === SETTINGS_PATH) {
     if (req.method === 'GET' || req.method === 'HEAD') {
       writeJSON(res, 200, { ok: true, settings: readSettings(), defaults: DEFAULT_SETTINGS });
@@ -434,6 +484,17 @@ export const name = 'dsh-fnos-advanced';
  */
 export function apply(ctx) {
   if (!ctx || typeof ctx.inject !== 'function') return;
+
+  ctx.inject(['workspaceRegistry'], (scope) => {
+    const registry = scope.workspaceRegistry;
+    if (!registry) return;
+    workspaceRegistry = registry;
+    if (typeof scope.effect === 'function') {
+      scope.effect(() => () => {
+        if (workspaceRegistry === registry) workspaceRegistry = null;
+      }, 'dsh-fnos-advanced: workspace registry');
+    }
+  });
 
   ctx.inject(['webServer'], (scope) => {
     const server = scope.webServer;

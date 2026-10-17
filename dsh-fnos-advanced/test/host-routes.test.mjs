@@ -3,7 +3,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { apply } from '../lib/index.js';
 
 /** Capture the route registered by the host half. */
@@ -93,6 +93,44 @@ test('rejects non-GET methods', async () => {
   });
 });
 
+test('looks up a workspace path from the storage registry', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-workspaces-'));
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  const id = '11111111-1111-4111-8111-111111111111';
+  try {
+    await mkdir(path.join(home, 'storages'), { recursive: true });
+    await writeFile(
+      path.join(home, 'storages', 'workspace.json'),
+      JSON.stringify({
+        tables: {
+          workspaces: {
+            [id]: { path: '/vol1/1000/workspace', title: 'workspace' },
+          },
+        },
+      }),
+    );
+
+    await withServer(async (base) => {
+      const found = await (await fetch(`${base}/fnos-advanced/workspace-path?id=${id}`)).json();
+      assert.equal(found.ok, true);
+      assert.equal(found.id, id);
+      assert.equal(found.path, '/vol1/1000/workspace');
+      assert.equal(found.title, 'workspace');
+
+      assert.equal((await fetch(`${base}/fnos-advanced/workspace-path?id=missing`)).status, 404);
+      assert.equal(
+        (await fetch(`${base}/fnos-advanced/workspace-path?id=${encodeURIComponent('../etc/passwd')}`)).status,
+        400,
+      );
+    });
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('persists and validates settings under DSH_HOME', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-settings-'));
   const previous = process.env.DSH_HOME;
@@ -143,6 +181,9 @@ test('client bundle is the dsh lazy-factory shape and bundles the SDK', async ()
   assert.match(bundle, /buildAppAuthUrl/);
   assert.match(bundle, /parseAppAuthCallback/);
   assert.match(bundle, /fnos-advanced\/auth-result/);
+  assert.match(bundle, /fnos-advanced\/workspace-path/);
+  assert.match(bundle, /openFileManager/);
   assert.match(bundle, /require\("react"\)/);
-  assert.match(bundle, /plugins\.row\.config/);
+  assert.match(bundle, /plugins\.bundle\.config/);
+  assert.doesNotMatch(bundle, /plugins\.row\.config/);
 });

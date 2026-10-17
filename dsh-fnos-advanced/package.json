@@ -1,6 +1,6 @@
 {
   "name": "dsh-fnos-advanced",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "飞牛目录授权选择器：桌面直连原生选择器，浏览器可选反代/内网入口。fnOS directory picker: native desktop picking, proxy/LAN choice.",
   "type": "module",
   "main": "lib/index.js",

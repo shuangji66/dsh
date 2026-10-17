@@ -1480,11 +1480,11 @@ var Ue = class {
 
 // src/client/index.js
 var LOG_PREFIX = "[dsh-fnos-advanced]";
-var VERSION = "0.2.1";
+var VERSION = "0.2.3";
 var MSG_TYPE = "dsh-fnos-advanced:auth";
 var STORAGE_KEY = "dsh-fnos-advanced:auth-result";
 var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
-var SETTINGS_SLOT_KEY = "dsh-fnos-advanced#dsh-fnos-advanced";
+var SETTINGS_SLOT_KEY = "dsh-fnos-advanced";
 var DEFAULT_SETTINGS = Object.freeze({ proxyBase: "", lanTarget: "5666", authMode: "ask" });
 var BUTTON_ATTR = "data-dsh-fnos-advanced";
 var STATUS_CLASS = "dsh-fnos-advanced-status";
@@ -1495,6 +1495,7 @@ var OPEN_BUTTON_RE = /^(?:open|打开|确定|选择|select|choose)/i;
 var CANCEL_BUTTON_RE = /^(?:cancel|取消)/i;
 var POPUP_FEATURES = "popup=yes,width=760,height=680,resizable=yes,scrollbars=yes";
 var AUTH_TIMEOUT_MS = 5 * 60 * 1e3;
+var FOLDER_OPEN_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M1.5 3.5C1.5 2.95 1.95 2.5 2.5 2.5H5.4C5.65 2.5 5.88 2.59 6.07 2.75L7.7 4.2C7.88 4.36 8.12 4.45 8.36 4.45H13.5C14.05 4.45 14.5 4.9 14.5 5.45V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3.5Z" stroke="currentColor"/></svg>';
 var installedDispose = null;
 var sdkInstance = null;
 var configPromise = null;
@@ -1502,6 +1503,8 @@ var settingsCache = null;
 var settingsCachedAt = 0;
 var settingsPromise = null;
 var settingsHostState = "unknown";
+var workspacePaths = /* @__PURE__ */ new Map();
+var lastWorkspaceMenu = null;
 function apply(ctx) {
   if (typeof window === "undefined" || typeof document === "undefined") return;
   const dispose = install();
@@ -1509,6 +1512,7 @@ function apply(ctx) {
     ctx.effect(() => dispose, "dsh-fnos-advanced: workspace directory picker");
   }
   registerSettingsSlot(ctx);
+  registerWorkspacePaths(ctx);
 }
 function install() {
   if (installedDispose) return installedDispose;
@@ -1534,6 +1538,20 @@ function install() {
   };
   document.addEventListener("click", onClick, true);
   cleanups.push(() => document.removeEventListener("click", onClick, true));
+  const onWorkspaceRowClick = (event) => {
+    const row = event.target instanceof Element ? event.target.closest('[data-row-key^="workspace:"]') : null;
+    if (!row) return;
+    const key = row.getAttribute("data-row-key") || "";
+    const id = key.slice("workspace:".length);
+    if (id) {
+      lastWorkspaceMenu = { id, at: Date.now() };
+      scheduleScan();
+    }
+  };
+  document.addEventListener("click", onWorkspaceRowClick, true);
+  cleanups.push(() => document.removeEventListener("click", onWorkspaceRowClick, true));
+  getSdk().ready().then(scheduleScan).catch(() => {
+  });
   const dispose = () => {
     if (scanTimer) {
       window.clearTimeout(scanTimer);
@@ -1545,7 +1563,7 @@ function install() {
       } catch {
       }
     }
-    for (const node of document.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}`)) {
+    for (const node of document.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir]`)) {
       node.remove();
     }
     const style = document.getElementById(STYLE_ID);
@@ -1565,6 +1583,141 @@ function scan() {
     if (dialog.querySelector(`[${BUTTON_ATTR}]`)) continue;
     injectButton(dialog);
   }
+  scanWorkspaceMenus();
+}
+function registerWorkspacePaths(ctx) {
+  if (!ctx || typeof ctx.inject !== "function") return;
+  ctx.inject(["workspaces"], (scope) => {
+    const workspaces = scope.workspaces;
+    const list = workspaces && workspaces.list;
+    if (!list || typeof list.getSnapshot !== "function") return;
+    const update = () => {
+      try {
+        const snapshot = list.getSnapshot();
+        const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+        workspacePaths = new Map(
+          items.filter((item) => item && item.workspaceId && typeof item.path === "string").map((item) => [String(item.workspaceId), item.path])
+        );
+      } catch {
+      }
+    };
+    update();
+    if (typeof list.subscribe === "function" && typeof scope.effect === "function") {
+      try {
+        scope.effect(() => list.subscribe(update), "dsh-fnos-advanced: workspace paths");
+      } catch {
+      }
+    }
+  });
+}
+function isFnosHost() {
+  const sdk = getSdk();
+  if (sdk.isWeb && sdk.isStandaloneWeb) return false;
+  return window.parent !== window || sdk.isWeb === false;
+}
+function scanWorkspaceMenus() {
+  if (!isFnosHost()) return;
+  if (!lastWorkspaceMenu || Date.now() - lastWorkspaceMenu.at > 5 * 60 * 1e3) return;
+  for (const menu of document.querySelectorAll('[role="menu"]')) {
+    if (!isVisible(menu)) continue;
+    if (menu.querySelector("[data-dsh-fnos-open-dir]")) continue;
+    if (!isWorkspaceActionsMenu(menu)) continue;
+    injectOpenDirItem(menu);
+  }
+}
+function isWorkspaceActionsMenu(menu) {
+  const text = (menu.textContent || "").replace(/\s+/g, " ");
+  return /Delete workspace|删除工作区|删除工作空间|删除工作區/i.test(text);
+}
+function injectOpenDirItem(menu) {
+  const viewport = menu.querySelector('[role="presentation"]') || menu;
+  const templateButton = menu.querySelector('button[role="menuitem"]');
+  const template = templateButton && templateButton.closest("div");
+  if (!template) return;
+  const item = template.cloneNode(true);
+  item.setAttribute("data-dsh-fnos-open-dir", "1");
+  const button = item.querySelector('button[role="menuitem"]');
+  if (!button) return;
+  const spans = Array.from(button.querySelectorAll("span"));
+  const label = spans.find((span) => /Rename|重命名|Delete|删除/i.test(span.textContent || "")) || spans[spans.length - 1];
+  if (label) label.textContent = "打开目录";
+  const icon = spans.find((span) => span !== label);
+  if (icon) icon.innerHTML = FOLDER_OPEN_SVG;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const context = lastWorkspaceMenu;
+    closeMenu(menu);
+    if (!context) {
+      showToast("无法确定工作区");
+      return;
+    }
+    void openWorkspaceDirectory(context.id);
+  });
+  viewport.insertBefore(item, viewport.firstChild);
+}
+function closeMenu(menu) {
+  try {
+    const options = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true };
+    document.dispatchEvent(new KeyboardEvent("keydown", options));
+    window.dispatchEvent(new KeyboardEvent("keydown", options));
+  } catch {
+  }
+  window.setTimeout(() => {
+    if (menu.isConnected) menu.remove();
+  }, 0);
+}
+async function resolveWorkspacePath(id) {
+  const cached = workspacePaths.get(id);
+  if (cached) return cached;
+  try {
+    const response = await fetch(
+      `${pluginURL("fnos-advanced/workspace-path")}?id=${encodeURIComponent(id)}`,
+      { credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } }
+    );
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data.ok && typeof data.path === "string" && data.path) {
+        workspacePaths.set(id, data.path);
+        return data.path;
+      }
+    }
+  } catch {
+  }
+  return "";
+}
+async function openWorkspaceDirectory(id) {
+  const path = await resolveWorkspacePath(id);
+  if (!path) {
+    showToast("无法获取工作区目录");
+    return;
+  }
+  const sdk = getSdk();
+  try {
+    await sdk.ready();
+  } catch {
+  }
+  try {
+    await sdk.openFileManager(path);
+  } catch (error) {
+    console.warn(LOG_PREFIX, "openFileManager failed", error);
+    showToast("打开目录失败，当前宿主可能不支持该操作。");
+  }
+}
+function showToast(text) {
+  let toast = document.querySelector(".dsh-fnos-advanced-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "dsh-fnos-advanced-toast";
+    toast.setAttribute("role", "status");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.style.display = "block";
+  if (toast.__dshFnosTimer) window.clearTimeout(toast.__dshFnosTimer);
+  toast.__dshFnosTimer = window.setTimeout(() => {
+    toast.style.display = "none";
+  }, 5e3);
 }
 function isWorkspacePicker(dialog) {
   if (!isVisible(dialog)) return false;
@@ -2196,7 +2349,7 @@ function registerSettingsSlot(ctx) {
   ctx.inject(["slots"], (scope) => {
     const slots = scope.slots;
     if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
-    const install2 = () => slots.inject("plugins.row.config", () => slots.register({ name: "plugins.row.config", key: SETTINGS_SLOT_KEY }, SettingsSlot));
+    const install2 = () => slots.inject("plugins.bundle.config", () => slots.register({ name: "plugins.bundle.config", key: SETTINGS_SLOT_KEY }, SettingsSlot));
     if (typeof scope.effect === "function") {
       scope.effect(install2, "dsh-fnos-advanced: settings page");
     } else {
@@ -2537,6 +2690,25 @@ function injectStyle() {
       align-items: center;
       color: var(--dsw-alias-label-secondary, #666);
       font-size: 12px;
+    }
+    .dsh-fnos-advanced-toast {
+      position: fixed;
+      left: 50%;
+      bottom: 32px;
+      z-index: 10000;
+      display: none;
+      box-sizing: border-box;
+      max-width: min(480px, calc(100vw - 32px));
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: rgba(24, 24, 28, .92);
+      color: #fff;
+      font-size: 13px;
+      line-height: 18px;
+      overflow-wrap: anywhere;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, .24);
+      transform: translateX(-50%);
+      pointer-events: none;
     }
   `;
   (document.head || document.documentElement).appendChild(style);

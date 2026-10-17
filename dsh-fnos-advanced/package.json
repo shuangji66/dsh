@@ -53,6 +53,9 @@
     "prepack": "npm run build",
     "test": "node --test test/*.test.mjs"
   },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "devDependencies": {
     "@trimjs/web-app": "^0.5.0",
     "esbuild": "^0.25.0"

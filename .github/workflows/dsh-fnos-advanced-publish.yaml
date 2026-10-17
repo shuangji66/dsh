@@ -1,0 +1,97 @@
+name: Publish dsh-fnos-advanced to npm
+
+# Manual-only publish. The version is read from dsh-fnos-advanced/package.json,
+# so there is no version input to mistype.
+#
+# Auth: the repository secret `NPM` is a token issued by the npmjs.com account
+# `shuangji66` (owner of the `dsh-fnos-advanced` package name). The token must
+# be allowed to publish and to skip 2FA: a classic "Automation" / "Publish"
+# token, or a granular token with read+write on this package and bypass-2FA.
+#
+# Convention:
+#   registry: https://registry.npmjs.org/
+#   package:  dsh-fnos-advanced@<version>
+#   install:  dsh plugin --profile web add dsh-fnos-advanced
+#
+# Bump the version before running. npm never allows overwriting a published
+# version, so the guard below fails on purpose instead of publishing silently.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-fnos-advanced-npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      # setup-node writes the matching .npmrc line for this env var.
+      NODE_AUTH_TOKEN: ${{ secrets.NPM }}
+      NPM_USERNAME: shuangji66
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dsh-fnos-advanced/package-lock.json
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Read name and version from package.json
+        working-directory: dsh-fnos-advanced
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ -z "$VERSION" ]; then
+            echo "empty package.json version" >&2
+            exit 1
+          fi
+          if [ "$NAME" != "dsh-fnos-advanced" ]; then
+            echo "unexpected package name: $NAME (expected dsh-fnos-advanced)" >&2
+            exit 1
+          fi
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Install and test
+        working-directory: dsh-fnos-advanced
+        run: |
+          npm ci
+          npm test
+
+      - name: Verify npm identity
+        working-directory: dsh-fnos-advanced
+        run: |
+          WHOAMI="$(npm whoami)"
+          echo "NPM token belongs to: $WHOAMI"
+          if [ "$WHOAMI" != "$NPM_USERNAME" ]; then
+            echo "::error::secrets.NPM belongs to '$WHOAMI', expected '$NPM_USERNAME'"
+            exit 1
+          fi
+
+      - name: Refuse to republish an existing version
+        working-directory: dsh-fnos-advanced
+        run: |
+          # `npm view` exits non-zero for a missing version; a network failure
+          # would also land here, and the publish step then reports it.
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::$NAME@$VERSION is already on npm; bump the version in package.json first"
+            exit 1
+          fi
+          echo "$NAME@$VERSION is not published yet"
+
+      - name: Publish to npm
+        working-directory: dsh-fnos-advanced
+        run: |
+          # `prepack` rebuilds lib/client.js from src before the tarball is made.
+          npm publish
+          echo "Published: https://www.npmjs.com/package/$NAME/v/$VERSION"
+          echo "Install:   dsh plugin --profile web add $NAME"

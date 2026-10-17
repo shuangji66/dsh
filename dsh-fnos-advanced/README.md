@@ -21,7 +21,7 @@
 
 ### 通过插件管理器 / 市场
 
-发布到 npm 后：
+插件发布在 npm 官方 registry，用 dsh 的插件命令安装：
 
 ```bash
 dsh plugin --profile web add dsh-fnos-advanced
@@ -232,45 +232,44 @@ dsh-fnos-advanced/
 └── package.json
 ```
 
-## 发布（GitHub Release tarball）
+## 发布（npm）
 
-仓库根目录的工作流：
+发布到 npm 官方 registry，工作流在仓库根目录：
 
 ```text
-.github/workflows/dsh-fnos-advanced-release.yaml
+.github/workflows/dsh-fnos-advanced-publish.yaml
 ```
 
 仅手动触发：
 
-- 先把 `dsh-fnos-advanced/package.json` 的 `version` 改成要发布的版本；
-- Actions → **Release dsh-fnos-advanced** → Run workflow；
-- 版本号由工作流直接读取 `package.json`，tag 自动生成为
-  `dsh-fnos-advanced-v<version>`，不需要手动输入。
+- 先把 `dsh-fnos-advanced/package.json` 的 `version` 改成要发布的版本
+  （npm 不允许覆盖已发布的版本，版本已存在时工作流会直接失败）；
+- Actions → **Publish dsh-fnos-advanced to npm** → Run workflow；
+- 版本号由工作流读取 `package.json`，不需要手动输入。
 
-Release 产物：
+认证用仓库 Secret `NPM`：该 token 属于 npmjs.com 账号 **shuangji66**，需要
+具备发布权限并能跳过 2FA（classic 的 Automation / Publish token，或对该包有
+read+write 权限且勾选 bypass 2FA 的 granular token）。工作流会先跑 `npm whoami`，
+账号不是 `shuangji66` 就失败，避免用别的账号发出去。
+
+工作流顺序：`npm ci` → `npm test` → `npm whoami` 校验 → 版本占用检查 →
+`npm publish`（`prepack` 会自动重新构建 `lib/client.js`）。
+
+发布后：
 
 ```text
-dsh-fnos-advanced-0.2.3.tgz
-dsh-fnos-advanced-0.2.3.tgz.sha256
+包页面：https://www.npmjs.com/package/dsh-fnos-advanced
+安装：  dsh plugin --profile web add dsh-fnos-advanced
 ```
 
-`.sha256` 是标准 `sha256sum` 输出，供控制台按「同名 + `.sha256`」规则取回校验。
-Release 使用 `--latest=false`，不会影响本仓库 Harness 自身的 latest 更新检查。
-
-从 Release 安装：
+查询已发布的最新版本：
 
 ```bash
-dsh plugin --profile web add \
-  https://github.com/shuangji66/dsh/releases/download/dsh-fnos-advanced-v0.2.3/dsh-fnos-advanced-0.2.3.tgz
+npm view dsh-fnos-advanced version
 ```
 
-未来控制台做插件自我更新时，可直接按以下规则拼地址：
-
-```text
-tag      = dsh-fnos-advanced-v<version>
-package  = https://github.com/<owner>/<repo>/releases/download/<tag>/dsh-fnos-advanced-<version>.tgz
-checksum = <package>.sha256
-```
+插件的更新检测同样以 registry 为准（`npm view dsh-fnos-advanced versions`），
+不再依赖 GitHub Release 的 tarball 与 `.sha256`。
 
 ## 已知限制
 

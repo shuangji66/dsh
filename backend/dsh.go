@@ -1319,14 +1319,7 @@ func (m *DshManager) cleanStaleProfileLocks() int {
 // selectedDshVersion 返回当前选中的 dsh 版本（配置里的版本号，且该版本确实装着）；
 // 未安装/未选中任何版本时返回空串。
 func (m *DshManager) selectedDshVersion() string {
-	v := strings.TrimSpace(GetConfig().DshVersion)
-	if v == "" || !validVersionArg(v) {
-		return ""
-	}
-	if !dshVersionInstalled(versionDirFor(m.renv, v)) {
-		return ""
-	}
-	return v
+	return selectedDshVersionFor(m.renv)
 }
 
 // errNoDshVersion 表示「本机没有选中且装着的 dsh 版本」。错误文本保持英文（它会被日志

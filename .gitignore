@@ -8,6 +8,7 @@ dsh-market
 .gocache*
 .gopath*
 .tools
+.playwright-skill
 # 前端产物经 //go:embed 打入二进制的暂存目录：由构建脚本创建/清空，master 里不该有。
 backend/embed
 # 后端构建产物。Makefile / build.sh 的 -o 是 backend/harness（已由上面的 `harness` 覆盖）；

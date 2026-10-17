@@ -772,6 +772,12 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 （`DshManager.dshBinPath`）—— `exec.Command("dsh")` 的 LookPath 走的是 harness 自己的
 PATH，不能用来解析「当前选中的版本」。
 
+**Web 终端里的 `dsh` 走稳定入口** `${数据目录}/server/.bin/dsh`：它是符号链接，启动时
+由 `syncDshShim` 对齐到当前选中版本，切换版本时原子改指向。终端 PATH 只在会话创建时
+构造一次，直接沿用启动环境的旧 `<版本>/node_modules/.bin` 会在切换/删除版本后让 `dsh`
+命令消失；稳定入口让路径恒定存在，已经开着的终端会话也能跟着切换（`.bin` 以点开头，
+不会被版本列表当成一个版本）。
+
 > **附件 fsync 补丁（必须打，否则 fnOS 上传文件 / 图片整体失败）**：
 > `@deepseek-ai/dsh-attachment-local` 落盘附件时会对每级祖先目录 `open(O_RDONLY) + fsync`
 > 并一路上溯到 `/`，而 fnOS 把 `/vol1` 与 `/vol1/@appshare` 设为 mode 000（仅由 trim_acl

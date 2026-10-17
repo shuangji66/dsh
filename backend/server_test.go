@@ -693,6 +693,10 @@ func TestSwitchVersion(t *testing.T) {
 	if got := GetConfig().DshVersion; got != "0.2.0-rc.2" {
 		t.Fatalf("配置里的选中版本 = %q, want 0.2.0-rc.2", got)
 	}
+	// 终端稳定入口必须跟着切到新版本（终端会话不会重算 PATH）。
+	if got, err := os.Readlink(serverShimDshFor(srv.renv)); err != nil || got != versionDshBinFor(srv.renv, "0.2.0-rc.2") {
+		t.Fatalf("shim target = %q, err = %v, want %q", got, err, versionDshBinFor(srv.renv, "0.2.0-rc.2"))
+	}
 	select {
 	case <-startDone:
 	case <-time.After(3 * time.Second):

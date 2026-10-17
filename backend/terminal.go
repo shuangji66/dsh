@@ -372,7 +372,20 @@ func terminalEnv(renv *RuntimeEnv, home string) []string {
 		set("HOME=" + home)
 		set("PWD=" + home)
 	}
-	set("PATH=" + renv.Path)
+	// PATH = 稳定入口目录 + 启动时的平台 PATH。
+	//
+	// 稳定入口 ${数据目录}/server/.bin/dsh 指向当前选中版本（见 syncDshShim）：
+	// 终端会话的环境只在 spawn 时构造一次，切换版本不会重算，若直接沿用 renv.Path
+	// 里的旧 <版本>/node_modules/.bin，切完/删掉旧版本后终端里就没有 dsh 命令了。
+	// 这条目录恒定存在，符号链接由切换流程原子替换，**已经开着的会话**也能用上新版本。
+	pathVal := ""
+	if renv != nil {
+		pathVal = serverShimDirFor(renv)
+		if renv.Path != "" {
+			pathVal += ":" + renv.Path
+		}
+	}
+	set("PATH=" + pathVal)
 	set("TERM=xterm-256color")
 	set("LANG=" + localeLang(renv.Lang))
 	set("COLORTERM=truecolor")

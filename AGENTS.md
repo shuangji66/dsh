@@ -124,6 +124,10 @@
   **「有更新」的红点只看版本号大小**（列表里最高的一版比选中的高就亮），不区分 `dist-tags`
   —— 基准是列表最高版本（`newestOf`），标签只作为列表里的标注展示，见 `refreshDshStatus`。
   启动与 CLI 用选中版本的**绝对路径**（`DshManager.dshBinPath`）。
+  **终端的 `dsh` 走稳定入口** `${数据目录}/server/.bin/dsh`（符号链接，`syncDshShim`
+  在启动时对齐、`Switch` 时原子替换）：终端 PATH 只在会话创建时构造一次，不能依赖
+  `<版本>/node_modules/.bin` 这种随版本变化、且旧版本删除后就不存在的路径。`.bin`
+  以点开头，`validVersionArg` 会拒绝它，因此不会被 `installedVersions` 当成一个版本。
   **低于 `dshMinVersion` 的已装旧版**走一条窄路：`filterDshVersions` 照旧把它们滤掉、
   `Install` 照旧拒绝，但 `snapshot()` 会把本地装着的老版本以 `Deprecated` 补到列表**最底部**，
   `Switch` 一律拒绝切过去（含从新版切回，错误码 `err_version_deprecated`），前端在那一行只给

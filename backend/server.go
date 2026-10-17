@@ -166,6 +166,70 @@ func dshVersionInstalled(dir string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
+// selectedDshVersionFor 返回「配置里选中、且确实装着」的版本号，否则空串。
+// DshManager 与稳定入口 shim 共用这一份判定，避免「哪个版本算选中」出现两套口径。
+func selectedDshVersionFor(renv *RuntimeEnv) string {
+	v := strings.TrimSpace(GetConfig().DshVersion)
+	if v == "" || !validVersionArg(v) {
+		return ""
+	}
+	if !dshVersionInstalled(versionDirFor(renv, v)) {
+		return ""
+	}
+	return v
+}
+
+// dshShimDirName 是版本根目录下放稳定入口的隐藏目录。
+//
+// 刻意叫 ".bin" 并放在 server/ 里：它和每个版本的 <版本>/node_modules/.bin 一样，
+// 是「一条放进 PATH 的 bin 目录」。以 "." 开头的目录不可能被当成版本号
+// （validVersionArg 拒绝），因此 installedVersions / snapshot 不会把它列成版本。
+const dshShimDirName = ".bin"
+
+// serverShimDirFor 返回稳定入口目录：${数据目录}/server/.bin。
+// 终端把它前置到 PATH，切换版本时只改里面的 dsh 符号链接，路径本身不变。
+func serverShimDirFor(renv *RuntimeEnv) string {
+	return filepath.Join(serverRootFor(renv), dshShimDirName)
+}
+
+// serverShimDshFor 返回稳定入口的 dsh 路径：${数据目录}/server/.bin/dsh。
+func serverShimDshFor(renv *RuntimeEnv) string {
+	return filepath.Join(serverShimDirFor(renv), "dsh")
+}
+
+// syncDshShim 把稳定入口 ${数据目录}/server/.bin/dsh 指向当前选中版本的 dsh。
+//
+// 为什么需要它：终端的 PATH 来自 harness **启动时**的 os.Environ（见 terminalEnv），
+// 不会随「切换 dsh 版本」重算。旧形态下 PATH 里是平台注入的固定 bin 目录；多版本后
+// 每个版本各有自己的 node_modules/.bin，旧目录被删掉终端里就再没有 dsh 命令。稳定
+// 入口让终端 PATH 里那条目录恒定存在，切换只改它指向的版本。
+//
+// 没有选中版本（未安装 / 目录被外部删掉）时删除链接，避免终端调用一个已不存在的
+// 可执行文件。新建临时链接再 rename，保证终端读到的永远是完整链接（不会看到空窗）。
+func syncDshShim(renv *RuntimeEnv) error {
+	shim := serverShimDshFor(renv)
+	version := selectedDshVersionFor(renv)
+	if version == "" {
+		if err := os.Remove(shim); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(serverShimDirFor(renv), 0o755); err != nil {
+		return err
+	}
+	tmp := shim + ".tmp"
+	_ = os.Remove(tmp)
+	if err := os.Symlink(versionDshBinFor(renv, version), tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, shim); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // --- 版本元数据 ---
 
 // DshVersionEntry 是版本列表里的一行（镜像源上的一个版本，或本地已安装但镜像上
@@ -1214,6 +1278,11 @@ func (m *ServerManager) Switch(version string) error {
 	cfg.DshVersion = version
 	if err := SaveConfig(m.renv, &cfg, false); err != nil {
 		return fmt.Errorf("保存 dsh 版本配置失败: %w", err)
+	}
+	// 终端里的 dsh 走稳定入口（${数据目录}/server/.bin/dsh）：切换后立刻改指向。
+	// 已经开着的终端会话不会重算 PATH，只有链接变了它们才会用上新版本。
+	if err := syncDshShim(m.renv); err != nil {
+		logWarn("[dsh] failed to update terminal dsh shim: %v", err)
 	}
 	logInfo("[dsh] switching version %s -> %s", prev, version)
 

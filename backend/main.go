@@ -125,6 +125,13 @@ func main() {
 		logWarn("[node] node26 no longer present, node version reverted to node24 (persisted)")
 	}
 
+	// 校准终端里的 dsh 稳定入口（${数据目录}/server/.bin/dsh → 当前选中版本）。
+	// 启动时对账一次，覆盖「版本目录被外部删掉 / 配置里选中的版本已不存在」；
+	// 之后每次切换版本由 ServerManager.Switch 更新同一个链接。
+	if err := syncDshShim(&renv); err != nil {
+		logWarn("[dsh] failed to sync terminal dsh shim: %v", err)
+	}
+
 	auth := NewAuth()
 	if cfg.AuthEnabled {
 		if cfg.Password == "" {

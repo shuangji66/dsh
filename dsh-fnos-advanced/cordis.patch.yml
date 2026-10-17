@@ -1,0 +1,8 @@
+# dsh-fnos-advanced bundle patch.
+#
+# One host row is enough: the browser half is discovered from the package.json
+# `dsh.client` declaration, and the host half serves the fnOS auth callback
+# plus a tiny config endpoint.
+- insert:
+    - id: dsh-fnos-advanced
+      name: dsh-fnos-advanced

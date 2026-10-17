@@ -1,0 +1,60 @@
+{
+  "name": "dsh-fnos-advanced",
+  "version": "0.2.1",
+  "description": "飞牛目录授权选择器：桌面直连原生选择器，浏览器可选反代/内网入口。fnOS directory picker: native desktop picking, proxy/LAN choice.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "src",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "fnos",
+    "workspace",
+    "directory-picker"
+  ],
+  "license": "MIT",
+  "author": "shuangji66",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shuangji66/dsh.git",
+    "directory": "dsh-fnos-advanced"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [],
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@trimjs/web-app": "^0.5.0",
+    "esbuild": "^0.25.0"
+  }
+}

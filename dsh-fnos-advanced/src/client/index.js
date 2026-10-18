@@ -26,6 +26,8 @@ import { isCancellationText, isPickerCancelled } from './cancel.js';
 import { fileNameForPath, imageMimeForPath } from './files.js';
 import { looksLikeComposerCommandMenu } from './menu.js';
 import { fileRowActions } from './file-actions.js';
+import { pickerParams } from './picker.js';
+import { t, translateError, getLanguagePreference, setLanguagePreference, currentLanguage } from './i18n.js';
 
 const LOG_PREFIX = '[dsh-fnos-advanced]';
 const VERSION = '0.3.0';
@@ -49,7 +51,6 @@ const CANCEL_BUTTON_RE = /^(?:cancel|取消)/i;
 
 const POPUP_FEATURES = 'popup=yes,width=760,height=680,resizable=yes,scrollbars=yes';
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
-const SIDEBAR_GROUPS = ['myFiles', 'otherShare', 'external', 'remote', 'favorites', 'team'];
 const FOLDER_OPEN_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M1.5 3.5C1.5 2.95 1.95 2.5 2.5 2.5H5.4C5.65 2.5 5.88 2.59 6.07 2.75L7.7 4.2C7.88 4.36 8.12 4.45 8.36 4.45H13.5C14.05 4.45 14.5 4.9 14.5 5.45V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3.5Z" stroke="currentColor"/></svg>';
 const PICK_FILE_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9.5 1.5H4.5C3.95 1.5 3.5 1.95 3.5 2.5V13.5C3.5 14.05 3.95 14.5 4.5 14.5H11.5C12.05 14.5 12.5 14.05 12.5 13.5V4.5L9.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/><path d="M6 8.5H10M8 6.5V10.5" stroke="currentColor" stroke-linecap="round"/></svg>';
 const FILE_ACTION_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="3.5" cy="8" r="1.15" fill="currentColor"/><circle cx="8" cy="8" r="1.15" fill="currentColor"/><circle cx="12.5" cy="8" r="1.15" fill="currentColor"/></svg>';
@@ -251,9 +252,9 @@ function injectPickItem(menu) {
   }
 
   if (icon) icon.innerHTML = PICK_FILE_SVG;
-  if (name) name.textContent = '从飞牛选择';
+  if (name) name.textContent = t('从飞牛选择');
   if (alias) alias.textContent = 'fnos';
-  if (description) description.textContent = '选择 NAS 上的文件，非图片作为路径引用';
+  if (description) description.textContent = t('选择 NAS 上的文件，非图片作为路径引用');
 
   item.addEventListener('mousedown', (event) => {
     event.preventDefault();
@@ -344,8 +345,8 @@ function injectFileAction(row) {
   action.setAttribute(FILE_ACTION_ATTR, '1');
   action.className = 'dsh-fnos-file-action';
   action.innerHTML = FILE_ACTION_SVG;
-  action.title = '飞牛操作';
-  action.setAttribute('aria-label', '飞牛操作');
+  action.title = t('飞牛操作');
+  action.setAttribute('aria-label', t('飞牛操作'));
   action.style.height = `${rowButton.offsetHeight || 28}px`;
 
   action.addEventListener('mousedown', (event) => {
@@ -397,7 +398,7 @@ function openFileMenu(anchor, row) {
 
     const text = document.createElement('span');
     text.className = 'dsh-fnos-file-menu-label';
-    text.textContent = FILE_ACTION_TEXT[action];
+    text.textContent = t(FILE_ACTION_TEXT[action]);
     item.append(text);
 
     item.addEventListener('click', (event) => {
@@ -469,7 +470,7 @@ async function runFileAction(action, path, entry) {
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
     console.warn(LOG_PREFIX, 'file-tree action failed', action, message, error);
-    showToast(action === 'open' ? '在飞牛中打开失败，当前宿主可能不支持该操作。' : message);
+    showToast(action === 'open' ? t('在飞牛中打开失败，当前宿主可能不支持该操作。') : translateError(message));
   }
 }
 
@@ -493,7 +494,7 @@ async function openPathInFnos(path, isDirectory) {
 async function quotePathToComposer(path) {
   const active = findActiveComposerInput();
   if (!active) {
-    showToast('没有找到对话输入框，无法引用。');
+    showToast(t('没有找到对话输入框，无法引用。'));
     return;
   }
   await addPathsToComposer([path], active.input);
@@ -501,7 +502,7 @@ async function quotePathToComposer(path) {
 
 async function copyPathToClipboard(path) {
   const ok = await copyText(path);
-  showToast(ok ? '已复制路径' : '复制失败，请手动复制');
+  showToast(ok ? t('已复制路径') : t('复制失败，请手动复制'));
 }
 
 async function copyText(text) {
@@ -565,12 +566,11 @@ function isFnosHost() {
 }
 
 function scanWorkspaceMenus() {
-  if (!isFnosHost()) return;
   if (!lastWorkspaceMenu || Date.now() - lastWorkspaceMenu.at > 5 * 60 * 1000) return;
 
   for (const menu of document.querySelectorAll('[role="menu"]')) {
     if (!isVisible(menu)) continue;
-    if (menu.querySelector('[data-dsh-fnos-open-dir]')) continue;
+    if (menu.querySelector('[data-dsh-fnos-check-dir]')) continue;
     if (!isWorkspaceActionsMenu(menu)) continue;
     injectOpenDirItem(menu);
   }
@@ -587,32 +587,55 @@ function injectOpenDirItem(menu) {
   const template = templateButton && templateButton.closest('div');
   if (!template) return;
 
-  const item = template.cloneNode(true);
-  item.setAttribute('data-dsh-fnos-open-dir', '1');
-  const button = item.querySelector('button[role="menuitem"]');
-  if (!button) return;
+  const make = (attr, label, icon, onClick) => {
+    const item = template.cloneNode(true);
+    item.setAttribute(attr, '1');
+    const button = item.querySelector('button[role="menuitem"]');
+    if (!button) return null;
 
-  const spans = Array.from(button.querySelectorAll('span'));
-  const label = spans.find((span) => /Rename|重命名|Delete|删除/i.test(span.textContent || ''))
-    || spans[spans.length - 1];
-  if (label) label.textContent = '打开目录';
+    const spans = Array.from(button.querySelectorAll('span'));
+    const labelNode = spans.find((span) => /Rename|重命名|Delete|删除/i.test(span.textContent || ''))
+      || spans[spans.length - 1];
+    if (labelNode) labelNode.textContent = label;
 
-  const icon = spans.find((span) => span !== label);
-  if (icon) icon.innerHTML = FOLDER_OPEN_SVG;
+    const iconNode = spans.find((span) => span !== labelNode);
+    if (iconNode) iconNode.innerHTML = icon;
 
-  button.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const context = lastWorkspaceMenu;
-    closeMenu(menu);
-    if (!context) {
-      showToast('无法确定工作区');
-      return;
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const context = lastWorkspaceMenu;
+      closeMenu(menu);
+      if (!context) {
+        showToast(t('无法确定工作区'));
+        return;
+      }
+      onClick(context.id);
+    });
+    return item;
+  };
+
+  const open = isFnosHost()
+    ? make('data-dsh-fnos-open-dir', t('打开目录'), FOLDER_OPEN_SVG, (id) => {
+      void openWorkspaceDirectory(id);
+    })
+    : null;
+  const check = make('data-dsh-fnos-check-dir', t('检查目录权限'), FOLDER_OPEN_SVG, (id) => {
+    void checkWorkspaceFromMenu(id);
+  });
+  const reauth = make('data-dsh-fnos-reauth-dir', t('重新授权目录'), FOLDER_OPEN_SVG, (id) => {
+    let popup = null;
+    if (!isFnosHost()) {
+      popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+      if (popup) writePopupLoading(popup);
     }
-    void openWorkspaceDirectory(context.id);
+    void reauthWorkspaceFromMenu(id, popup);
   });
 
-  viewport.insertBefore(item, viewport.firstChild);
+  // Keep the existing order at the top: open, check, re-authorize.
+  if (reauth) viewport.insertBefore(reauth, viewport.firstChild);
+  if (check) viewport.insertBefore(check, viewport.firstChild);
+  if (open) viewport.insertBefore(open, viewport.firstChild);
 }
 
 function closeMenu(menu) {
@@ -624,6 +647,28 @@ function closeMenu(menu) {
   window.setTimeout(() => {
     if (menu.isConnected) menu.remove();
   }, 0);
+}
+
+/** Unique workspace paths, from the live service or the host registry. */
+async function knownWorkspacePaths() {
+  if (workspacePaths.size === 0) {
+    try {
+      const response = await fetch(pluginURL('fnos-advanced/workspaces'), {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        for (const workspace of data && Array.isArray(data.workspaces) ? data.workspaces : []) {
+          if (workspace && workspace.id && typeof workspace.path === 'string') {
+            workspacePaths.set(String(workspace.id), workspace.path);
+          }
+        }
+      }
+    } catch { /* old host or transient failure: no disabled paths */ }
+  }
+  return [...new Set([...workspacePaths.values()].filter(Boolean))];
 }
 
 async function resolveWorkspacePath(id) {
@@ -649,7 +694,7 @@ async function resolveWorkspacePath(id) {
 async function openWorkspaceDirectory(id) {
   const path = await resolveWorkspacePath(id);
   if (!path) {
-    showToast('无法获取工作区目录');
+    showToast(t('无法获取工作区目录'));
     return;
   }
 
@@ -659,7 +704,103 @@ async function openWorkspaceDirectory(id) {
     await sdk.openFileManager(path);
   } catch (error) {
     console.warn(LOG_PREFIX, 'openFileManager failed', error);
-    showToast('打开目录失败，当前宿主可能不支持该操作。');
+    showToast(t('打开目录失败，当前宿主可能不支持该操作。'));
+  }
+}
+
+async function checkWorkspaceHealth(ids) {
+  const response = await fetch(pluginURL('fnos-advanced/workspace-health'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ ids: Array.isArray(ids) ? ids : [] }),
+  });
+  if (response.status === 404 || response.status === 405) {
+    throw new Error(t('没有找到工作区权限接口'));
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    throw new Error(translateError(data.error) || t('检查失败：{error}', { error: `HTTP ${response.status}` }));
+  }
+  return Array.isArray(data.results) ? data.results : [];
+}
+
+function workspaceHealthText(result) {
+  if (!result || !result.exists) return t('目录不存在');
+  if (result.directory === false) return t('不是目录');
+  if (!result.readable) return t('目录不可读（{error}）', { error: result.error || 'EACCES' });
+  if (!result.writable) return t('目录可读但不可写');
+  return t('目录可读写');
+}
+
+async function checkWorkspaceFromMenu(id) {
+  showToast(t('正在检查目录权限…'));
+  try {
+    const [result] = await checkWorkspaceHealth([id]);
+    showToast(workspaceHealthText(result));
+  } catch (error) {
+    showToast(t('检查失败：{error}', { error: translateError(error && error.message) }));
+  }
+}
+
+async function reauthWorkspaceFromMenu(id, popup) {
+  const path = await resolveWorkspacePath(id);
+  if (!path) {
+    closePopup(popup);
+    showToast(t('无法获取工作区目录'));
+    return;
+  }
+  try {
+    await authorizeWorkspacePath(path, popup);
+    const [result] = await checkWorkspaceHealth([id]);
+    showToast(`${t('已重新授权')} · ${workspaceHealthText(result)}`);
+  } catch (error) {
+    closePopup(popup);
+    showToast(t('重新授权失败：{error}', { error: translateError(error && error.message) }));
+  }
+}
+
+/**
+ * Re-authorize one known path. In a fnOS host the SDK opens the native
+ * authorization sheet; in a browser the existing app-auth popup is used. The
+ * caller must open a blank popup inside its click handler for the browser path.
+ */
+async function authorizeWorkspacePath(path, popup) {
+  if (isFnosHost()) {
+    const sdk = getSdk();
+    try { await sdk.ready(); } catch { /* fall through to the host call */ }
+    const result = await sdk.authorizeUserFile(path);
+    if (result && result.code === 0) return true;
+    throw new Error(result && result.msg ? translateError(result.msg) : t('重新授权失败：{error}', { error: 'EACCES' }));
+  }
+
+  const config = await loadConfig();
+  const settings = await loadSettings();
+  const target = await resolveAuthTargets(config, settings);
+  let base = target.base;
+  if (target.mode === 'choose') {
+    const preferred = target.choices.find((choice) => choice.id === settings.authMode) || target.choices[0];
+    base = preferred.base;
+  }
+
+  let windowRef = popup;
+  if (!windowRef || windowRef.closed) {
+    windowRef = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+  }
+  if (!windowRef) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
+  writePopupLoading(windowRef);
+
+  try {
+    const auth = await requestAuth(windowRef, randomId(), config.appName || 'Harness', base, 'authorizeUserFile', { path });
+    if (auth && auth.status === 'success') return true;
+    if (auth && (auth.status === 'cancelled' || isCancellationText(auth.error))) {
+      throw new Error(t('已取消授权'));
+    }
+    throw new Error(auth && auth.error ? translateError(auth.error) : t('打开选择器失败'));
+  } catch (error) {
+    closePopup(windowRef);
+    throw error;
   }
 }
 
@@ -699,16 +840,24 @@ function injectButton(dialog) {
   const footer = findFooter(dialog);
   if (!footer) return;
 
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.setAttribute(BUTTON_ATTR, '1');
-  button.className = 'dsh-fnos-advanced-button';
-  button.textContent = '选择飞牛目录';
-  button.title = '通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）';
+  const make = (pick, label, title) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute(BUTTON_ATTR, '1');
+    button.dataset.pick = pick;
+    button.className = 'dsh-fnos-advanced-button';
+    button.textContent = label;
+    button.title = title;
+    return button;
+  };
 
-  // Put it before the leading footer action (New folder / 新建文件夹), so the
-  // button does not sit between Cancel and Open.
-  footer.insertBefore(button, footer.firstChild);
+  const primary = make('directory', t('选择飞牛目录'), t('通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）'));
+  const shared = make('shared', t('共享'), t('选择飞牛共享目录'));
+
+  // Keep both before the leading footer action (New folder / 新建文件夹), so
+  // neither sits between Cancel and Open.
+  footer.insertBefore(shared, footer.firstChild);
+  footer.insertBefore(primary, footer.firstChild);
 }
 
 function findPathInput(dialog) {
@@ -792,23 +941,24 @@ async function ensurePathInput(dialog) {
 async function handlePick(button) {
   const dialog = button.closest('[role="dialog"]');
   if (!dialog) return;
-  await runPickFlow(button, directoryFlow(dialog, button));
+  const shared = button.dataset.pick === 'shared';
+  await runPickFlow(button, shared ? sharedFlow(dialog, button) : directoryFlow(dialog, button));
 }
 
 async function handlePickFiles(button) {
   const active = findActiveComposerInput();
   if (!active) {
-    showToast('没有找到对话的文件输入框，当前 dsh 版本可能不支持。');
+    showToast(t('没有找到对话的文件输入框，当前 dsh 版本可能不支持。'));
     return;
   }
   const { input, region } = active;
   if (input.disabled) {
-    showToast('当前会话暂时不能添加附件。');
+    showToast(t('当前会话暂时不能添加附件。'));
     return;
   }
   const editor = region.querySelector('[data-composer-input]');
   if (editor && editor.getAttribute('contenteditable') === 'false') {
-    showToast('当前会话暂时不能添加附件。');
+    showToast(t('当前会话暂时不能添加附件。'));
     return;
   }
   await runPickFlow(button, composerFlow(input, button));
@@ -840,16 +990,19 @@ async function runPickFlow(button, flow) {
   }
 
   try {
+    if (flow.directory && !Array.isArray(flow.disabledPaths)) {
+      flow.disabledPaths = await knownWorkspacePaths();
+    }
     const direct = await pickPathsDirect(flow, button);
     if (direct.handled) {
       closePopup(popup);
       if (direct.paths && direct.paths.length) {
         await finishPick(button, flow, direct.paths);
       } else if (direct.cancelled) {
-        flow.status('已取消选择', false);
+        flow.status(t('已取消选择'), false);
         flow.restore();
       } else {
-        flow.status(direct.error || '打开选择器失败', true);
+        flow.status(translateError(direct.error) || t('打开选择器失败'), true);
         flow.restore();
       }
       return;
@@ -869,7 +1022,7 @@ async function runPickFlow(button, flow) {
     if (!popup || popup.closed) {
       popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
     }
-    if (!popup) throw new Error('浏览器拦截了授权窗口，请允许弹窗后重试。');
+    if (!popup) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
 
     await startAuthFlow(button, appName, target.base, popup, flow);
   } catch (error) {
@@ -879,22 +1032,25 @@ async function runPickFlow(button, flow) {
 }
 
 function directoryFlow(dialog, button) {
-  const initialText = button.textContent || '选择飞牛目录';
+  const initialText = button.textContent || t('选择飞牛目录');
   return {
     button,
+    method: 'pickUserFile',
     directory: true,
-    title: '选择工作区目录',
-    okText: '确认授权',
+    creatable: true,
+    disabledPaths: null,
+    title: t('选择工作区目录'),
+    okText: t('确认授权'),
     anchor: dialog,
     status: (text, isError) => showStatus(dialog, text, isError),
     onPaths: async (paths) => {
       const input = await ensurePathInput(dialog);
-      if (!input) throw new Error('没有找到目录选择器的路径输入框');
+      if (!input) throw new Error(t('没有找到目录选择器的路径输入框'));
       fillAndEnter(input, paths[0]);
     },
-    doneText: (paths) => `已填入授权目录：${paths[0]}`,
+    doneText: (paths) => t('已填入授权目录：{path}', { path: paths[0] }),
     setLabel: (text) => { button.textContent = text; },
-    doneLabel: () => '已填入路径',
+    doneLabel: () => t('已填入路径'),
     restore: () => {
       button.textContent = initialText;
       button.disabled = false;
@@ -906,13 +1062,14 @@ function directoryFlow(dialog, button) {
 function composerFlow(input, button) {
   return {
     button,
+    method: 'pickUserFile',
     directory: false,
-    title: '选择文件',
-    okText: '添加引用',
+    title: t('选择文件'),
+    okText: t('添加引用'),
     anchor: input.closest('[data-composer-card]') || input.parentElement,
     status: (text) => showToast(text),
     onPaths: (paths) => addPathsToComposer(paths, input),
-    doneText: (paths) => `已添加 ${paths.length} 个文件${paths.length === 1 ? '' : ''}`,
+    doneText: (paths) => t('已添加 {count} 个文件', { count: paths.length }),
     setLabel: () => { /* icon-only button: progress goes to the toast */ },
     doneLabel: () => '',
     restore: () => {
@@ -922,10 +1079,35 @@ function composerFlow(input, button) {
   };
 }
 
+function sharedFlow(dialog, button) {
+  const initialText = button.textContent || t('共享');
+  return {
+    button,
+    method: 'pickSharedFile',
+    title: t('选择共享目录'),
+    okText: t('确认授权'),
+    anchor: dialog,
+    status: (text, isError) => showStatus(dialog, text, isError),
+    onPaths: async (paths) => {
+      const input = await ensurePathInput(dialog);
+      if (!input) throw new Error(t('没有找到目录选择器的路径输入框'));
+      fillAndEnter(input, paths[0]);
+    },
+    doneText: (paths) => t('已填入授权目录：{path}', { path: paths[0] }),
+    setLabel: (text) => { button.textContent = text; },
+    doneLabel: () => t('已填入路径'),
+    restore: () => {
+      button.textContent = initialText;
+      button.disabled = false;
+      delete button.dataset.busy;
+    },
+  };
+}
+
 function markBusy(button, flow) {
   button.dataset.busy = '1';
   button.disabled = true;
-  flow.setLabel('准备授权…');
+  flow.setLabel(t('准备授权…'));
 }
 
 async function finishPick(button, flow, paths) {
@@ -955,20 +1137,21 @@ async function pickPathsDirect(flow, button) {
   if (sdk.isWeb && sdk.isStandaloneWeb) return { handled: false };
   if (sdk.isWeb && window.parent === window) return { handled: false };
 
+  const method = flow.method || 'pickUserFile';
+  const picker = sdk[method];
+  if (typeof picker !== 'function') return { handled: false };
+
   button.dataset.direct = '1';
-  flow.setLabel('等待选择…');
+  flow.setLabel(t('等待选择…'));
+
+  const params = pickerParams(flow);
 
   let result;
   try {
-    result = await sdk.pickUserFile({
-      directory: flow.directory,
-      title: flow.title,
-      okText: flow.okText,
-      sidebarGroup: SIDEBAR_GROUPS,
-    });
+    result = await picker.call(sdk, params);
   } catch (error) {
     console.warn(LOG_PREFIX, 'in-host picker unavailable; falling back to URL auth', error);
-    flow.status('当前宿主未提供内嵌选择器，已改用网页授权。', false);
+    flow.status(t('当前宿主未提供内嵌选择器，已改用网页授权。'), false);
     return { handled: false };
   } finally {
     delete button.dataset.direct;
@@ -982,27 +1165,30 @@ async function pickPathsDirect(flow, button) {
   return {
     handled: true,
     cancelled: isPickerCancelled(result),
-    error: result && result.msg ? result.msg : '打开选择器失败',
+    error: result && result.msg ? result.msg : t('打开选择器失败'),
   };
 }
 
 async function startAuthFlow(button, appName, base, existingPopup, flow) {
-  flow.setLabel('等待授权…');
+  flow.setLabel(t('等待授权…'));
   const state = randomId();
 
   let popup = existingPopup;
   if (!popup || popup.closed) {
     popup = window.open('', `dsh-fnos-advanced-auth-${state}`, POPUP_FEATURES);
   }
-  if (!popup) throw new Error('浏览器拦截了授权窗口，请允许弹窗后重试。');
+  if (!popup) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
   writePopupLoading(popup);
 
   try {
-    const auth = await requestAuth(popup, state, appName, base, {
-      directory: flow.directory,
-      title: flow.title,
-      okText: flow.okText,
-    });
+    const auth = await requestAuth(
+      popup,
+      state,
+      appName,
+      base,
+      flow.method || 'pickUserFile',
+      pickerParams(flow),
+    );
     if (!auth || auth.status !== 'success') {
       if (auth && (auth.status === 'cancelled' || isCancellationText(auth.error))) {
         // Text matching is a heuristic (older hosts report cancellation as
@@ -1011,17 +1197,17 @@ async function startAuthFlow(button, appName, base, existingPopup, flow) {
         if (auth.status !== 'cancelled') {
           console.info(LOG_PREFIX, 'authorization result treated as cancellation', auth);
         }
-        flow.status('已取消选择', false);
+        flow.status(t('已取消选择'), false);
         flow.restore();
         return;
       }
-      throw new Error(auth && auth.error ? auth.error : '打开选择器失败');
+      throw new Error(auth && auth.error ? translateError(auth.error) : t('打开选择器失败'));
     }
 
     const paths = Array.isArray(auth.path)
       ? auth.path.filter((item) => typeof item === 'string' && item)
       : [];
-    if (!paths.length) throw new Error('授权结果里没有路径');
+    if (!paths.length) throw new Error(t('授权结果里没有路径'));
 
     await finishPick(button, flow, paths);
   } catch (error) {
@@ -1033,7 +1219,7 @@ async function startAuthFlow(button, appName, base, existingPopup, flow) {
 function handlePickError(button, flow, error) {
   const message = error && error.message ? error.message : String(error);
   console.warn(LOG_PREFIX, message, error);
-  flow.status(message, true);
+  flow.status(translateError(message), true);
   flow.restore();
 }
 
@@ -1078,13 +1264,13 @@ async function addPathsToComposer(paths, input) {
     files.push(file);
   }
 
-  if (!files.length) throw new Error('没有可添加的文件');
+  if (!files.length) throw new Error(t('没有可添加的文件'));
   dispatchComposerFiles(input, files);
 
   if (unreadable > 0) {
-    showToast(`${unreadable} 张图片未能读取，已改为路径引用`);
+    showToast(t('{count} 张图片未能读取，已改为路径引用', { count: unreadable }));
   } else if (images > 0) {
-    showToast(`已添加 ${files.length} 个文件（${images} 张图片会上传）`);
+    showToast(t('已添加 {count} 个文件（{images} 张图片会上传）', { count: files.length, images }));
   }
 }
 
@@ -1097,18 +1283,18 @@ async function readImageFile(path, mime) {
     body: JSON.stringify({ path }),
   });
   if (tokenResponse.status === 404 || tokenResponse.status === 405) {
-    throw new Error('宿主半侧未提供图片读取接口');
+    throw new Error(t('宿主半侧未提供图片读取接口'));
   }
   const info = await tokenResponse.json().catch(() => ({}));
   if (!tokenResponse.ok || !info.ok || !info.token) {
-    throw new Error(info.error || `读取图片失败（HTTP ${tokenResponse.status}）`);
+    throw new Error(translateError(info.error) || t('读取图片失败（HTTP {status}）', { status: tokenResponse.status }));
   }
 
   const response = await fetch(
     pluginURL(`fnos-advanced/file-bytes?token=${encodeURIComponent(info.token)}`),
     { credentials: 'same-origin', cache: 'no-store' },
   );
-  if (!response.ok) throw new Error(`读取图片失败（HTTP ${response.status}）`);
+  if (!response.ok) throw new Error(t('读取图片失败（HTTP {status}）', { status: response.status }));
   const blob = await response.blob();
   return new File([blob], info.name || fileNameForPath(path), {
     type: info.mime || mime || blob.type || 'application/octet-stream',
@@ -1182,8 +1368,8 @@ function dispatchComposerFiles(input, files) {
 
 function writePopupLoading(popup) {
   try {
-    popup.document.title = '飞牛授权';
-    popup.document.body.innerHTML = '<p style="font:14px/1.6 -apple-system,BlinkMacSystemFont,\'PingFang SC\',sans-serif;padding:24px;color:#555">正在打开飞牛授权页面…</p>';
+    popup.document.title = t('飞牛授权');
+    popup.document.body.innerHTML = `<p style="font:14px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;padding:24px;color:#555">${t('正在打开飞牛授权页面…')}</p>`;
   } catch { /* about:blank may already be navigating */ }
 }
 
@@ -1197,7 +1383,7 @@ function writePopupLoading(popup) {
  * @param {{directory: boolean, title: string, okText: string}} pick
  * @returns {Promise<any>}
  */
-function requestAuth(popup, state, appName, base, pick) {
+function requestAuth(popup, state, appName, base, method, params) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let closeTimer = 0;
@@ -1305,12 +1491,12 @@ function requestAuth(popup, state, appName, base, pick) {
           return;
         }
         await readServerResult();
-        if (!settled) finish({ status: 'cancelled', error: '授权窗口已关闭' });
+        if (!settled) finish({ status: 'cancelled', error: t('授权窗口已关闭') });
       }, 450);
     }, 500);
 
     timeoutTimer = window.setTimeout(() => {
-      fail(new Error('授权超时，请重试'));
+      fail(new Error(t('授权超时，请重试')));
     }, AUTH_TIMEOUT_MS);
 
     (async () => {
@@ -1321,12 +1507,9 @@ function requestAuth(popup, state, appName, base, pick) {
         sdk.getAppAuthBaseUrl = async () => base;
         let url;
         try {
-          url = await sdk.buildAppAuthUrl('pickUserFile', {
+          url = await sdk.buildAppAuthUrl(method, {
             appName,
-            directory: pick.directory === true,
-            sidebarGroup: SIDEBAR_GROUPS,
-            title: pick.title,
-            okText: pick.okText,
+            ...params,
             redirectUri: pluginURL('fnos-advanced/auth-callback.html'),
             state,
           });
@@ -1334,8 +1517,16 @@ function requestAuth(popup, state, appName, base, pick) {
           sdk.getAppAuthBaseUrl = previousBase;
         }
 
+        // The SDK only serializes directory/accept/sidebarGroup/title/okText.
+        // Pass the newer picker hints through when the host supports them.
+        const targetUrl = new URL(url);
+        if (params.creatable) targetUrl.searchParams.set('creatable', 'true');
+        if (Array.isArray(params.disabledPaths) && params.disabledPaths.length) {
+          targetUrl.searchParams.set('disabledPaths', JSON.stringify(params.disabledPaths));
+        }
+
         if (settled) return;
-        popup.location.replace(url);
+        popup.location.replace(targetUrl.toString());
       } catch (error) {
         fail(error instanceof Error ? error : new Error(String(error)));
       }
@@ -1351,16 +1542,16 @@ function showAuthChooser(flow, appName, choices) {
   }
   removeChooser(anchor);
   if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
-  flow.setLabel('选择授权入口…');
+  flow.setLabel(t('选择授权入口…'));
 
   const panel = document.createElement('div');
   panel.className = 'dsh-fnos-advanced-chooser';
   panel.setAttribute('role', 'menu');
-  panel.setAttribute('aria-label', '选择授权入口');
+  panel.setAttribute('aria-label', t('选择授权入口'));
 
   const title = document.createElement('div');
   title.className = 'dsh-fnos-advanced-chooser-title';
-  title.textContent = '选择授权入口';
+  title.textContent = t('选择授权入口');
   panel.appendChild(title);
 
   for (const choice of choices) {
@@ -1392,7 +1583,7 @@ function showAuthChooser(flow, appName, choices) {
   const cancel = document.createElement('button');
   cancel.type = 'button';
   cancel.className = 'dsh-fnos-advanced-chooser-cancel';
-  cancel.textContent = '取消';
+  cancel.textContent = t('取消');
   cancel.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1479,10 +1670,10 @@ async function resolveAuthTargets(config, settings) {
   const choices = [];
 
   if (proxy) {
-    choices.push({ id: 'proxy', label: '通过反代地址', detail: proxy, base: proxy });
+    choices.push({ id: 'proxy', label: t('通过反代地址'), detail: proxy, base: proxy });
   }
   if (lan && !choices.some((choice) => choice.base === lan)) {
-    choices.push({ id: 'lan', label: '通过内网地址', detail: lan, base: lan });
+    choices.push({ id: 'lan', label: t('通过内网地址'), detail: lan, base: lan });
   }
 
   if (settings.authMode === 'proxy' && proxy) {
@@ -1698,8 +1889,67 @@ function SettingsSlot(props) {
 
 function settingsSummary() {
   const settings = settingsCache || DEFAULT_SETTINGS;
-  const proxy = settings.proxyBase || '未设置';
-  return `反代 ${proxy} · 内网 ${settings.lanTarget}`;
+  const proxy = settings.proxyBase || t('未设置');
+  return t('反代 {proxy} · 内网 {lan}', { proxy, lan: settings.lanTarget });
+}
+
+function CollapsibleSection({ title, description, defaultOpen, children }) {
+  const [open, setOpen] = React.useState(defaultOpen !== false);
+  const hintStyle = {
+    margin: 0,
+    fontSize: 12,
+    lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary, #888)',
+  };
+
+  return React.createElement('section', {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      paddingTop: 10,
+      borderTop: '1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.22))',
+    },
+  }, [
+    React.createElement('button', {
+      key: 'toggle',
+      type: 'button',
+      'aria-expanded': open,
+      'aria-label': `${title} · ${open ? t('收起') : t('展开')}`,
+      onClick: () => setOpen((value) => !value),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        width: '100%',
+        padding: '2px 0',
+        border: 'none',
+        background: 'transparent',
+        color: 'inherit',
+        font: 'inherit',
+        textAlign: 'left',
+        cursor: 'pointer',
+      },
+    }, [
+      React.createElement('span', { key: 'title', style: { fontSize: 14, fontWeight: 600 } }, title),
+      React.createElement('span', {
+        key: 'chevron',
+        'aria-hidden': true,
+        style: {
+          color: 'var(--dsw-alias-label-tertiary, #888)',
+          fontSize: 14,
+          transform: open ? 'rotate(90deg)' : 'none',
+          transition: 'transform .12s ease',
+        },
+      }, '›'),
+    ]),
+    description ? React.createElement('p', { key: 'desc', style: { ...hintStyle, display: open ? 'block' : 'none' } }, description) : null,
+    React.createElement('div', {
+      key: 'body',
+      style: { display: open ? 'block' : 'none' },
+    }, children),
+  ]);
 }
 
 function SettingsPage() {
@@ -1712,6 +1962,7 @@ function SettingsPage() {
   const [gatewayAccess, setGatewayAccess] = React.useState(/^\/app(?:\/|$)/.test(window.location.pathname));
   const [hostState, setHostState] = React.useState('unknown');
   const [hostVersion, setHostVersion] = React.useState('');
+  const [language, setLanguage] = React.useState(getLanguagePreference());
 
   React.useEffect(() => {
     let alive = true;
@@ -1768,15 +2019,15 @@ function SettingsPage() {
         }),
       });
       if (response.status === 404 || response.status === 405) {
-        throw new Error('宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存。');
+        throw new Error(t('宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。'));
       }
       const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.ok) throw new Error(data.error || `保存失败（HTTP ${response.status}）`);
+      if (!response.ok || !data.ok) throw new Error(translateError(data.error) || t('保存失败（HTTP {status}）', { status: response.status }));
       const saved = normalizeClientSettings(data.settings);
       settingsCache = saved;
       settingsCachedAt = Date.now();
       setSettings(saved);
-      setMessage('已保存');
+      setMessage(t('已保存'));
     } catch (err) {
       setError(err && err.message ? err.message : String(err));
     } finally {
@@ -1789,11 +2040,11 @@ function SettingsPage() {
   const hostWarning = hostReady
     ? ''
     : hostOutdated
-      ? `宿主半侧版本 ${hostVersion}，客户端 ${VERSION}。请重启 dsh 后再保存设置。`
+      ? t('宿主半侧版本 {host}，客户端 {client}。请重启 dsh 后再保存设置。', { host: hostVersion, client: VERSION })
       : hostState === 'missing'
-        ? '宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。'
+        ? t('宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。')
         : hostState === 'error'
-          ? '无法读取宿主设置接口，请确认 dsh 运行正常。'
+          ? t('无法读取宿主设置接口，请确认 dsh 运行正常。')
           : '';
   const disabled = loading || saving || !hostReady;
   const inputStyle = {
@@ -1838,10 +2089,10 @@ function SettingsPage() {
   };
 
   const accessNote = embedded
-    ? '当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。'
+    ? t('当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。')
     : gatewayAccess
-      ? '当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。'
-      : '当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。';
+      ? t('当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。')
+      : t('当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。');
 
   return React.createElement('div', {
     style: {
@@ -1855,95 +2106,424 @@ function SettingsPage() {
     },
   }, [
     React.createElement('div', { key: 'heading', style: { display: 'flex', flexDirection: 'column', gap: 4 } }, [
-      React.createElement('div', { key: 'title', style: { fontSize: 15, fontWeight: 600 } }, '飞牛目录授权'),
-      React.createElement('p', { key: 'desc', style: hintStyle }, '配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。'),
+      React.createElement('div', { key: 'title', style: { fontSize: 15, fontWeight: 600 } }, t('飞牛目录授权')),
+      React.createElement('p', { key: 'desc', style: hintStyle }, t('配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。')),
     ]),
 
-    React.createElement('label', { key: 'proxy', style: labelStyle }, [
-      React.createElement('span', { key: 'label' }, '反代飞牛地址'),
-      React.createElement('input', {
-        key: 'input',
-        type: 'text',
-        value: settings.proxyBase,
-        onChange: update('proxyBase'),
-        placeholder: 'https://fnos.example.com',
-        autoComplete: 'off',
-        spellCheck: false,
-        disabled,
-        style: inputStyle,
-      }),
-      React.createElement('span', { key: 'hint', style: hintStyle }, '填协议 + 域名[:端口]，不要带路径；留空表示未配置。'),
-    ]),
+    React.createElement(CollapsibleSection, {
+      key: 'auth',
+      title: t('连接与授权'),
+      description: t('配置反代/内网授权入口、界面语言和图片读取。'),
+      defaultOpen: true,
+    }, [
+      React.createElement('label', { key: 'proxy', style: labelStyle }, [
+        React.createElement('span', { key: 'label' }, t('反代飞牛地址')),
+        React.createElement('input', {
+          key: 'input',
+          type: 'text',
+          value: settings.proxyBase,
+          onChange: update('proxyBase'),
+          placeholder: 'https://fnos.example.com',
+          autoComplete: 'off',
+          spellCheck: false,
+          disabled,
+          style: inputStyle,
+        }),
+        React.createElement('span', { key: 'hint', style: hintStyle }, t('填协议 + 域名[:端口]，不要带路径；留空表示未配置。')),
+      ]),
 
-    React.createElement('label', { key: 'lan', style: labelStyle }, [
-      React.createElement('span', { key: 'label' }, '飞牛内网地址 / 端口'),
-      React.createElement('input', {
-        key: 'input',
-        type: 'text',
-        value: settings.lanTarget,
-        onChange: update('lanTarget'),
-        placeholder: '5666 或 http://192.168.1.10:5666',
-        autoComplete: 'off',
-        spellCheck: false,
-        disabled,
-        style: inputStyle,
-      }),
-      React.createElement('span', { key: 'hint', style: hintStyle }, '只填端口时使用当前访问主机的地址；默认 5666。'),
-    ]),
+      React.createElement('label', { key: 'lan', style: labelStyle }, [
+        React.createElement('span', { key: 'label' }, t('飞牛内网地址 / 端口')),
+        React.createElement('input', {
+          key: 'input',
+          type: 'text',
+          value: settings.lanTarget,
+          onChange: update('lanTarget'),
+          placeholder: '5666 或 http://192.168.1.10:5666',
+          autoComplete: 'off',
+          spellCheck: false,
+          disabled,
+          style: inputStyle,
+        }),
+        React.createElement('span', { key: 'hint', style: hintStyle }, t('只填端口时使用当前访问主机的地址；默认 5666。')),
+      ]),
 
-    React.createElement('label', { key: 'mode', style: labelStyle }, [
-      React.createElement('span', { key: 'label' }, '非网关访问时的授权入口'),
-      React.createElement('select', {
-        key: 'select',
-        value: settings.authMode,
-        onChange: update('authMode'),
-        disabled,
-        style: inputStyle,
-      }, [
-        React.createElement('option', { key: 'ask', value: 'ask' }, '每次询问（推荐）'),
-        React.createElement('option', { key: 'proxy', value: 'proxy' }, '优先使用反代地址'),
-        React.createElement('option', { key: 'lan', value: 'lan' }, '优先使用内网地址'),
+      React.createElement('label', { key: 'mode', style: labelStyle }, [
+        React.createElement('span', { key: 'label' }, t('非网关访问时的授权入口')),
+        React.createElement('select', {
+          key: 'select',
+          value: settings.authMode,
+          onChange: update('authMode'),
+          disabled,
+          style: inputStyle,
+        }, [
+          React.createElement('option', { key: 'ask', value: 'ask' }, t('每次询问（推荐）')),
+          React.createElement('option', { key: 'proxy', value: 'proxy' }, t('优先使用反代地址')),
+          React.createElement('option', { key: 'lan', value: 'lan' }, t('优先使用内网地址')),
+        ]),
+      ]),
+
+      React.createElement('label', { key: 'language', style: labelStyle }, [
+        React.createElement('span', { key: 'label' }, t('界面语言')),
+        React.createElement('select', {
+          key: 'select',
+          value: language,
+          onChange: (event) => {
+            const next = setLanguagePreference(event.target.value);
+            setLanguage(next);
+            setMessage('');
+            setError('');
+          },
+          disabled,
+          style: inputStyle,
+        }, [
+          React.createElement('option', { key: 'auto', value: 'auto' }, t('跟随浏览器')),
+          React.createElement('option', { key: 'zh', value: 'zh' }, t('中文')),
+          React.createElement('option', { key: 'en', value: 'en' }, 'English'),
+        ]),
+      ]),
+
+      React.createElement('label', { key: 'image-read', style: { ...labelStyle, flexDirection: 'row', alignItems: 'flex-start', gap: 8 } }, [
+        React.createElement('input', {
+          key: 'checkbox',
+          type: 'checkbox',
+          checked: settings.imageRead !== false,
+          onChange: (event) => {
+            const checked = event.target.checked;
+            setSettings((current) => ({ ...current, imageRead: checked }));
+            setMessage('');
+            setError('');
+          },
+          disabled,
+          style: { marginTop: 3 },
+        }),
+        React.createElement('span', { key: 'text', style: { display: 'flex', flexDirection: 'column', gap: 4 } }, [
+          React.createElement('span', { key: 'label' }, t('从飞牛选择图片时读取图片内容')),
+          React.createElement('span', { key: 'hint', style: hintStyle }, t('图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。')),
+        ]),
+      ]),
+
+      React.createElement('p', { key: 'access', style: hintStyle }, accessNote),
+      hostWarning ? React.createElement('p', {
+        key: 'host-warning',
+        style: { ...hintStyle, color: 'var(--dsw-alias-state-error-primary, #d93025)' },
+      }, hostWarning) : null,
+
+      React.createElement('div', { key: 'actions', style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' } }, [
+        React.createElement('button', {
+          key: 'save',
+          type: 'button',
+          onClick: save,
+          disabled,
+          style: buttonStyle,
+        }, saving ? t('保存中…') : t('保存')),
+        loading ? React.createElement('span', { key: 'loading', style: hintStyle }, t('读取设置…')) : null,
+        message ? React.createElement('span', { key: 'ok', style: { fontSize: 12, color: 'var(--dsw-alias-state-success-primary, #188038)' } }, message) : null,
+        error ? React.createElement('span', { key: 'err', style: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary, #d93025)' } }, error) : null,
       ]),
     ]),
 
-    React.createElement('label', { key: 'image-read', style: { ...labelStyle, flexDirection: 'row', alignItems: 'flex-start', gap: 8 } }, [
-      React.createElement('input', {
-        key: 'checkbox',
-        type: 'checkbox',
-        checked: settings.imageRead !== false,
-        onChange: (event) => {
-          const checked = event.target.checked;
-          setSettings((current) => ({ ...current, imageRead: checked }));
-          setMessage('');
+    React.createElement(CollapsibleSection, {
+      key: 'health',
+      title: t('工作区目录权限'),
+      description: t('检查 dsh 工作区目录的读写权限。飞牛 ACL 记录损坏或目录移动后，dsh 会读不到这些目录。'),
+      defaultOpen: true,
+    }, React.createElement(WorkspaceHealthSection, { disabled })),
+
+    React.createElement(CollapsibleSection, {
+      key: 'diagnostics',
+      title: t('诊断'),
+      description: t('检查 dsh 版本、DOM 锚点和飞牛地址连通性。'),
+      defaultOpen: false,
+    }, React.createElement(DiagnosticsSection, {
+      settings,
+      hostVersion,
+      hostState,
+      embedded,
+      gatewayAccess,
+    })),
+  ]);
+}
+
+function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewayAccess }) {
+  const [proxyStatus, setProxyStatus] = React.useState(null);
+  const [lanStatus, setLanStatus] = React.useState(null);
+  const [copyMessage, setCopyMessage] = React.useState(null);
+  const [health, setHealth] = React.useState(null);
+  const [tick, setTick] = React.useState(0);
+  const [appName, setAppName] = React.useState('Harness');
+
+  const loadHealth = React.useCallback(() => {
+    fetch(pluginURL('fnos-advanced/health'), { credentials: 'same-origin', cache: 'no-store' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => setHealth(data))
+      .catch(() => setHealth(null));
+  }, []);
+
+  React.useEffect(() => {
+    let alive = true;
+    loadConfig().then((config) => {
+      if (alive && config.appName) setAppName(config.appName);
+    }).catch(() => { /* keep default */ });
+    loadHealth();
+    return () => { alive = false; };
+  }, [loadHealth]);
+
+  const hintStyle = {
+    margin: 0,
+    fontSize: 12,
+    lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary, #888)',
+  };
+  const buttonStyle = {
+    boxSizing: 'border-box',
+    height: 32,
+    padding: '0 12px',
+    borderRadius: 8,
+    border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))',
+    background: 'transparent',
+    color: 'var(--dsw-alias-label-primary, inherit)',
+    font: 'inherit',
+    fontSize: 13,
+    cursor: 'pointer',
+  };
+  const statusStyle = (status) => ({
+    fontSize: 12,
+    color: status && status.ok === true
+      ? 'var(--dsw-alias-state-success-primary, #188038)'
+      : status && status.ok === false
+        ? 'var(--dsw-alias-state-error-primary, #d93025)'
+        : 'var(--dsw-alias-label-tertiary, #888)',
+  });
+  const statusText = (status) => {
+    if (!status) return '';
+    if (status.reason === 'notSet') return t('未设置');
+    if (status.reason === 'timeout') return t('连接超时');
+    if (status.reason === 'unreachable') return t('无法连接');
+    return t('可连接（{ms}ms）', { ms: status.ms });
+  };
+
+  // Recompute anchors on every render (the sidebar/tab may have opened since).
+  const composerRegion = document.querySelector('[data-conversation-region="composer"]');
+  const composerAnchor = composerRegion
+    ? Boolean(composerRegion.querySelector('input[type="file"][multiple]'))
+    : null;
+  const treeRoot = document.querySelector('[data-files-root]');
+  const fileTreeAnchor = treeRoot ? Boolean(treeRoot.querySelector('[data-files-entry][data-files-path]')) : null;
+  const anchorText = (value) => (
+    value === true ? t('可用') : value === false ? t('不可用') : t('未检测')
+  );
+
+  const testAddress = async (kind) => {
+    const setStatus = kind === 'proxy' ? setProxyStatus : setLanStatus;
+    const base = kind === 'proxy'
+      ? normalizeBase(settings.proxyBase || '')
+      : lanBaseFromSettings(settings);
+    if (!base) {
+      setStatus({ reason: 'notSet' });
+      return;
+    }
+    setStatus({ pending: true });
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? window.setTimeout(() => controller.abort(), 4000) : 0;
+    const started = Date.now();
+    try {
+      await fetch(
+        `${base}/app-auth/pick-user-file?appName=${encodeURIComponent(appName)}&directory=true`,
+        {
+          mode: 'no-cors',
+          cache: 'no-store',
+          credentials: 'omit',
+          signal: controller ? controller.signal : undefined,
+        },
+      );
+      setStatus({ ok: true, ms: Date.now() - started });
+    } catch (error) {
+      setStatus({ ok: false, reason: error && error.name === 'AbortError' ? 'timeout' : 'unreachable' });
+    } finally {
+      if (timer) window.clearTimeout(timer);
+    }
+  };
+
+  const runtime = embedded ? t('飞牛桌面 / App') : gatewayAccess ? t('飞牛网关') : t('普通浏览器');
+  const hostStateText = hostState === 'ok'
+    ? t('正常')
+    : hostState === 'missing'
+      ? t('缺失（需重启 dsh）')
+      : hostState === 'error' ? t('读取失败') : t('未检测');
+
+  const copyDiagnostics = async () => {
+    const lines = [
+      `dsh-fnos-advanced ${VERSION}`,
+      `${t('客户端')}: ${VERSION}`,
+      `${t('宿主')}: ${hostVersion || '?'} (${hostStateText})`,
+      `${t('运行环境')}: ${runtime}`,
+      `${t('界面语言')}: ${currentLanguage()}`,
+      `${t('对话输入框')}: ${anchorText(composerAnchor)}`,
+      `${t('文件树')}: ${anchorText(fileTreeAnchor)}`,
+      `${t('图片读取')}: ${health && health.features ? (health.features.imageRead ? t('开') : t('关')) : t('未检测')}`,
+      `${t('工作区体检')}: ${health && health.features ? (health.features.workspaceHealth ? t('可用') : t('不可用')) : t('未检测')}`,
+      `${t('反代飞牛地址')}: ${settings.proxyBase || t('未设置')}`,
+      `${t('飞牛内网地址 / 端口')}: ${settings.lanTarget}`,
+      `${t('测试反代地址')}: ${statusText(proxyStatus) || t('未检测')}`,
+      `${t('测试内网地址')}: ${statusText(lanStatus) || t('未检测')}`,
+    ];
+    const ok = await copyText(lines.join('\n'));
+    setCopyMessage(Boolean(ok));
+  };
+
+  return React.createElement('div', {
+    key: `diagnostics-${tick}`,
+    style: { display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 },
+  }, [
+    React.createElement('div', { key: 'versions', style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 12 } }, [
+      React.createElement('span', { key: 'h1', style: hintStyle }, t('宿主')), React.createElement('span', { key: 'v1' }, `${hostVersion || '?'} · ${hostStateText}`),
+      React.createElement('span', { key: 'h2', style: hintStyle }, t('客户端')), React.createElement('span', { key: 'v2' }, VERSION),
+      React.createElement('span', { key: 'h3', style: hintStyle }, t('运行环境')), React.createElement('span', { key: 'v3' }, runtime),
+      React.createElement('span', { key: 'h4', style: hintStyle }, t('图片读取')), React.createElement('span', { key: 'v4' }, health && health.features ? (health.features.imageRead ? t('开') : t('关')) : t('未检测')),
+      React.createElement('span', { key: 'h5', style: hintStyle }, t('对话输入框')), React.createElement('span', { key: 'v5' }, anchorText(composerAnchor)),
+      React.createElement('span', { key: 'h6', style: hintStyle }, t('文件树')), React.createElement('span', { key: 'v6' }, anchorText(fileTreeAnchor)),
+      React.createElement('span', { key: 'h7', style: hintStyle }, t('工作区体检')), React.createElement('span', { key: 'v7' }, health && health.features ? (health.features.workspaceHealth ? t('可用') : t('不可用')) : t('未检测')),
+    ]),
+    React.createElement('div', { key: 'addresses', style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } }, [
+      React.createElement('button', { key: 'proxy', type: 'button', onClick: () => testAddress('proxy'), style: buttonStyle }, t('测试反代地址')),
+      proxyStatus ? React.createElement('span', { key: 'proxy-status', style: statusStyle(proxyStatus) }, proxyStatus.pending ? t('测试中…') : statusText(proxyStatus)) : null,
+      React.createElement('button', { key: 'lan', type: 'button', onClick: () => testAddress('lan'), style: buttonStyle }, t('测试内网地址')),
+      lanStatus ? React.createElement('span', { key: 'lan-status', style: statusStyle(lanStatus) }, lanStatus.pending ? t('测试中…') : statusText(lanStatus)) : null,
+    ]),
+    React.createElement('div', { key: 'actions', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } }, [
+      React.createElement('button', { key: 'copy', type: 'button', onClick: copyDiagnostics, style: buttonStyle }, t('复制诊断信息')),
+      React.createElement('button', {
+        key: 'refresh',
+        type: 'button',
+        onClick: () => {
+          setProxyStatus(null);
+          setLanStatus(null);
+          setCopyMessage(null);
+          loadHealth();
+          setTick((value) => value + 1);
+        },
+        style: buttonStyle,
+      }, t('重新检测')),
+      copyMessage !== null ? React.createElement('span', { key: 'copy-msg', style: hintStyle }, copyMessage ? t('诊断信息已复制') : t('复制失败')) : null,
+    ]),
+  ]);
+}
+
+function WorkspaceHealthSection({ disabled }) {
+  const [results, setResults] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const check = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setResults(await checkWorkspaceHealth([]));
+    } catch (err) {
+      setError(translateError(err && err.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const reauth = async (result) => {
+    let popup = null;
+    if (!isFnosHost()) {
+      popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+      if (popup) writePopupLoading(popup);
+    }
+    try {
+      await authorizeWorkspacePath(result.path, popup);
+      const [next] = await checkWorkspaceHealth([result.id]);
+      if (next) {
+        setResults((current) => current.map((item) => (item.id === next.id ? next : item)));
+      }
+      showToast(t('已重新授权'));
+    } catch (err) {
+      closePopup(popup);
+      showToast(t('重新授权失败：{error}', { error: translateError(err && err.message) }));
+    }
+  };
+
+  const buttonStyle = {
+    boxSizing: 'border-box',
+    height: 32,
+    padding: '0 12px',
+    borderRadius: 8,
+    border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))',
+    background: 'transparent',
+    color: 'var(--dsw-alias-label-primary, inherit)',
+    font: 'inherit',
+    fontSize: 13,
+    cursor: disabled || loading ? 'default' : 'pointer',
+    opacity: disabled || loading ? 0.6 : 1,
+  };
+  const hintStyle = {
+    margin: 0,
+    fontSize: 12,
+    lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary, #888)',
+  };
+  const rowStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '8px 0',
+    borderTop: '1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.2))',
+  };
+
+  return React.createElement('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 },
+  }, [
+    React.createElement('div', { key: 'actions', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } }, [
+      React.createElement('button', {
+        key: 'check',
+        type: 'button',
+        onClick: check,
+        disabled: disabled || loading,
+        style: buttonStyle,
+      }, loading ? t('检查中…') : t('检查全部工作区')),
+      results.length ? React.createElement('span', { key: 'count', style: hintStyle }, t('共 {count} 个', { count: results.length })) : null,
+      error ? React.createElement('span', { key: 'error', style: { ...hintStyle, color: 'var(--dsw-alias-state-error-primary, #d93025)' } }, error) : null,
+      (results.length || error) ? React.createElement('button', {
+        key: 'clear',
+        type: 'button',
+        onClick: () => {
+          setResults([]);
           setError('');
         },
-        disabled,
-        style: { marginTop: 3 },
-      }),
-      React.createElement('span', { key: 'text', style: { display: 'flex', flexDirection: 'column', gap: 4 } }, [
-        React.createElement('span', { key: 'label' }, '从飞牛选择图片时读取图片内容'),
-        React.createElement('span', { key: 'hint', style: hintStyle }, '图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。'),
-      ]),
-    ]),
-
-    React.createElement('p', { key: 'access', style: hintStyle }, accessNote),
-    hostWarning ? React.createElement('p', {
-      key: 'host-warning',
-      style: { ...hintStyle, color: 'var(--dsw-alias-state-error-primary, #d93025)' },
-    }, hostWarning) : null,
-
-    React.createElement('div', { key: 'actions', style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' } }, [
-      React.createElement('button', {
-        key: 'save',
-        type: 'button',
-        onClick: save,
-        disabled,
+        disabled: loading,
         style: buttonStyle,
-      }, saving ? '保存中…' : '保存'),
-      loading ? React.createElement('span', { key: 'loading', style: hintStyle }, '读取设置…') : null,
-      message ? React.createElement('span', { key: 'ok', style: { fontSize: 12, color: 'var(--dsw-alias-state-success-primary, #188038)' } }, message) : null,
-      error ? React.createElement('span', { key: 'err', style: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary, #d93025)' } }, error) : null,
+      }, t('清除结果')) : null,
     ]),
+    results.length ? React.createElement('div', { key: 'list' }, results.map((result) => {
+      const healthy = result.exists && result.readable && result.writable;
+      const status = workspaceHealthText(result);
+      return React.createElement('div', { key: result.id, style: rowStyle }, [
+        React.createElement('div', { key: 'info', style: { minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: 2 } }, [
+          React.createElement('span', { key: 'name', style: { fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, result.title || result.id),
+          React.createElement('span', { key: 'path', style: { ...hintStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: result.path }, result.path),
+        ]),
+        React.createElement('span', {
+          key: 'status',
+          style: {
+            flex: 'none',
+            fontSize: 12,
+            color: healthy
+              ? 'var(--dsw-alias-state-success-primary, #188038)'
+              : 'var(--dsw-alias-state-error-primary, #d93025)',
+          },
+        }, status),
+        React.createElement('button', {
+          key: 'reauth',
+          type: 'button',
+          onClick: () => reauth(result),
+          disabled: disabled,
+          style: buttonStyle,
+        }, t('重新授权')),
+      ]);
+    })) : null,
   ]);
 }
 
@@ -1952,7 +2532,7 @@ function validateProxyBase(value) {
   if (!text) return '';
   const url = new URL(text);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('反代地址只支持 http/https');
+    throw new Error(t('反代地址只支持 http/https'));
   }
   return url.origin;
 }

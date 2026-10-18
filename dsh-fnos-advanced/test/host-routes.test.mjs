@@ -3,7 +3,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { apply } from '../lib/index.js';
 
 /** Capture the route registered by the host half. */
@@ -170,6 +170,87 @@ test('persists and validates settings under DSH_HOME', async () => {
     if (previous === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previous;
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('lists workspaces and reports metadata-only access health', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-health-home-'));
+  const good = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-health-good-'));
+  const readonly = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-health-ro-'));
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  const ids = {
+    good: '11111111-1111-4111-8111-111111111111',
+    missing: '22222222-2222-4222-8222-222222222222',
+    readonly: '33333333-3333-4333-8333-333333333333',
+  };
+  const missing = path.join(home, 'missing-workspace');
+  try {
+    await chmod(readonly, 0o555);
+    await mkdir(path.join(home, 'storages'), { recursive: true });
+    await writeFile(
+      path.join(home, 'storages', 'workspace.json'),
+      JSON.stringify({
+        tables: {
+          workspaces: {
+            [ids.good]: { path: good, title: 'good' },
+            [ids.missing]: { path: missing, title: 'missing' },
+            [ids.readonly]: { path: readonly, title: 'readonly' },
+          },
+        },
+      }),
+    );
+
+    await withServer(async (base) => {
+      const listed = await (await fetch(`${base}/fnos-advanced/workspaces`)).json();
+      assert.equal(listed.ok, true);
+      assert.equal(listed.workspaces.length, 3);
+
+      const response = await fetch(`${base}/fnos-advanced/workspace-health`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [ids.good, ids.missing, ids.readonly] }),
+      });
+      assert.equal(response.status, 200);
+      const health = await response.json();
+      const byId = Object.fromEntries(health.results.map((row) => [row.id, row]));
+      assert.equal(byId[ids.good].exists, true);
+      assert.equal(byId[ids.good].directory, true);
+      assert.equal(byId[ids.good].readable, true);
+      assert.equal(byId[ids.good].writable, true);
+      assert.equal(byId[ids.missing].exists, false);
+      assert.equal(byId[ids.readonly].exists, true);
+      assert.equal(byId[ids.readonly].writable, false);
+      assert.equal(byId[ids.readonly].error, 'EACCES');
+
+      const all = await (await fetch(`${base}/fnos-advanced/workspace-health`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [] }),
+      })).json();
+      assert.equal(all.results.length, 3);
+
+      const cross = await fetch(`${base}/fnos-advanced/workspace-health`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
+        body: JSON.stringify({ ids: [ids.good] }),
+      });
+      assert.equal(cross.status, 403);
+
+      const invalid = await fetch(`${base}/fnos-advanced/workspace-health`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ['../etc'] }),
+      });
+      assert.equal(invalid.status, 400);
+    });
+  } finally {
+    await chmod(readonly, 0o755).catch(() => {});
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+    await rm(home, { recursive: true, force: true });
+    await rm(good, { recursive: true, force: true });
+    await rm(readonly, { recursive: true, force: true });
   }
 });
 

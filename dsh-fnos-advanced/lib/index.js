@@ -25,6 +25,8 @@ const CALLBACK_PATH_ALT = `${ROUTE_PREFIX}/auth-callback`;
 const RESULT_PATH = `${ROUTE_PREFIX}/auth-result`;
 const SETTINGS_PATH = `${ROUTE_PREFIX}/settings`;
 const WORKSPACE_PATH = `${ROUTE_PREFIX}/workspace-path`;
+const WORKSPACES_PATH = `${ROUTE_PREFIX}/workspaces`;
+const WORKSPACE_HEALTH_PATH = `${ROUTE_PREFIX}/workspace-health`;
 const FILE_TOKEN_PATH = `${ROUTE_PREFIX}/file-token`;
 const FILE_BYTES_PATH = `${ROUTE_PREFIX}/file-bytes`;
 const HEALTH_PATH = `${ROUTE_PREFIX}/health`;
@@ -256,7 +258,7 @@ const CALLBACK_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>飞牛授权</title>
+<title>fnOS / 飞牛授权</title>
 <style>
   :root { color-scheme: light dark; }
   html, body { height: 100%; margin: 0; }
@@ -357,21 +359,32 @@ const CALLBACK_HTML = `<!doctype html>
     }).catch(function () {});
   } catch (_) { /* fetch unavailable */ }
 
-  var ok = result.status === 'success' && paths.length > 0;
+  var authorize = result.method === 'authorizeUserFile' || result.method === 'authorizeSharedFile';
+  var ok = result.status === 'success' && (paths.length > 0 || authorize);
+  var zh = /^zh/i.test(navigator.language || '');
   var title = document.getElementById('title');
   var message = document.getElementById('message');
   var path = document.getElementById('path');
   var close = document.getElementById('close');
 
+  document.title = zh ? '飞牛授权' : 'fnOS authorization';
+  document.documentElement.lang = zh ? 'zh-CN' : 'en';
+
   if (ok) {
-    title.textContent = '授权成功';
-    message.textContent = '已授权给飞牛应用，正在返回 DeepSeek Harness。';
-    path.textContent = paths[0];
-    path.hidden = false;
+    title.textContent = zh ? '授权成功' : 'Authorized';
+    message.textContent = zh
+      ? '已授权给飞牛应用，正在返回 DeepSeek Harness。'
+      : 'Authorized for the fnOS app. Returning to DeepSeek Harness.';
+    if (paths.length) {
+      path.textContent = paths[0];
+      path.hidden = false;
+    }
   } else {
-    title.textContent = '未完成授权';
+    title.textContent = zh ? '未完成授权' : 'Authorization not completed';
     title.classList.add('error');
-    message.textContent = result.error || '授权已取消，请回到 DeepSeek Harness 重试。';
+    message.textContent = result.error || (zh
+      ? '授权已取消，请回到 DeepSeek Harness 重试。'
+      : 'Authorization was cancelled. Return to DeepSeek Harness and retry.');
   }
 
   close.hidden = false;
@@ -591,6 +604,127 @@ function handleFileBytes(req, res) {
   stream.pipe(res);
 }
 
+/** All known workspaces, from the live registry first and the storage file second. */
+function listWorkspaces() {
+  const found = new Map();
+  try {
+    const list = workspaceRegistry && typeof workspaceRegistry.list === 'function'
+      ? workspaceRegistry.list()
+      : [];
+    for (const workspace of list) {
+      const id = workspace && workspace.id != null ? String(workspace.id) : '';
+      if (!id || typeof workspace.path !== 'string' || !workspace.path) continue;
+      found.set(id, {
+        id,
+        path: workspace.path,
+        title: typeof workspace.title === 'string' ? workspace.title : '',
+      });
+    }
+  } catch { /* fall through to the disk registry */ }
+
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(dshHome(), 'storages', 'workspace.json'), 'utf8'));
+    const records = data?.tables?.workspaces;
+    if (records && typeof records === 'object') {
+      for (const [id, record] of Object.entries(records)) {
+        if (found.has(id)) continue;
+        if (!record || typeof record.path !== 'string' || !record.path) continue;
+        found.set(id, {
+          id,
+          path: record.path,
+          title: typeof record.title === 'string' ? record.title : '',
+        });
+      }
+    }
+  } catch { /* storage may be absent or mid-write */ }
+
+  return [...found.values()];
+}
+
+/** Metadata-only access check for one workspace (no file contents are read). */
+function workspaceHealth(id) {
+  const workspace = lookupWorkspace(id);
+  if (!workspace) return null;
+  const result = {
+    id: workspace.id,
+    path: workspace.path,
+    title: workspace.title,
+    exists: false,
+    directory: false,
+    readable: false,
+    writable: false,
+    error: '',
+  };
+
+  try {
+    const stat = fs.statSync(workspace.path);
+    result.exists = true;
+    result.directory = stat.isDirectory();
+    if (!result.directory) {
+      result.error = 'ENOTDIR';
+      return result;
+    }
+  } catch (error) {
+    result.error = error && error.code ? error.code : 'ENOENT';
+    return result;
+  }
+
+  try {
+    fs.accessSync(workspace.path, fs.constants.R_OK);
+    result.readable = true;
+  } catch (error) {
+    result.error = error && error.code ? error.code : 'EACCES';
+  }
+
+  try {
+    fs.accessSync(workspace.path, fs.constants.W_OK);
+    result.writable = true;
+  } catch (error) {
+    if (!result.error) result.error = error && error.code ? error.code : 'EACCES';
+  }
+
+  return result;
+}
+
+async function handleWorkspaceHealth(req, res) {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { Allow: 'POST', 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
+  if (!sameOriginRequest(req)) {
+    writeJSON(res, 403, { ok: false, error: 'cross-origin request rejected' });
+    return;
+  }
+
+  let body;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    writeJSON(res, 400, { ok: false, error: 'invalid request body' });
+    return;
+  }
+
+  const requested = Array.isArray(body?.ids) ? body.ids : [];
+  let ids = requested;
+  if (ids.length === 0) ids = listWorkspaces().map((workspace) => workspace.id);
+  if (ids.length > 200) {
+    writeJSON(res, 400, { ok: false, error: 'too many workspaces' });
+    return;
+  }
+  if (ids.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(id))) {
+    writeJSON(res, 400, { ok: false, error: 'invalid workspace id' });
+    return;
+  }
+
+  const results = [];
+  for (const id of ids) {
+    const health = workspaceHealth(id);
+    if (health) results.push(health);
+  }
+  writeJSON(res, 200, { ok: true, results });
+}
+
 async function handle(req, res) {
   pruneFileTokens();
   let pathname;
@@ -663,6 +797,21 @@ async function handle(req, res) {
     return;
   }
 
+  if (pathname === WORKSPACES_PATH) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { Allow: 'GET, HEAD', 'Cache-Control': 'no-store' });
+      res.end();
+      return;
+    }
+    writeJSON(res, 200, { ok: true, workspaces: listWorkspaces() });
+    return;
+  }
+
+  if (pathname === WORKSPACE_HEALTH_PATH) {
+    await handleWorkspaceHealth(req, res);
+    return;
+  }
+
   if (pathname === SETTINGS_PATH) {
     if (req.method === 'GET' || req.method === 'HEAD') {
       writeJSON(res, 200, { ok: true, settings: readSettings(), defaults: DEFAULT_SETTINGS });
@@ -721,7 +870,7 @@ async function handle(req, res) {
       ok: true,
       appName: appName(),
       version: VERSION,
-      features: { filePicker: true, imageRead: readSettings().imageRead },
+      features: { filePicker: true, imageRead: readSettings().imageRead, workspaceHealth: true },
     });
     return;
   }

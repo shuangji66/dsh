@@ -25,6 +25,7 @@ import { TrimApp } from '@trimjs/web-app';
 import { isCancellationText, isPickerCancelled } from './cancel.js';
 import { fileNameForPath, imageMimeForPath } from './files.js';
 import { looksLikeComposerCommandMenu } from './menu.js';
+import { fileRowActions } from './file-actions.js';
 
 const LOG_PREFIX = '[dsh-fnos-advanced]';
 const VERSION = '0.3.0';
@@ -37,6 +38,7 @@ const DEFAULT_SETTINGS = Object.freeze({ proxyBase: '', lanTarget: '5666', authM
 
 const BUTTON_ATTR = 'data-dsh-fnos-advanced';
 const PICK_ITEM_ATTR = 'data-dsh-fnos-pick-file';
+const FILE_ACTION_ATTR = 'data-dsh-fnos-file-action';
 const STATUS_CLASS = 'dsh-fnos-advanced-status';
 const STYLE_ID = 'dsh-fnos-advanced-style';
 
@@ -50,6 +52,7 @@ const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const SIDEBAR_GROUPS = ['myFiles', 'otherShare', 'external', 'remote', 'favorites', 'team'];
 const FOLDER_OPEN_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M1.5 3.5C1.5 2.95 1.95 2.5 2.5 2.5H5.4C5.65 2.5 5.88 2.59 6.07 2.75L7.7 4.2C7.88 4.36 8.12 4.45 8.36 4.45H13.5C14.05 4.45 14.5 4.9 14.5 5.45V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3.5Z" stroke="currentColor"/></svg>';
 const PICK_FILE_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9.5 1.5H4.5C3.95 1.5 3.5 1.95 3.5 2.5V13.5C3.5 14.05 3.95 14.5 4.5 14.5H11.5C12.05 14.5 12.5 14.05 12.5 13.5V4.5L9.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/><path d="M6 8.5H10M8 6.5V10.5" stroke="currentColor" stroke-linecap="round"/></svg>';
+const FILE_ACTION_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="3.5" cy="8" r="1.15" fill="currentColor"/><circle cx="8" cy="8" r="1.15" fill="currentColor"/><circle cx="12.5" cy="8" r="1.15" fill="currentColor"/></svg>';
 
 let installedDispose = null;
 let sdkInstance = null;
@@ -145,9 +148,18 @@ function install() {
     for (const cleanup of cleanups.splice(0)) {
       try { cleanup(); } catch { /* ignore */ }
     }
+    closeFileMenu();
     for (const node of document.querySelectorAll(`[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir]`)) {
       node.remove();
     }
+    for (const row of document.querySelectorAll('.dsh-fnos-file-row')) {
+      row.classList.remove('dsh-fnos-file-row');
+      if (row.dataset.dshFnosPosition === '1') {
+        row.style.position = '';
+        delete row.dataset.dshFnosPosition;
+      }
+    }
+    for (const node of document.querySelectorAll(`[${FILE_ACTION_ATTR}]`)) node.remove();
     const style = document.getElementById(STYLE_ID);
     if (style) style.remove();
     installedDispose = null;
@@ -168,6 +180,7 @@ function scan() {
     injectButton(dialog);
   }
   scanCommandMenu();
+  scanFileTree();
   scanWorkspaceMenus();
 }
 
@@ -279,6 +292,241 @@ function findActiveComposerInput() {
 function findComposerFileInput(region) {
   return Array.from(region.querySelectorAll('input[type="file"]'))
     .find((input) => input.multiple && !input.disabled) || null;
+}
+
+/** Row action menu state (only one open at a time). */
+let fileMenu = null;
+let fileMenuCleanup = null;
+
+/**
+ * Add a small "fnOS actions" control to every file-tree row.
+ *
+ * Rows expose `data-files-entry` (`file` / `directory` / `other`) and an
+ * absolute `data-files-path`; both are deliberate automation anchors in
+ * 0.2.0-rc.2 and 0.2.1-rc.2. The control sits outside the row <button> so a
+ * click never opens/toggles the file itself.
+ */
+function scanFileTree() {
+  for (const row of document.querySelectorAll('[data-files-entry][data-files-path]')) {
+    const entry = row.getAttribute('data-files-entry') || '';
+    const action = row.querySelector(`:scope > [${FILE_ACTION_ATTR}]`);
+    if (entry !== 'file' && entry !== 'directory') {
+      if (action) action.remove();
+      row.classList.remove('dsh-fnos-file-row');
+      if (row.dataset.dshFnosPosition === '1') {
+        row.style.position = '';
+        delete row.dataset.dshFnosPosition;
+      }
+      continue;
+    }
+    if (action) {
+      const rowButton = row.querySelector(':scope > button');
+      const height = rowButton ? rowButton.offsetHeight : 0;
+      if (height && action.style.height !== `${height}px`) action.style.height = `${height}px`;
+      continue;
+    }
+    injectFileAction(row);
+  }
+}
+
+function injectFileAction(row) {
+  const rowButton = row.querySelector(':scope > button');
+  if (!rowButton) return;
+
+  row.classList.add('dsh-fnos-file-row');
+  if (getComputedStyle(row).position === 'static') {
+    row.style.position = 'relative';
+    row.dataset.dshFnosPosition = '1';
+  }
+
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.setAttribute(FILE_ACTION_ATTR, '1');
+  action.className = 'dsh-fnos-file-action';
+  action.innerHTML = FILE_ACTION_SVG;
+  action.title = '飞牛操作';
+  action.setAttribute('aria-label', '飞牛操作');
+  action.style.height = `${rowButton.offsetHeight || 28}px`;
+
+  action.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  action.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (fileMenu && fileMenu.__dshFnosRow === row) {
+      closeFileMenu();
+      return;
+    }
+    openFileMenu(action, row);
+  });
+
+  row.appendChild(action);
+}
+
+const FILE_ACTION_TEXT = Object.freeze({
+  open: '在飞牛中打开',
+  quote: '引用到对话',
+  copy: '复制路径',
+});
+
+function openFileMenu(anchor, row) {
+  closeFileMenu();
+  const path = row.getAttribute('data-files-path') || '';
+  const entry = row.getAttribute('data-files-entry') || '';
+  const actions = fileRowActions(entry, isFnosHost());
+  if (!path || !actions.length) return;
+
+  const menu = document.createElement('div');
+  menu.className = 'dsh-fnos-file-menu';
+  menu.setAttribute('role', 'menu');
+  menu.__dshFnosRow = row;
+
+  const title = document.createElement('div');
+  title.className = 'dsh-fnos-file-menu-title';
+  title.textContent = path.split('/').filter(Boolean).pop() || path;
+  title.title = path;
+  menu.append(title);
+
+  for (const action of actions) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'dsh-fnos-file-menu-item';
+    item.setAttribute('role', 'menuitem');
+
+    const text = document.createElement('span');
+    text.className = 'dsh-fnos-file-menu-label';
+    text.textContent = FILE_ACTION_TEXT[action];
+    item.append(text);
+
+    item.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFileMenu();
+      void runFileAction(action, path, entry);
+    });
+    menu.appendChild(item);
+  }
+
+  document.body.appendChild(menu);
+  positionFileMenu(menu, anchor);
+  fileMenu = menu;
+
+  const onPointerDown = (event) => {
+    if (!(event.target instanceof Node)) return;
+    if (menu.contains(event.target) || anchor.contains(event.target)) return;
+    closeFileMenu();
+  };
+  const onKeyDown = (event) => {
+    if (event.key === 'Escape') closeFileMenu();
+  };
+  document.addEventListener('pointerdown', onPointerDown, true);
+  document.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('scroll', closeFileMenu, true);
+  window.addEventListener('resize', closeFileMenu);
+
+  fileMenuCleanup = () => {
+    document.removeEventListener('pointerdown', onPointerDown, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+    window.removeEventListener('scroll', closeFileMenu, true);
+    window.removeEventListener('resize', closeFileMenu);
+  };
+}
+
+function positionFileMenu(menu, anchor) {
+  const margin = 8;
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth || 200;
+  const height = menu.offsetHeight || 100;
+  menu.style.left = `${Math.min(Math.max(margin, rect.right - width), window.innerWidth - width - margin)}px`;
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - margin) top = Math.max(margin, rect.top - height - 6);
+  menu.style.top = `${top}px`;
+}
+
+function closeFileMenu() {
+  if (fileMenuCleanup) {
+    try { fileMenuCleanup(); } catch { /* ignore */ }
+    fileMenuCleanup = null;
+  }
+  if (fileMenu) {
+    fileMenu.remove();
+    fileMenu = null;
+  }
+}
+
+async function runFileAction(action, path, entry) {
+  const isDirectory = entry === 'directory';
+  try {
+    if (action === 'open') {
+      await openPathInFnos(path, isDirectory);
+    } else if (action === 'quote') {
+      await quotePathToComposer(path);
+    } else if (action === 'copy') {
+      await copyPathToClipboard(path);
+    }
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    console.warn(LOG_PREFIX, 'file-tree action failed', action, message, error);
+    showToast(action === 'open' ? '在飞牛中打开失败，当前宿主可能不支持该操作。' : message);
+  }
+}
+
+async function openPathInFnos(path, isDirectory) {
+  const sdk = getSdk();
+  try { await sdk.ready(); } catch { /* fall through to the host call */ }
+
+  if (isDirectory || typeof sdk.openFile !== 'function') {
+    await sdk.openFileManager(path);
+    return;
+  }
+  try {
+    const opened = await sdk.openFile(path);
+    if (opened === false) throw new Error('openFile is not supported by this host');
+  } catch (error) {
+    console.warn(LOG_PREFIX, 'openFile failed; falling back to the file manager', error);
+    await sdk.openFileManager(path);
+  }
+}
+
+async function quotePathToComposer(path) {
+  const active = findActiveComposerInput();
+  if (!active) {
+    showToast('没有找到对话输入框，无法引用。');
+    return;
+  }
+  await addPathsToComposer([path], active.input);
+}
+
+async function copyPathToClipboard(path) {
+  const ok = await copyText(path);
+  showToast(ok ? '已复制路径' : '复制失败，请手动复制');
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* insecure context or permission denied: use the fallback */ }
+
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+    area.remove();
+    return Boolean(ok);
+  } catch {
+    return false;
+  }
 }
 
 function registerWorkspacePaths(ctx) {
@@ -1744,6 +1992,92 @@ function injectStyle() {
     .dsh-fnos-advanced-button:disabled {
       opacity: .62;
       cursor: default;
+    }
+    .dsh-fnos-file-row > button {
+      padding-right: 34px;
+    }
+    .dsh-fnos-file-action {
+      position: absolute;
+      top: 0;
+      right: 6px;
+      box-sizing: border-box;
+      display: grid;
+      place-items: center;
+      width: 24px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--dsw-alias-label-tertiary, #888);
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .12s ease, background-color .12s ease;
+    }
+    .dsh-fnos-file-row:hover > .dsh-fnos-file-action,
+    .dsh-fnos-file-row:focus-within > .dsh-fnos-file-action,
+    .dsh-fnos-file-row > .dsh-fnos-file-action:focus-visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .dsh-fnos-file-action:hover {
+      background: transparent;
+      color: var(--dsw-alias-label-primary, inherit);
+    }
+    .dsh-fnos-file-action:focus-visible {
+      outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
+      outline-offset: 1px;
+    }
+    @media (hover: none) {
+      .dsh-fnos-file-row > .dsh-fnos-file-action {
+        opacity: 1;
+        pointer-events: auto;
+      }
+    }
+    .dsh-fnos-file-menu {
+      position: fixed;
+      z-index: 10000;
+      box-sizing: border-box;
+      width: 200px;
+      padding: 6px;
+      border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
+      border-radius: 10px;
+      background: var(--dsw-alias-bg-layer-1, #fff);
+      color: var(--dsw-alias-label-primary, inherit);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
+    }
+    .dsh-fnos-file-menu-title {
+      margin-bottom: 4px;
+      padding: 2px 8px 6px;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 18px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dsh-fnos-file-menu-item {
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      width: 100%;
+      padding: 7px 8px;
+      border: none;
+      border-radius: 7px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .dsh-fnos-file-menu-item:hover {
+      background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+    }
+    .dsh-fnos-file-menu-label {
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 18px;
     }
     .dsh-fnos-advanced-status {
       position: absolute;

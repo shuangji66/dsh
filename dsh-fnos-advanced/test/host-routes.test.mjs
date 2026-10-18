@@ -320,6 +320,8 @@ test('client bundle is the dsh lazy-factory shape and bundles the SDK', async ()
   assert.match(bundle, /data-conversation-region/);
   assert.match(bundle, /data-trigger-menu/);
   assert.match(bundle, /data-dsh-fnos-pick-file/);
+  assert.match(bundle, /data-files-entry/);
+  assert.match(bundle, /data-dsh-fnos-file-action/);
   assert.match(bundle, /fnos-advanced\/file-token/);
   assert.match(bundle, /fnos-advanced\/file-bytes/);
 });

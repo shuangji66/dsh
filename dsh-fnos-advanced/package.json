@@ -1,7 +1,7 @@
 {
   "name": "dsh-fnos-advanced",
   "version": "0.3.0",
-  "description": "飞牛文件与目录桥：从飞牛选目录/文件进 dsh，非图片零拷贝引用、图片按需读取。fnOS picker and file bridge for DeepSeek Harness.",
+  "description": "飞牛文件与目录桥：选目录/选文件进对话、文件树行操作（在飞牛打开/引用到对话/复制路径）。fnOS picker, composer file bridge, and file-tree actions for DeepSeek Harness.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

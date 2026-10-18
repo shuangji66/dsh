@@ -1480,7 +1480,7 @@ var Ue = class {
 
 // src/client/index.js
 var LOG_PREFIX = "[dsh-fnos-advanced]";
-var VERSION = "0.2.3";
+var VERSION = "0.2.4";
 var MSG_TYPE = "dsh-fnos-advanced:auth";
 var STORAGE_KEY = "dsh-fnos-advanced:auth-result";
 var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
@@ -1859,6 +1859,18 @@ async function handlePick(button) {
     handlePickError(button, dialog, originalText, error);
   }
 }
+function isPickerCancelled(result) {
+  if (!result) return true;
+  if (result.code === 0) return false;
+  const empty = !Array.isArray(result.data) || result.data.length === 0;
+  if (!empty) return false;
+  const msg = String(result.msg || "");
+  if (result.code === 1 && (!msg || /operation failed|操作失败|cancel|取消|abort/i.test(msg))) return true;
+  return /cancel|取消|abort/i.test(msg);
+}
+function isCancellationText(text) {
+  return /operation failed|操作失败|cancel|取消|abort/i.test(String(text || ""));
+}
 async function tryDirectPick(button, dialog, originalText) {
   const sdk = getSdk();
   try {
@@ -1884,7 +1896,11 @@ async function tryDirectPick(button, dialog, originalText) {
   }
   const path = result && result.code === 0 && Array.isArray(result.data) ? result.data[0] : "";
   if (!path) {
-    showStatus(dialog, result && result.msg ? result.msg : "授权已取消", true);
+    if (isPickerCancelled(result)) {
+      showStatus(dialog, "已取消选择目录", false);
+    } else {
+      showStatus(dialog, result && result.msg ? result.msg : "打开目录选择器失败", true);
+    }
     resetButton(button, originalText);
     return true;
   }
@@ -1910,7 +1926,12 @@ async function startAuthFlow(button, dialog, originalText, appName, base, existi
     if (!input) throw new Error("没有找到目录选择器的路径输入框");
     const auth = await requestAuth(popup, state, appName, base);
     if (!auth || auth.status !== "success") {
-      throw new Error(auth && auth.error ? auth.error : "授权已取消");
+      if (auth && (auth.status === "cancelled" || isCancellationText(auth.error))) {
+        showStatus(dialog, "已取消选择目录", false);
+        resetButton(button, originalText);
+        return;
+      }
+      throw new Error(auth && auth.error ? auth.error : "打开目录选择器失败");
     }
     const path = Array.isArray(auth.path) ? auth.path[0] : "";
     if (!path) throw new Error("授权结果里没有目录路径");
@@ -2732,6 +2753,10 @@ if (typeof window !== "undefined") {
   window.__dshFnosAdvanced = {
     version: VERSION,
     install,
+    handlePick,
+    isPickerCancelled,
+    pickUserFile: (options) => getSdk().pickUserFile(options),
+    openFileManager: (path) => getSdk().openFileManager(path),
     loadSettings,
     resolveAuthTargets,
     resolveAuthBase,

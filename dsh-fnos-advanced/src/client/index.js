@@ -24,7 +24,7 @@ import * as React from 'react';
 import { TrimApp } from '@trimjs/web-app';
 
 const LOG_PREFIX = '[dsh-fnos-advanced]';
-const VERSION = '0.2.3';
+const VERSION = '0.2.4';
 
 const MSG_TYPE = 'dsh-fnos-advanced:auth';
 const STORAGE_KEY = 'dsh-fnos-advanced:auth-result';
@@ -481,6 +481,28 @@ async function handlePick(button) {
  * @returns {Promise<boolean>} true when the direct attempt was handled
  *   (success, or the user cancelled); false when the caller should fall back.
  */
+/**
+ * fnOS host bridge cancellation: `pickUserFile` resolves with code 1,
+ * `msg: "Operation failed"` and an empty `data` array instead of rejecting.
+ * Treat that shape as a cancellation, not as a picker failure.
+ */
+function isPickerCancelled(result) {
+  if (!result) return true;
+  if (result.code === 0) return false;
+  const empty = !Array.isArray(result.data) || result.data.length === 0;
+  if (!empty) return false;
+  const msg = String(result.msg || '');
+  // The fnOS host bridge reports cancellation as code 1 / "Operation failed"
+  // with an empty data array. Keep specific errors (e.g. permission denied)
+  // visible instead of calling every code-1 response a cancellation.
+  if (result.code === 1 && (!msg || /operation failed|操作失败|cancel|取消|abort/i.test(msg))) return true;
+  return /cancel|取消|abort/i.test(msg);
+}
+
+function isCancellationText(text) {
+  return /operation failed|操作失败|cancel|取消|abort/i.test(String(text || ''));
+}
+
 async function tryDirectPick(button, dialog, originalText) {
   const sdk = getSdk();
   try {
@@ -511,7 +533,11 @@ async function tryDirectPick(button, dialog, originalText) {
 
   const path = result && result.code === 0 && Array.isArray(result.data) ? result.data[0] : '';
   if (!path) {
-    showStatus(dialog, result && result.msg ? result.msg : '授权已取消', true);
+    if (isPickerCancelled(result)) {
+      showStatus(dialog, '已取消选择目录', false);
+    } else {
+      showStatus(dialog, result && result.msg ? result.msg : '打开目录选择器失败', true);
+    }
     resetButton(button, originalText);
     return true;
   }
@@ -543,7 +569,12 @@ async function startAuthFlow(button, dialog, originalText, appName, base, existi
 
     const auth = await requestAuth(popup, state, appName, base);
     if (!auth || auth.status !== 'success') {
-      throw new Error(auth && auth.error ? auth.error : '授权已取消');
+      if (auth && (auth.status === 'cancelled' || isCancellationText(auth.error))) {
+        showStatus(dialog, '已取消选择目录', false);
+        resetButton(button, originalText);
+        return;
+      }
+      throw new Error(auth && auth.error ? auth.error : '打开目录选择器失败');
     }
 
     const path = Array.isArray(auth.path) ? auth.path[0] : '';
@@ -1483,6 +1514,10 @@ if (typeof window !== 'undefined') {
   window.__dshFnosAdvanced = {
     version: VERSION,
     install,
+    handlePick,
+    isPickerCancelled,
+    pickUserFile: (options) => getSdk().pickUserFile(options),
+    openFileManager: (path) => getSdk().openFileManager(path),
     loadSettings,
     resolveAuthTargets,
     resolveAuthBase,

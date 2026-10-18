@@ -27,7 +27,7 @@ const WORKSPACE_PATH = `${ROUTE_PREFIX}/workspace-path`;
 const HEALTH_PATH = `${ROUTE_PREFIX}/health`;
 
 /** Package version shown by the config endpoint; keep in sync with package.json. */
-const VERSION = '0.2.4';
+const VERSION = '0.2.5';
 
 /**
  * The fnOS app identity is injected by the system when it starts the app.

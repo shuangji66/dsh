@@ -7,10 +7,12 @@ package main
 //   - 两个插件的检测/安装/卸载互不串台：各写各的状态槽位（kind=market / advanced），
 //     命令里用的也是各自的 npm 包名；
 //   - 本地检测缓存**按 kind 分开**（一个插件刚查过，不能让另一个插件吃它的缓存）；
+//   - 一次刷新只跑一条 `dsh plugin list`（两个插件共用输出），但缓存命中时一条都不跑；
 //   - 安装仍带精确版本号、仍按镜像源回退；卸载仍不带 `--registry`。
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -262,5 +264,80 @@ func TestAdvancedMirrorFailureNamesThePackage(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte(advancedPackageName)) {
 		t.Fatalf("错误信息应点名 %s，实得: %v", advancedPackageName, err)
+	}
+}
+
+// 一次强制刷新两个插件只跑一条 `dsh plugin list`；随后非强制刷新命中缓存，一条都不跑。
+func TestRefreshManagedPluginsSharesOneListCommand(t *testing.T) {
+	dataDir := t.TempDir()
+	upd := newManagedPluginTestManager(t, dataDir, "0.2.0")
+	marker := fakeDshPlugin(t, dataDir, "0.2.0", pluginListWithPkgs(map[string]string{
+		marketPackageName:   "1.0.0",
+		advancedPackageName: "0.2.1",
+	}))
+
+	upd.refreshManagedPluginsLocal(true)
+
+	listCalls := func() int {
+		raw, err := os.ReadFile(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(raw), "plugin --profile web list")
+	}
+	if got := listCalls(); got != 1 {
+		t.Fatalf("两个插件应共用一次 list 命令，实际 %d 次", got)
+	}
+	if st := upd.getStatus(updateKindMarket); st.LocalVersion != "1.0.0" || st.Unavailable {
+		t.Fatalf("市场本地版本 = %+v, want 1.0.0 且可用", st)
+	}
+	if st := upd.getStatus(updateKindAdvanced); st.LocalVersion != "0.2.1" || st.Unavailable {
+		t.Fatalf("增强插件本地版本 = %+v, want 0.2.1 且可用", st)
+	}
+
+	// 两个 kind 都有缓存：非强制刷新不该再起子进程。
+	upd.refreshManagedPluginsLocal(false)
+	if got := listCalls(); got != 1 {
+		t.Fatalf("缓存命中时不应再跑 list，实际共 %d 次", got)
+	}
+}
+
+// 插件操作失败进日志的文本必须是英文（规则 7）：面向用户的错误优先取 detail / cmd，
+// 没有英文参数时只记 code，不能把中文兜底文案打进日志。
+func TestPluginOpLogTextStaysEnglish(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "detail 优先",
+			err:  uiErr("err_plugin_op_failed", "插件 %s 操作失败: %s", "pkg", "dshmarket", "detail", "pnpm ERR_PNPM_FETCH_404"),
+			want: "pnpm ERR_PNPM_FETCH_404",
+		},
+		{
+			name: "没有 detail 时取 cmd",
+			err:  uiErr("err_plugin_cmd_failed", "dsh %s 失败", "cmd", "plugin --profile web remove dshmarket"),
+			want: "plugin --profile web remove dshmarket",
+		},
+		{
+			name: "只有中文文案时记 code",
+			err:  uiErr("err_plugin_restart_timeout", "dsh 服务重启后 30 秒内没有就绪，请查看控制台日志"),
+			want: "[err_plugin_restart_timeout]",
+		},
+		{
+			name: "普通错误原样",
+			err:  errors.New("exec: exit status 1"),
+			want: "exec: exit status 1",
+		},
+	}
+	for _, tc := range cases {
+		got := pluginOpLogText(tc.err)
+		if got != tc.want {
+			t.Fatalf("%s: pluginOpLogText = %q, want %q", tc.name, got, tc.want)
+		}
+		if !isASCII(got) {
+			t.Fatalf("%s: 日志文本必须是英文，实得 %q", tc.name, got)
+		}
 	}
 }

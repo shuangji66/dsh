@@ -22,9 +22,10 @@
 
 import * as React from 'react';
 import { TrimApp } from '@trimjs/web-app';
+import { isCancellationText, isPickerCancelled } from './cancel.js';
 
 const LOG_PREFIX = '[dsh-fnos-advanced]';
-const VERSION = '0.2.4';
+const VERSION = '0.2.5';
 
 const MSG_TYPE = 'dsh-fnos-advanced:auth';
 const STORAGE_KEY = 'dsh-fnos-advanced:auth-result';
@@ -481,28 +482,6 @@ async function handlePick(button) {
  * @returns {Promise<boolean>} true when the direct attempt was handled
  *   (success, or the user cancelled); false when the caller should fall back.
  */
-/**
- * fnOS host bridge cancellation: `pickUserFile` resolves with code 1,
- * `msg: "Operation failed"` and an empty `data` array instead of rejecting.
- * Treat that shape as a cancellation, not as a picker failure.
- */
-function isPickerCancelled(result) {
-  if (!result) return true;
-  if (result.code === 0) return false;
-  const empty = !Array.isArray(result.data) || result.data.length === 0;
-  if (!empty) return false;
-  const msg = String(result.msg || '');
-  // The fnOS host bridge reports cancellation as code 1 / "Operation failed"
-  // with an empty data array. Keep specific errors (e.g. permission denied)
-  // visible instead of calling every code-1 response a cancellation.
-  if (result.code === 1 && (!msg || /operation failed|操作失败|cancel|取消|abort/i.test(msg))) return true;
-  return /cancel|取消|abort/i.test(msg);
-}
-
-function isCancellationText(text) {
-  return /operation failed|操作失败|cancel|取消|abort/i.test(String(text || ''));
-}
-
 async function tryDirectPick(button, dialog, originalText) {
   const sdk = getSdk();
   try {
@@ -570,6 +549,12 @@ async function startAuthFlow(button, dialog, originalText, appName, base, existi
     const auth = await requestAuth(popup, state, appName, base);
     if (!auth || auth.status !== 'success') {
       if (auth && (auth.status === 'cancelled' || isCancellationText(auth.error))) {
+        // Text matching is a heuristic (older hosts report cancellation as
+        // "Operation failed" instead of a status). Leave a breadcrumb so a
+        // misclassified genuine failure can still be diagnosed.
+        if (auth.status !== 'cancelled') {
+          console.info(LOG_PREFIX, 'authorization result treated as cancellation', auth);
+        }
         showStatus(dialog, '已取消选择目录', false);
         resetButton(button, originalText);
         return;
@@ -1511,11 +1496,14 @@ function isVisible(element) {
 // Test/debug handle. The host-side workspace guard is the real installer; this
 // exists so a standalone build can be exercised without the module loader.
 if (typeof window !== 'undefined') {
+  // Debug surface for the browser console (real-device diagnosis). Not a public
+  // API; the pure cancellation helpers are unit-tested in test/cancel.test.mjs.
   window.__dshFnosAdvanced = {
     version: VERSION,
     install,
     handlePick,
     isPickerCancelled,
+    isCancellationText,
     pickUserFile: (options) => getSdk().pickUserFile(options),
     openFileManager: (path) => getSdk().openFileManager(path),
     loadSettings,

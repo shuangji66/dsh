@@ -45,8 +45,9 @@
   保持纯文本，由控制台日志页按 `[LEVEL]` 着色。连续重复的同一行只记一次、序列结束时补
   汇总行（`flushLog` 在退出前补出）。dsh 子进程的 stdout/stderr 经 `dshLogWriter`
   **原样透传**（不加前缀、不做抑制），终端固定黄色。更新类日志按**目标分开打标签**：
-  `[harness]`（控制台）/ `[dsh]`（dsh 服务）/ `[market]`（插件市场），见
-  `updateLogTag` —— 新增加更新步骤时不要再用通用的 `[update]`，否则升级日志又会混在一起。
+  `[harness]`（控制台）/ `[dsh]`（dsh 服务）/ `[market]`（插件市场）/ `[advanced]`
+  （增强插件 dsh-fnos-advanced），见 `updateLogTag` —— 新增加更新步骤时不要再用通用的
+  `[update]`，否则升级日志又会混在一起。
 - `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled/not-installed`）
   + `proxyState`。反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
   `not-installed` 表示「本机没有选中的 dsh 版本」，等待页据此提示去概览页下载 + 切换

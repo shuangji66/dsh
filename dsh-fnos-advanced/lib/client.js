@@ -1478,9 +1478,37 @@ var Ue = class {
   }
 };
 
+// src/client/cancel.js
+var CANCEL_TEXTS = /* @__PURE__ */ new Set([
+  "operation failed",
+  "操作失败",
+  "cancel",
+  "canceled",
+  "cancelled",
+  "abort",
+  "aborted",
+  "取消",
+  "已取消",
+  "用户取消"
+]);
+function isCancellationText(text) {
+  const value = String(text == null ? "" : text).trim().toLowerCase();
+  if (!value) return false;
+  return CANCEL_TEXTS.has(value) || value.includes("取消");
+}
+function isPickerCancelled(result) {
+  if (!result) return true;
+  const data = Array.isArray(result.data) ? result.data : [];
+  if (data.length > 0) return false;
+  if (result.code === 0) return true;
+  const msg = String(result.msg || "").trim();
+  if (!msg) return result.code === 1;
+  return isCancellationText(msg);
+}
+
 // src/client/index.js
 var LOG_PREFIX = "[dsh-fnos-advanced]";
-var VERSION = "0.2.4";
+var VERSION = "0.2.5";
 var MSG_TYPE = "dsh-fnos-advanced:auth";
 var STORAGE_KEY = "dsh-fnos-advanced:auth-result";
 var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
@@ -1859,18 +1887,6 @@ async function handlePick(button) {
     handlePickError(button, dialog, originalText, error);
   }
 }
-function isPickerCancelled(result) {
-  if (!result) return true;
-  if (result.code === 0) return false;
-  const empty = !Array.isArray(result.data) || result.data.length === 0;
-  if (!empty) return false;
-  const msg = String(result.msg || "");
-  if (result.code === 1 && (!msg || /operation failed|操作失败|cancel|取消|abort/i.test(msg))) return true;
-  return /cancel|取消|abort/i.test(msg);
-}
-function isCancellationText(text) {
-  return /operation failed|操作失败|cancel|取消|abort/i.test(String(text || ""));
-}
 async function tryDirectPick(button, dialog, originalText) {
   const sdk = getSdk();
   try {
@@ -1927,6 +1943,9 @@ async function startAuthFlow(button, dialog, originalText, appName, base, existi
     const auth = await requestAuth(popup, state, appName, base);
     if (!auth || auth.status !== "success") {
       if (auth && (auth.status === "cancelled" || isCancellationText(auth.error))) {
+        if (auth.status !== "cancelled") {
+          console.info(LOG_PREFIX, "authorization result treated as cancellation", auth);
+        }
         showStatus(dialog, "已取消选择目录", false);
         resetButton(button, originalText);
         return;
@@ -2755,6 +2774,7 @@ if (typeof window !== "undefined") {
     install,
     handlePick,
     isPickerCancelled,
+    isCancellationText,
     pickUserFile: (options) => getSdk().pickUserFile(options),
     openFileManager: (path) => getSdk().openFileManager(path),
     loadSettings,

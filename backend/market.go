@@ -95,40 +95,82 @@ var (
 
 // --- 检测：`dsh plugin --profile web list` ---
 
-// pluginInstalled 通过 `dsh plugin --profile web list` 判断某个受管插件装没装、装的哪一版。
-// 返回 ok=false 表示输出里没有该包（= 未安装）。
-func (m *UpdateManager) pluginInstalled(p managedPlugin) (version string, ok bool, err error) {
+// pluginList 是一次 `dsh plugin --profile web list` 的结果：已安装的包 → 版本号。
+//
+// 两个受管插件共用同一条命令输出 —— 每次检测要起一个 1~3 秒的子进程，而「dsh 刚就绪」
+// 这类时刻本来就要同时刷新两个插件，各跑一遍只是白等一倍时间（见
+// refreshManagedPluginsLocal / refreshManagedPluginStatuses）。
+type pluginList struct {
+	versions map[string]string
+	raw      string
+	err      error
+}
+
+// readPluginList 执行一次 `dsh plugin --profile web list`（不联网）。
+//
+// 只读检测，但仍走控制台侧插件命令的统一入口：它执行前会清「持有者已死」的陈旧
+// profile 写锁（list 正是最容易被陈旧锁拖住 120 秒的那条），并把「插件命令进行中」
+// 登记给忙守卫。超时用 pluginCmdTimeout（不是 marketCmdTimeout）—— 这条是只读命令，
+// 不该允许它挂 10 分钟，否则忙守卫会被一次卡住的检测长期占住。
+func (m *UpdateManager) readPluginList() pluginList {
 	if m.dsh == nil {
-		return "", false, uiErr("err_dsh_manager_unavailable", "dsh 管理器不可用")
+		return pluginList{err: uiErr("err_dsh_manager_unavailable", "dsh 管理器不可用")}
 	}
-	// 只读检测，但仍走控制台侧插件命令的统一入口：它执行前会清「持有者已死」的陈旧
-	// profile 写锁（list 正是最容易被陈旧锁拖住 120 秒的那条），并把「插件命令进行中」
-	// 登记给忙守卫。超时用 pluginCmdTimeout（不是 marketCmdTimeout）—— 这条是只读命令，
-	// 不该允许它挂 10 分钟，否则忙守卫会被一次卡住的检测长期占住。
 	out, err := m.dsh.runPluginCmd("list")
 	if err != nil {
+		return pluginList{raw: out, err: err}
+	}
+	versions := make(map[string]string)
+	for _, pl := range parsePluginList(out) {
+		versions[pl.Name] = pl.Version
+	}
+	return pluginList{versions: versions, raw: out}
+}
+
+// snapshotFromPluginList 把一次列表输出换算成某个插件的本地检测结果。
+//
+// 错误按**每个插件各自的包名**包装（界面诊断里要知道是哪一个插件查不了）；「查不了」
+// 与「查到了、没装」必须分开，见 applyPluginLocalResult。
+func snapshotFromPluginList(p managedPlugin, list pluginList) marketLocalSnapshot {
+	if list.err != nil {
+		err := list.err
+		// 已经是面向用户的错误（dsh 管理器不可用等）：原样透出。
+		if _, ok := uiMsgOf(err); ok {
+			return marketLocalSnapshot{Diag: err.Error(), Err: err}
+		}
 		// 「本机没有选中的 dsh 版本」是最常见的失败原因，而且它的内部错误文本是英文的
 		// （会被日志打印，见 AGENTS 规则 7）—— 这里换成中文话术，用户才看得懂该去做什么。
 		// 这条错误只进界面（弹窗诊断），不进日志。
 		if errors.Is(err, errNoDshVersion) {
-			return "", false, uiErr("err_no_dsh_version", "未安装 dsh 服务：请先在控制台「概览」页的版本列表里下载一个版本，再点「切换」")
+			err = uiErr("err_no_dsh_version", "未安装 dsh 服务：请先在控制台「概览」页的版本列表里下载一个版本，再点「切换」")
+		} else {
+			// 命令整体失败（dsh 未安装 / pnpm 缺失 / profile 目录不存在等）：
+			// 把原因带上，前端在弹窗里能直接看到「为什么检测不到」。
+			msg := strings.TrimSpace(list.raw)
+			if msg == "" {
+				msg = err.Error()
+			}
+			err = uiErr("err_plugin_detect_failed",
+				"检测插件 %s 失败（dsh plugin --profile %s list）: %s",
+				"pkg", p.pkg, "profile", marketProfile, "detail", msg)
 		}
-		// 命令整体失败（dsh 未安装 / pnpm 缺失 / profile 目录不存在等）：
-		// 把原因带上，前端在弹窗里能直接看到「为什么检测不到」。
-		msg := strings.TrimSpace(out)
-		if msg == "" {
-			msg = err.Error()
-		}
-		return "", false, uiErr("err_plugin_detect_failed",
-			"检测插件 %s 失败（dsh plugin --profile %s list）: %s",
-			"pkg", p.pkg, "profile", marketProfile, "detail", msg)
+		return marketLocalSnapshot{Diag: err.Error(), Err: err}
 	}
-	for _, pl := range parsePluginList(out) {
-		if pl.Name == p.pkg {
-			return pl.Version, true, nil
-		}
+	if v, ok := list.versions[p.pkg]; ok {
+		return marketLocalSnapshot{Version: v}
 	}
-	return "", false, nil
+	return marketLocalSnapshot{Diag: fmt.Sprintf("`dsh plugin --profile %s list` 未列出 %s", marketProfile, p.pkg)}
+}
+
+// pluginInstalled 判断某个受管插件装没装、装的哪一版（单插件入口，保留给测试与调用方）。
+// 返回 ok=false 表示输出里没有该包（= 未安装）。刷新路径会共用一次列表输出，见
+// readPluginList。
+func (m *UpdateManager) pluginInstalled(p managedPlugin) (version string, ok bool, err error) {
+	snap := snapshotFromPluginList(p, m.readPluginList())
+	if snap.Err != nil {
+		return "", false, snap.Err
+	}
+	return snap.Version, snap.Version != "", nil
 }
 
 // marketInstalled 是插件市场的检测入口（保留给既有测试与调用方）。
@@ -167,20 +209,26 @@ func (m *UpdateManager) detectPluginLocal(p managedPlugin, force bool) marketLoc
 		m.marketLocalMu.Unlock()
 	}
 	snap := m.probePluginLocal(p)
-	m.marketLocalMu.Lock()
-	if snap.Err != nil {
-		// 「查不了」的结果不进缓存：缓存只装**确定的结论**（装了哪一版 / 没装）。把失败
-		// 缓存住，界面上的「—」就会一直挂到下一次触发（最坏一小时）；而重新探测很便宜 ——
-		// 没选中版本时立刻返回，否则也只是一个 1~3 秒的只读子进程。
-		delete(m.pluginLocalCache, p.kind)
-	} else {
-		if m.pluginLocalCache == nil {
-			m.pluginLocalCache = make(map[updateKind]*marketLocalSnapshot)
-		}
-		m.pluginLocalCache[p.kind] = &snap
-	}
-	m.marketLocalMu.Unlock()
+	m.storePluginSnapshot(p, snap)
 	return snap
+}
+
+// storePluginSnapshot 把一次本地检测写进按 kind 分开的缓存。
+//
+// 「查不了」的结果不进缓存：缓存只装**确定的结论**（装了哪一版 / 没装）。把失败
+// 缓存住，界面上的「—」就会一直挂到下一次触发（最坏一小时）；而重新探测很便宜 ——
+// 没选中版本时立刻返回，否则也只是一个 1~3 秒的只读子进程。
+func (m *UpdateManager) storePluginSnapshot(p managedPlugin, snap marketLocalSnapshot) {
+	m.marketLocalMu.Lock()
+	defer m.marketLocalMu.Unlock()
+	if snap.Err != nil {
+		delete(m.pluginLocalCache, p.kind)
+		return
+	}
+	if m.pluginLocalCache == nil {
+		m.pluginLocalCache = make(map[updateKind]*marketLocalSnapshot)
+	}
+	m.pluginLocalCache[p.kind] = &snap
 }
 
 // detectMarketLocal 是插件市场的本地检测入口（保留给既有测试与调用方）。
@@ -190,14 +238,7 @@ func (m *UpdateManager) detectMarketLocal(force bool) marketLocalSnapshot {
 
 // probePluginLocal 真正执行一次本地检测（起子进程，不联网）。
 func (m *UpdateManager) probePluginLocal(p managedPlugin) marketLocalSnapshot {
-	v, ok, err := m.pluginInstalled(p)
-	if err != nil {
-		return marketLocalSnapshot{Diag: err.Error(), Err: err}
-	}
-	if !ok {
-		return marketLocalSnapshot{Diag: fmt.Sprintf("`dsh plugin --profile %s list` 未列出 %s", marketProfile, p.pkg)}
-	}
-	return marketLocalSnapshot{Version: v}
+	return snapshotFromPluginList(p, m.readPluginList())
 }
 
 // applyPluginLocalResult 把一次本地检测结果写进受管插件的状态。
@@ -232,11 +273,16 @@ func applyMarketLocalResult(st *UpdateStatus, snap marketLocalSnapshot) {
 // 保留 LatestVersion 的既有值（HasUpdate 由 applyPluginLocalResult 统一算）。
 func (m *UpdateManager) refreshPluginLocal(p managedPlugin, force bool) marketLocalSnapshot {
 	snap := m.detectPluginLocal(p, force)
+	m.applyPluginSnapshot(p, snap)
+	return snap
+}
+
+// applyPluginSnapshot 把一份本地检测结果写进该插件的状态槽位。
+func (m *UpdateManager) applyPluginSnapshot(p managedPlugin, snap marketLocalSnapshot) {
 	m.updateStatus(p.kind, func(st *UpdateStatus) {
 		st.Kind = p.kind
 		applyPluginLocalResult(st, snap)
 	})
-	return snap
 }
 
 // refreshMarketLocal 是插件市场的本地刷新入口（保留给既有测试）。
@@ -245,9 +291,51 @@ func (m *UpdateManager) refreshMarketLocal(force bool) marketLocalSnapshot {
 }
 
 // refreshManagedPluginsLocal 刷新所有受管插件的本地版本（dsh 刚就绪时用）。
+//
+// 需要真查时两个插件**共用一次** `dsh plugin list`：这条命令 1~3 秒，而 dsh 每次就绪
+// 都要刷新两个插件，各跑一遍等于让用户多等一个子进程。非强制时优先吃各自缓存；两个都
+// 命中就完全不起子进程。
 func (m *UpdateManager) refreshManagedPluginsLocal(force bool) {
+	if !force {
+		m.marketLocalMu.Lock()
+		cached := make([]marketLocalSnapshot, len(managedPlugins))
+		complete := true
+		for i, p := range managedPlugins {
+			c := m.pluginLocalCache[p.kind]
+			if c == nil {
+				complete = false
+				break
+			}
+			cached[i] = *c
+		}
+		m.marketLocalMu.Unlock()
+		if complete {
+			for i, p := range managedPlugins {
+				m.applyPluginSnapshot(p, cached[i])
+			}
+			return
+		}
+	}
+	list := m.readPluginList()
 	for _, p := range managedPlugins {
-		m.refreshPluginLocal(p, force)
+		// 非强制刷新时，已有缓存结论的插件不该因为这一次 list 失败被降级成「查不了」
+		// （与 detectPluginLocal 的「缓存优先」语义一致：查不到就沿用上一次的确定结论）。
+		if !force && list.err != nil {
+			m.marketLocalMu.Lock()
+			c := m.pluginLocalCache[p.kind]
+			var cached marketLocalSnapshot
+			if c != nil {
+				cached = *c
+			}
+			m.marketLocalMu.Unlock()
+			if c != nil {
+				m.applyPluginSnapshot(p, cached)
+				continue
+			}
+		}
+		snap := snapshotFromPluginList(p, list)
+		m.storePluginSnapshot(p, snap)
+		m.applyPluginSnapshot(p, snap)
 	}
 }
 
@@ -275,9 +363,19 @@ func (m *UpdateManager) pluginLatest(p managedPlugin) (string, string, error) {
 		lastErr = fmt.Errorf("%s: no usable version in metadata", mirror.mirrorLogName())
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
+		lastErr = fmt.Errorf("no usable npm mirror")
 	}
-	return "", "", fmt.Errorf("获取 %s 最新版本失败（已尝试镜像源：%s）: %v", p.pkg, mirrorLogNames(), lastErr)
+	// 这条会顺着安装/更新链路进日志（runPluginOp 的 logError），必须英文；界面文案由
+	// pluginLatestErr 包装成 code + 中文兜底。
+	return "", "", fmt.Errorf("fetch %s latest version failed (mirrors tried: %s): %v",
+		p.pkg, mirrorLogNames(), lastErr)
+}
+
+// pluginLatestErr 把英文的底层检测错误包成面向用户的文案（code + 中文兜底）。
+func pluginLatestErr(p managedPlugin, err error) error {
+	return uiErr("err_plugin_latest_failed",
+		"获取 %s 最新版本失败（已尝试镜像源：%s）: %s",
+		"pkg", p.pkg, "mirrors", mirrorLogNames(), "detail", err.Error())
 }
 
 // marketLatest 是插件市场的最新版检测入口（保留给既有测试与调用方）。
@@ -289,7 +387,12 @@ func (m *UpdateManager) marketLatest() (string, string, error) {
 // 任何一步失败都只写进该插件自己的 Error，不影响其它更新链路。
 func (m *UpdateManager) refreshPluginStatus(p managedPlugin) {
 	// 检测跑一趟本来就慢（子进程 + 镜像源），这里强制重查本地版本，保证结论是当下的。
-	snap := m.detectPluginLocal(p, true)
+	m.refreshPluginStatusWith(p, m.detectPluginLocal(p, true))
+}
+
+// refreshPluginStatusWith 用一份已算好的本地快照做完整检测（本地 + 镜像源最新版）。
+// 两个插件同时刷新时共用一次 `dsh plugin list`（见 refreshManagedPluginStatuses）。
+func (m *UpdateManager) refreshPluginStatusWith(p managedPlugin, snap marketLocalSnapshot) {
 	now := time.Now()
 	latest, _, err := m.pluginLatest(p)
 	// 更新日志：与 harness 同一套做法 —— 只取**要装的那一版**（最新版）的 release 正文，
@@ -310,7 +413,7 @@ func (m *UpdateManager) refreshPluginStatus(p managedPlugin) {
 			st.LatestVersion = ""
 			// 镜像源没答上时无法比较版本，红点必须熄掉（本地状态仍由上面维护）。
 			st.HasUpdate = false
-			setErrFields(&st.Error, &st.ErrorRef, err)
+			setErrFields(&st.Error, &st.ErrorRef, pluginLatestErr(p, err))
 			return
 		}
 		setErrFields(&st.Error, &st.ErrorRef, nil)
@@ -325,9 +428,14 @@ func (m *UpdateManager) refreshMarketStatus() {
 }
 
 // refreshManagedPluginStatuses 刷新所有受管插件的状态（含镜像源最新版）。
+//
+// 本地检测共用一次 `dsh plugin list`（两插件各跑一遍等于白等一个 1~3 秒的子进程）。
 func (m *UpdateManager) refreshManagedPluginStatuses() {
+	list := m.readPluginList()
 	for _, p := range managedPlugins {
-		m.refreshPluginStatus(p)
+		snap := snapshotFromPluginList(p, list)
+		m.storePluginSnapshot(p, snap)
+		m.refreshPluginStatusWith(p, snap)
 	}
 }
 
@@ -434,7 +542,8 @@ func tailLines(out string, n int) string {
 		}
 	}
 	if len(kept) == 0 {
-		return "（无输出）"
+		// 这段会作为 detail 参数进日志（见 pluginOpLogText），保持英文。
+		return "(no output)"
 	}
 	return strings.Join(kept, " | ")
 }
@@ -452,7 +561,7 @@ var pluginCmdFn = func(m *UpdateManager, p managedPlugin, args []string) error {
 func (m *UpdateManager) resolvePluginVersion(p managedPlugin) (string, error) {
 	version, mirror, err := m.pluginLatest(p)
 	if err != nil {
-		return "", err
+		return "", pluginLatestErr(p, err)
 	}
 	logInfo("%s newest %s version is %s (via %s)", updateLogTag(p.kind), p.pkg, version, mirror)
 	return version, nil
@@ -523,6 +632,24 @@ func (m *UpdateManager) removePlugin(p managedPlugin) error {
 	})
 }
 
+// pluginOpLogText 取出适合写日志的错误文本。
+//
+// 面向用户的错误（userError）的 Error() 是**中文兜底文案**（见 uimsg.go），直接打日志会
+// 违反「日志必须英文」（AGENTS 规则 7）。这里优先取参数里的英文 detail / cmd（都是
+// npm/dsh 的原始诊断），两者都没有时只记 code。
+func pluginOpLogText(err error) string {
+	if m, ok := uiMsgOf(err); ok {
+		if detail := m.Params["detail"]; detail != "" {
+			return detail
+		}
+		if cmd := m.Params["cmd"]; cmd != "" {
+			return cmd
+		}
+		return "[" + m.Code + "]"
+	}
+	return err.Error()
+}
+
 // runPluginOp 串行执行一次受管插件操作：置阶段 → 跑命令 → 重启 dsh → 刷新状态。
 //
 // phase 是状态机里的阶段名（installing / removing），actionLog 是**日志**里的英文
@@ -550,7 +677,7 @@ func (m *UpdateManager) runPluginOp(p managedPlugin, phase, actionLog string, ru
 			err = m.restartDshForPlugin(p)
 		}
 		if err != nil {
-			logError("%s %s failed: %v", updateLogTag(p.kind), actionLog, err)
+			logError("%s %s failed: %s", updateLogTag(p.kind), actionLog, pluginOpLogText(err))
 			m.updateStatus(p.kind, func(st *UpdateStatus) {
 				st.Seq = seq
 				st.Phase = ""
@@ -612,16 +739,19 @@ func (m *UpdateManager) restartDshForPlugin(p managedPlugin) error {
 	}
 	dshPortFreeFn(m, 30*time.Second)
 	if err := startDshCapturedFn(m); err != nil {
-		return fmt.Errorf("重启 dsh 服务失败（插件变更已落盘，重启控制台后生效）: %w", err)
+		return uiErr("err_plugin_restart_failed",
+			"重启 dsh 服务失败（插件变更已落盘，重启控制台后生效）: %s", "detail", err.Error())
 	}
 	// 等它真的开始监听：起不来时把错误抛给用户，而不是让用户点进 dsh 界面看到等待页。
 	switch marketReadyFn(m, 30*time.Second) {
 	case marketWaitReady:
 		return nil
 	case marketWaitExited:
-		return fmt.Errorf("dsh 服务重启后立即退出（可能是新插件与当前 dsh 版本不兼容），请查看控制台日志")
+		return uiErr("err_plugin_restart_exited",
+			"dsh 服务重启后立即退出（可能是新插件与当前 dsh 版本不兼容），请查看控制台日志")
 	default:
-		return fmt.Errorf("dsh 服务重启后 30 秒内没有就绪，请查看控制台日志")
+		return uiErr("err_plugin_restart_timeout",
+			"dsh 服务重启后 30 秒内没有就绪，请查看控制台日志")
 	}
 }
 

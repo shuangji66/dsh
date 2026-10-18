@@ -221,9 +221,9 @@ func TestMarketLatestFallsBackAcrossMirrors(t *testing.T) {
 		t.Fatalf("最新版 = (%q, %q), want (%q, %q)", ver, mirror, "1.66.11", wantMirror)
 	}
 
-	// 全部失败：错误信息必须点出「都不试官方源」这个语义。
+	// 全部失败：错误信息必须点出「都不试官方源」这个语义（日志/错误链英文，见规则 7）。
 	withMirrors(t, []npmMirror{{Name: "镜像一", URL: bad.URL}})
-	if _, _, err := upd.marketLatest(); err == nil || !strings.Contains(err.Error(), "镜像源") {
+	if _, _, err := upd.marketLatest(); err == nil || !strings.Contains(err.Error(), "mirrors tried") {
 		t.Fatalf("全部失败时应报镜像源相关错误，实得 %v", err)
 	}
 }

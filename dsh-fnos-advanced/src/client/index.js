@@ -23,17 +23,20 @@
 import * as React from 'react';
 import { TrimApp } from '@trimjs/web-app';
 import { isCancellationText, isPickerCancelled } from './cancel.js';
+import { fileNameForPath, imageMimeForPath } from './files.js';
+import { looksLikeComposerCommandMenu } from './menu.js';
 
 const LOG_PREFIX = '[dsh-fnos-advanced]';
-const VERSION = '0.2.5';
+const VERSION = '0.3.0';
 
 const MSG_TYPE = 'dsh-fnos-advanced:auth';
 const STORAGE_KEY = 'dsh-fnos-advanced:auth-result';
 const AUTH_BASE_KEY = 'dsh-fnos-advanced:auth-base';
 const SETTINGS_SLOT_KEY = 'dsh-fnos-advanced';
-const DEFAULT_SETTINGS = Object.freeze({ proxyBase: '', lanTarget: '5666', authMode: 'ask' });
+const DEFAULT_SETTINGS = Object.freeze({ proxyBase: '', lanTarget: '5666', authMode: 'ask', imageRead: true });
 
 const BUTTON_ATTR = 'data-dsh-fnos-advanced';
+const PICK_ITEM_ATTR = 'data-dsh-fnos-pick-file';
 const STATUS_CLASS = 'dsh-fnos-advanced-status';
 const STYLE_ID = 'dsh-fnos-advanced-style';
 
@@ -44,7 +47,9 @@ const CANCEL_BUTTON_RE = /^(?:cancel|取消)/i;
 
 const POPUP_FEATURES = 'popup=yes,width=760,height=680,resizable=yes,scrollbars=yes';
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const SIDEBAR_GROUPS = ['myFiles', 'otherShare', 'external', 'remote', 'favorites', 'team'];
 const FOLDER_OPEN_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M1.5 3.5C1.5 2.95 1.95 2.5 2.5 2.5H5.4C5.65 2.5 5.88 2.59 6.07 2.75L7.7 4.2C7.88 4.36 8.12 4.45 8.36 4.45H13.5C14.05 4.45 14.5 4.9 14.5 5.45V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3.5Z" stroke="currentColor"/></svg>';
+const PICK_FILE_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9.5 1.5H4.5C3.95 1.5 3.5 1.95 3.5 2.5V13.5C3.5 14.05 3.95 14.5 4.5 14.5H11.5C12.05 14.5 12.5 14.05 12.5 13.5V4.5L9.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/><path d="M6 8.5H10M8 6.5V10.5" stroke="currentColor" stroke-linecap="round"/></svg>';
 
 let installedDispose = null;
 let sdkInstance = null;
@@ -55,6 +60,10 @@ let settingsPromise = null;
 let settingsHostState = 'unknown';
 let workspacePaths = new Map();
 let lastWorkspaceMenu = null;
+/** Paths registered for File objects handed to dsh's composer input. */
+const hostPathByFile = new WeakMap();
+/** The store dsh's captured bridge actually reads (survives client HMR). */
+let hostPathStore = hostPathByFile;
 
 /**
  * Cordis client plugin entry.
@@ -78,6 +87,10 @@ function install() {
   if (installedDispose) return installedDispose;
 
   injectStyle();
+  // dsh captures the host-path bridge once when the composer slot is injected
+  // (`const bridge = hostPathBridge()`), so install ours at plugin load time,
+  // long before a file is picked. Waiting until the click would be too late.
+  ensureHostPathBridge();
   const cleanups = [];
 
   let scanTimer = 0;
@@ -132,7 +145,7 @@ function install() {
     for (const cleanup of cleanups.splice(0)) {
       try { cleanup(); } catch { /* ignore */ }
     }
-    for (const node of document.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir]`)) {
+    for (const node of document.querySelectorAll(`[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir]`)) {
       node.remove();
     }
     const style = document.getElementById(STYLE_ID);
@@ -154,7 +167,118 @@ function scan() {
     if (dialog.querySelector(`[${BUTTON_ATTR}]`)) continue;
     injectButton(dialog);
   }
+  scanCommandMenu();
   scanWorkspaceMenus();
+}
+
+/**
+ * Add "从飞牛选择" to dsh's composer command menu (the "+" menu: 文件 / 目标 /
+ * 计划 / …) instead of adding a standalone toolbar button. A separate button
+ * would compete with dsh's own tool row layout on narrow screens; the command
+ * menu already owns a stable list surface.
+ *
+ * The menu is the input-trigger popup: `[data-trigger-menu]` +
+ * `role="listbox"` + `button[role="option"]`. Identify it by the English
+ * command aliases (file / goal / plan), which are language-independent.
+ */
+function scanCommandMenu() {
+  for (const menu of document.querySelectorAll('[data-trigger-menu]')) {
+    if (!isVisible(menu)) continue;
+    if (menu.querySelector(`[${PICK_ITEM_ATTR}]`)) continue;
+    if (!isComposerCommandMenu(menu)) continue;
+    injectPickItem(menu);
+  }
+}
+
+function isComposerCommandMenu(menu) {
+  const options = Array.from(menu.querySelectorAll('button[role="option"]'));
+  return looksLikeComposerCommandMenu(options.map((option) => option.textContent || ''));
+}
+
+function injectPickItem(menu) {
+  const options = Array.from(menu.querySelectorAll('button[role="option"]'));
+  const fileOption = options.find((option) => /\bfile\b/i.test(option.textContent || ''));
+  if (!fileOption || !fileOption.parentElement) return;
+
+  const item = fileOption.cloneNode(true);
+  item.removeAttribute('id');
+  item.removeAttribute('aria-selected');
+  item.removeAttribute('aria-label');
+  item.setAttribute(PICK_ITEM_ATTR, '1');
+  // The source row may be the highlighted one; keep only one active row.
+  if (item.className) {
+    item.className = item.className.split(/\s+/).filter((name) => name && !/active/i.test(name)).join(' ');
+  }
+
+  // The row is: [icon] [name] [alias?] [description?]. English menus render
+  // the same word for name and alias ("File"/"file"), so the alias row may be
+  // absent; locate the icon by its SVG and walk siblings instead of matching
+  // text. No CSS-module class names are used.
+  const spans = Array.from(item.querySelectorAll('span'));
+  const icon = spans.find((span) => span.querySelector('svg')) || spans[0];
+  const name = icon ? icon.nextElementSibling : spans[1];
+  let alias = name ? name.nextElementSibling : null;
+  if (alias && (alias.querySelector('svg') || !(alias.textContent || '').trim())) alias = null;
+  let description = alias ? alias.nextElementSibling : name ? name.nextElementSibling : null;
+
+  // The "file" row has no description; borrow the description element (and its
+  // styling) from a sibling command row instead of inventing a class name.
+  if (!description) {
+    const template = options
+      .map((option) => {
+        const optionAlias = Array.from(option.querySelectorAll('span'))
+          .find((span) => (span.textContent || '').trim().toLowerCase() === 'goal');
+        return optionAlias ? optionAlias.nextElementSibling : null;
+      })
+      .find((node) => node && node.tagName === 'SPAN');
+    if (template) {
+      description = template.cloneNode(false);
+      item.appendChild(description);
+    }
+  }
+
+  if (icon) icon.innerHTML = PICK_FILE_SVG;
+  if (name) name.textContent = '从飞牛选择';
+  if (alias) alias.textContent = 'fnos';
+  if (description) description.textContent = '选择 NAS 上的文件，非图片作为路径引用';
+
+  item.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  item.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissTriggerMenu();
+    void handlePickFiles(item);
+  });
+
+  fileOption.after(item);
+}
+
+function dismissTriggerMenu() {
+  // The trigger menu dismisses itself on a pointerdown outside its surface.
+  try {
+    const event = typeof PointerEvent === 'function'
+      ? new PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+      : new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    (document.body || document.documentElement).dispatchEvent(event);
+  } catch { /* React will also close it on the next outside click */ }
+}
+
+/** The visible composer's hidden file input (the menu is portaled outside it). */
+function findActiveComposerInput() {
+  for (const region of document.querySelectorAll('[data-conversation-region="composer"]')) {
+    if (!isVisible(region)) continue;
+    const input = findComposerFileInput(region);
+    if (input) return { input, region };
+  }
+  return null;
+}
+
+function findComposerFileInput(region) {
+  return Array.from(region.querySelectorAll('input[type="file"]'))
+    .find((input) => input.multiple && !input.disabled) || null;
 }
 
 function registerWorkspacePaths(ctx) {
@@ -418,14 +542,43 @@ async function ensurePathInput(dialog) {
 }
 
 async function handlePick(button) {
-  if (button.dataset.busy === '1') return;
   const dialog = button.closest('[role="dialog"]');
   if (!dialog) return;
+  await runPickFlow(button, directoryFlow(dialog, button));
+}
 
-  const originalText = button.textContent || '选择飞牛目录';
-  button.dataset.busy = '1';
-  button.disabled = true;
-  button.textContent = '准备授权…';
+async function handlePickFiles(button) {
+  const active = findActiveComposerInput();
+  if (!active) {
+    showToast('没有找到对话的文件输入框，当前 dsh 版本可能不支持。');
+    return;
+  }
+  const { input, region } = active;
+  if (input.disabled) {
+    showToast('当前会话暂时不能添加附件。');
+    return;
+  }
+  const editor = region.querySelector('[data-composer-input]');
+  if (editor && editor.getAttribute('contenteditable') === 'false') {
+    showToast('当前会话暂时不能添加附件。');
+    return;
+  }
+  await runPickFlow(button, composerFlow(input, button));
+}
+
+/**
+ * Drive one picker attempt: native host picker first, then the fnOS web
+ * authorization page. The flow object carries the per-surface differences
+ * (directory picker vs conversation composer) so the authorization machinery
+ * exists only once.
+ *
+ * @param {HTMLButtonElement} button
+ * @param {any} flow
+ */
+async function runPickFlow(button, flow) {
+  if (button.dataset.busy === '1') return;
+
+  markBusy(button, flow);
 
   // Top-level browsers need the popup opened inside the click task. Host
   // environments (fnOS desktop / mobile app) get the native picker first and
@@ -439,10 +592,17 @@ async function handlePick(button) {
   }
 
   try {
-    const direct = await tryDirectPick(button, dialog, originalText);
-    if (direct) {
-      if (popup) {
-        try { popup.close(); } catch { /* ignore */ }
+    const direct = await pickPathsDirect(flow, button);
+    if (direct.handled) {
+      closePopup(popup);
+      if (direct.paths && direct.paths.length) {
+        await finishPick(button, flow, direct.paths);
+      } else if (direct.cancelled) {
+        flow.status('已取消选择', false);
+        flow.restore();
+      } else {
+        flow.status(direct.error || '打开选择器失败', true);
+        flow.restore();
       }
       return;
     }
@@ -453,10 +613,8 @@ async function handlePick(button) {
     const target = await resolveAuthTargets(config, settings);
 
     if (target.mode === 'choose') {
-      if (popup) {
-        try { popup.close(); } catch { /* ignore */ }
-      }
-      showAuthChooser(dialog, button, originalText, appName, target.choices);
+      closePopup(popup);
+      showAuthChooser(flow, appName, target.choices);
       return;
     }
 
@@ -465,74 +623,123 @@ async function handlePick(button) {
     }
     if (!popup) throw new Error('浏览器拦截了授权窗口，请允许弹窗后重试。');
 
-    await startAuthFlow(button, dialog, originalText, appName, target.base, popup);
+    await startAuthFlow(button, appName, target.base, popup, flow);
   } catch (error) {
-    if (popup) {
-      try { popup.close(); } catch { /* ignore */ }
-    }
-    handlePickError(button, dialog, originalText, error);
+    closePopup(popup);
+    handlePickError(button, flow, error);
   }
+}
+
+function directoryFlow(dialog, button) {
+  const initialText = button.textContent || '选择飞牛目录';
+  return {
+    button,
+    directory: true,
+    title: '选择工作区目录',
+    okText: '确认授权',
+    anchor: dialog,
+    status: (text, isError) => showStatus(dialog, text, isError),
+    onPaths: async (paths) => {
+      const input = await ensurePathInput(dialog);
+      if (!input) throw new Error('没有找到目录选择器的路径输入框');
+      fillAndEnter(input, paths[0]);
+    },
+    doneText: (paths) => `已填入授权目录：${paths[0]}`,
+    setLabel: (text) => { button.textContent = text; },
+    doneLabel: () => '已填入路径',
+    restore: () => {
+      button.textContent = initialText;
+      button.disabled = false;
+      delete button.dataset.busy;
+    },
+  };
+}
+
+function composerFlow(input, button) {
+  return {
+    button,
+    directory: false,
+    title: '选择文件',
+    okText: '添加引用',
+    anchor: input.closest('[data-composer-card]') || input.parentElement,
+    status: (text) => showToast(text),
+    onPaths: (paths) => addPathsToComposer(paths, input),
+    doneText: (paths) => `已添加 ${paths.length} 个文件${paths.length === 1 ? '' : ''}`,
+    setLabel: () => { /* icon-only button: progress goes to the toast */ },
+    doneLabel: () => '',
+    restore: () => {
+      button.disabled = false;
+      delete button.dataset.busy;
+    },
+  };
+}
+
+function markBusy(button, flow) {
+  button.dataset.busy = '1';
+  button.disabled = true;
+  flow.setLabel('准备授权…');
+}
+
+async function finishPick(button, flow, paths) {
+  await flow.onPaths(paths);
+  flow.status(flow.doneText(paths), false);
+  const label = flow.doneLabel();
+  if (label) button.textContent = label;
+  window.setTimeout(() => flow.restore(), 1600);
 }
 
 /**
  * In fnOS desktop / the mobile app, the official SDK can open the native
- * directory picker directly through the host bridge. Only fall back to URL
+ * picker directly through the host bridge. Only fall back to URL
  * authorization when that bridge is not available.
  *
- * @returns {Promise<boolean>} true when the direct attempt was handled
- *   (success, or the user cancelled); false when the caller should fall back.
+ * @returns {Promise<{handled: boolean, paths?: string[], cancelled?: boolean, error?: string}>}
  */
-async function tryDirectPick(button, dialog, originalText) {
+async function pickPathsDirect(flow, button) {
   const sdk = getSdk();
   try {
     await sdk.ready();
   } catch {
-    return false;
+    return { handled: false };
   }
 
   // A normal browser tab has no host bridge; don't even try.
-  if (sdk.isWeb && sdk.isStandaloneWeb) return false;
-  if (sdk.isWeb && window.parent === window) return false;
+  if (sdk.isWeb && sdk.isStandaloneWeb) return { handled: false };
+  if (sdk.isWeb && window.parent === window) return { handled: false };
 
-  button.textContent = '等待选择目录…';
+  button.dataset.direct = '1';
+  flow.setLabel('等待选择…');
 
   let result;
   try {
     result = await sdk.pickUserFile({
-      directory: true,
-      title: '选择工作区目录',
-      okText: '确认授权',
-      sidebarGroup: ['myFiles', 'otherShare', 'external', 'remote', 'favorites', 'team'],
+      directory: flow.directory,
+      title: flow.title,
+      okText: flow.okText,
+      sidebarGroup: SIDEBAR_GROUPS,
     });
   } catch (error) {
     console.warn(LOG_PREFIX, 'in-host picker unavailable; falling back to URL auth', error);
-    showStatus(dialog, '当前宿主未提供内嵌目录选择器，已改用网页授权。', false);
-    return false;
+    flow.status('当前宿主未提供内嵌选择器，已改用网页授权。', false);
+    return { handled: false };
+  } finally {
+    delete button.dataset.direct;
   }
 
-  const path = result && result.code === 0 && Array.isArray(result.data) ? result.data[0] : '';
-  if (!path) {
-    if (isPickerCancelled(result)) {
-      showStatus(dialog, '已取消选择目录', false);
-    } else {
-      showStatus(dialog, result && result.msg ? result.msg : '打开目录选择器失败', true);
-    }
-    resetButton(button, originalText);
-    return true;
-  }
+  const paths = result && result.code === 0 && Array.isArray(result.data)
+    ? result.data.filter((item) => typeof item === 'string' && item)
+    : [];
+  if (paths.length) return { handled: true, paths };
 
-  const input = await ensurePathInput(dialog);
-  if (!input) throw new Error('没有找到目录选择器的路径输入框');
-
-  fillAndEnter(input, path);
-  showStatus(dialog, `已填入授权目录：${path}`, false);
-  button.textContent = '已填入路径';
-  window.setTimeout(() => resetButton(button, originalText), 1600);
-  return true;
+  return {
+    handled: true,
+    cancelled: isPickerCancelled(result),
+    error: result && result.msg ? result.msg : '打开选择器失败',
+  };
 }
 
-async function startAuthFlow(button, dialog, originalText, appName, base, existingPopup) {
-  button.textContent = '等待授权…';
+async function startAuthFlow(button, appName, base, existingPopup, flow) {
+  flow.setLabel('等待授权…');
   const state = randomId();
 
   let popup = existingPopup;
@@ -543,10 +750,11 @@ async function startAuthFlow(button, dialog, originalText, appName, base, existi
   writePopupLoading(popup);
 
   try {
-    const input = await ensurePathInput(dialog);
-    if (!input) throw new Error('没有找到目录选择器的路径输入框');
-
-    const auth = await requestAuth(popup, state, appName, base);
+    const auth = await requestAuth(popup, state, appName, base, {
+      directory: flow.directory,
+      title: flow.title,
+      okText: flow.okText,
+    });
     if (!auth || auth.status !== 'success') {
       if (auth && (auth.status === 'cancelled' || isCancellationText(auth.error))) {
         // Text matching is a heuristic (older hosts report cancellation as
@@ -555,42 +763,178 @@ async function startAuthFlow(button, dialog, originalText, appName, base, existi
         if (auth.status !== 'cancelled') {
           console.info(LOG_PREFIX, 'authorization result treated as cancellation', auth);
         }
-        showStatus(dialog, '已取消选择目录', false);
-        resetButton(button, originalText);
+        flow.status('已取消选择', false);
+        flow.restore();
         return;
       }
-      throw new Error(auth && auth.error ? auth.error : '打开目录选择器失败');
+      throw new Error(auth && auth.error ? auth.error : '打开选择器失败');
     }
 
-    const path = Array.isArray(auth.path) ? auth.path[0] : '';
-    if (!path) throw new Error('授权结果里没有目录路径');
+    const paths = Array.isArray(auth.path)
+      ? auth.path.filter((item) => typeof item === 'string' && item)
+      : [];
+    if (!paths.length) throw new Error('授权结果里没有路径');
 
-    fillAndEnter(input, path);
-    showStatus(dialog, `已填入授权目录：${path}`, false);
-    button.textContent = '已填入路径';
-    window.setTimeout(() => resetButton(button, originalText), 1600);
+    await finishPick(button, flow, paths);
   } catch (error) {
-    try { popup.close(); } catch { /* ignore */ }
+    closePopup(popup);
     throw error;
   }
 }
 
-function handlePickError(button, dialog, originalText, error) {
+function handlePickError(button, flow, error) {
   const message = error && error.message ? error.message : String(error);
   console.warn(LOG_PREFIX, message, error);
-  showStatus(dialog, message, true);
-  resetButton(button, originalText);
+  flow.status(message, true);
+  flow.restore();
 }
 
-function resetButton(button, text) {
-  button.textContent = text;
-  button.disabled = false;
-  delete button.dataset.busy;
+function closePopup(popup) {
+  if (!popup) return;
+  try { popup.close(); } catch { /* ignore */ }
+}
+
+/**
+ * Turn picked fnOS paths into dsh composer attachments.
+ *
+ * - non-images: an empty `File` plus a `__DSH_HOST_PATHS__` mapping, so dsh
+ *   inserts a zero-copy `@path` reference instead of uploading bytes;
+ * - images: read through the host's one-time token route (vision needs bytes)
+ *   and fall back to a path reference when the host cannot serve them.
+ */
+async function addPathsToComposer(paths, input) {
+  const settings = await loadSettings();
+  ensureHostPathBridge();
+
+  const files = [];
+  let images = 0;
+  let unreadable = 0;
+
+  for (const raw of paths) {
+    const path = String(raw);
+    const mime = imageMimeForPath(path);
+    if (mime && settings.imageRead !== false) {
+      try {
+        const file = await readImageFile(path, mime);
+        hostPathStore.set(file, path);
+        files.push(file);
+        images += 1;
+        continue;
+      } catch (error) {
+        console.warn(LOG_PREFIX, 'image bytes unavailable; adding a path reference instead', error);
+        unreadable += 1;
+      }
+    }
+    const file = new File([], fileNameForPath(path), { type: 'application/octet-stream' });
+    hostPathStore.set(file, path);
+    files.push(file);
+  }
+
+  if (!files.length) throw new Error('没有可添加的文件');
+  dispatchComposerFiles(input, files);
+
+  if (unreadable > 0) {
+    showToast(`${unreadable} 张图片未能读取，已改为路径引用`);
+  } else if (images > 0) {
+    showToast(`已添加 ${files.length} 个文件（${images} 张图片会上传）`);
+  }
+}
+
+async function readImageFile(path, mime) {
+  const tokenResponse = await fetch(pluginURL('fnos-advanced/file-token'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (tokenResponse.status === 404 || tokenResponse.status === 405) {
+    throw new Error('宿主半侧未提供图片读取接口');
+  }
+  const info = await tokenResponse.json().catch(() => ({}));
+  if (!tokenResponse.ok || !info.ok || !info.token) {
+    throw new Error(info.error || `读取图片失败（HTTP ${tokenResponse.status}）`);
+  }
+
+  const response = await fetch(
+    pluginURL(`fnos-advanced/file-bytes?token=${encodeURIComponent(info.token)}`),
+    { credentials: 'same-origin', cache: 'no-store' },
+  );
+  if (!response.ok) throw new Error(`读取图片失败（HTTP ${response.status}）`);
+  const blob = await response.blob();
+  return new File([blob], info.name || fileNameForPath(path), {
+    type: info.mime || mime || blob.type || 'application/octet-stream',
+  });
+}
+
+/**
+ * Make dsh treat mapped files as real host paths. The Desktop application
+ * installs its own bridge; preserve it as the fallback so plugin files and
+ * Desktop-dropped files keep working together.
+ */
+function ensureHostPathBridge() {
+  const existing = globalThis.__DSH_HOST_PATHS__;
+  if (existing && existing.__dshFnosAdvanced) {
+    hostPathStore = existing.__dshFnosFiles || hostPathStore;
+    return existing;
+  }
+
+  // Patch a bridge that another shell (dsh Desktop) installed *in place*:
+  // dsh captures that exact object when the composer mounts, so replacing it
+  // with a wrapper would leave the captured reference without our files.
+  if (existing && typeof existing === 'object') {
+    const original = typeof existing.pathFor === 'function' ? existing.pathFor : null;
+    const store = existing.__dshFnosFiles || new WeakMap();
+    try {
+      existing.pathFor = function pathFor(file) {
+        const own = store.get(file);
+        if (own) return own;
+        try {
+          return original ? original.call(existing, file) : '';
+        } catch {
+          return '';
+        }
+      };
+      existing.__dshFnosFiles = store;
+      existing.__dshFnosAdvanced = true;
+      hostPathStore = store;
+      return existing;
+    } catch { /* frozen object: fall back to a wrapper */ }
+  }
+
+  const store = hostPathByFile;
+  const bridge = {
+    __dshFnosAdvanced: true,
+    __dshFnosFiles: store,
+    pathFor(file) {
+      const own = store.get(file);
+      if (own) return own;
+      try {
+        return existing && typeof existing.pathFor === 'function' ? existing.pathFor(file) : '';
+      } catch {
+        return '';
+      }
+    },
+  };
+
+  try {
+    globalThis.__DSH_HOST_PATHS__ = bridge;
+  } catch { /* ignore a frozen global */ }
+  hostPathStore = store;
+  return bridge;
+}
+
+function dispatchComposerFiles(input, files) {
+  const transfer = new DataTransfer();
+  for (const file of files) transfer.items.add(file);
+
+  input.files = transfer.files;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 function writePopupLoading(popup) {
   try {
-    popup.document.title = '飞牛目录授权';
+    popup.document.title = '飞牛授权';
     popup.document.body.innerHTML = '<p style="font:14px/1.6 -apple-system,BlinkMacSystemFont,\'PingFang SC\',sans-serif;padding:24px;color:#555">正在打开飞牛授权页面…</p>';
   } catch { /* about:blank may already be navigating */ }
 }
@@ -602,9 +946,10 @@ function writePopupLoading(popup) {
  * @param {string} state
  * @param {string} appName
  * @param {string} base
+ * @param {{directory: boolean, title: string, okText: string}} pick
  * @returns {Promise<any>}
  */
-function requestAuth(popup, state, appName, base) {
+function requestAuth(popup, state, appName, base, pick) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let closeTimer = 0;
@@ -730,10 +1075,10 @@ function requestAuth(popup, state, appName, base) {
         try {
           url = await sdk.buildAppAuthUrl('pickUserFile', {
             appName,
-            directory: true,
-            sidebarGroup: ['myFiles', 'otherShare', 'external', 'remote', 'favorites', 'team'],
-            title: '选择工作区目录',
-            okText: '确认授权',
+            directory: pick.directory === true,
+            sidebarGroup: SIDEBAR_GROUPS,
+            title: pick.title,
+            okText: pick.okText,
             redirectUri: pluginURL('fnos-advanced/auth-callback.html'),
             state,
           });
@@ -750,10 +1095,15 @@ function requestAuth(popup, state, appName, base) {
   });
 }
 
-function showAuthChooser(dialog, button, originalText, appName, choices) {
-  removeChooser(dialog);
-  if (getComputedStyle(dialog).position === 'static') dialog.style.position = 'relative';
-  button.textContent = '选择授权入口…';
+function showAuthChooser(flow, appName, choices) {
+  const anchor = flow.anchor;
+  if (!anchor) {
+    flow.restore();
+    return;
+  }
+  removeChooser(anchor);
+  if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
+  flow.setLabel('选择授权入口…');
 
   const panel = document.createElement('div');
   panel.className = 'dsh-fnos-advanced-chooser';
@@ -783,9 +1133,9 @@ function showAuthChooser(dialog, button, originalText, appName, choices) {
     option.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      removeChooser(dialog);
-      startAuthFlow(button, dialog, originalText, appName, choice.base, null).catch((error) => {
-        handlePickError(button, dialog, originalText, error);
+      removeChooser(anchor);
+      startAuthFlow(flow.button, appName, choice.base, null, flow).catch((error) => {
+        handlePickError(flow.button, flow, error);
       });
     });
     panel.appendChild(option);
@@ -798,16 +1148,16 @@ function showAuthChooser(dialog, button, originalText, appName, choices) {
   cancel.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    removeChooser(dialog);
-    resetButton(button, originalText);
+    removeChooser(anchor);
+    flow.restore();
   });
   panel.appendChild(cancel);
 
-  dialog.appendChild(panel);
+  anchor.appendChild(panel);
 }
 
-function removeChooser(dialog) {
-  dialog.querySelectorAll('.dsh-fnos-advanced-chooser').forEach((node) => node.remove());
+function removeChooser(anchor) {
+  anchor.querySelectorAll('.dsh-fnos-advanced-chooser').forEach((node) => node.remove());
 }
 
 function parseAuthPayload(payload) {
@@ -971,6 +1321,7 @@ function normalizeClientSettings(settings) {
     authMode: ['ask', 'proxy', 'lan'].includes(settings?.authMode)
       ? settings.authMode
       : DEFAULT_SETTINGS.authMode,
+    imageRead: settings?.imageRead !== false,
   };
 }
 
@@ -1165,6 +1516,7 @@ function SettingsPage() {
           proxyBase,
           lanTarget: String(settings.lanTarget || '').trim() || DEFAULT_SETTINGS.lanTarget,
           authMode: settings.authMode,
+          imageRead: settings.imageRead !== false,
         }),
       });
       if (response.status === 404 || response.status === 405) {
@@ -1303,6 +1655,26 @@ function SettingsPage() {
         React.createElement('option', { key: 'ask', value: 'ask' }, '每次询问（推荐）'),
         React.createElement('option', { key: 'proxy', value: 'proxy' }, '优先使用反代地址'),
         React.createElement('option', { key: 'lan', value: 'lan' }, '优先使用内网地址'),
+      ]),
+    ]),
+
+    React.createElement('label', { key: 'image-read', style: { ...labelStyle, flexDirection: 'row', alignItems: 'flex-start', gap: 8 } }, [
+      React.createElement('input', {
+        key: 'checkbox',
+        type: 'checkbox',
+        checked: settings.imageRead !== false,
+        onChange: (event) => {
+          const checked = event.target.checked;
+          setSettings((current) => ({ ...current, imageRead: checked }));
+          setMessage('');
+          setError('');
+        },
+        disabled,
+        style: { marginTop: 3 },
+      }),
+      React.createElement('span', { key: 'text', style: { display: 'flex', flexDirection: 'column', gap: 4 } }, [
+        React.createElement('span', { key: 'label' }, '从飞牛选择图片时读取图片内容'),
+        React.createElement('span', { key: 'hint', style: hintStyle }, '图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。'),
       ]),
     ]),
 
@@ -1493,6 +1865,13 @@ function isVisible(element) {
   return Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
 }
 
+// Install the path bridge at module-evaluation time. dsh reads
+// `globalThis.__DSH_HOST_PATHS__` once when its composer slot is injected, so
+// this must not wait for `apply()` or a click.
+if (typeof window !== 'undefined') {
+  try { ensureHostPathBridge(); } catch { /* ignore a frozen global */ }
+}
+
 // Test/debug handle. The host-side workspace guard is the real installer; this
 // exists so a standalone build can be exercised without the module loader.
 if (typeof window !== 'undefined') {
@@ -1514,5 +1893,11 @@ if (typeof window !== 'undefined') {
     findFooter,
     isWorkspacePicker,
     fillAndEnter,
+    findComposerFileInput,
+    findActiveComposerInput,
+    addPathsToComposer,
+    ensureHostPathBridge,
+    getSdk,
+    pickPathsDirect,
   };
 }

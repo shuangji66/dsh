@@ -1,14 +1,18 @@
 # dsh-fnos-advanced
 
-为 DeepSeek Harness（dsh）的工作区目录选择器增加一个 **「选择飞牛目录」** 按钮：
-点击后选择并授权飞牛（fnOS）目录，插件自动把授权路径填回 dsh 的目录选择器并按下
-回车，选择器随即进入该目录。
+为 DeepSeek Harness（dsh）增加一条 **飞牛（fnOS）文件通道**：
 
-- **在飞牛桌面 / 飞牛 App 内**：直接调用飞牛宿主的原生目录选择器，不打开网页授权；
+- 工作区目录选择器多一个 **「选择飞牛目录」** 按钮：授权后自动把路径填回 dsh 并进入该目录；
+- 对话输入框的 **「+」命令菜单**（文件 / 目标 / 计划 …）多一项
+  **「从飞牛选择」**：选中的文件直接进入对话草稿；**非图片是零拷贝的 `@路径` 引用**
+  （不复制、不经过浏览器上传），图片按需读取字节以支持视觉；
+
+- **在飞牛桌面 / 飞牛 App 内**：直接调用飞牛宿主的原生选择器，不打开网页授权；
   工作区的「更多」菜单还会多出 **「打开目录」**，调用飞牛文件管理器打开该工作区目录。
 - **在普通浏览器里**：通过飞牛授权页完成；如果同时配置了反代地址和内网地址，
   会先让用户选择用哪一个入口授权。
-- **在 dsh 插件中心**：插件行提供设置页，可配置飞牛反代地址、内网地址/端口和默认入口。
+- **在 dsh 插件中心**：插件行提供设置页，可配置飞牛反代地址、内网地址/端口、默认入口，
+  以及是否允许读取图片内容。
 
 - 不导入任何 `@deepseek-ai/*` 客户端/宿主插件包：目录选择器只依赖 dsh 的客户端
   bundle 装载约定与 `ctx.webServer.register` 服务；设置页使用 `plugins.bundle.config`
@@ -74,6 +78,17 @@ dsh plugin --profile web add /absolute/path/to/dsh-fnos-advanced
 5. 插件自动把授权路径填入选择器的路径输入框并回车，选择器进入该目录。
 6. 点选择器的「Open / 打开」即可把该目录添加为工作区。
 
+### 从飞牛选择文件进对话
+
+1. 点对话输入框左侧的 **「+」** 打开命令菜单，点 **「从飞牛选择」**（在「文件」下面）。
+2. 和目录一样：飞牛宿主内直接弹原生选择器；普通浏览器走网页授权。
+3. 选中后：
+   - **非图片**（文档、压缩包、视频、代码……）：dsh 里出现一个 `@/vol1/...` 引用芯片。
+     文件不会被复制，也不会走浏览器上传；模型需要时按该路径读取原文件。
+   - **图片**（PNG/JPEG/WebP/GIF）：插件通过宿主的一次性令牌接口读取字节，再交给 dsh
+     的正常图片上传流程（视觉需要真实字节）；读取失败时自动降级为路径引用并提示。
+4. 引用和普通附件一样随消息发送；移除芯片不会删除原文件。
+
 ### 打开工作区目录（飞牛桌面 / App）
 
 在飞牛桌面或飞牛 App 内，工作区行的「更多」菜单会增加「打开目录」：
@@ -97,6 +112,7 @@ dsh plugin --profile web add /absolute/path/to/dsh-fnos-advanced
 | 反代飞牛地址 | 非常规反代下的飞牛外部地址，只填 `协议://域名[:端口]`，不要带路径；留空表示未配置 |
 | 飞牛内网地址 / 端口 | 只填端口（默认 `5666`）时使用当前访问主机的地址；也可填完整地址，如 `http://192.168.1.10:5666` |
 | 非网关访问时的授权入口 | `每次询问`（默认）、`优先使用反代地址`、`优先使用内网地址` |
+| 从飞牛选择图片时读取图片内容 | 默认开启。关闭后图片也只生成路径引用（模型无法直接「看到」图片）；仅支持 PNG/JPEG/WebP/GIF，单个不超过 20 MB |
 
 设置保存在 `$DSH_HOME/fnos-advanced/settings.json`（`DSH_HOME` 默认 `~/.dsh`），
 文件权限 `0600`。设置页使用 dsh 的 `plugins.bundle.config` slot，注册 key 为包名
@@ -177,6 +193,16 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 - 工作区「更多」菜单的「打开目录」通过 DOM 注入：监听 `data-row-key="workspace:…"`
   行上的点击，菜单出现后克隆现有菜单项样式并插入；仅在 `isStandaloneWeb === false`
   或 `sdk.isWeb === false` 的宿主环境启用。
+- 「从飞牛选择」作为**命令菜单项**注入，而不是额外的工具栏按钮：菜单由
+  `[data-trigger-menu]` + `role="listbox"` + `button[role="option"]` 组成，靠命令别名
+  （`file` / `goal` / `plan`）识别，不依赖语言或 CSS Module 类名；识别后在「文件」项后面
+  克隆一个同款菜单项（去掉复制过来的 active 态），描述样式借用邻近菜单项。
+- 文件仍送进 `[data-conversation-region="composer"]` 的隐藏 `input[type=file][multiple]`；
+  菜单是 portal，点击后从「当前可见的 composer」重新找 input，不依赖事件 target 的祖先链。
+  找不到锚点时菜单项不出现，不影响原功能。
+- 非图片引用依赖 dsh 的 `globalThis.__DSH_HOST_PATHS__` 桥：插件在**模块加载时**安装
+  `pathFor(file)`（dsh 是在挂载 composer 时一次性读取这个全局对象，等到点击时再装就晚了），
+  用 `WeakMap` 把 `File` 映射到真实路径；图片则先 `POST file-token` 再取字节。
 - 用 `HTMLInputElement.prototype.value` 的原生 setter 写入路径，派发 `input` / `change`，
   再派发 `keydown/keypress/keyup` 的 Enter 事件；React 受控输入实测可用。
 - 通过 `ctx.effect` 注册清理逻辑；插件卸载时移除按钮、样式与监听器。
@@ -194,9 +220,22 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 | `GET /fnos-advanced/workspace-path?id=…` | 按 workspaceId 返回工作区路径（宿主 registry / 磁盘 registry 回退） |
 | `GET /fnos-advanced/settings` | 读取插件中心设置 |
 | `POST /fnos-advanced/settings` | 校验并保存设置到 `$DSH_HOME/fnos-advanced/settings.json` |
-| `GET /fnos-advanced/health` | 健康检查 |
+| `POST /fnos-advanced/file-token` | 校验图片路径并发放一次性读取令牌（60 秒、单次使用） |
+| `GET /fnos-advanced/file-bytes?token=…` | 按令牌返回图片字节（仅图片白名单、≤20 MB、禁止 dsh 数据目录） |
+| `GET /fnos-advanced/health` | 健康检查，含 `features.imageRead` |
 
-宿主侧不接触 token，也不代理文件内容；它只负责把授权结果安全地转交给同源的 dsh 页面。
+宿主侧不接触飞牛登录 token。它只负责把授权结果转交给同源的 dsh 页面，以及为**用户刚选中的图片**
+提供一次性的字节读取；没有通用文件读取路由：
+
+- 只接受绝对路径 + 图片扩展名白名单（`.png/.jpg/.jpeg/.webp/.gif`）；
+- 拒绝隐藏路径（任一段以 `.` 开头）与 `DSH_HOME` 内的文件；
+- 普通文件、空文件、非图片、超过 20 MB 一律拒绝；
+- 令牌 60 秒过期、单次使用；发放前按真实路径（`realpath`）校验，读取时用已打开的文件描述符；
+- 仅接受同源请求（`Origin`/`Referer` 与 `Host`/`X-Forwarded-Host` 匹配），跨站请求直接 403；
+- 设置页可整体关闭（`imageRead: false`）。
+
+> dsh 的 webServer 本身没有服务端鉴权，通常由外层控制台/网关挡在前面。因此这里刻意不做
+> 「`/file?path=`」这类通用读取：插件路由一旦暴露到网络，通用读文件就等于把整台 NAS 交出去。
 
 ## 跨 dsh 版本
 
@@ -208,6 +247,10 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 - 宿主行只使用稳定的 `ctx.inject(['webServer'], …)` + `ctx.webServer.register({ kind, path, handler })`。
 - 如果未来 dsh 改了目录选择器的 DOM 结构（标题、路径输入框、底部按钮），需要同步调整
   `src/client/index.js` 中的识别与注入逻辑。
+- 对话文件通道依赖两个已被 0.2.0-rc.2 / 0.2.1-rc.2 验证的稳定面：composer 的
+  `data-conversation-region="composer"` + 隐藏 file input，以及
+  `__DSH_HOST_PATHS__.pathFor(file)`。命令菜单锚点缺失时菜单项不出现；图片读取接口缺失
+  （旧宿主）时图片降级为路径引用；两种情况都不会影响 dsh 原有的附件上传按钮。
 
 ## 开发与构建
 
@@ -274,7 +317,12 @@ npm view dsh-fnos-advanced version
 
 ## 已知限制
 
-- 按钮文案固定为中文「选择飞牛目录」；如需英文/其他语言可自行修改源码。
+- 菜单项文案固定为中文（「选择飞牛目录」「从飞牛选择」）；如需英文/其他语言可自行修改源码。
+- 「从飞牛选择」是鼠标/触摸可点的菜单项；dsh 的上下键高亮由它自己的 React 列表维护，
+  不会把注入项算进键盘导航。
+- 「从飞牛选择」一次能选几个文件由飞牛宿主的选择器决定（插件接受返回的全部路径）。
+- 图片以外的文件**不会**被插件读取内容，只生成路径引用；如果模型的文件工具无权访问该路径，
+  需要先在工作区/权限里授权（飞牛选择器已经为你选中的路径授权）。
 - 网页授权需要浏览器允许弹窗；被拦截时按钮下方会提示。飞牛桌面/App 内的原生
   选择器不需要弹窗。
 - 设置页依赖 dsh 的 `plugins.bundle.config` slot；旧版本没有该 slot 时只能通过编辑

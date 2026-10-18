@@ -1,7 +1,7 @@
 {
   "name": "dsh-fnos-advanced",
-  "version": "0.2.5",
-  "description": "飞牛目录授权选择器：桌面直连原生选择器，浏览器可选反代/内网入口。fnOS directory picker: native desktop picking, proxy/LAN choice.",
+  "version": "0.3.0",
+  "description": "飞牛文件与目录桥：从飞牛选目录/文件进 dsh，非图片零拷贝引用、图片按需读取。fnOS picker and file bridge for DeepSeek Harness.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -29,7 +29,9 @@
     "deepseek-harness",
     "fnos",
     "workspace",
-    "directory-picker"
+    "directory-picker",
+    "file-picker",
+    "attachments"
   ],
   "license": "MIT",
   "author": "shuangji66",

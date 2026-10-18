@@ -3,7 +3,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { apply } from '../lib/index.js';
 
 /** Capture the route registered by the host half. */
@@ -139,7 +139,7 @@ test('persists and validates settings under DSH_HOME', async () => {
     await withServer(async (base) => {
       const initial = await (await fetch(`${base}/fnos-advanced/settings`)).json();
       assert.equal(initial.ok, true);
-      assert.deepEqual(initial.settings, { proxyBase: '', lanTarget: '5666', authMode: 'ask' });
+      assert.deepEqual(initial.settings, { proxyBase: '', lanTarget: '5666', authMode: 'ask', imageRead: true });
 
       const posted = await fetch(`${base}/fnos-advanced/settings`, {
         method: 'POST',
@@ -173,6 +173,136 @@ test('persists and validates settings under DSH_HOME', async () => {
   }
 });
 
+test('serves a picked image through a one-time token', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-home-'));
+  const photos = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-photos-'));
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  const image = path.join(photos, 'photo.png');
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  try {
+    await writeFile(image, bytes);
+
+    await withServer(async (base) => {
+      const issued = await fetch(`${base}/fnos-advanced/file-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: image }),
+      });
+      assert.equal(issued.status, 200);
+      const token = await issued.json();
+      assert.equal(token.ok, true);
+      assert.equal(token.mime, 'image/png');
+      assert.equal(token.name, 'photo.png');
+      assert.equal(token.size, bytes.length);
+
+      const served = await fetch(`${base}/fnos-advanced/file-bytes?token=${encodeURIComponent(token.token)}`);
+      assert.equal(served.status, 200);
+      assert.equal(served.headers.get('content-type'), 'image/png');
+      assert.equal(served.headers.get('x-content-type-options'), 'nosniff');
+      assert.deepEqual(Buffer.from(await served.arrayBuffer()), bytes);
+
+      // One-time: a replay finds no token.
+      assert.equal(
+        (await fetch(`${base}/fnos-advanced/file-bytes?token=${encodeURIComponent(token.token)}`)).status,
+        404,
+      );
+    });
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+    await rm(home, { recursive: true, force: true });
+    await rm(photos, { recursive: true, force: true });
+  }
+});
+
+test('rejects non-images, hidden paths, DSH_HOME and cross-origin token requests', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-home-'));
+  const photos = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-photos-'));
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  try {
+    const text = path.join(photos, 'notes.txt');
+    const hidden = path.join(photos, '.secret', 'photo.png');
+    const secret = path.join(home, 'photo.png');
+    const large = path.join(photos, 'large.png');
+    const okImage = path.join(photos, 'ok.png');
+    await writeFile(text, 'hello');
+    await writeFile(okImage, Buffer.from([1, 2, 3]));
+    await mkdir(path.dirname(hidden), { recursive: true });
+    await writeFile(hidden, Buffer.from([1]));
+    await writeFile(secret, Buffer.from([1]));
+    const handle = await open(large, 'w');
+    await handle.truncate(20 * 1024 * 1024 + 1);
+    await handle.close();
+
+    await withServer(async (base) => {
+      const ask = (body, headers = {}) => fetch(`${base}/fnos-advanced/file-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+      });
+
+      assert.equal((await ask({ path: text })).status, 415);
+      assert.equal((await ask({ path: hidden })).status, 403);
+      assert.equal((await ask({ path: secret })).status, 403);
+      assert.equal((await ask({ path: 'relative/photo.png' })).status, 400);
+      assert.equal((await ask({ path: path.join(photos, 'missing.png') })).status, 404);
+      assert.equal((await ask({ path: large })).status, 413);
+      assert.equal((await ask({ path: path.join(photos, 'photo.png') }, { Origin: 'https://evil.example' })).status, 403);
+
+      // Harness' reverse proxy rewrites Host/Origin to the dsh upstream but
+      // leaves Referer on the public origin; X-Forwarded-Host bridges them.
+      const proxied = await ask({ path: okImage }, {
+        Origin: base,
+        Referer: 'https://fnos.example/app/Harness/dsh/',
+        'X-Forwarded-Host': 'fnos.example',
+      });
+      assert.equal(proxied.status, 200);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+    await rm(home, { recursive: true, force: true });
+    await rm(photos, { recursive: true, force: true });
+  }
+});
+
+test('honours the imageRead setting', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-home-'));
+  const photos = await mkdtemp(path.join(os.tmpdir(), 'dsh-fnos-photos-'));
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  const image = path.join(photos, 'photo.png');
+  try {
+    await writeFile(image, Buffer.from([1, 2, 3]));
+    await withServer(async (base) => {
+      const saved = await fetch(`${base}/fnos-advanced/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageRead: false }),
+      });
+      assert.equal(saved.status, 200);
+      assert.equal((await saved.json()).settings.imageRead, false);
+
+      const health = await (await fetch(`${base}/fnos-advanced/health`)).json();
+      assert.equal(health.features.imageRead, false);
+
+      const denied = await fetch(`${base}/fnos-advanced/file-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: image }),
+      });
+      assert.equal(denied.status, 403);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+    await rm(home, { recursive: true, force: true });
+    await rm(photos, { recursive: true, force: true });
+  }
+});
+
 test('client bundle is the dsh lazy-factory shape and bundles the SDK', async () => {
   const bundle = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
   assert.match(bundle, /window\.__ModuleLoader__\.load\(/);
@@ -186,4 +316,10 @@ test('client bundle is the dsh lazy-factory shape and bundles the SDK', async ()
   assert.match(bundle, /require\("react"\)/);
   assert.match(bundle, /plugins\.bundle\.config/);
   assert.doesNotMatch(bundle, /plugins\.row\.config/);
+  assert.match(bundle, /__DSH_HOST_PATHS__/);
+  assert.match(bundle, /data-conversation-region/);
+  assert.match(bundle, /data-trigger-menu/);
+  assert.match(bundle, /data-dsh-fnos-pick-file/);
+  assert.match(bundle, /fnos-advanced\/file-token/);
+  assert.match(bundle, /fnos-advanced\/file-bytes/);
 });

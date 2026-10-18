@@ -13,6 +13,7 @@
  * result when a browser (or COOP) drops the opener relation.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,10 +25,12 @@ const CALLBACK_PATH_ALT = `${ROUTE_PREFIX}/auth-callback`;
 const RESULT_PATH = `${ROUTE_PREFIX}/auth-result`;
 const SETTINGS_PATH = `${ROUTE_PREFIX}/settings`;
 const WORKSPACE_PATH = `${ROUTE_PREFIX}/workspace-path`;
+const FILE_TOKEN_PATH = `${ROUTE_PREFIX}/file-token`;
+const FILE_BYTES_PATH = `${ROUTE_PREFIX}/file-bytes`;
 const HEALTH_PATH = `${ROUTE_PREFIX}/health`;
 
 /** Package version shown by the config endpoint; keep in sync with package.json. */
-const VERSION = '0.2.5';
+const VERSION = '0.3.0';
 
 /**
  * The fnOS app identity is injected by the system when it starts the app.
@@ -89,7 +92,35 @@ const DEFAULT_SETTINGS = Object.freeze({
   proxyBase: '',
   lanTarget: '5666',
   authMode: 'ask',
+  imageRead: true,
 });
+
+/**
+ * Images dsh accepts as vision attachments. The byte route is restricted to
+ * these formats: this is a picker bridge, not a general file server.
+ */
+const IMAGE_MIME_BY_EXTENSION = Object.freeze({
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+});
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_PATH_LENGTH = 4096;
+const FILE_TOKEN_TTL_MS = 60 * 1000;
+
+/** One-time tokens for image bytes (token → {path, mime, size, ts}). */
+const pendingFiles = new Map();
+
+function pruneFileTokens() {
+  const now = Date.now();
+  for (const [token, entry] of pendingFiles) {
+    if (now - entry.ts <= FILE_TOKEN_TTL_MS) continue;
+    try { if (entry && typeof entry.fd === 'number') fs.closeSync(entry.fd); } catch { /* ignore */ }
+    pendingFiles.delete(token);
+  }
+}
 
 /** Settings are small and non-secret, but still live under DSH_HOME. */
 function settingsFilePath() {
@@ -140,6 +171,7 @@ function normalizeSettings(input) {
     proxyBase: normalizeProxyBase(input?.proxyBase),
     lanTarget: normalizeLanTarget(input?.lanTarget),
     authMode,
+    imageRead: input?.imageRead !== false,
   };
 }
 
@@ -151,7 +183,8 @@ function sanitizeSettings(input) {
   const authMode = ['ask', 'proxy', 'lan'].includes(input?.authMode)
     ? input.authMode
     : DEFAULT_SETTINGS.authMode;
-  return { proxyBase, lanTarget, authMode };
+  const imageRead = input?.imageRead !== false;
+  return { proxyBase, lanTarget, authMode, imageRead };
 }
 
 function readSettings() {
@@ -223,7 +256,7 @@ const CALLBACK_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>飞牛目录授权</title>
+<title>飞牛授权</title>
 <style>
   :root { color-scheme: light dark; }
   html, body { height: 100%; margin: 0; }
@@ -332,7 +365,7 @@ const CALLBACK_HTML = `<!doctype html>
 
   if (ok) {
     title.textContent = '授权成功';
-    message.textContent = '目录已授权给飞牛应用，正在返回工作区选择器。';
+    message.textContent = '已授权给飞牛应用，正在返回 DeepSeek Harness。';
     path.textContent = paths[0];
     path.hidden = false;
   } else {
@@ -351,7 +384,215 @@ const CALLBACK_HTML = `<!doctype html>
 </body>
 </html>`;
 
+/** HTTP error with a status code, mapped by the file routes below. */
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function dshHome() {
+  return path.resolve(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'));
+}
+
+function isInsidePath(child, parent) {
+  return child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
+}
+
+function hasHiddenSegment(value) {
+  return value.split(path.sep).some((segment) => segment.startsWith('.') && segment !== '.' && segment !== '..');
+}
+
+/**
+ * Only same-origin browsers may ask for image bytes. The check is not an
+ * authentication mechanism (dsh itself has no server-side auth), but it keeps
+ * the route from being usable as a cross-site read from another origin.
+ */
+function sameOriginRequest(req) {
+  const site = String(req.headers['sec-fetch-site'] || '');
+  // Modern browsers label the request; same-origin/none is enough and avoids
+  // depending on how each gateway rewrites Origin/Referer.
+  if (site === 'same-origin' || site === 'none') return true;
+  if (site) return false;
+
+  // Harness' reverse proxy rewrites Host/Origin to the dsh upstream but leaves
+  // Referer pointing at the public origin, so accept the forwarded host too.
+  const hosts = new Set([
+    String(req.headers.host || ''),
+    String(req.headers['x-forwarded-host'] || ''),
+  ].filter(Boolean));
+  for (const header of ['origin', 'referer']) {
+    const value = String(req.headers[header] || '');
+    if (!value) continue;
+    let valueHost;
+    try {
+      valueHost = new URL(value).host;
+    } catch {
+      return false;
+    }
+    if (!hosts.has(valueHost)) return false;
+  }
+  return true;
+}
+
+/**
+ * Validate a path for the image byte bridge.
+ *
+ * The bridge exists only because dsh needs the actual bytes to send an image to
+ * the model (a path reference cannot carry vision). Keep it narrow: absolute
+ * path, supported image extension, no hidden segments, not inside DSH_HOME,
+ * regular non-empty file, size capped.
+ */
+function openImageForRead(input) {
+  if (typeof input !== 'string' || !input || input.length > MAX_PATH_LENGTH || input.includes('\0')) {
+    throw httpError(400, '图片路径无效');
+  }
+  if (!path.isAbsolute(input)) throw httpError(400, '图片路径必须是绝对路径');
+
+  const normalized = path.normalize(input);
+  if (hasHiddenSegment(normalized)) throw httpError(403, '不允许读取隐藏路径');
+
+  let real;
+  try {
+    real = fs.realpathSync(normalized);
+  } catch {
+    throw httpError(404, '图片不存在');
+  }
+  // Re-check after resolving symlinks: the link itself may live in a visible
+  // directory while pointing at a hidden one.
+  if (hasHiddenSegment(real)) throw httpError(403, '不允许读取隐藏路径');
+  if (isInsidePath(real, dshHome())) throw httpError(403, '不允许读取 dsh 数据目录');
+
+  const mime = IMAGE_MIME_BY_EXTENSION[path.extname(real).toLowerCase()];
+  if (!mime) throw httpError(415, '只支持 PNG/JPEG/WebP/GIF 图片');
+
+  let fd;
+  try {
+    fd = fs.openSync(real, 'r');
+  } catch {
+    throw httpError(404, '图片不存在');
+  }
+
+  let stat;
+  try {
+    stat = fs.fstatSync(fd);
+  } catch {
+    fs.closeSync(fd);
+    throw httpError(404, '图片不存在');
+  }
+  if (!stat.isFile()) {
+    fs.closeSync(fd);
+    throw httpError(400, '不是普通文件');
+  }
+  if (stat.size <= 0) {
+    fs.closeSync(fd);
+    throw httpError(400, '图片内容为空');
+  }
+  if (stat.size > MAX_IMAGE_BYTES) {
+    fs.closeSync(fd);
+    throw httpError(413, `图片超过 ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+  }
+
+  return { fd, path: real, mime, size: stat.size, name: path.basename(real) };
+}
+
+async function handleFileToken(req, res) {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { Allow: 'POST', 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
+  if (!sameOriginRequest(req)) {
+    writeJSON(res, 403, { ok: false, error: 'cross-origin request rejected' });
+    return;
+  }
+  if (readSettings().imageRead === false) {
+    writeJSON(res, 403, { ok: false, error: '插件设置已关闭图片读取' });
+    return;
+  }
+
+  let body;
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    writeJSON(res, 400, { ok: false, error: 'invalid request body' });
+    return;
+  }
+
+  let opened;
+  try {
+    opened = openImageForRead(body?.path);
+  } catch (error) {
+    writeJSON(res, error.status || 400, { ok: false, error: error.message });
+    return;
+  }
+
+  pruneFileTokens();
+  if (pendingFiles.size >= 200) {
+    const oldest = pendingFiles.keys().next().value;
+    if (oldest !== undefined) {
+      const entry = pendingFiles.get(oldest);
+      try { if (entry && typeof entry.fd === 'number') fs.closeSync(entry.fd); } catch { /* ignore */ }
+      pendingFiles.delete(oldest);
+    }
+  }
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  pendingFiles.set(token, { ...opened, ts: Date.now() });
+  writeJSON(res, 200, { ok: true, token, mime: opened.mime, size: opened.size, name: opened.name });
+}
+
+function handleFileBytes(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { Allow: 'GET, HEAD', 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
+  if (!sameOriginRequest(req)) {
+    writeJSON(res, 403, { ok: false, error: 'cross-origin request rejected' });
+    return;
+  }
+
+  pruneFileTokens();
+  const token = new URL(req.url || '/', 'http://localhost').searchParams.get('token') || '';
+  const entry = token ? pendingFiles.get(token) : undefined;
+  if (!entry) {
+    writeJSON(res, 404, { ok: false, error: 'token not found' });
+    return;
+  }
+  // One-time: a token cannot be replayed even while it is still fresh.
+  pendingFiles.delete(token);
+
+  let size = entry.size;
+  try { size = fs.fstatSync(entry.fd).size; } catch { /* keep the token-time size */ }
+  if (size <= 0) {
+    try { fs.closeSync(entry.fd); } catch { /* ignore */ }
+    writeJSON(res, 404, { ok: false, error: 'file not found' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': entry.mime,
+    'Content-Length': size,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': 'inline',
+  });
+  if (req.method === 'HEAD') {
+    try { fs.closeSync(entry.fd); } catch { /* ignore */ }
+    res.end();
+    return;
+  }
+
+  const stream = fs.createReadStream(entry.path, { fd: entry.fd, start: 0, end: size - 1, autoClose: true });
+  stream.on('error', () => {
+    try { res.destroy(); } catch { /* ignore */ }
+  });
+  stream.pipe(res);
+}
+
 async function handle(req, res) {
+  pruneFileTokens();
   let pathname;
   try {
     pathname = new URL(req.url || '/', 'http://localhost').pathname;
@@ -444,6 +685,16 @@ async function handle(req, res) {
     return;
   }
 
+  if (pathname === FILE_TOKEN_PATH) {
+    await handleFileToken(req, res);
+    return;
+  }
+
+  if (pathname === FILE_BYTES_PATH) {
+    handleFileBytes(req, res);
+    return;
+  }
+
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { Allow: 'GET, HEAD', 'Cache-Control': 'no-store' });
     res.end();
@@ -466,7 +717,12 @@ async function handle(req, res) {
   }
 
   if (pathname === HEALTH_PATH) {
-    writeJSON(res, 200, { ok: true, appName: appName(), version: VERSION });
+    writeJSON(res, 200, {
+      ok: true,
+      appName: appName(),
+      version: VERSION,
+      features: { filePicker: true, imageRead: readSettings().imageRead },
+    });
     return;
   }
 

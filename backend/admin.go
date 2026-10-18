@@ -1241,6 +1241,15 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleMarketRemove(w, r)
 		case p == "/api/market/done" && r.Method == http.MethodPost:
 			m.handleMarketDone(w, r)
+		// 增强插件（dsh-fnos-advanced，飞牛目录选择器）：与市场同一套动作
+		case p == "/api/advanced/install" && r.Method == http.MethodPost:
+			m.handleAdvancedInstall(w, r)
+		case p == "/api/advanced/update" && r.Method == http.MethodPost:
+			m.handleAdvancedUpdate(w, r)
+		case p == "/api/advanced/remove" && r.Method == http.MethodPost:
+			m.handleAdvancedRemove(w, r)
+		case p == "/api/advanced/done" && r.Method == http.MethodPost:
+			m.handleAdvancedDone(w, r)
 		// DeepSeek 官方账号（控制台侧完成授权，见 account.go）
 		case p == "/api/account" && r.Method == http.MethodGet:
 			m.handleAccountStatus(w, r)
@@ -1400,14 +1409,15 @@ func validUpdateKind(k updateKind) bool {
 	return false
 }
 
-// handleUpdateStatus 返回当前 harness、dsh 与插件市场的版本检测结果。
+// handleUpdateStatus 返回当前 harness、dsh、插件市场与增强插件的版本检测结果。
 func (m *AdminMux) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	snap := m.update.snapshot()
 	writeJSON(w, map[string]interface{}{
-		"ok":      true,
-		"harness": snap[updateKindHarness],
-		"dsh":     snap[updateKindDsh],
-		"market":  snap[updateKindMarket],
+		"ok":       true,
+		"harness":  snap[updateKindHarness],
+		"dsh":      snap[updateKindDsh],
+		"market":   snap[updateKindMarket],
+		"advanced": snap[updateKindAdvanced],
 		// server 是 dsh 服务多版本的快照（列表 + 选中 + 安装进度），见 server.go。
 		"server": m.update.server.snapshot(),
 	})
@@ -1415,8 +1425,8 @@ func (m *AdminMux) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateCheck 执行一次手动检查更新（“检查更新”按钮）并返回最新结果。
 // 同步执行：前端在拿到响应后即可依据结果提示“暂无更新”或显示红点。
-// 三条链路一起检测：harness 走 GitHub Release tag，dsh 与市场走 npm 镜像源
-// （见 server.go 的 refreshVersions 与 market.go 的 refreshMarketStatus）。
+// 四条链路一起检测：harness 走 GitHub Release tag，dsh、插件市场与增强插件走 npm
+// 镜像源（见 server.go 的 refreshVersions 与 market.go 的 refreshManagedPluginStatuses）。
 //
 // 手动检查一律强制刷新 dsh 版本列表：用户点「检查更新」时看到的是缓存里那份
 // 可能已过期的列表（TTL 5 分钟），而 dsh 的发布节奏很快。
@@ -1427,11 +1437,12 @@ func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	m.update.checkOnce()
 	snap := m.update.snapshot()
 	writeJSON(w, map[string]interface{}{
-		"ok":      true,
-		"harness": snap[updateKindHarness],
-		"dsh":     snap[updateKindDsh],
-		"market":  snap[updateKindMarket],
-		"server":  m.update.server.snapshot(),
+		"ok":       true,
+		"harness":  snap[updateKindHarness],
+		"dsh":      snap[updateKindDsh],
+		"market":   snap[updateKindMarket],
+		"advanced": snap[updateKindAdvanced],
+		"server":   m.update.server.snapshot(),
 	})
 }
 
@@ -1606,15 +1617,16 @@ func (m *AdminMux) handleDiscardUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"ok": true, "discarded": true})
 }
 
-// handleUpdateStream 通过 SSE 推送更新检测结果变更（harness / dsh / 市场三份）。
+// handleUpdateStream 通过 SSE 推送更新检测结果变更（harness / dsh / 市场 / 增强插件四份）。
 func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 	setSSEHeaders(w)
 	ctx := r.Context()
 	send := func() {
 		sseSend(w, "update", sseJSON(map[string]interface{}{
-			"harness": m.update.getStatus(updateKindHarness),
-			"dsh":     m.update.getStatus(updateKindDsh),
-			"market":  m.update.getStatus(updateKindMarket),
+			"harness":  m.update.getStatus(updateKindHarness),
+			"dsh":      m.update.getStatus(updateKindDsh),
+			"market":   m.update.getStatus(updateKindMarket),
+			"advanced": m.update.getStatus(updateKindAdvanced),
 			// dsh 版本列表与安装进度（server.go）：下载/安装 dsh 版本时前端靠这一帧
 			// 实时刷新对应行的进度，不额外开一条 SSE 通道。
 			"server": m.update.server.snapshot(),
@@ -1786,6 +1798,41 @@ func (m *AdminMux) handleMarketRemove(w http.ResponseWriter, r *http.Request) {
 // handleMarketDone 清掉一次市场操作的终态（前端收起「已完成」提示时调用）。
 func (m *AdminMux) handleMarketDone(w http.ResponseWriter, r *http.Request) {
 	m.update.DoneMarket()
+	writeJSON(w, map[string]interface{}{"ok": true})
+}
+
+// --- 增强插件（dsh-fnos-advanced）API（见 market.go） ---
+
+// handleAdvancedInstall 安装增强插件的最新版（异步，进度经 SSE 推送）。
+func (m *AdminMux) handleAdvancedInstall(w http.ResponseWriter, r *http.Request) {
+	if err := m.update.InstallAdvanced(); err != nil {
+		writeErrOperation(w, err)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "install"})
+}
+
+// handleAdvancedUpdate 把增强插件更新到最新版（异步）。
+func (m *AdminMux) handleAdvancedUpdate(w http.ResponseWriter, r *http.Request) {
+	if err := m.update.UpdateAdvanced(); err != nil {
+		writeErrOperation(w, err)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "update"})
+}
+
+// handleAdvancedRemove 卸载增强插件（异步）。
+func (m *AdminMux) handleAdvancedRemove(w http.ResponseWriter, r *http.Request) {
+	if err := m.update.RemoveAdvanced(); err != nil {
+		writeErrOperation(w, err)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "action": "remove"})
+}
+
+// handleAdvancedDone 清掉一次增强插件操作的终态。
+func (m *AdminMux) handleAdvancedDone(w http.ResponseWriter, r *http.Request) {
+	m.update.DoneAdvanced()
 	writeJSON(w, map[string]interface{}{"ok": true})
 }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { UpdateStatus } from '@/serverapi'
+import type { ManagedPluginKind, UpdateStatus } from '@/serverapi'
 import { uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
@@ -9,16 +9,19 @@ import GithubIconLink from '@/components/GithubIconLink.vue'
 import MarkdownText from '@/components/MarkdownText.vue'
 import { repoSlugs, repoURL } from '@/constants/repos'
 
-// 插件市场（dshmarket）弹窗：未安装 → 安装最新版；已安装 → 更新 / 卸载。
+// 受管插件弹窗（插件市场 dshmarket / 增强插件 dsh-fnos-advanced）：未安装 → 安装最新版；
+// 已安装 → 更新 / 卸载。
 //
-// 市场现在是一个普通的 profile 插件（不再是 dsh server 包自带的 bundle），因此
-// 「未安装」是正常状态之一，弹窗必须能把它装上 —— 这是市场面板自己给不了的能力。
-// 动作经 dsh 的插件命令完成（见后端 market.go），安装/卸载成功后后端会重启 dsh。
+// 两个插件是**同一形态**的普通 profile 插件（不再是 dsh server 包自带的 bundle），因此
+// 弹窗、状态机与动作流程共用这一份实现，只在插件名 / 说明文案 / 仓库图标上按
+// `plugin` 区分。动作经 dsh 的插件命令完成（见后端 market.go），安装/卸载成功后后端会
+// 重启 dsh。
 //
 // 同样遵循「props 进来、事件出去」：状态由父组件（UpdateSection 的 SSE 快照）持有。
 const props = defineProps<{
   visible: boolean
   status: UpdateStatus
+  plugin: ManagedPluginKind
 }>()
 
 const emit = defineEmits<{
@@ -33,6 +36,20 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
+const isAdvanced = computed(() => props.plugin === 'advanced')
+const targetName = computed(() =>
+  isAdvanced.value ? t('plugin_dialog_advanced_name') : t('plugin_dialog_market_name')
+)
+const repoSlug = computed(() => repoSlugs[props.plugin])
+const notInstalledDesc = computed(() =>
+  isAdvanced.value ? t('plugin_dialog_advanced_desc') : t('plugin_dialog_market_desc')
+)
+const removeConfirmMsg = computed(() =>
+  isAdvanced.value
+    ? t('plugin_dialog_advanced_remove_confirm_msg')
+    : t('plugin_dialog_market_remove_confirm_msg')
+)
+
 const installed = computed(() => !!props.status.localVersion)
 const latest = computed(() => props.status.latestVersion || '')
 const hasUpdate = computed(() => props.status.hasUpdate)
@@ -41,13 +58,13 @@ const hasUpdate = computed(() => props.status.hasUpdate)
 // （装过没装过都不知道）。见后端 UpdateStatus.Unavailable。
 const unknown = computed(() => !!props.status.unavailable)
 
-// 进行中（安装/卸载）：禁用关闭与一切动作按钮；进度只能等它跑完（后端不支持取消）。
+// 进行中（安装/卸载）：禁用一切动作按钮；进度只能等它跑完（后端不支持取消）。
 const phase = computed(() => props.status.phase || '')
 const busy = computed(() => phase.value === 'installing' || phase.value === 'removing')
 
 const phaseText = computed(() => {
-  if (phase.value === 'removing') return t('market_removing')
-  if (phase.value === 'installing') return t('market_installing')
+  if (phase.value === 'removing') return t('plugin_dialog_removing', { name: targetName.value })
+  if (phase.value === 'installing') return t('plugin_dialog_installing', { name: targetName.value })
   return ''
 })
 
@@ -84,11 +101,11 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
         <div class="g-modal-mask" @click="close"></div>
         <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
           <DialogCloseButton :label="t('dialog_close')" @close="close" />
-          <!-- 标题 + 插件市场仓库（dsh-market/dsh-market）的 GitHub 裸图标外链，紧靠标题；
-               右侧留出 X 的位置。与 harness 弹窗、dsh 版本弹窗同一形态。 -->
+          <!-- 标题 + 对应仓库的 GitHub 裸图标外链，紧靠标题；右侧留出 X 的位置。
+               与 harness 弹窗、dsh 版本弹窗同一形态。 -->
           <div class="flex items-center gap-2 pr-11 mb-3">
-            <h3 class="g-dialog-title !pr-0">{{ t('market_dialog_title') }}</h3>
-            <GithubIconLink :href="repoURL(repoSlugs.market)" :label="repoSlugs.market" />
+            <h3 class="g-dialog-title !pr-0">{{ targetName }}</h3>
+            <GithubIconLink :href="repoURL(repoSlug)" :label="repoSlug" />
           </div>
 
           <!-- 进行中：安装/卸载都在跑插件命令，成功后会重启 dsh 让新 bundle 生效 -->
@@ -103,7 +120,7 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
             <div v-if="status.message" class="mt-2 font-mono text-xs text-ink-faint dark:text-[#8A8A92] break-all select-text">
               {{ uiText(status.message, status.messageRef) }}
             </div>
-            <div class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('market_busy_hint') }}</div>
+            <div class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('plugin_dialog_busy_hint') }}</div>
           </div>
 
           <template v-else>
@@ -117,28 +134,34 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
                 <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_latest_ver') }}</span>
                 <span class="font-mono text-sm font-semibold text-ink dark:text-white">{{ latest || '—' }}</span>
               </div>
+              <!-- 增强插件安装后的下一步：设置页（授权入口）在插件页的「已安装插件」列表里。
+                   放在 v-if="installed" 块内，避免打断后面的 v-else-if / v-else 链。 -->
+              <p
+                v-if="isAdvanced"
+                class="pt-1 text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]"
+              >{{ t('plugin_dialog_advanced_after_install') }}</p>
             </div>
-            <!-- 未安装：说明用正文档（text-sm + ink-soft，见 style.css 的弹窗字号约定），
+            <!-- 未安装 / 查不到：说明用正文档（text-sm + ink-soft，见 style.css 的弹窗字号约定），
                  要装的版本号是元信息，用 text-xs + ink-faint。 -->
             <!-- 查不到（dsh 未就绪）：不能断言「未安装」，也不给安装入口 —— 只说清原因，
                  等 dsh 起来后后端会自动重查（见 RefreshMarketAfterDshStart）。 -->
             <p v-else-if="unknown" class="text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
-              {{ t('market_detect_unavailable') }}
+              {{ t('plugin_dialog_detect_unavailable', { name: targetName }) }}
             </p>
             <p v-else class="text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
-              {{ t('market_not_installed_desc') }}
+              {{ notInstalledDesc }}
             </p>
             <p v-if="!installed && !unknown && latest" class="mt-2 text-xs text-ink-faint dark:text-[#8A8A92]">
-              {{ t('market_install_target', { v: latest }) }}
+              {{ t('plugin_dialog_install_target', { v: latest }) }}
             </p>
             <p v-if="!installed && !unknown && !latest" class="mt-2 text-sm leading-relaxed text-ink-soft dark:text-[#A6A6AD]">
-              {{ t('market_latest_unknown') }}
+              {{ t('plugin_dialog_latest_unknown') }}
             </p>
 
             <!-- 更新内容（release 正文，不含标题）：与 harness 更新弹窗**同一套显示逻辑**
-                 ——正文由后端在状态里给（只取要装的那一版，见 market.go 的 refreshMarketStatus），
+                 ——正文由后端在状态里给（只取要装的那一版，见 market.go 的 refreshPluginStatus），
                  这里 Markdown 渲染、超长可滚动、不撑破弹窗，字号与其它弹窗正文同档。
-                 没有正文时整块不渲染（不再有「市场包说明」那种兜底文案）。 -->
+                 没有正文时整块不渲染。 -->
             <div v-if="hasUpdate && status.releaseNotes" class="mt-3">
               <div class="text-xs text-ink-faint dark:text-[#8A8A92] mb-1">{{ t('update_release_notes') }}</div>
               <div class="rounded-lg bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] px-3 py-2 text-sm text-ink-soft dark:text-[#A6A6AD] max-h-44 overflow-y-auto leading-relaxed">
@@ -163,10 +186,10 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
           <!-- 底部动作：未安装 → 安装；已安装 → 更新（有新版时）/ 卸载；查不到 → 不给动作 -->
           <div v-if="!busy" class="g-dialog-actions">
             <template v-if="installed">
-              <button v-if="hasUpdate" class="g-btn-warning" @click="emit('update')">{{ t('market_update_btn') }}</button>
-              <button class="g-btn-danger" @click="removeConfirm = true">{{ t('market_remove_btn') }}</button>
+              <button v-if="hasUpdate" class="g-btn-warning" @click="emit('update')">{{ t('plugin_dialog_update_btn') }}</button>
+              <button class="g-btn-danger" @click="removeConfirm = true">{{ t('plugin_dialog_remove_btn') }}</button>
             </template>
-            <button v-else-if="!unknown" class="g-btn-secondary" @click="emit('install')">{{ t('market_install_btn') }}</button>
+            <button v-else-if="!unknown" class="g-btn-secondary" @click="emit('install')">{{ t('plugin_dialog_install_btn') }}</button>
           </div>
         </div>
       </div>
@@ -175,9 +198,9 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
     <!-- 卸载二次确认 -->
     <ConfirmDialog
       v-model:visible="removeConfirm"
-      :title="t('market_remove_confirm_title')"
-      :message="t('market_remove_confirm_msg')"
-      :confirm-text="t('market_remove_confirm_ok')"
+      :title="t('plugin_dialog_remove_confirm_title', { name: targetName })"
+      :message="removeConfirmMsg"
+      :confirm-text="t('plugin_dialog_remove_confirm_ok')"
       :cancel-text="t('confirm_cancel')"
       danger
       @confirm="confirmRemove"

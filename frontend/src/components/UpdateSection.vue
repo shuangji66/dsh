@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, sseUrl, type UpdateKind, type ServerVersions, type UpdateStatus } from '@/serverapi'
+import { api, sseUrl, type ManagedPluginKind, type UpdateKind, type ServerVersions, type UpdateStatus } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
@@ -11,39 +11,42 @@ import CheckUpdateButton from '@/components/CheckUpdateButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
 import { repoSlugs, repoURL } from '@/constants/repos'
 import ServerVersionsDialog from '@/components/ServerVersionsDialog.vue'
-import MarketDialog from '@/components/MarketDialog.vue'
+import ManagedPluginDialog from '@/components/ManagedPluginDialog.vue'
 
-// 概览页「版本」卡片：三个版本（harness 控制台 / dsh 服务 / 插件市场）的当前版本、
-// 检查更新入口与各自的弹窗。
+// 概览页「版本」卡片：四个版本（harness 控制台 / dsh 服务 / 插件市场 / 增强插件）的
+// 当前版本、检查更新入口与各自的弹窗。
 //
-// 三条链路的**形态各不相同**，因此弹窗也分成三个：
+// 四条链路的**形态各不相同**，因此弹窗也分成三类：
 //   - harness：GitHub Release 资产（下载 → 安装两步，可暂停/取消）—— 弹窗在本组件内；
 //   - dsh 服务：本机多版本（npm install 到 `<数据目录>/server/<版本>`，可下载/删除/切换）
 //     —— 弹窗见 ServerVersionsDialog.vue；
-//   - 插件市场：普通 profile 插件（未安装 → 安装 latest，已安装 → 更新/卸载）
-//     —— 弹窗见 MarketDialog.vue。
+//   - 插件市场 / 增强插件：同一形态的普通 profile 插件（未安装 → 安装最新版，已安装 →
+//     更新/卸载），共用 ManagedPluginDialog.vue。
 //
-// 本组件是这三者的**唯一数据源**：它持有 /api/update/stream 的 SSE 快照并按 kind 分发，
+// 本组件是这四者的**唯一数据源**：它持有 /api/update/stream 的 SSE 快照并按 kind 分发，
 // 子弹窗只收 props、只发意图事件。
 const toast = useToastStore()
 const { t } = useI18n()
 
-// 后端推送的更新状态（harness / dsh / 插件市场 各一份）。本地版本号由
+// 后端推送的更新状态（harness / dsh / 插件市场 / 增强插件 各一份）。本地版本号由
 // `/api/update/status` 统一提供（dsh 版本原 `/api/dsh/version` 端点已移除）。
 const harnessStatus = ref<UpdateStatus>({ kind: 'harness', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
 const dshStatus = ref<UpdateStatus>({ kind: 'dsh', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '', releaseNotes: '' })
-// 市场（dshmarket）：普通 profile 插件，localVersion 为空即「未安装」。
+// 受管插件（dshmarket / dsh-fnos-advanced）：普通 profile 插件，localVersion 为空即
+// 「未安装」；unavailable 为真表示「这次查不到」，不能当成未安装。
 const marketStatus = ref<UpdateStatus>({ kind: 'market', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '' })
+const advancedStatus = ref<UpdateStatus>({ kind: 'advanced', localVersion: '', latestVersion: '', hasUpdate: false, checkedAt: '' })
 // dsh 服务版本快照（可选版本列表 + 已安装 + 选中 + 安装进度）。
 const serverVersions = ref<ServerVersions | null>(null)
 
 // 各目标是否正在“检查更新”
-const checking = ref<Record<UpdateKind, boolean>>({ harness: false, dsh: false, market: false })
+const checking = ref<Record<UpdateKind, boolean>>({ harness: false, dsh: false, market: false, advanced: false })
 
-// 按 kind 取对应的状态对象：三条链路的字段完全一致，只有数据来源不同。
+// 按 kind 取对应的状态对象：四条链路的字段完全一致，只有数据来源不同。
 function statusOf(kind: UpdateKind): UpdateStatus {
   if (kind === 'harness') return harnessStatus.value
   if (kind === 'dsh') return dshStatus.value
+  if (kind === 'advanced') return advancedStatus.value
   return marketStatus.value
 }
 
@@ -51,13 +54,97 @@ function statusOf(kind: UpdateKind): UpdateStatus {
 function patchStatus(kind: UpdateKind, patch: Partial<UpdateStatus>) {
   if (kind === 'harness') harnessStatus.value = { ...harnessStatus.value, ...patch }
   else if (kind === 'dsh') dshStatus.value = { ...dshStatus.value, ...patch }
+  else if (kind === 'advanced') advancedStatus.value = { ...advancedStatus.value, ...patch }
   else marketStatus.value = { ...marketStatus.value, ...patch }
 }
 
-// --- dsh 服务版本弹窗 / 插件市场弹窗 ---
+// --- 受管插件（插件市场 / 增强插件） ---
+//
+// 两个插件的后端动作完全同构（安装 / 更新 / 卸载 / 收起结果），差异只有接口前缀与
+// 弹窗上的名字，因此这里用 kind 参数化，避免把同一套逻辑写两遍。
+const managedKinds: ManagedPluginKind[] = ['market', 'advanced']
+const managedDialogVisible = ref<Record<ManagedPluginKind, boolean>>({ market: false, advanced: false })
+const pendingManagedAction = ref<Record<ManagedPluginKind, 'install' | 'update' | 'remove' | null>>({
+  market: null,
+  advanced: null
+})
+// 每个插件各自记「上一条已提示过的结果」，避免 SSE 重复推同一份快照时重复弹 toast。
+const announcedManagedOp: Record<ManagedPluginKind, string> = { market: '', advanced: '' }
+
+function managedStatusOf(kind: ManagedPluginKind): UpdateStatus {
+  return statusOf(kind)
+}
+
+async function runManagedAction(kind: ManagedPluginKind, action: 'install' | 'update' | 'remove') {
+  pendingManagedAction.value[kind] = action
+  try {
+    if (action === 'install') await api.pluginInstall(kind)
+    else if (action === 'update') await api.pluginUpdate(kind)
+    else await api.pluginRemove(kind)
+  } catch (e) {
+    pendingManagedAction.value[kind] = null
+    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
+  }
+}
+
+// managedActionLabel 把动作翻成两字动词（直接复用弹窗按钮文案，避免再维护一份）。
+function managedActionLabel(action: 'install' | 'update' | 'remove'): string {
+  if (action === 'update') return t('plugin_dialog_update_btn')
+  if (action === 'remove') return t('plugin_dialog_remove_btn')
+  return t('plugin_dialog_install_btn')
+}
+
+function managedName(kind: ManagedPluginKind): string {
+  return kind === 'advanced' ? t('plugin_dialog_advanced_name') : t('plugin_dialog_market_name')
+}
+
+// 收起某个插件操作的终态（成功提示已 toast / 失败详情已看过 / 弹窗已关闭）。
+async function onManagedAck(kind: ManagedPluginKind) {
+  try {
+    await api.pluginDone(kind)
+  } catch { /* 忽略：只是清状态，失败不影响用户 */ }
+}
+
+function closeManagedDialog(kind: ManagedPluginKind) {
+  managedDialogVisible.value[kind] = false
+}
+
+function managedOpSig(kind: ManagedPluginKind): string {
+  const st = managedStatusOf(kind)
+  return `${st.seq || 0}|${st.phase || ''}|${st.error || ''}`
+}
+
+function handleManagedResult(kind: ManagedPluginKind) {
+  const st = managedStatusOf(kind)
+  const sig = managedOpSig(kind)
+  if (sig === announcedManagedOp[kind]) return
+  if (st.phase === 'done') {
+    announcedManagedOp[kind] = sig
+    const action = pendingManagedAction.value[kind]
+    pendingManagedAction.value[kind] = null
+    toast.show(
+      action
+        ? t('plugin_dialog_toast_done', { action: managedActionLabel(action) })
+        : t('plugin_dialog_toast_done_generic', { name: managedName(kind) }),
+      'success'
+    )
+    // 与 dsh 版本安装同一条约定：成功只提示一次，立刻收起后端那份终态。
+    api.pluginDone(kind).catch(() => { /* 忽略：只是清状态 */ })
+  } else if (st.error) {
+    announcedManagedOp[kind] = sig
+    pendingManagedAction.value[kind] = null
+    toast.show(uiText(st.error, st.errorRef), 'error')
+    // 失败不清：错误详情留在弹窗里，等用户关闭弹窗时再收起。
+  }
+}
+
+for (const kind of managedKinds) {
+  watch(() => managedOpSig(kind), () => handleManagedResult(kind))
+}
+
+// --- dsh 服务版本弹窗 ---
 const serverDialogVisible = ref(false)
 const serverLoading = ref(false)
-const marketDialogVisible = ref(false)
 
 // openServerDialog 打开 dsh 版本列表：先用后端快照兜底显示，再拉一次（避免显示别人
 // 刷新前的旧列表）；加载期间按钮禁用，不阻塞已装版本的切换/删除。
@@ -133,41 +220,6 @@ async function onSwitchVersion(version: string) {
   }
 }
 
-// 市场三动作：安装（未安装 → 最新版本）/ 更新（已安装 → 最新版本）/ 卸载。
-// pendingMarketAction 记下这次点的是哪个动作：结果（成功或失败）经 SSE 异步到达，
-// 而弹窗可能已经被关掉，所以结果统一用 toast 通知（文案里的动词按动作区分）。
-const pendingMarketAction = ref<'install' | 'update' | 'remove' | null>(null)
-
-async function runMarketAction(action: 'install' | 'update' | 'remove') {
-  pendingMarketAction.value = action
-  try {
-    if (action === 'install') await api.marketInstall()
-    else if (action === 'update') await api.marketUpdate()
-    else await api.marketRemove()
-  } catch (e) {
-    pendingMarketAction.value = null
-    toast.show(uiErrText(e, t('update_error_unknown')), 'error')
-  }
-}
-
-// marketActionLabel 把动作翻成两字动词（直接复用弹窗按钮文案，避免再维护一份）。
-function marketActionLabel(action: 'install' | 'update' | 'remove'): string {
-  if (action === 'update') return t('market_update_btn')
-  if (action === 'remove') return t('market_remove_btn')
-  return t('market_install_btn')
-}
-
-// 收起市场操作的终态（成功提示已 toast / 失败详情已看过 / 弹窗已关闭）。
-async function onMarketAck() {
-  try {
-    await api.marketDone()
-  } catch { /* 忽略：只是清状态，失败不影响用户 */ }
-}
-
-function closeMarketDialog() {
-  marketDialogVisible.value = false
-}
-
 // 弹窗状态
 const dialogVisible = ref(false)
 const dialogKind = ref<UpdateKind>('harness')
@@ -206,7 +258,7 @@ let preInstallVersion = ''
 let readyPollTimer: ReturnType<typeof setInterval> | null = null
 
 // 从后端快照合并到本地响应式状态（允许只带部分 kind 的快照）
-function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus; server?: ServerVersions }) {
+function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus; advanced?: UpdateStatus; server?: ServerVersions }) {
   if (snap.harness) {
     harnessStatus.value = { ...snap.harness, localVersion: snap.harness.localVersion || '' }
   }
@@ -215,6 +267,9 @@ function merge(snap: { harness?: UpdateStatus; dsh?: UpdateStatus; market?: Upda
   }
   if (snap.market) {
     marketStatus.value = { ...snap.market, localVersion: snap.market.localVersion || '' }
+  }
+  if (snap.advanced) {
+    advancedStatus.value = { ...snap.advanced, localVersion: snap.advanced.localVersion || '' }
   }
   // dsh 版本快照（列表 + 安装进度）也随同一条 SSE 推送更新 —— 版本弹窗里那一行的
   // 下载/包处理进度就来自这里，不需要额外开一条通道。
@@ -233,8 +288,8 @@ const dialogTitle = computed(() => {
   return t('update_dialog_title_market')
 })
 
-// 弹窗标题右侧那个裸图标外链指向的仓库地址。三个目标的仓库集中定义在
-// `constants/repos.ts`，dsh 版本弹窗与市场弹窗也用同一份（它们各自挂自己的图标）。
+// 弹窗标题右侧那个裸图标外链指向的仓库地址。四个目标的仓库集中定义在
+// `constants/repos.ts`，dsh 版本弹窗与受管插件弹窗也用同一份（它们各自挂自己的图标）。
 const dialogRepoSlug = computed(() => repoSlugs[dialogKind.value])
 const dialogRepoURL = computed(() => repoURL(dialogRepoSlug.value))
 
@@ -248,8 +303,9 @@ function hasUpdateDot(kind: UpdateKind): boolean {
 function versionText(kind: UpdateKind): string {
   return statusOf(kind).localVersion
 }
-// 版本行的显示文本（dsh 服务行与插件市场行用）。空版本号有两种含义，必须分开：
-//   - 「查不了」（unavailable，目前只有市场会置位：dsh 服务未就绪 / 没选中版本 /
+// 版本行的显示文本（dsh 服务行、插件市场行与增强插件行用）。空版本号有两种含义，
+// 必须分开：
+//   - 「查不了」（unavailable，只有两个受管插件会置位：dsh 服务未就绪 / 没选中版本 /
 //     `dsh plugin list` 报错）→ 显示「—」：这时我们**不知道**装没装，写「未安装」
 //     就是在说假话（dsh 还没起来时最容易看到）；
 //   - 明确查到了、只是没装 → 「未安装」。
@@ -273,8 +329,8 @@ function storeVersionText(kind: UpdateKind): string {
 // onerror 里 close() 会让浏览器永久放弃该连接，下载进度再也送不到页面。
 const updateStream = useEventStream(() => sseUrl('/api/update/stream'), {
   update: (data) => {
-    const d = data as { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus; server?: ServerVersions }
-    if (d && (d.harness || d.dsh || d.market || d.server)) merge(d)
+    const d = data as { harness?: UpdateStatus; dsh?: UpdateStatus; market?: UpdateStatus; advanced?: UpdateStatus; server?: ServerVersions }
+    if (d && (d.harness || d.dsh || d.market || d.advanced || d.server)) merge(d)
   }
 })
 
@@ -302,14 +358,15 @@ async function doCheck(kind: UpdateKind) {
   }
 }
 
-// 打开对应目标的弹窗：harness 用本组件内的更新弹窗，dsh / 市场各有自己的弹窗。
+// 打开对应目标的弹窗：harness 用本组件内的更新弹窗；dsh 用版本列表弹窗；
+// 插件市场与增强插件共用受管插件弹窗。
 function openDialog(kind: UpdateKind) {
   if (kind === 'dsh') {
     openServerDialog()
     return
   }
-  if (kind === 'market') {
-    marketDialogVisible.value = true
+  if (kind === 'market' || kind === 'advanced') {
+    managedDialogVisible.value[kind] = true
     return
   }
   dialogKind.value = kind
@@ -360,7 +417,11 @@ function startProgressPoll(kind: UpdateKind) {
     try {
       const snap = await api.updateStatus()
       merge(snap)
-      const st = kind === 'harness' ? snap.harness : kind === 'dsh' ? snap.dsh : snap.market
+      const st =
+        kind === 'harness' ? snap.harness
+        : kind === 'dsh' ? snap.dsh
+        : kind === 'advanced' ? snap.advanced
+        : snap.market
       // 下载阶段结束（已就绪 / 报错 / 取消 / 回到空闲）即停止兜底轮询。
       if (!st || st.phase !== 'downloading') stopProgressPoll()
     } catch {
@@ -600,11 +661,10 @@ async function doCancelUpdate() {
 // ②成功提示发出后立刻调 `dshVersionAck` 把后端那份终态收起 —— 概览页切走会卸载、切回会
 // 重新挂载，状态留着就会把同一条成功提示再弹一次。失败不清（错误详情要留在弹窗里）。
 //
-// 签名里必须带**后端给的运行序号**（install.seq / market.seq）：只按 version+phase 去重时，
+// 签名里必须带**后端给的运行序号**（install.seq / 插件的 op seq）：只按 version+phase 去重时，
 // 同一挂载内第二次相同结果会被静默吞掉（装成功 → 删掉 → 再装成功；市场装成功 → 卸载成功）。
 // 这两个序号都是后端每次操作自增的，前端不能自己数（SSE 可能只收到终态那一帧）。
 let announcedServerInstall = ''
-let announcedMarketOp = ''
 
 const serverInstallSig = computed(() => {
   const st = serverVersions.value?.install
@@ -628,37 +688,12 @@ watch(serverInstallSig, () => {
   }
 })
 
-const marketOpSig = computed(
-  () => `${marketStatus.value.seq || 0}|${marketStatus.value.phase || ''}|${marketStatus.value.error || ''}`
-)
-
-watch(marketOpSig, () => {
-  const st = marketStatus.value
-  const sig = marketOpSig.value
-  if (sig === announcedMarketOp) return
-  if (st.phase === 'done') {
-    announcedMarketOp = sig
-    const action = pendingMarketAction.value
-    pendingMarketAction.value = null
-    toast.show(
-      action ? t('market_toast_done', { action: marketActionLabel(action) }) : t('market_toast_done_generic'),
-      'success'
-    )
-    // 与 dsh 版本安装同一条约定：成功只提示一次，立刻收起后端那份终态。
-    api.marketDone().catch(() => { /* 忽略：只是清状态 */ })
-  } else if (st.error) {
-    announcedMarketOp = sig
-    pendingMarketAction.value = null
-    toast.show(uiText(st.error, st.errorRef), 'error')
-    // 失败不清：错误详情留在弹窗里，等用户关闭弹窗时再收起。
-  }
-})
-
 // --- 删除已下载的更新包 ---
 const discardConfirmVisible = ref(false) // 删除更新包二次确认
 
 // 任一弹窗打开期间锁定页面滚动（弹窗会叠加：更新弹窗之上还有取消/安装等二次确认；
-// dsh 版本弹窗与市场弹窗不在这里 —— 它们自己锁，见 ServerVersionsDialog / MarketDialog）。
+// dsh 版本弹窗与受管插件弹窗不在这里 —— 它们自己锁，见 ServerVersionsDialog /
+// ManagedPluginDialog）。
 const anyDialogOpen = computed(
   () =>
     dialogVisible.value ||
@@ -827,6 +862,22 @@ watch(
             <span v-if="hasUpdateDot('market')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <CheckUpdateButton :checking="checking.market" :label="t('update_check')" @check="doCheck('market')" />
+        </div>
+      </div>
+
+      <!-- 增强插件版本（dsh-fnos-advanced）：与插件市场同形态（普通 profile 插件），
+           未安装时可在这里装上；弹窗样式与安装流程复用市场那一套。 -->
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
+        <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_advanced_ver') }}</span>
+        <div class="flex items-center gap-3 min-w-0">
+          <button
+            class="relative font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50 text-ink dark:text-white"
+            @click="openDialog('advanced')"
+          >
+            {{ versionLabel('advanced') }}
+            <span v-if="hasUpdateDot('advanced')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
+          </button>
+          <CheckUpdateButton :checking="checking.advanced" :label="t('update_check')" @check="doCheck('advanced')" />
         </div>
       </div>
     </div>
@@ -1093,15 +1144,18 @@ watch(
       @switch="onSwitchVersion"
     />
 
-    <!-- 插件市场弹窗（安装 / 更新 / 卸载） -->
-    <MarketDialog
-      :visible="marketDialogVisible"
-      :status="marketStatus"
-      @close="closeMarketDialog"
-      @install="runMarketAction('install')"
-      @update="runMarketAction('update')"
-      @remove="runMarketAction('remove')"
-      @ack="onMarketAck"
+    <!-- 受管插件弹窗（插件市场 / 增强插件）：安装 / 更新 / 卸载，共用同一份实现 -->
+    <ManagedPluginDialog
+      v-for="kind in managedKinds"
+      :key="kind"
+      :visible="managedDialogVisible[kind]"
+      :status="managedStatusOf(kind)"
+      :plugin="kind"
+      @close="closeManagedDialog(kind)"
+      @install="runManagedAction(kind, 'install')"
+      @update="runManagedAction(kind, 'update')"
+      @remove="runManagedAction(kind, 'remove')"
+      @ack="onManagedAck(kind)"
     />
   </section>
 </template>

@@ -74,7 +74,8 @@ var updateIdleTimeout = 60 * time.Second
 // updateRetryBackoff 是同一通路上两次尝试之间的退避时间（变量而非常量：测试里会调小）。
 var updateRetryBackoff = 800 * time.Millisecond
 
-// updateKind 表示更新目标：harness 控制台、dsh 服务或插件市场（dshmarket）。
+// updateKind 表示更新目标：harness 控制台、dsh 服务、插件市场（dshmarket）或
+// 增强插件（dsh-fnos-advanced）。
 type updateKind string
 
 const (
@@ -83,11 +84,14 @@ const (
 	// updateKindMarket 表示「就地把 server 目录里那份 dshmarket 换成 npm 最新版」。
 	// 它不是 GitHub release 资产（版本来自 npm registry），细节见 market.go。
 	updateKindMarket updateKind = "market"
+	// updateKindAdvanced 表示增强插件 dsh-fnos-advanced：与市场同一套形态（普通
+	// profile 插件，检测/安装/更新/卸载全走 `dsh plugin …`，见 market.go）。
+	updateKindAdvanced updateKind = "advanced"
 )
 
 // updateLogTag 返回某个更新目标的日志标签：harness（控制台）与 dsh（dsh 服务）
 // 的更新日志分开输出，便于按目标筛日志、看清「这次更新的是谁」；
-// market（插件市场）的作用域同样独立，因此也单独一个标签。
+// market（插件市场）与 advanced（增强插件）的作用域同样独立，因此各自一个标签。
 func updateLogTag(k updateKind) string {
 	switch k {
 	case updateKindHarness:
@@ -96,6 +100,8 @@ func updateLogTag(k updateKind) string {
 		return "[dsh]"
 	case updateKindMarket:
 		return "[market]"
+	case updateKindAdvanced:
+		return "[advanced]"
 	default:
 		return "[update]"
 	}
@@ -172,20 +178,21 @@ type UpdateStatus struct {
 	// ErrorHint 是给前端的结构化错误归类（目前只有 "network"：代理与直连均失败），
 	// 前端据此显示本地化的“请检查网络或代理”提示；Error 里则是原始错误文本。
 	ErrorHint string `json:"errorHint,omitempty"`
-	// Message 是当前阶段的说明/实时尾行（仅市场使用：`dsh plugin …` 的输出尾行）。
+	// Message 是当前阶段的说明/实时尾行（受管插件用：`dsh plugin …` 的进度与输出尾行）。
 	Message string `json:"message,omitempty"`
-	// 市场安装位置诊断（仅 kind=market）：`dsh plugin --profile web list` 的原始输出，
-	// 用于解释「没检测到市场」这类情况。
+	// 市场安装位置诊断（kind=market / advanced）：`dsh plugin --profile web list` 的
+	// 原始输出，用于解释「没检测到插件」这类情况。字段名沿用 marketDir（历史命名），
+	// 两个受管插件共用。
 	MarketDir string `json:"marketDir,omitempty"`
-	// Unavailable（仅 kind=market）表示**这次没能查到**本机装的市场是哪一版：dsh 服务
-	// 未就绪（启动中 / 已停止 / 没选中任何版本）或 `dsh plugin --profile web list` 报错。
-	// 这时 LocalVersion 为空**不代表「未安装」**—— 前端据此显示「—」而不是「未安装」，
-	// 否则用户在 dsh 还没起来时会以为市场没装。
+	// Unavailable（kind=market / advanced）表示**这次没能查到**本机装的是哪一版：dsh
+	// 服务未就绪（启动中 / 已停止 / 没选中任何版本）或 `dsh plugin --profile web list`
+	// 报错。这时 LocalVersion 为空**不代表「未安装」**—— 前端据此显示「—」而不是
+	// 「未安装」，否则用户在 dsh 还没起来时会以为插件没装。
 	// 首帧（进程刚起、还没检测过）也是这个状态：没检测过 = 不知道。
 	Unavailable bool `json:"unavailable,omitempty"`
-	// Seq 是「第几次操作」的序号（目前只有插件市场写它，见 runMarketOp）：前端用它给
-	// 「操作结果只提示一次」去重 —— 只按 phase/error 去重时，第二次同样的结果
-	// （装成功后再卸成功，phase 都是 done/error 都为空）会被静默吞掉。
+	// Seq 是「第几次操作」的序号（插件市场 / 增强插件共用同一个计数器，见
+	// runPluginOp）：前端用它给「操作结果只提示一次」去重 —— 只按 phase/error 去重时，
+	// 第二次同样的结果（装成功后再卸成功，phase 都是 done/error 都为空）会被静默吞掉。
 	Seq int64 `json:"seq,omitempty"`
 	// ErrorRef / MessageRef 是 Error / Message 的「界面文案引用」（code + 参数）：
 	// 前端按 code 走 i18n，取不到才回退到原文。只给**面向用户**的文案设它们，
@@ -215,10 +222,10 @@ type UpdateManager struct {
 	statuses map[updateKind]*UpdateStatus
 	// applying 用于防止并发执行自我更新（同一时刻只允许一个更新任务）。
 	applying sync.Mutex
-	// marketOpSeq 是市场操作的序号（每次安装/更新/卸载 +1），随状态推给前端用于
-	// 「结果只提示一次」的去重键。用原子量：它只在 runMarketOp 里自增，不需要参与
-	// statuses 的锁。
-	marketOpSeq atomic.Int64
+	// pluginOpSeq 是受管插件操作的序号（每次安装/更新/卸载 +1，市场与增强插件共用），
+	// 随状态推给前端用于「结果只提示一次」的去重键。用原子量：它只在 runPluginOp 里
+	// 自增，不需要参与 statuses 的锁。
+	pluginOpSeq atomic.Int64
 	// backupMu 保证「同一时刻只有一个 dsh 数据备份」在跑（备份本身与更新互斥走
 	// applying，见 BackupDshData）。单独一把锁只为把「已有备份在进行」和
 	// 「正在更新」区分成不同提示。
@@ -240,11 +247,12 @@ type UpdateManager struct {
 	pendingMu sync.Mutex
 	pending   map[updateKind]*PendingUpdate
 
-	// marketLocalMu 保护 marketLocalCache：市场「本机装的是哪一版」的本地检测结果。
-	// 那次检测要起一个 `dsh plugin --profile web list` 子进程（1~3 秒），因此像版本列表
-	// 一样缓存起来，只在显式刷新时重跑（见 market.go 的 detectMarketLocal）。
+	// marketLocalMu 保护 pluginLocalCache：受管插件（市场 / 增强插件）「本机装的是
+	// 哪一版」的本地检测结果，按 kind 分开缓存。那次检测要起一个
+	// `dsh plugin --profile web list` 子进程（1~3 秒），因此像版本列表一样缓存起来，
+	// 只在显式刷新时重跑（见 market.go 的 detectPluginLocal）。
 	marketLocalMu    sync.Mutex
-	marketLocalCache *marketLocalSnapshot
+	pluginLocalCache map[updateKind]*marketLocalSnapshot
 
 	// checkLogMu 保护 lastCheckSig：按目标分别记录「上次检测结论」，
 	// 只在某个目标的结论发生变化时才记一行，避免每小时自动检测重复输出同样的内容。
@@ -254,8 +262,9 @@ type UpdateManager struct {
 	// dshNotes 是「按版本号查更新日志」的索引（见 notesIndex）：dsh 版本列表里点某个
 	// 版本号时按需拉取，结果缓存在这里。客户端用 httpClientForUpdate() 现取（它跟随
 	// 「代理更新」开关，而开关可以随时改），因此存的是构造函数而不是客户端实例。
-	// 插件市场**不用索引**：它和 harness 一样只取「要装的那一版」的正文（见
-	// market.go 的 refreshMarketStatus）——一个 tag 一次请求，不需要整仓日志。
+	// 受管插件（插件市场 / 增强插件）**不用索引**：它们和 harness 一样只取「要装的那
+	// 一版」的正文（见 market.go 的 refreshPluginStatus）——一个 tag 一次请求，不需要
+	// 整仓日志。
 	dshNotes *notesIndex
 }
 
@@ -278,12 +287,14 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	// 「哪个版本装着」是磁盘上的事实，`dsh -V` 只用于安装完成后的校验。
 	m.server = newServerManager(renv, dsh, m)
 	m.statuses[updateKindDsh] = &UpdateStatus{Kind: updateKindDsh}
-	// 市场（dshmarket）的本地检测要起一个 `dsh plugin --profile web list` 子进程
-	// （约 1~3 秒），因此**异步**做：控制台启动路径不能被它拖住。检测结果经 SSE 推给
-	// 前端；最新版等 checkOnce/手动检查时才查镜像源。
+	// 市场（dshmarket）与增强插件（dsh-fnos-advanced）的本地检测都要起一个
+	// `dsh plugin --profile web list` 子进程（约 1~3 秒），因此**异步**做：控制台
+	// 启动路径不能被它拖住。检测结果经 SSE 推给前端；最新版等 checkOnce/手动检查时
+	// 才查镜像源。
 	// 初始 Unavailable=true：这一刻还没检测过，界面显示「—」（而不是「未安装」）；
-	// 第一次检测出结论后由 applyMarketLocalResult 改掉。
+	// 第一次检测出结论后由 applyPluginLocalResult 改掉。
 	m.statuses[updateKindMarket] = &UpdateStatus{Kind: updateKindMarket, Unavailable: true}
+	m.statuses[updateKindAdvanced] = &UpdateStatus{Kind: updateKindAdvanced, Unavailable: true}
 	go func() {
 		// 稍等一会再检测：让启动流水线（含 dsh 自身的启动）先走完，避免与它抢 profile。
 		// 这一次**只是尽早拿到结果**：它很可能撞上「dsh 还没起来」而失败，那时状态是
@@ -291,7 +302,7 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 		// RefreshMarketAfterDshStart）。
 		// force=true：缓存此时是空的（或上一轮的旧值），启动这一次要拿到当下的真实安装情况。
 		time.Sleep(5 * time.Second)
-		m.refreshMarketLocal(true)
+		m.refreshManagedPluginsLocal(true)
 	}()
 	m.server.refreshDshStatus()
 	// 启动时清理上次未能回收的更新包（自我更新 exec、异常退出等场景的残留）。
@@ -676,21 +687,28 @@ func (r releaseRepo) url() string {
 // harnessReleaseRepo 是本控制台的发布仓库（harness-* 两类发布资产在这里）。
 var harnessReleaseRepo = releaseRepo{owner: updateRepoOwner, name: updateRepoName}
 
-// dshReleaseRepo / marketReleaseRepo 是 dsh 服务与插件市场各自的**上游**发布仓库。
-// 二者与 npm 包一一对应（包元数据里的 repository.url 就是它们），因此版本号的来源
-// （npm 镜像源）与更新日志的来源（GitHub Release）不会漂移，不必再去解析包元数据：
+// dshReleaseRepo / marketReleaseRepo / advancedReleaseRepo 是 dsh 服务、插件市场与
+// 增强插件各自的**上游**发布仓库。三者与 npm 包一一对应（包元数据里的
+// repository.url 就是它们），因此版本号的来源（npm 镜像源）与更新日志的来源
+// （GitHub Release）不会漂移，不必再去解析包元数据：
 //   - @deepseek-ai/dsh     → deepseek-ai/deepseek-harness，tag 形如 `dsh-v0.2.1-alpha.2`；
-//   - dshmarket           → dsh-market/dsh-market，tag 形如 `v1.66.14`。
+//   - dshmarket           → dsh-market/dsh-market，tag 形如 `v1.66.14`；
+//   - dsh-fnos-advanced   → shuangji66/dsh（本仓库），tag 形如
+//     `dsh-fnos-advanced-v0.2.3`。
 //
-// tag 前缀的差异集中在 dshReleaseTag / marketReleaseTag，别在别处再拼一份。
+// tag 前缀的差异集中在 dshReleaseTag / marketReleaseTag / advancedReleaseTag，
+// 别在别处再拼一份。
 var (
-	dshReleaseRepo    = releaseRepo{owner: "deepseek-ai", name: "deepseek-harness"}
-	marketReleaseRepo = releaseRepo{owner: "dsh-market", name: "dsh-market"}
+	dshReleaseRepo      = releaseRepo{owner: "deepseek-ai", name: "deepseek-harness"}
+	marketReleaseRepo   = releaseRepo{owner: "dsh-market", name: "dsh-market"}
+	advancedReleaseRepo = releaseRepo{owner: updateRepoOwner, name: updateRepoName}
 )
 
-// dshReleaseTag / marketReleaseTag 把 npm 版本号还原成对应仓库的 release tag。
-func dshReleaseTag(version string) string    { return "dsh-v" + version }
-func marketReleaseTag(version string) string { return "v" + version }
+// dshReleaseTag / marketReleaseTag / advancedReleaseTag 把 npm 版本号还原成对应仓库的
+// release tag。
+func dshReleaseTag(version string) string      { return "dsh-v" + version }
+func marketReleaseTag(version string) string   { return "v" + version }
+func advancedReleaseTag(version string) string { return "dsh-fnos-advanced-v" + version }
 
 // dshNotesReleases 是 dsh 版本列表的更新日志**一次拉取的 release 数量上限**：只覆盖
 // 最近 10 个版本。版本列表本身也只列最近这些版本，所以正常情况下每个能点的版本号都查得到；
@@ -1092,7 +1110,7 @@ func proxyReachable(proxyAddr string) bool {
 // --- 检测主流程 ---
 
 // checkOnce 执行一次完整的版本检测：harness 走 GitHub tag，dsh 走 npm 镜像源的
-// dist-tags，市场走 `dsh plugin list` + 镜像源的 dist-tags（三条独立链路）。
+// dist-tags，插件市场与增强插件走 `dsh plugin list` + 镜像源的 dist-tags（四条独立链路）。
 func (m *UpdateManager) checkOnce() {
 	tags, err := m.fetchGitTags()
 	now := time.Now()
@@ -1100,9 +1118,9 @@ func (m *UpdateManager) checkOnce() {
 	if err != nil {
 		logWarn("[update] failed to fetch tags: %v", err)
 		m.mu.Lock()
-		// 只把 tag 拉取失败写进 harness：dsh 的版本来自 npm 镜像源、市场来自
-		// `dsh plugin list` + 镜像源，与 GitHub tag 无关，把 tag 的错误盖上去只会误导
-		// （它们的错误由 refreshVersions / refreshMarketStatus 各自负责写）。
+		// 只把 tag 拉取失败写进 harness：dsh 的版本来自 npm 镜像源、插件市场与增强插件
+		// 来自 `dsh plugin list` + 镜像源，与 GitHub tag 无关，把 tag 的错误盖上去只会
+		// 误导（它们的错误由 refreshVersions / refreshManagedPluginStatuses 各自负责写）。
 		if st, ok := m.statuses[updateKindHarness]; ok {
 			st.LatestVersion = ""
 			st.HasUpdate = false
@@ -1117,7 +1135,7 @@ func (m *UpdateManager) checkOnce() {
 		// 自动检测同时负责刷新版本列表缓存（force=true）：它就是「后台发现有没有新版本」
 		// 的那个时机，顺手把列表更新掉，之后用户打开弹窗看到的就是这一次的结果。
 		m.server.refreshVersions(true)
-		m.refreshMarketStatus()
+		m.refreshManagedPluginStatuses()
 		return
 	}
 
@@ -1160,15 +1178,17 @@ func (m *UpdateManager) checkOnce() {
 	// force=true：这一趟本来就是联网检测，顺带刷新版本列表缓存（见 refreshVersions 注释）。
 	m.server.refreshVersions(true)
 
-	// 市场：版本来自 `dsh plugin list` + 镜像源，与 GitHub tag 是两条独立链路。
-	m.refreshMarketStatus()
+	// 插件市场 / 增强插件：版本来自 `dsh plugin list` + 镜像源，与 GitHub tag 是
+	// 两条独立链路。
+	m.refreshManagedPluginStatuses()
 
-	// harness、dsh、市场各自一行，且只有**自己**的结论变化时才打印（三者的
-	// 「上次结论」分别记录）：三类更新是彼此独立的升级动作，合并成一行既难读、也没法
+	// harness、dsh、市场、增强插件各自一行，且只有**自己**的结论变化时才打印（四者的
+	// 「上次结论」分别记录）：四类更新是彼此独立的升级动作，合并成一行既难读、也没法
 	// 按目标筛日志；而每小时自动检测若每次都输出同样的结论，只会把日志刷满。
 	hs := m.getStatus(updateKindHarness)
 	ds := m.getStatus(updateKindDsh)
 	ms := m.getStatus(updateKindMarket)
+	as := m.getStatus(updateKindAdvanced)
 	// changed 判断某目标的结论是否与上次不同（true 才允许输出该目标那一行）。
 	// store 也进签名：同一条「最新版」在「可就地更新」与「只能换包」之间切换时，
 	// 日志必须跟着变一句，否则会留下「有更新却没有任何下载入口」的现场。
@@ -1187,6 +1207,7 @@ func (m *UpdateManager) checkOnce() {
 	showHarness := changed(updateKindHarness, hs.HasUpdate, hs.StoreUpdate, hs.LatestVersion)
 	showDsh := changed(updateKindDsh, ds.HasUpdate, false, ds.LatestVersion)
 	showMarket := changed(updateKindMarket, ms.HasUpdate, false, ms.LatestVersion)
+	showAdvanced := changed(updateKindAdvanced, as.HasUpdate, false, as.LatestVersion)
 	m.checkLogMu.Unlock()
 
 	if showHarness && hs.HasUpdate {
@@ -1206,11 +1227,16 @@ func (m *UpdateManager) checkOnce() {
 		logInfo("%s update available: %s -> %s",
 			updateLogTag(updateKindMarket), ms.LocalVersion, ms.LatestVersion)
 	}
+	if showAdvanced && as.HasUpdate {
+		logInfo("%s update available: %s -> %s",
+			updateLogTag(updateKindAdvanced), as.LocalVersion, as.LatestVersion)
+	}
 }
 
-// RefreshMarketAfterDshStart 在 dsh 刚（重新）启动起来之后重查一次「本机装的市场是哪一版」。
+// RefreshMarketAfterDshStart 在 dsh 刚（重新）启动起来之后重查一次「本机装的受管插件
+// 是哪一版」（插件市场与增强插件；函数名沿用历史命名）。
 //
-// 为什么需要它：市场版本只能靠 `dsh plugin --profile web list` 查，而这条命令在 dsh 起来
+// 为什么需要它：插件版本只能靠 `dsh plugin --profile web list` 查，而这条命令在 dsh 起来
 // 之前必然失败；失败的结论是「查不了」（UpdateStatus.Unavailable → 界面「—」）。因此每一个
 // 「dsh 就绪」的时刻都要跟一次重查，否则「—」会一直挂到下一次小时级检测或用户手动检查：
 //   - 控制台启动流水线收尾（dsh 起来 + 依赖装好，见 main.go）；
@@ -1221,9 +1247,9 @@ func (m *UpdateManager) checkOnce() {
 func (m *UpdateManager) RefreshMarketAfterDshStart() {
 	go func() {
 		// 稍等一小段：dsh 刚启动时还在装配 profile / 插件树，立刻查容易撞上「还没写好」
-		// 的假失败（与市场变更后重启 dsh 那条路径等 marketReadySettle 同一个理由）。
+		// 的假失败（与插件变更后重启 dsh 那条路径等 marketReadySettle 同一个理由）。
 		time.Sleep(marketReadySettle)
-		m.refreshMarketLocal(true)
+		m.refreshManagedPluginsLocal(true)
 	}()
 }
 

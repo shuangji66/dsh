@@ -212,15 +212,15 @@ func TestStopWithoutAnyDshIsSafe(t *testing.T) {
 // 若此刻市场面板正在装别的插件，那次操作会被连带杀掉并留下陈旧写锁。
 // 守卫拒绝时：报错、不停 dsh；插件命令本身已经跑完（其结果保留在盘上）。
 func TestMarketOpRestartRespectsBusyGuard(t *testing.T) {
-	prevBusy, prevCmd := marketBusyFn, marketPluginCmdFn
+	prevBusy, prevCmd := marketBusyFn, pluginCmdFn
 	prevStop, prevFree, prevStart := dshStopFn, dshPortFreeFn, startDshCapturedFn
 	t.Cleanup(func() {
-		marketBusyFn, marketPluginCmdFn = prevBusy, prevCmd
+		marketBusyFn, pluginCmdFn = prevBusy, prevCmd
 		dshStopFn, dshPortFreeFn, startDshCapturedFn = prevStop, prevFree, prevStart
 	})
 
 	calls := []string{}
-	marketPluginCmdFn = func(*UpdateManager, []string) error { calls = append(calls, "cmd"); return nil }
+	pluginCmdFn = func(*UpdateManager, managedPlugin, []string) error { calls = append(calls, "cmd"); return nil }
 	dshStopFn = func(*UpdateManager) error { calls = append(calls, "stop"); return nil }
 	dshPortFreeFn = func(*UpdateManager, time.Duration) { calls = append(calls, "portfree") }
 	startDshCapturedFn = func(*UpdateManager) error { calls = append(calls, "start"); return nil }

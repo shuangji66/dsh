@@ -2,8 +2,8 @@
 //
 // **只有 dsh 版本列表在用**（`ServerVersionsDialog` 的版本号按钮 → `ReleaseNotesDialog`）：
 // 它是「点某一版看那一版」的列表，所以按版本号按需拉。插件市场的更新日志不走这里 ——
-// 它和 harness 一样只取「要装的那一版」，正文随状态推送、内联显示（见 MarketDialog.vue
-// 与后端 market.go 的 refreshMarketStatus）。
+// 它和 harness 一样只取「要装的那一版」，正文随状态推送、内联显示（见 ManagedPluginDialog.vue
+// 与后端 market.go 的 refreshPluginStatus）。
 //
 // 三条刻意的行为：
 //  1. **成功才缓存**：available=false（这次没取到：断网 / 限流）与抛错都不进缓存，

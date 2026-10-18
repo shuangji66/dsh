@@ -109,7 +109,7 @@
 │   ├── terminal.go          # WebSocket 交互式 PTY 终端（会话单挂载点）
 │   ├── update.go            # 更新管理（harness 版本检测、下载通路/续传/校验、数据备份）
 │   ├── server.go            # dsh 服务多版本：镜像源列表 / npm 安装 / 取消 / 删除 / 切换
-│   ├── market.go            # 插件市场（dshmarket）：检测 / 安装 / 更新 / 卸载
+│   ├── market.go            # 受管插件（dshmarket / dsh-fnos-advanced）：检测 / 安装 / 更新 / 卸载
 │   ├── install.go           # node-pty 自动安装
 │   ├── quickcmds.go         # 终端快捷指令持久化 API（命令内容加密落盘 + 旧明文迁移）
 │   ├── secret.go            # 命令内容加密：AES-256-GCM 信封 + 主密钥（master.key / HARNESS_MASTER_KEY）
@@ -615,6 +615,12 @@ const onBlur = (event) => {
 
 ---
 
+## 插件市场（dshmarket）与增强插件（dsh-fnos-advanced）
+
+> 两者是**同一种形态**的受管插件（普通 profile 插件、npm 包），检测/安装/更新/卸载
+> 共用 `backend/market.go` 的 `managedPlugin` 实现；下文以插件市场为例，增强插件
+> 只是把包名换成 `dsh-fnos-advanced`、状态槽位换成 `kind=advanced`。
+
 ## 插件市场（dshmarket）的安装与更新
 
 **形态变了**：过去 dshmarket 是被 CI 写进 dsh server 包 `dependencies` 的「内置 bundle」
@@ -647,7 +653,7 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
   - 检测失败时**保留上一次已知的版本号**（插件不会因为 dsh 重启而消失，清空比留着旧值
     更像谎话），只有从未查到过才没有值；
   - 首帧（进程刚起、还没检测过）也是 `unavailable=true`：没检测过 = 不知道。
-  实现见 `market.go` 的 `applyMarketLocalResult`（本地检测结果的**唯一**写入口）与
+  实现见 `market.go` 的 `applyPluginLocalResult`（本地检测结果的**唯一**写入口，市场与增强插件共用）与
   回归测试 `backend/market_unavailable_test.go`。
 - **dsh 一就绪就重查**（`RefreshMarketAfterDshStart`）：既然「查不到」是常态，就必须在
   能查的时刻补一次，否则「—」会一直挂到下一次小时级检测。触发点：控制台启动流水线收尾
@@ -671,7 +677,7 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
 - **顺序：先跑插件命令、再重启 dsh**。安装/卸载都是 pnpm 在 profile 目录里跑，
   会持有 profile 写锁（`profiles/web/package.json.lock`），**绝不能在它跑的时候停 dsh**
   ——停 dsh 会连带终止持有锁的那个进程组，留下陈旧锁，之后所有插件操作都会白等 120 秒
-  再失败。因此命令跑完才 `restartDshForMarket()`：先过忙守卫、停 dsh、等端口释放、
+  再失败。因此命令跑完才 `restartDshForPlugin()`：先过忙守卫、停 dsh、等端口释放、
   `startDshCaptured()` 拉起并重新换取会话凭据，再等它真正监听端口（上限 30 秒；进程退出
   立即判失败）让新 bundle 生效。
 - **进度**：阶段（安装中 / 卸载中）+ 插件命令的输出尾行 + 「正在重启 dsh 服务」，
@@ -753,7 +759,7 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 已装着才出现）。**不允许切回**：直接调接口 `Switch` 也会被拒（`err_version_deprecated`）。
 这样既不留下「看不见又删不掉」的 500 MB 目录，也不会把服务切回一个没人维护的版本。
 
-**版本数据的缓存策略**（`refreshVersions(force)` / `detectMarketLocal(force)`）：这两个来源
+**版本数据的缓存策略**（`refreshVersions(force)` / `detectPluginLocal(force)`）：这两个来源
 都是「慢查询」——前者要打三个镜像源，后者要起一个 `dsh plugin --profile web list` 子进程
 （1~3 秒）——因此都按**缓存优先**处理，`force=false` 时只要有缓存就直接返回、不联网：
 

@@ -1,6 +1,7 @@
 package main
 
-// market.go —— 插件市场（dshmarket）的检测、安装、卸载与更新。
+// market.go —— 受管插件（插件市场 dshmarket / 增强插件 dsh-fnos-advanced）的检测、
+// 安装、更新与卸载。
 //
 // **形态变了**：过去 dshmarket 是被 CI 写进 dsh server 包 dependencies 的「内置
 // bundle」（见 .github/workflows/server-build.yaml），控制台能做的是「就地把 server
@@ -12,6 +13,10 @@ package main
 //	安装：`dsh plugin --profile web add dshmarket@<最新版本号> --registry=<镜像源>`
 //	更新：同安装（再 add 一次最新版本号）
 //	卸载：`dsh plugin --profile web remove dshmarket`
+//
+// 增强插件 dsh-fnos-advanced（飞牛目录选择器）是**同一形态的第二个受管插件**：它同样
+// 发布在 npm、同样由 `dsh plugin add|remove` 安装卸载，因此这里用 managedPlugin 把
+// 「包名 / 状态槽位 / 更新日志来源」参数化，两套动作共用同一份实现与同一套镜像源回退。
 //
 // 镜像源与 dsh 版本安装完全一致（见 server.go 的 npmMirrors）：阿里云 → 腾讯云 →
 // 华为云，5 秒无响应换下一个，不重试，都失败就报错，不试官方源。
@@ -26,7 +31,7 @@ package main
 //  3. 【不自己下载 tarball】也不做完整性校验：pnpm 会按 registry 元数据里的 integrity
 //     校验它下载的字节，控制台再下一份只会重复劳动。
 //  4. 【控制台要能处理「压根没装」】市场面板自带的自更新入口只适用于「已经装好」的
-//     情况；「未安装 → 装上 latest」这条路径只有控制台能提供。
+//     情况；「未安装 → 装上最新版」这条路径只有控制台能提供（增强插件也一样）。
 
 import (
 	"encoding/json"
@@ -40,8 +45,10 @@ import (
 )
 
 const (
-	// marketPackageName 是市场的 npm 包名（与 profile bundles 里的名字一致）。
+	// marketPackageName 是插件市场的 npm 包名（与 profile bundles 里的名字一致）。
 	marketPackageName = "dshmarket"
+	// advancedPackageName 是增强插件（飞牛目录选择器）的 npm 包名。
+	advancedPackageName = "dsh-fnos-advanced"
 	// marketProfile 是控制台管理的 dsh profile 名（与 `dsh web` 用的那个一致）。
 	marketProfile = "web"
 	// marketCmdTimeout 是单次 `dsh plugin …` 命令的上限：pnpm 要下载并构建依赖，
@@ -57,11 +64,40 @@ const (
 	marketBackupPrefix = "market-"
 )
 
+// managedPlugin 描述一个由控制台管理的 profile 插件（npm 包）。
+//
+// 两个受管插件（市场 / 增强插件）的形态完全一致，差异只有：状态写到哪个 kind、
+// npm 包名是什么、更新日志取自哪个仓库与 tag。把这三项参数化后，检测/安装/更新/
+// 卸载都只有一份实现 —— 别再为某个插件复制一份命令执行与镜像回退逻辑。
+type managedPlugin struct {
+	kind      updateKind
+	pkg       string
+	notesRepo releaseRepo         // 更新日志来源仓库
+	notesTag  func(string) string // 版本号 → release tag
+}
+
+var (
+	marketPlugin = managedPlugin{
+		kind:      updateKindMarket,
+		pkg:       marketPackageName,
+		notesRepo: marketReleaseRepo,
+		notesTag:  marketReleaseTag,
+	}
+	advancedPlugin = managedPlugin{
+		kind:      updateKindAdvanced,
+		pkg:       advancedPackageName,
+		notesRepo: advancedReleaseRepo,
+		notesTag:  advancedReleaseTag,
+	}
+	// managedPlugins 是所有受管插件（刷新、检测与后台任务按这个顺序遍历）。
+	managedPlugins = []managedPlugin{marketPlugin, advancedPlugin}
+)
+
 // --- 检测：`dsh plugin --profile web list` ---
 
-// marketInstalled 通过 `dsh plugin --profile web list` 判断市场装没装、装的哪一版。
-// 返回 ok=false 表示输出里没有 dshmarket（= 未安装）。
-func (m *UpdateManager) marketInstalled() (version string, ok bool, err error) {
+// pluginInstalled 通过 `dsh plugin --profile web list` 判断某个受管插件装没装、装的哪一版。
+// 返回 ok=false 表示输出里没有该包（= 未安装）。
+func (m *UpdateManager) pluginInstalled(p managedPlugin) (version string, ok bool, err error) {
 	if m.dsh == nil {
 		return "", false, uiErr("err_dsh_manager_unavailable", "dsh 管理器不可用")
 	}
@@ -73,7 +109,7 @@ func (m *UpdateManager) marketInstalled() (version string, ok bool, err error) {
 	if err != nil {
 		// 「本机没有选中的 dsh 版本」是最常见的失败原因，而且它的内部错误文本是英文的
 		// （会被日志打印，见 AGENTS 规则 7）—— 这里换成中文话术，用户才看得懂该去做什么。
-		// 这条错误只进界面（MarketDir 诊断 / 弹窗），不进日志。
+		// 这条错误只进界面（弹窗诊断），不进日志。
 		if errors.Is(err, errNoDshVersion) {
 			return "", false, uiErr("err_no_dsh_version", "未安装 dsh 服务：请先在控制台「概览」页的版本列表里下载一个版本，再点「切换」")
 		}
@@ -83,72 +119,88 @@ func (m *UpdateManager) marketInstalled() (version string, ok bool, err error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", false, uiErr("err_market_detect_failed", "检测插件市场失败（dsh plugin --profile %s list）: %s", "profile", marketProfile, "detail", msg)
+		return "", false, uiErr("err_plugin_detect_failed",
+			"检测插件 %s 失败（dsh plugin --profile %s list）: %s",
+			"pkg", p.pkg, "profile", marketProfile, "detail", msg)
 	}
-	for _, p := range parsePluginList(out) {
-		if p.Name == marketPackageName {
-			return p.Version, true, nil
+	for _, pl := range parsePluginList(out) {
+		if pl.Name == p.pkg {
+			return pl.Version, true, nil
 		}
 	}
 	return "", false, nil
 }
 
-// marketLocalSnapshot 是「本地检测」的结果（不联网）。
+// marketInstalled 是插件市场的检测入口（保留给既有测试与调用方）。
+func (m *UpdateManager) marketInstalled() (string, bool, error) {
+	return m.pluginInstalled(marketPlugin)
+}
+
+// marketLocalSnapshot 是「本地检测」的结果（不联网）。名字沿用历史命名，现在两个受管
+// 插件共用这一种快照。
 //
 // Err 非空表示**查不了**（dsh 未就绪 / 没选中版本 / 命令报错），与「查到了，没装」
 // （Err == nil 且 Version == ""）是两件事 —— 界面上前者显示「—」、后者显示「未安装」，
-// 见 applyMarketLocalResult。
+// 见 applyPluginLocalResult。
 type marketLocalSnapshot struct {
 	Version string
 	Diag    string // 检测失败/未安装的原因（诊断用，进 MarketDir 字段）
 	Err     error
 }
 
-// detectMarketLocal 取「本机装的是哪一版」。
+// detectPluginLocal 取「本机装的是哪一版」。
 //
-// force=false 时**优先吃缓存**：这次检测要起一个 `dsh plugin --profile web list` 子进程
-// （1~3 秒），而它被调用的场合比「插件真的变了」多得多（弹窗打开、诊断接口、状态重算），
-// 每次都跑一遍既慢又容易和 profile 写锁打架。
+// force=false 时**优先吃缓存**（按 kind 分开缓存）：这次检测要起一个
+// `dsh plugin --profile web list` 子进程（1~3 秒），而它被调用的场合比「插件真的变了」
+// 多得多（弹窗打开、诊断接口、状态重算），每次都跑一遍既慢又容易和 profile 写锁打架。
 //
-// 重跑的入口（force=true）：市场安装/卸载完成（结果变了，必须重查）、后台自动检测、
+// 重跑的入口（force=true）：插件安装/卸载完成（结果变了，必须重查）、后台自动检测、
 // 手动「检查更新」，以及「dsh 刚就绪」的时刻（见 RefreshMarketAfterDshStart）。
-func (m *UpdateManager) detectMarketLocal(force bool) marketLocalSnapshot {
+func (m *UpdateManager) detectPluginLocal(p managedPlugin, force bool) marketLocalSnapshot {
 	if !force {
 		m.marketLocalMu.Lock()
-		if c := m.marketLocalCache; c != nil {
+		if c := m.pluginLocalCache[p.kind]; c != nil {
 			snap := *c
 			m.marketLocalMu.Unlock()
 			return snap
 		}
 		m.marketLocalMu.Unlock()
 	}
-	snap := m.probeMarketLocal()
+	snap := m.probePluginLocal(p)
 	m.marketLocalMu.Lock()
 	if snap.Err != nil {
 		// 「查不了」的结果不进缓存：缓存只装**确定的结论**（装了哪一版 / 没装）。把失败
 		// 缓存住，界面上的「—」就会一直挂到下一次触发（最坏一小时）；而重新探测很便宜 ——
 		// 没选中版本时立刻返回，否则也只是一个 1~3 秒的只读子进程。
-		m.marketLocalCache = nil
+		delete(m.pluginLocalCache, p.kind)
 	} else {
-		m.marketLocalCache = &snap
+		if m.pluginLocalCache == nil {
+			m.pluginLocalCache = make(map[updateKind]*marketLocalSnapshot)
+		}
+		m.pluginLocalCache[p.kind] = &snap
 	}
 	m.marketLocalMu.Unlock()
 	return snap
 }
 
-// probeMarketLocal 真正执行一次本地检测（起子进程，不联网）。
-func (m *UpdateManager) probeMarketLocal() marketLocalSnapshot {
-	v, ok, err := m.marketInstalled()
+// detectMarketLocal 是插件市场的本地检测入口（保留给既有测试与调用方）。
+func (m *UpdateManager) detectMarketLocal(force bool) marketLocalSnapshot {
+	return m.detectPluginLocal(marketPlugin, force)
+}
+
+// probePluginLocal 真正执行一次本地检测（起子进程，不联网）。
+func (m *UpdateManager) probePluginLocal(p managedPlugin) marketLocalSnapshot {
+	v, ok, err := m.pluginInstalled(p)
 	if err != nil {
 		return marketLocalSnapshot{Diag: err.Error(), Err: err}
 	}
 	if !ok {
-		return marketLocalSnapshot{Diag: fmt.Sprintf("`dsh plugin --profile %s list` 未列出 %s", marketProfile, marketPackageName)}
+		return marketLocalSnapshot{Diag: fmt.Sprintf("`dsh plugin --profile %s list` 未列出 %s", marketProfile, p.pkg)}
 	}
 	return marketLocalSnapshot{Version: v}
 }
 
-// applyMarketLocalResult 把一次本地检测结果写进市场状态。
+// applyPluginLocalResult 把一次本地检测结果写进受管插件的状态。
 //
 // 两条铁律（错了界面就会说谎）：
 //   - **查不了 ≠ 没装**：snap.Err != nil（dsh 未就绪、没选中版本、命令报错）时置
@@ -158,7 +210,7 @@ func (m *UpdateManager) probeMarketLocal() marketLocalSnapshot {
 //     把它清成空 —— 那比留着旧值更像谎话（插件不会因为 dsh 重启就消失）。
 //
 // HasUpdate（红点）也在这里统一算：只有「已知本地版本」且「最新版更高」时才亮。
-func applyMarketLocalResult(st *UpdateStatus, snap marketLocalSnapshot) {
+func applyPluginLocalResult(st *UpdateStatus, snap marketLocalSnapshot) {
 	st.Unavailable = snap.Err != nil
 	if snap.Err == nil {
 		st.LocalVersion = snap.Version
@@ -170,32 +222,49 @@ func applyMarketLocalResult(st *UpdateStatus, snap marketLocalSnapshot) {
 		compareVersion(st.LatestVersion, st.LocalVersion) > 0
 }
 
-// refreshMarketLocal 刷新本地检测并把「当前装的是哪一版」写进市场状态。
+// applyMarketLocalResult 是插件市场的写入口（保留给既有测试）。
+func applyMarketLocalResult(st *UpdateStatus, snap marketLocalSnapshot) {
+	applyPluginLocalResult(st, snap)
+}
+
+// refreshPluginLocal 刷新本地检测并把「当前装的是哪一版」写进状态。
 // force=false 时吃缓存（启动时先让界面有版本号可用，不额外起子进程）。
-// 保留 LatestVersion 的既有值（HasUpdate 由 applyMarketLocalResult 统一算）。
-func (m *UpdateManager) refreshMarketLocal(force bool) marketLocalSnapshot {
-	snap := m.detectMarketLocal(force)
-	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
-		st.Kind = updateKindMarket
-		applyMarketLocalResult(st, snap)
+// 保留 LatestVersion 的既有值（HasUpdate 由 applyPluginLocalResult 统一算）。
+func (m *UpdateManager) refreshPluginLocal(p managedPlugin, force bool) marketLocalSnapshot {
+	snap := m.detectPluginLocal(p, force)
+	m.updateStatus(p.kind, func(st *UpdateStatus) {
+		st.Kind = p.kind
+		applyPluginLocalResult(st, snap)
 	})
 	return snap
 }
 
+// refreshMarketLocal 是插件市场的本地刷新入口（保留给既有测试）。
+func (m *UpdateManager) refreshMarketLocal(force bool) marketLocalSnapshot {
+	return m.refreshPluginLocal(marketPlugin, force)
+}
+
+// refreshManagedPluginsLocal 刷新所有受管插件的本地版本（dsh 刚就绪时用）。
+func (m *UpdateManager) refreshManagedPluginsLocal(force bool) {
+	for _, p := range managedPlugins {
+		m.refreshPluginLocal(p, force)
+	}
+}
+
 // --- 版本检测：npm 镜像源 ---
 
-// marketLatest 依次尝试各镜像源的 dshmarket 元数据，返回**版本号最高**的那一版
+// pluginLatest 依次尝试各镜像源的元数据，返回**版本号最高**的那一版
 // （`newestVersion`）与命中的镜像源日志标识（英文标识；界面文案要用 npmMirror.Name，
 // 别在这里返回中文显示名 —— 它会被调用方写进日志）。
 //
-// 刻意不看 `dist-tags.latest`：市场装的是「实际发布的最新版本号」那一版，而不是发布者
+// 刻意不看 `dist-tags.latest`：装的是「实际发布的最新版本号」那一版，而不是发布者
 // 手动指到哪一版的标签（标签可能滞后、可能指向稳定线而版本集合里已有更新的预览版）。
-// 安装时同一条链路的 `add dshmarket@<该版本>` 用的是这里返回的精确版本号。
-func (m *UpdateManager) marketLatest() (string, string, error) {
+// 安装时同一条链路的 `add <pkg>@<该版本>` 用的是这里返回的精确版本号。
+func (m *UpdateManager) pluginLatest(p managedPlugin) (string, string, error) {
 	client := mirrorClient()
 	var lastErr error
 	for _, mirror := range npmMirrors {
-		versions, _, err := fetchMirrorPackument(client, mirror.URL, marketPackageName)
+		versions, _, err := fetchMirrorPackument(client, mirror.URL, p.pkg)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
 			continue
@@ -208,29 +277,34 @@ func (m *UpdateManager) marketLatest() (string, string, error) {
 	if lastErr == nil {
 		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
 	}
-	return "", "", fmt.Errorf("获取 %s 最新版本失败（已尝试镜像源：%s）: %v", marketPackageName, mirrorLogNames(), lastErr)
+	return "", "", fmt.Errorf("获取 %s 最新版本失败（已尝试镜像源：%s）: %v", p.pkg, mirrorLogNames(), lastErr)
 }
 
-// refreshMarketStatus 做一次完整的市场检测：本地检测 + 镜像源最新版。
-// 任何一步失败都只写进市场的 Error，不影响 harness / dsh 两条更新链路。
-func (m *UpdateManager) refreshMarketStatus() {
+// marketLatest 是插件市场的最新版检测入口（保留给既有测试与调用方）。
+func (m *UpdateManager) marketLatest() (string, string, error) {
+	return m.pluginLatest(marketPlugin)
+}
+
+// refreshPluginStatus 做一次完整的受管插件检测：本地检测 + 镜像源最新版。
+// 任何一步失败都只写进该插件自己的 Error，不影响其它更新链路。
+func (m *UpdateManager) refreshPluginStatus(p managedPlugin) {
 	// 检测跑一趟本来就慢（子进程 + 镜像源），这里强制重查本地版本，保证结论是当下的。
-	snap := m.detectMarketLocal(true)
+	snap := m.detectPluginLocal(p, true)
 	now := time.Now()
-	latest, _, err := m.marketLatest()
+	latest, _, err := m.pluginLatest(p)
 	// 更新日志：与 harness 同一套做法 —— 只取**要装的那一版**（最新版）的 release 正文，
-	// 按 tag 单次请求（`v<版本>`，见 marketReleaseTag），不做整仓索引。
+	// 按 tag 单次请求（见 managedPlugin.notesTag），不做整仓索引。
 	// 只在「确实有更新」时才取：没更新时弹窗不显示日志块，取回来也没人看，白打一次 GitHub。
 	// 必须在这里取 —— updateStatus 的回调在 m.mu 里执行，不能在里面发网络请求。
 	notes := ""
 	if err == nil && latest != "" && snap.Version != "" && compareVersion(latest, snap.Version) > 0 {
-		notes = fetchReleaseNotes(m.httpClientForUpdate(), marketReleaseRepo, marketReleaseTag(latest))
+		notes = fetchReleaseNotes(m.httpClientForUpdate(), p.notesRepo, p.notesTag(latest))
 	}
-	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
-		st.Kind = updateKindMarket
+	m.updateStatus(p.kind, func(st *UpdateStatus) {
+		st.Kind = p.kind
 		st.CheckedAt = now
 		// 本地那一半走同一个入口：查不了 → Unavailable（界面「—」）并保留旧版本号。
-		applyMarketLocalResult(st, snap)
+		applyPluginLocalResult(st, snap)
 		st.ReleaseNotes = notes
 		if err != nil {
 			st.LatestVersion = ""
@@ -245,19 +319,32 @@ func (m *UpdateManager) refreshMarketStatus() {
 	})
 }
 
-// marketInfo 返回供 /api/market/info 使用的诊断快照：只读、不联网、不起子进程
+// refreshMarketStatus 是插件市场的完整检测入口（保留给既有测试与调用方）。
+func (m *UpdateManager) refreshMarketStatus() {
+	m.refreshPluginStatus(marketPlugin)
+}
+
+// refreshManagedPluginStatuses 刷新所有受管插件的状态（含镜像源最新版）。
+func (m *UpdateManager) refreshManagedPluginStatuses() {
+	for _, p := range managedPlugins {
+		m.refreshPluginStatus(p)
+	}
+}
+
+// pluginInfo 返回受管插件的诊断快照：只读、不联网、不起子进程
 // （本地检测吃缓存；没有缓存时才会真的查一次）。
 //
 // available=false 表示**没查到**（dsh 未就绪 / 命令报错），此时 installed=false 只表示
 // 「不知道」，不是「没装」—— 调用方别把它当否命题用。
-func (m *UpdateManager) marketInfo() map[string]interface{} {
-	snap := m.detectMarketLocal(false)
-	st := m.getStatus(updateKindMarket)
+func (m *UpdateManager) pluginInfo(p managedPlugin) map[string]interface{} {
+	snap := m.detectPluginLocal(p, false)
+	st := m.getStatus(p.kind)
 	available := snap.Err == nil
 	updatable := available && snap.Version != "" && st.LatestVersion != "" &&
 		compareVersion(st.LatestVersion, snap.Version) > 0
 	return map[string]interface{}{
 		"ok":        true,
+		"pkg":       p.pkg,
 		"available": available,
 		"installed": available && snap.Version != "",
 		"version":   snap.Version,
@@ -268,6 +355,11 @@ func (m *UpdateManager) marketInfo() map[string]interface{} {
 	}
 }
 
+// marketInfo 返回供 /api/market/info 使用的诊断快照。
+func (m *UpdateManager) marketInfo() map[string]interface{} {
+	return m.pluginInfo(marketPlugin)
+}
+
 // --- 安装 / 更新 / 卸载 ---
 
 // marketCommand 组装 `dsh plugin --profile web <args…>`（不含 registry 参数）。
@@ -275,7 +367,7 @@ func marketCommand(args []string) []string {
 	return append([]string{"plugin", "--profile", marketProfile}, args...)
 }
 
-// runMarketPluginCmd 以**镜像源逐个尝试**的方式执行一次市场安装/更新命令
+// runPluginCmdFor 以**镜像源逐个尝试**的方式执行一次受管插件的安装/更新命令
 // （`add`，它会访问 registry）。
 //
 // registry 通过 `--registry=<镜像源>` 传，只要整条命令失败（元数据取不到、tarball 下载
@@ -283,41 +375,53 @@ func marketCommand(args []string) []string {
 //
 // 注意：只有「会访问 registry 的命令」能走这里 —— pnpm 的 `add` 支持 `--registry`，
 // 而 `remove` / `list` 这类命令**不认这个选项**（会直接 `Unknown option: 'registry'`），
-// 它们走 runMarketPluginCmdOnce。
-func (m *UpdateManager) runMarketPluginCmd(args []string) error {
+// 它们走 runPluginCmdOnceFor。
+func (m *UpdateManager) runPluginCmdFor(p managedPlugin, args []string) error {
 	var lastErr error
 	for _, mirror := range npmMirrors {
 		full := append(marketCommand(args), "--registry="+mirror.URL)
-		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+		m.updateStatus(p.kind, func(st *UpdateStatus) {
 			// 界面进度文案用中文显示名；日志用下面的 mirrorLogName()（英文标识）。
-			setMsgFields(&st.Message, &st.MessageRef, "msg_market_from_mirror",
-				"正在从 %s 处理 %s", "mirror", mirror.Name, "pkg", marketPackageName)
+			setMsgFields(&st.Message, &st.MessageRef, "msg_plugin_from_mirror",
+				"正在从 %s 处理 %s", "mirror", mirror.Name, "pkg", p.pkg)
 		})
-		logInfo("[market] running dsh %s (via %s)", strings.Join(full, " "), mirror.mirrorLogName())
+		logInfo("%s running dsh %s (via %s)", updateLogTag(p.kind), strings.Join(full, " "), mirror.mirrorLogName())
 		out, err := m.dsh.RunPluginCommand(marketCmdTimeout, full)
 		if err == nil {
 			return nil
 		}
 		lastErr = fmt.Errorf("%s: %v", mirror.mirrorLogName(), tailLines(out, 3))
-		logWarn("[market] dsh plugin command via %s failed: %v", mirror.mirrorLogName(), err)
+		logWarn("%s dsh plugin command via %s failed: %v", updateLogTag(p.kind), mirror.mirrorLogName(), err)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
 	}
-	return uiErr("err_market_op_failed", "插件市场操作失败（%s 均失败，不重试、不使用官方源）: %s", "mirrors", mirrorLogNames(), "detail", lastErr.Error())
+	return uiErr("err_plugin_op_failed",
+		"插件 %s 操作失败（%s 均失败，不重试、不使用官方源）: %s",
+		"pkg", p.pkg, "mirrors", mirrorLogNames(), "detail", lastErr.Error())
 }
 
-// runMarketPluginCmdOnce 执行一次**与 registry 无关**的市场命令（`remove` 等）：
+// runMarketPluginCmd 是插件市场的镜像回退执行入口（保留给既有测试与调用方）。
+func (m *UpdateManager) runMarketPluginCmd(args []string) error {
+	return m.runPluginCmdFor(marketPlugin, args)
+}
+
+// runPluginCmdOnceFor 执行一次**与 registry 无关**的受管插件命令（`remove` 等）：
 // 不带 `--registry`、不按镜像源回退（卸载既不下载也不解析依赖，没有任何「换个源再试」
 // 的意义），失败就把 dsh/pnpm 的原话报出去。
-func (m *UpdateManager) runMarketPluginCmdOnce(args []string) error {
+func (m *UpdateManager) runPluginCmdOnceFor(p managedPlugin, args []string) error {
 	full := marketCommand(args)
-	logInfo("[market] running dsh %s", strings.Join(full, " "))
+	logInfo("%s running dsh %s", updateLogTag(p.kind), strings.Join(full, " "))
 	out, err := m.dsh.RunPluginCommand(marketCmdTimeout, full)
 	if err != nil {
-		return uiErr("err_market_cmd_failed", "dsh %s 失败: %s", "cmd", strings.Join(full, " "), "detail", tailLines(out, 3))
+		return uiErr("err_plugin_cmd_failed", "dsh %s 失败: %s", "cmd", strings.Join(full, " "), "detail", tailLines(out, 3))
 	}
 	return nil
+}
+
+// runMarketPluginCmdOnce 是插件市场的单次执行入口（保留给既有测试与调用方）。
+func (m *UpdateManager) runMarketPluginCmdOnce(args []string) error {
+	return m.runPluginCmdOnceFor(marketPlugin, args)
 }
 
 // tailLines 取输出结尾若干行非空内容（pnpm 的诊断通常在结尾），用于错误信息。
@@ -335,81 +439,104 @@ func tailLines(out string, n int) string {
 	return strings.Join(kept, " | ")
 }
 
-// marketPluginCmdFn 执行一次「镜像源逐个尝试」的 `dsh plugin …`（变量形式便于
+// pluginCmdFn 执行一次「镜像源逐个尝试」的 `dsh plugin …`（变量形式便于
 // 单测注入，不必真的起 dsh / pnpm）。
-var marketPluginCmdFn = func(m *UpdateManager, args []string) error {
-	return m.runMarketPluginCmd(args)
+var pluginCmdFn = func(m *UpdateManager, p managedPlugin, args []string) error {
+	return m.runPluginCmdFor(p, args)
 }
 
-// resolveMarketVersion 取「实际最新的一版」的精确版本号（镜像源，非 dist-tags）。
+// resolvePluginVersion 取「实际最新的一版」的精确版本号（镜像源，非 dist-tags）。
 //
 // 安装前现取一次（而不是复用状态里那份可能过期的 LatestVersion）：状态是最近一次检测的
 // 快照，用户可能在检测之后很久才点安装。
-func (m *UpdateManager) resolveMarketVersion() (string, error) {
-	version, mirror, err := m.marketLatest()
+func (m *UpdateManager) resolvePluginVersion(p managedPlugin) (string, error) {
+	version, mirror, err := m.pluginLatest(p)
 	if err != nil {
 		return "", err
 	}
-	logInfo("[market] newest %s version is %s (via %s)", marketPackageName, version, mirror)
+	logInfo("%s newest %s version is %s (via %s)", updateLogTag(p.kind), p.pkg, version, mirror)
 	return version, nil
 }
 
 // InstallMarket 安装插件市场的最新版本号那一版。异步执行，进度经市场状态推送。
 func (m *UpdateManager) InstallMarket() error {
-	return m.runMarketOp("安装", "market install", m.addNewestMarketCmd)
+	return m.installPlugin(marketPlugin)
 }
 
 // UpdateMarket 把插件市场更新到最新版本号那一版（语义上就是再装一次那个精确版本）。
 func (m *UpdateManager) UpdateMarket() error {
-	return m.runMarketOp("更新", "market update", m.addNewestMarketCmd)
+	return m.installPlugin(marketPlugin)
 }
 
-// addNewestMarketCmd 组装「装到最新版本号」这条命令：先解析出精确版本号，再交给
-// 镜像源逐个尝试的执行器（`add dshmarket@<版本>`）。
+// InstallAdvanced 安装增强插件的最新版本号那一版（异步，进度经 SSE 推送）。
+func (m *UpdateManager) InstallAdvanced() error {
+	return m.installPlugin(advancedPlugin)
+}
+
+// UpdateAdvanced 把增强插件更新到最新版本号那一版。
+func (m *UpdateManager) UpdateAdvanced() error {
+	return m.installPlugin(advancedPlugin)
+}
+
+// installPlugin 是「装/更新到最新版本号」的统一入口。
+func (m *UpdateManager) installPlugin(p managedPlugin) error {
+	return m.runPluginOp(p, "installing", "install", func() error {
+		return m.addNewestPluginCmd(p)
+	})
+}
+
+// addNewestPluginCmd 组装「装到最新版本号」这条命令：先解析出精确版本号，再交给
+// 镜像源逐个尝试的执行器（`add <pkg>@<版本>`）。
 //
 // 用精确版本而不是 `@latest`：`@latest` 让 pnpm 自己按标签解析，标签滞后时会装到旧版本；
 // 精确版本还能让「某个镜像源还没同步到这一版」表现为该次尝试失败 → 自动换下一个镜像源。
-func (m *UpdateManager) addNewestMarketCmd() error {
-	version, err := m.resolveMarketVersion()
+func (m *UpdateManager) addNewestPluginCmd(p managedPlugin) error {
+	version, err := m.resolvePluginVersion(p)
 	if err != nil {
 		return err
 	}
-	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+	m.updateStatus(p.kind, func(st *UpdateStatus) {
 		st.LatestVersion = version
-		setMsgFields(&st.Message, &st.MessageRef, "msg_market_installing",
-			"正在安装 %s@%s", "pkg", marketPackageName, "version", version)
+		setMsgFields(&st.Message, &st.MessageRef, "msg_plugin_installing",
+			"正在安装 %s@%s", "pkg", p.pkg, "version", version)
 	})
-	return marketPluginCmdFn(m, []string{"add", marketPackageName + "@" + version})
+	return pluginCmdFn(m, p, []string{"add", p.pkg + "@" + version})
 }
 
 // RemoveMarket 卸载插件市场。
 //
-// 卸载走 runMarketPluginCmdOnce：**不带 `--registry`**（pnpm 的 remove 没有这个选项）、
+// 卸载走 runPluginCmdOnceFor：**不带 `--registry`**（pnpm 的 remove 没有这个选项）、
 // 也不按镜像源回退 —— 「装的是哪个源」与卸载无关。
 func (m *UpdateManager) RemoveMarket() error {
-	return m.runMarketOp("卸载", "market remove", func() error {
-		return m.runMarketPluginCmdOnce([]string{"remove", marketPackageName})
+	return m.removePlugin(marketPlugin)
+}
+
+// RemoveAdvanced 卸载增强插件。
+func (m *UpdateManager) RemoveAdvanced() error {
+	return m.removePlugin(advancedPlugin)
+}
+
+// removePlugin 是「卸载」的统一入口。
+func (m *UpdateManager) removePlugin(p managedPlugin) error {
+	return m.runPluginOp(p, "removing", "remove", func() error {
+		return m.runPluginCmdOnceFor(p, []string{"remove", p.pkg})
 	})
 }
 
-// runMarketOp 串行执行一次市场操作：置阶段 → 跑命令 → 重启 dsh → 刷新状态。
+// runPluginOp 串行执行一次受管插件操作：置阶段 → 跑命令 → 重启 dsh → 刷新状态。
 //
-// action 是给用户看的中文动作名（拒绝并发操作时的提示、状态里用），actionLog 是**日志**
-// 里的英文动作名 —— 日志一律英文（见 AGENTS 第 4 节规则 7），别把 action 传进日志。
-func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) error {
+// phase 是状态机里的阶段名（installing / removing），actionLog 是**日志**里的英文
+// 动作名 —— 日志一律英文（见 AGENTS 第 4 节规则 7），别把中文动作名传进去。
+func (m *UpdateManager) runPluginOp(p managedPlugin, phase, actionLog string, run func() error) error {
 	if !m.applying.TryLock() {
-		return busyf("err_market_busy", "正在执行其它更新/插件操作，请等它结束后再重试")
+		return busyf("err_plugin_busy", "正在执行其它更新/插件操作，请等它结束后再重试")
 	}
 	// 本次操作的序号：随状态一路带给前端，作为「结果只提示一次」的去重键
 	// （否则「装成功」之后再一次「装成功」的 phase 完全相同，会被静默吞掉）。
-	seq := m.marketOpSeq.Add(1)
+	seq := m.pluginOpSeq.Add(1)
 	go func() {
 		defer m.applying.Unlock()
-		phase := "installing"
-		if action == "卸载" {
-			phase = "removing"
-		}
-		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+		m.updateStatus(p.kind, func(st *UpdateStatus) {
 			st.Seq = seq
 			st.Phase = phase
 			setErrFields(&st.Error, &st.ErrorRef, nil)
@@ -420,11 +547,11 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 		if err == nil {
 			// 插件命令成功：bundle 选择已经落盘（安装会默认启用新 bundle），但正在跑的
 			// dsh 进程不会凭空装配它 —— 重启一次让它生效。
-			err = m.restartDshForMarket()
+			err = m.restartDshForPlugin(p)
 		}
 		if err != nil {
-			logError("[market] %s failed: %v", actionLog, err)
-			m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+			logError("%s %s failed: %v", updateLogTag(p.kind), actionLog, err)
+			m.updateStatus(p.kind, func(st *UpdateStatus) {
 				st.Seq = seq
 				st.Phase = ""
 				setErrFields(&st.Error, &st.ErrorRef, err)
@@ -432,13 +559,13 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 			})
 			return
 		}
-		logInfo("[market] %s finished", actionLog)
-		// force=true：刚装/卸完市场，本地版本确实变了，必须重查（不能吃缓存）。
+		logInfo("%s %s finished", updateLogTag(p.kind), actionLog)
+		// force=true：刚装/卸完，本地版本确实变了，必须重查（不能吃缓存）。
 		// 这次重查已经把 LocalVersion/Unavailable/HasUpdate 都写好了（含「查不了时保留
 		// 上一次已知版本」的语义）—— 这里只补终态字段，别再用 snap.Version 覆盖一遍：
-		// 那会把一次失败重查的结果当成「未安装」写回去（见 applyMarketLocalResult）。
-		m.refreshMarketLocal(true)
-		m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+		// 那会把一次失败重查的结果当成「未安装」写回去（见 applyPluginLocalResult）。
+		m.refreshPluginLocal(p, true)
+		m.updateStatus(p.kind, func(st *UpdateStatus) {
 			st.Seq = seq
 			st.Phase = "done"
 			setErrFields(&st.Error, &st.ErrorRef, nil)
@@ -448,53 +575,69 @@ func (m *UpdateManager) runMarketOp(action, actionLog string, run func() error) 
 	return nil
 }
 
-// DoneMarket 清掉一次市场操作的终态（前端收起结果提示时调用）。
+// DoneMarket 清掉一次插件市场操作的终态（前端收起结果提示时调用）。
 func (m *UpdateManager) DoneMarket() {
-	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
+	m.donePlugin(marketPlugin)
+}
+
+// DoneAdvanced 清掉一次增强插件操作的终态。
+func (m *UpdateManager) DoneAdvanced() {
+	m.donePlugin(advancedPlugin)
+}
+
+// donePlugin 清掉某个受管插件操作的终态。
+func (m *UpdateManager) donePlugin(p managedPlugin) {
+	m.updateStatus(p.kind, func(st *UpdateStatus) {
 		st.Phase = ""
 		setMsgFields(&st.Message, &st.MessageRef, "", "")
 		setErrFields(&st.Error, &st.ErrorRef, nil)
 	})
 }
 
-// restartDshForMarket 重启 dsh 让插件市场的安装/卸载生效。
+// restartDshForPlugin 重启 dsh 让受管插件的安装/卸载生效。
 //
 // 顺序要点：插件命令已经跑完（profile 写锁已释放），此时才停 dsh；停之前仍过一次忙
 // 守卫，因为可能正好有市场面板发起的另一次插件操作在跑（那一次会被停机连带杀掉，
 // 并留下陈旧锁）。
-func (m *UpdateManager) restartDshForMarket() error {
-	m.updateStatus(updateKindMarket, func(st *UpdateStatus) {
-		setMsgFields(&st.Message, &st.MessageRef, "msg_market_restarting", "正在重启 dsh 服务以使插件市场变更生效")
+func (m *UpdateManager) restartDshForPlugin(p managedPlugin) error {
+	m.updateStatus(p.kind, func(st *UpdateStatus) {
+		setMsgFields(&st.Message, &st.MessageRef, "msg_plugin_restarting",
+			"正在重启 dsh 服务以使插件变更生效（%s）", "pkg", p.pkg)
 	})
 	if err := m.replaceBusyGuard("重启 dsh 服务"); err != nil {
 		return err
 	}
 	if err := dshStopFn(m); err != nil {
-		logWarn("[market] failed to stop dsh before restart: %v", err)
+		logWarn("%s failed to stop dsh before restart: %v", updateLogTag(p.kind), err)
 	}
 	dshPortFreeFn(m, 30*time.Second)
 	if err := startDshCapturedFn(m); err != nil {
-		return fmt.Errorf("重启 dsh 服务失败（插件市场的变更已落盘，重启控制台后生效）: %w", err)
+		return fmt.Errorf("重启 dsh 服务失败（插件变更已落盘，重启控制台后生效）: %w", err)
 	}
 	// 等它真的开始监听：起不来时把错误抛给用户，而不是让用户点进 dsh 界面看到等待页。
 	switch marketReadyFn(m, 30*time.Second) {
 	case marketWaitReady:
 		return nil
 	case marketWaitExited:
-		return fmt.Errorf("dsh 服务重启后立即退出（可能是新装的插件市场与当前 dsh 版本不兼容），请查看控制台日志")
+		return fmt.Errorf("dsh 服务重启后立即退出（可能是新插件与当前 dsh 版本不兼容），请查看控制台日志")
 	default:
 		return fmt.Errorf("dsh 服务重启后 30 秒内没有就绪，请查看控制台日志")
 	}
 }
 
-// --- 可注入的 dsh 启停钩子（便于对市场操作做单元测试） ---
+// restartDshForMarket 是插件市场的重启入口（保留给既有测试与调用方）。
+func (m *UpdateManager) restartDshForMarket() error {
+	return m.restartDshForPlugin(marketPlugin)
+}
+
+// --- 可注入的 dsh 启停钩子（便于对插件操作做单元测试） ---
 //
 // 生产实现直接调用既有方法：Stop 走精准 PID/进程组终止，start 走 startDshCaptured
 // （它内部异步 WaitToken + ExchangeToken，即「拉起服务后换 token」这一步）。
 var (
 	dshStopFn = func(m *UpdateManager) error { return m.dsh.Stop() }
 	// startDshCapturedFn 拉起 dsh 并异步换取会话凭据。所有「重启/换版本后必须重新拿
-	// 凭据」的路径都经它（市场变更生效、dsh 版本切换），变量形式便于单测注入。
+	// 凭据」的路径都经它（插件变更生效、dsh 版本切换），变量形式便于单测注入。
 	startDshCapturedFn = func(m *UpdateManager) error { return m.startDshCaptured() }
 	marketReadyFn      = func(m *UpdateManager, max time.Duration) marketWaitResult {
 		return waitMarketDsh(m, max)
@@ -599,12 +742,13 @@ var marketBusyFn = func(m *UpdateManager) (bool, string) {
 // 的 profile 写锁（`profiles/web/package.json.lock`）。那把锁只在正常收尾时删除，
 // 且 dsh 侧**不清理陈旧锁**、等待上限 120 秒 —— 一旦持有者被杀，之后所有插件操作
 // （含插件列表）都会白等 120 秒再失败。而「更新 harness / 切换 dsh 版本 / 恢复 dsh 数据
-// / 重启 dsh 让市场变更生效」都必须停 dsh（并连带终止它的进程组），正好会杀掉这些持有者。
+// / 重启 dsh 让插件变更生效」都必须停 dsh（并连带终止它的进程组），正好会杀掉这些持有者。
 // 因此动手前先确认没有在跑的操作。
 //
 // 两个来源互补：
 //   - 市场面板内的安装 → 它 spawn 的 `dsh plugin …` 子进程 → 查市场的 /dsh-market/status；
-//   - 控制台自己的插件命令（插件页的列表/卸载、市场的安装/卸载）→ 查 DshManager 的命令计数。
+//   - 控制台自己的插件命令（插件页的列表/卸载、市场与增强插件的安装/卸载）→
+//     查 DshManager 的命令计数。
 func (m *UpdateManager) replaceBusyGuard(action string) error {
 	if m.dsh != nil && m.dsh.PluginCmdRunning() {
 		return busyf("err_plugin_cmd_running", "控制台正在执行插件命令（dsh plugin …）。需要停止 dsh 的操作"+

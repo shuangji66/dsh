@@ -180,23 +180,28 @@ export interface UpdateStatus {
   // 后端给错误的结构化归类：目前只有 'network'（代理与直连各 2 次均失败），
   // 前端据此显示本地化的“请检查网络或代理”提示。
   errorHint?: string
-  // 当前阶段的说明/实时尾行（仅市场：`dsh plugin …` 的输出尾行与「正在重启 dsh」等）。
+  // 当前阶段的说明/实时尾行（仅受管插件：`dsh plugin …` 的输出尾行与「正在重启 dsh」等）。
   message?: string
   // error/message 的界面文案引用（code + 参数）：前端优先按它走 i18n，见 uiText()。
   errorRef?: UIRef
   messageRef?: UIRef
-  // 仅市场：`dsh plugin --profile web list` 的检测诊断（解释「为什么检测不到」）。
+  // 仅受管插件（市场 / 增强插件）：`dsh plugin --profile web list` 的检测诊断
+  // （解释「为什么检测不到」）。字段名沿用 marketDir。
   marketDir?: string
-  // 仅市场：这次**没查到**本机装的是哪一版（dsh 服务未就绪 / 没选中版本 / 命令报错）。
+  // 仅受管插件：这次**没查到**本机装的是哪一版（dsh 服务未就绪 / 没选中版本 / 命令报错）。
   // 为真时 localVersion 为空**不代表「未安装」**—— 界面上显示「—」而不是「未安装」。
   // 首帧（还没检测过）也是 true：没检测过 = 不知道。
   unavailable?: boolean
-  // 仅市场：第几次市场操作（后端每次安装/更新/卸载自增）。前端「结果只提示一次」用它
-  // 做去重键 —— 只按 phase+error 去重时，「装成功」之后「卸载成功」的结果会被吞掉。
+  // 仅受管插件：第几次插件操作（后端每次安装/更新/卸载自增，两个插件共用计数器）。
+  // 前端「结果只提示一次」用它做去重键 —— 只按 phase+error 去重时，「装成功」之后
+  // 「卸载成功」的结果会被吞掉。
   seq?: number
 }
 
-export type UpdateKind = 'harness' | 'dsh' | 'market'
+export type UpdateKind = 'harness' | 'dsh' | 'market' | 'advanced'
+
+// 由控制台管理的 profile 插件（同一套弹窗与动作流程，见 ManagedPluginDialog.vue）。
+export type ManagedPluginKind = 'market' | 'advanced'
 
 // 市场诊断信息（GET /api/market/info）
 export interface MarketInfo {
@@ -275,6 +280,7 @@ export interface UpdatePayload {
   harness: UpdateStatus
   dsh: UpdateStatus
   market: UpdateStatus
+  advanced: UpdateStatus
   server?: ServerVersions
 }
 
@@ -284,6 +290,7 @@ export interface UpdateStatusPayload {
   harness: UpdateStatus
   dsh: UpdateStatus
   market: UpdateStatus
+  advanced: UpdateStatus
   server: ServerVersions
 }
 
@@ -596,14 +603,16 @@ export const api = {
   // （available=true + 两个正文都是空串）是两回事，界面要说不同的话。
   dshVersionNotes: (version: string) =>
     request<ReleaseNotesPayload>(`/api/dsh/versions/notes?version=${encodeURIComponent(version)}`),
-  // 插件市场（dshmarket）：安装 / 更新 / 卸载 / 收起结果提示
-  marketInstall: () =>
-    request<{ ok: boolean; started: boolean; action: string }>('/api/market/install', { method: 'POST' }),
-  marketUpdate: () =>
-    request<{ ok: boolean; started: boolean; action: string }>('/api/market/update', { method: 'POST' }),
-  marketRemove: () =>
-    request<{ ok: boolean; started: boolean; action: string }>('/api/market/remove', { method: 'POST' }),
-  marketDone: () => request<{ ok: boolean }>('/api/market/done', { method: 'POST' }),
+  // 受管插件（插件市场 dshmarket / 增强插件 dsh-fnos-advanced）：
+  // 安装 / 更新 / 卸载 / 收起结果提示。两个插件的后端动作完全同构。
+  pluginInstall: (kind: ManagedPluginKind) =>
+    request<{ ok: boolean; started: boolean; action: string }>(`/api/${kind}/install`, { method: 'POST' }),
+  pluginUpdate: (kind: ManagedPluginKind) =>
+    request<{ ok: boolean; started: boolean; action: string }>(`/api/${kind}/update`, { method: 'POST' }),
+  pluginRemove: (kind: ManagedPluginKind) =>
+    request<{ ok: boolean; started: boolean; action: string }>(`/api/${kind}/remove`, { method: 'POST' }),
+  pluginDone: (kind: ManagedPluginKind) =>
+    request<{ ok: boolean }>(`/api/${kind}/done`, { method: 'POST' }),
   // 终端页：快捷指令列表 / 整体保存
   listQuickCmds: () => request<{ ok: boolean; path: string; commands: QuickCmd[] }>('/api/quickcmds'),
   saveQuickCmds: (commands: QuickCmd[]) =>

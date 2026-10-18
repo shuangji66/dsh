@@ -525,6 +525,7 @@ func TestUpdateLogTag(t *testing.T) {
 		{updateKindHarness, "[harness]"},
 		{updateKindDsh, "[dsh]"},
 		{updateKindMarket, "[market]"},
+		{updateKindAdvanced, "[advanced]"},
 		{"", "[update]"},
 		{"unknown", "[update]"},
 	}

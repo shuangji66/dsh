@@ -134,14 +134,19 @@
   「删除」和「切到已安装的最新版」。**别把这条拒绝或那段沉底排序去掉**：控制台不再维护 0.2.0
   之前的客户端，但也不该让用户面对一个看不见、又删不掉的目录。回归测试见 `server_test.go`
   的 `TestSnapshotPutsDeprecatedInstalledVersionsAtBottom` 与 `TestSwitchRejectsDeprecatedVersion`。
-- `market.go` — **插件市场（dshmarket）**：它是普通的 profile 插件（不是 dsh 包自带的
-  bundle），检测靠 `dsh plugin --profile web list`，安装/更新/卸载靠
+- `market.go` — **受管插件：插件市场（dshmarket）与增强插件（dsh-fnos-advanced）**：
+  两者都是普通的 profile 插件（不是 dsh 包自带的 bundle），检测靠
+  `dsh plugin --profile web list`，安装/更新/卸载靠
   `dsh plugin --profile web add|remove`，镜像源与 `server.go` 同一套；没有备份/回滚。
-  这里还放着所有「停 dsh 前」共用的忙守卫（`replaceBusyGuard` / `stopDshForReplacement`）。
+  实现用 `managedPlugin{kind,pkg,notesRepo,notesTag}` 参数化（`marketPlugin` /
+  `advancedPlugin`），检测、安装、卸载、镜像回退与状态写入**只有一份** —— 新增受管插件
+  时补一个 `managedPlugin`、一个 `UpdateStatus` 槽位与初始化，别再复制一套 `dsh plugin …`
+  执行逻辑。这里还放着所有「停 dsh 前」共用的忙守卫（`replaceBusyGuard` /
+  `stopDshForReplacement`）。
   **「查不到」不等于「未安装」**：那条检测命令在 dsh 就绪前必然失败，失败时置
   `UpdateStatus.Unavailable`（前端版本行显示「—」、市场弹窗不给安装入口），**保留**上一次
   已知的版本号，并且只有命令成功退出才写 `LocalVersion`（空 = 真没装 →「未安装」）。
-  本地检测结果**只能**经 `applyMarketLocalResult` 写进状态（别在各处再写一遍
+  本地检测结果**只能**经 `applyPluginLocalResult` 写进状态（别在各处再写一遍
   `st.LocalVersion = snap.Version`，那会把「查不了」写成「未安装」）；检测失败的结果
   不进缓存。既然「查不到」是常态，每个「dsh 就绪」的时刻都要经
   `RefreshMarketAfterDshStart()` 补查一次（启动流水线收尾 / 概览页启动·重启 dsh /
@@ -157,8 +162,9 @@
      本身也只列最近这些版本）。`Lookup` 的 `loaded` 标志才是「命中不了就是没有」的依据
      （只按 map 命中判会把未知版本反复重查），拉取失败**不置 loaded、也不写缓存**，所以重试
      仍能拿到内容。
-  2. **插件市场**（`market.go` 的 `refreshMarketStatus`）：与 harness **完全同一套** —— 只取
-     「要装的那一版」（镜像源上的最新版）的正文，按 tag `v<版本>`（`marketReleaseTag`）
+  2. **受管插件**（`market.go` 的 `refreshPluginStatus`，市场与增强插件同一套）：与 harness
+     **完全同一套** —— 只取「要装的那一版」（镜像源上的最新版）的正文，按 tag
+     `v<版本>` / `dsh-fnos-advanced-v<版本>`（`marketReleaseTag` / `advancedReleaseTag`）
      **单次请求**，写进 `UpdateStatus.ReleaseNotes` 随状态一起推送；**没有索引、没有单独的
      接口、也没有「点版本号才显示」**（前端把它内联在更新弹窗里，和 harness 一样）。
      只在确实有更新时才拉（没更新时弹窗不显示日志块）。
@@ -267,10 +273,10 @@
   **更新类弹窗的标题右侧要挂对应仓库的 GitHub 裸图标**（`components/GithubIconLink.vue`）：
   标题与图标同处一个 `flex items-center gap-2 pr-11` 的行里，标题用 `.g-dialog-title !pr-0`
   （把 `.g-dialog-title` 自带的 `pr-11` 让给外层容器，否则图标会被推到 X 底下），图标不套
-  `g-btn-*`。三个目标的仓库地址**只有一份**，在 `constants/repos.ts`（`repoSlugs` / `repoURL`）
-  —— 弹窗是三个独立组件（harness 在 `UpdateSection`、dsh 在 `ServerVersionsDialog`、市场在
-  `MarketDialog`），地址别再各写一份。dsh 版本弹窗与市场弹窗是后来拆出来的，曾整段漏掉图标，
-  新增弹窗时记得一起挂上。
+  `g-btn-*`。四个目标的仓库地址**只有一份**，在 `constants/repos.ts`（`repoSlugs` / `repoURL`）
+  —— 弹窗是三个独立组件（harness 在 `UpdateSection`、dsh 在 `ServerVersionsDialog`、插件市场
+  与增强插件共用 `ManagedPluginDialog`），地址别再各写一份。dsh 版本弹窗与受管插件弹窗是
+  后来拆出来的，曾整段漏掉图标，新增弹窗时记得一起挂上。
   **「更新日志」弹窗**（`components/ReleaseNotesDialog.vue`，**只有 dsh 版本列表在用**；
   插件市场的日志和 harness 一样内联在更新弹窗里，不走这个组件）：把版本号做成**带下划线的
   按钮**（悬停变品牌色 = 全站「可点」的统一提示，与概览页的版本行一致），点开一个只读弹窗
@@ -278,15 +284,15 @@
   （`whitespace-pre-wrap`，后端已把 release 里的 HTML 压平）。取数 / 缓存 / 「迟到的响应不
   覆盖当前内容」都在 `composables/useReleaseNotes.ts`，**成功才缓存**（限流/断网那次不记，
   否则用户重试也永远看不到内容）。空文案必须写明「只覆盖最近 10 个版本」（`release_notes_empty`）。
-  **更新内容的内联展示**（harness 在 `UpdateSection.vue`、插件市场在 `MarketDialog.vue`，
-  两处结构刻意保持一致）：`v-if="hasUpdate && releaseNotes"` → 次要小标题
+  **更新内容的内联展示**（harness 在 `UpdateSection.vue`、受管插件在
+  `ManagedPluginDialog.vue`，结构刻意保持一致）：`v-if="hasUpdate && releaseNotes"` → 次要小标题
   `update_release_notes` + `max-h-44 overflow-y-auto` 的盒子 + `MarkdownText`；正文用
   `text-sm` + `ink-soft` + `leading-relaxed`（见上面「正文只分两档」）。没有正文时整块不渲染。
   **弹窗打开时必须锁背景滚动**：`useBodyScrollLock(可见性)`（`composables/useBodyScrollLock.ts`，
   模块级引用计数 —— 叠加的弹窗/二次确认各加一层，全部关闭才解锁），否则移动端能拖拽弹窗
   背后的控制台页面。实现是「body 固定定位 + 负 top 抵消」，**别退化成给 html/body 加
   `overflow: hidden`**（本项目是 height:100% 布局，那样背景会跳回顶部）。`ServerVersionsDialog`
-  与 `MarketDialog` 曾漏接（`UpdateSection` 的注释还误以为它们自己会锁），现已补上。
+  与 `ManagedPluginDialog` 曾漏接（`UpdateSection` 的注释还误以为它们自己会锁），现已补上。
   **弹窗里的长信息要按「组合」换行**：dsh 版本行是「版本号 + dist-tags + 安装/使用状态」，
   窄屏放不下时要求**版本号独占一行、标签与状态整组落到下一行** —— 做法是版本号加
   `whitespace-nowrap`（否则会在连字符处折断成两行），并把标签+状态包进**同一个 flex 项**
@@ -325,7 +331,7 @@
 - **全局禁选 / 禁原生拖拽 / 输入框禁自动填充**（`style.css` + `App.vue`）：
   `html { user-select: none }` 全局禁止文本选择，需要拖选的地方必须显式加 Tailwind 的
   `select-text`。现在加了的：`LogView` 的日志 `<pre>`、`TerminalView` 整页，以及弹窗里
-  **错误/诊断类文本块**（`MarketDialog` 的失败提示、检测诊断与 npm 尾行；
+  **错误/诊断类文本块**（`ManagedPluginDialog` 的失败提示、检测诊断与 npm 尾行；
   `ServerVersionsDialog` 的列表拉取失败提示、安装失败提示与 npm 尾行）—— 这些内容常要
   拿去搜/贴，不让选中等于逼用户手抄。刻意**不放**的：日志路径与「自动滚动」状态、插件名与
   版本号（插件名走「点击即复制」，见 `PluginsView` 的 `copyPluginName`）。输入框 /
@@ -418,11 +424,11 @@
      （`newestOf`），列表里仍标注 latest/alpha/next，但标签不参与判定 —— 别再改回
      `dist-tags.latest`。
    - **版本列表 / 市场本地检测是「缓存优先」，不要顺手加回 TTL 或改成每次都查**：
-     `refreshVersions(force)` 与 `detectMarketLocal(force)` 在 `force=false` 时只要有缓存就
+     `refreshVersions(force)` 与 `detectPluginLocal(force)` 在 `force=false` 时只要有缓存就
      直接返回（不联网、不起子进程）；刷新的入口只有「弹窗里的刷新」「后台自动检测 / 手动检查」
      与「市场装/卸完成」三处。这两个查询一个要打三个镜像源、一个要起 1~3 秒的
      `dsh plugin list` 子进程，被状态重算/页面打开这些高频场合反复触发过。
-     市场本地检测有两个**刻意**的例外（见上面 `market.go` 那条）：检测**失败**的结果不写进
+     受管插件本地检测有两个**刻意**的例外（见上面 `market.go` 那条）：检测**失败**的结果不写进
      缓存，且每个「dsh 刚就绪」的时刻补查一次 —— 否则「查不了」会被缓存住、界面一直显示「—」。
    - **附件 fsync 补丁必须在 `npm install` 之后由控制台补上**（`patchAttachmentFsync`）：
      dsh 的 attachment-local 会逐级上溯 fsync 到 `/`，而 fnOS 的 `/vol1`、
@@ -599,7 +605,7 @@
      - `replaceBusyGuard()` 是所有「停 dsh 之前」的统一前置检查（先挡、再停），当前的调用点：
        **更新 harness 控制台**（`installHarness`）、**恢复 dsh 数据**（会删 `~/.dsh`，
        经 `stopDshForReplacement`）、**切换 dsh 版本**（`ServerManager.Switch`）、
-       **市场安装/卸载后重启 dsh**（`restartDshForMarket`）。被拒绝时不产生任何停机、不改盘。
+       **市场/增强插件安装卸载后重启 dsh**（`restartDshForPlugin`）。被拒绝时不产生任何停机、不改盘。
      - 守卫来源：市场 `/dsh-market/status` 的 busy + `DshManager.PluginCmdRunning()`；
        市场不回答视为不忙（恢复这类抢修不被挡）。**控制台自己发起的每一条插件命令都要
        登记进这个计数** —— 插件页的 list/remove 与插件市场的 add/remove/list 都必须走

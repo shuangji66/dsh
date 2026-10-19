@@ -1,10 +1,13 @@
 /**
- * Build the fnOS picker parameters from a picker flow (pure, unit-tested).
+ * Build fnOS picker parameters and compare workspace paths (pure, unit-tested).
  *
  * Shared pickers omit `directory` entirely: the host decides what a shared
- * picker returns. `creatable` / `disabledPaths` only apply to the user folder
- * picker; they are forwarded to the native bridge and appended to the web
- * authorization URL by the client.
+ * picker returns. `creatable` only applies to the user folder picker.
+ *
+ * We deliberately do NOT send `disabledPaths` for existing workspaces: fnOS
+ * disables the whole subtree of a disabled path, which would also prevent
+ * adding a subdirectory as a new workspace. Duplicate protection is an exact
+ * path comparison after the user picks, not a picker-level block.
  */
 
 /** Sidebar groups shown by both folder and shared pickers. */
@@ -18,7 +21,7 @@ export const SIDEBAR_GROUPS = Object.freeze([
 ]);
 
 /**
- * @param {{directory?: boolean, creatable?: boolean, disabledPaths?: string[], title: string, okText: string}} flow
+ * @param {{directory?: boolean, creatable?: boolean, title: string, okText: string}} flow
  * @returns {Record<string, unknown>}
  */
 export function pickerParams(flow) {
@@ -29,8 +32,34 @@ export function pickerParams(flow) {
   };
   if (flow.directory !== undefined) params.directory = flow.directory === true;
   if (flow.creatable) params.creatable = true;
-  if (Array.isArray(flow.disabledPaths) && flow.disabledPaths.length) {
-    params.disabledPaths = [...flow.disabledPaths];
-  }
   return params;
+}
+
+/**
+ * Stable form for exact workspace comparison: strip trailing separators and
+ * collapse duplicate slashes. Linux paths are case-sensitive.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function normalizeWorkspacePath(value) {
+  const text = String(value == null ? '' : value);
+  if (!text) return '';
+  return text.replace(/\/+/g, '/').replace(/\/+$/, '') || '/';
+}
+
+/**
+ * Whether a picked path is already one of the workspace roots.
+ *
+ * This is an exact match on purpose: `/vol1/work` being a workspace must not
+ * prevent adding `/vol1/work/project` as another workspace.
+ *
+ * @param {unknown} candidate
+ * @param {string[]} workspacePaths
+ * @returns {boolean}
+ */
+export function isDuplicateWorkspacePath(candidate, workspacePaths) {
+  const target = normalizeWorkspacePath(candidate);
+  if (!target || !Array.isArray(workspacePaths)) return false;
+  return workspacePaths.some((path) => normalizeWorkspacePath(path) === target);
 }

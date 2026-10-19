@@ -9,7 +9,7 @@
 - 右侧文件树的每一行（文件 / 目录）右侧多一个 **「⋯」操作菜单**：
   **在飞牛中打开**（仅飞牛桌面 / App）、**引用到对话**（仅文件）、**复制路径**；
 - 工作区「更多」菜单与设置页提供 **目录权限体检 / 重新授权**，诊断飞牛 ACL 损坏或目录移动；
-- 目录选择器支持 **新建文件夹**、**禁选已添加目录**，并多一个 **共享目录** 入口；
+- 目录选择器支持 **新建文件夹**、**重复添加拦截**（只拦完全相同的目录，子目录仍可添加），并多一个 **共享目录** 入口；
 - 设置页提供 **诊断**（版本、DOM 锚点、地址连通性）和 **界面语言**（跟随浏览器 / 中文 / English）；
 
 - **在飞牛桌面 / 飞牛 App 内**：直接调用飞牛宿主的原生选择器，不打开网页授权；
@@ -110,12 +110,16 @@ dsh plugin --profile web add /absolute/path/to/dsh-fnos-advanced
 ### 目录选择器增强
 
 - **新建文件夹**：原生飞牛选择器和网页授权都会带上 `creatable`；
-- **禁选已添加目录**：已加入 dsh 的工作区路径通过 `disabledPaths` 置灰，减少重复添加；
+- **重复添加拦截**：选中的路径与已有工作区**完全相等**时，提示「该目录已添加为工作区」，
+  不填入选择器；比较前会去掉结尾 `/` 和重复斜杠。
+- **子目录不受影响**：`/vol1/work` 已是工作区时，仍然可以把 `/vol1/work/project` 作为新工作区。
+  这里**刻意不用 `disabledPaths`**：飞牛会把被禁路径的整个子树一起禁选，那正是之前无法添加
+  子目录的原因。
 - **共享目录**：目录选择器底部在「选择飞牛目录」旁多一个 **「共享」** 按钮（完整说明见 title），
   走 `pickSharedFile`（原生宿主）或 `/app-auth/pick-shared-file`（网页授权）。
 
-网页授权对 `creatable` / `disabledPaths` 是**尽力转发**（作为额外 query 参数）；旧版飞牛
-可能忽略它们，原生宿主则走 SDK 的正式参数。
+网页授权对 `creatable` 是**尽力转发**（作为额外 query 参数）；旧版飞牛可能忽略，原生宿主
+则走 SDK 的正式参数。重复添加拦截完全在客户端完成，不依赖选择器是否支持禁选。
 
 ### 工作区权限体检 / 重新授权
 
@@ -279,7 +283,7 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 | `POST /fnos-advanced/auth-result` | 回调页把 `{state, search}` 暂存到内存（5 分钟 TTL） |
 | `GET /fnos-advanced/auth-result?state=…` | dsh 页面轮询并取走结果（一次性） |
 | `GET /fnos-advanced/workspace-path?id=…` | 按 workspaceId 返回工作区路径（宿主 registry / 磁盘 registry 回退） |
-| `GET /fnos-advanced/workspaces` | 列出全部工作区（id / path / title），供选择器禁选与诊断使用 |
+| `GET /fnos-advanced/workspaces` | 列出全部工作区（id / path / title），供重复添加拦截与诊断使用 |
 | `POST /fnos-advanced/workspace-health` | 只读检查工作区目录（`exists` / `readable` / `writable`）；只接受工作区 id |
 | `GET /fnos-advanced/settings` | 读取插件中心设置 |
 | `POST /fnos-advanced/settings` | 校验并保存设置到 `$DSH_HOME/fnos-advanced/settings.json` |

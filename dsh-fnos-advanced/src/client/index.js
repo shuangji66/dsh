@@ -26,11 +26,11 @@ import { isCancellationText, isPickerCancelled } from './cancel.js';
 import { fileNameForPath, imageMimeForPath } from './files.js';
 import { looksLikeComposerCommandMenu } from './menu.js';
 import { fileRowActions } from './file-actions.js';
-import { pickerParams } from './picker.js';
+import { pickerParams, isDuplicateWorkspacePath } from './picker.js';
 import { t, translateError, getLanguagePreference, setLanguagePreference, currentLanguage } from './i18n.js';
 
 const LOG_PREFIX = '[dsh-fnos-advanced]';
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 
 const MSG_TYPE = 'dsh-fnos-advanced:auth';
 const STORAGE_KEY = 'dsh-fnos-advanced:auth-result';
@@ -990,9 +990,6 @@ async function runPickFlow(button, flow) {
   }
 
   try {
-    if (flow.directory && !Array.isArray(flow.disabledPaths)) {
-      flow.disabledPaths = await knownWorkspacePaths();
-    }
     const direct = await pickPathsDirect(flow, button);
     if (direct.handled) {
       closePopup(popup);
@@ -1038,11 +1035,11 @@ function directoryFlow(dialog, button) {
     method: 'pickUserFile',
     directory: true,
     creatable: true,
-    disabledPaths: null,
     title: t('选择工作区目录'),
     okText: t('确认授权'),
     anchor: dialog,
     status: (text, isError) => showStatus(dialog, text, isError),
+    isDuplicate: async (paths) => isDuplicateWorkspacePath(paths[0], await knownWorkspacePaths()),
     onPaths: async (paths) => {
       const input = await ensurePathInput(dialog);
       if (!input) throw new Error(t('没有找到目录选择器的路径输入框'));
@@ -1088,6 +1085,7 @@ function sharedFlow(dialog, button) {
     okText: t('确认授权'),
     anchor: dialog,
     status: (text, isError) => showStatus(dialog, text, isError),
+    isDuplicate: async (paths) => isDuplicateWorkspacePath(paths[0], await knownWorkspacePaths()),
     onPaths: async (paths) => {
       const input = await ensurePathInput(dialog);
       if (!input) throw new Error(t('没有找到目录选择器的路径输入框'));
@@ -1111,6 +1109,11 @@ function markBusy(button, flow) {
 }
 
 async function finishPick(button, flow, paths) {
+  if (typeof flow.isDuplicate === 'function' && await flow.isDuplicate(paths)) {
+    flow.status(t('该目录已添加为工作区'), false);
+    flow.restore();
+    return;
+  }
   await flow.onPaths(paths);
   flow.status(flow.doneText(paths), false);
   const label = flow.doneLabel();
@@ -1518,12 +1521,9 @@ function requestAuth(popup, state, appName, base, method, params) {
         }
 
         // The SDK only serializes directory/accept/sidebarGroup/title/okText.
-        // Pass the newer picker hints through when the host supports them.
+        // Pass the newer folder-creation hint through when the host supports it.
         const targetUrl = new URL(url);
         if (params.creatable) targetUrl.searchParams.set('creatable', 'true');
-        if (Array.isArray(params.disabledPaths) && params.disabledPaths.length) {
-          targetUrl.searchParams.set('disabledPaths', JSON.stringify(params.disabledPaths));
-        }
 
         if (settled) return;
         popup.location.replace(targetUrl.toString());
@@ -2813,5 +2813,6 @@ if (typeof window !== 'undefined') {
     ensureHostPathBridge,
     getSdk,
     pickPathsDirect,
+    isDuplicateWorkspacePath,
   };
 }

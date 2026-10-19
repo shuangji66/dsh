@@ -1564,10 +1564,17 @@ function pickerParams(flow) {
   };
   if (flow.directory !== void 0) params.directory = flow.directory === true;
   if (flow.creatable) params.creatable = true;
-  if (Array.isArray(flow.disabledPaths) && flow.disabledPaths.length) {
-    params.disabledPaths = [...flow.disabledPaths];
-  }
   return params;
+}
+function normalizeWorkspacePath(value) {
+  const text = String(value == null ? "" : value);
+  if (!text) return "";
+  return text.replace(/\/+/g, "/").replace(/\/+$/, "") || "/";
+}
+function isDuplicateWorkspacePath(candidate, workspacePaths2) {
+  const target = normalizeWorkspacePath(candidate);
+  if (!target || !Array.isArray(workspacePaths2)) return false;
+  return workspacePaths2.some((path) => normalizeWorkspacePath(path) === target);
 }
 
 // src/client/i18n.js
@@ -1602,6 +1609,7 @@ var EN = Object.freeze({
   "已取消授权": "Authorization cancelled",
   "已填入授权目录：{path}": "Folder authorized: {path}",
   "已填入路径": "Path filled",
+  "该目录已添加为工作区": "This folder is already a workspace",
   "打开选择器失败": "Could not open the picker",
   "当前宿主未提供内嵌选择器，已改用网页授权。": "The native picker is unavailable; using web authorization.",
   "浏览器拦截了授权窗口，请允许弹窗后重试。": "The browser blocked the authorization window. Allow popups and retry.",
@@ -1792,7 +1800,7 @@ function translateError(error) {
 
 // src/client/index.js
 var LOG_PREFIX = "[dsh-fnos-advanced]";
-var VERSION = "0.3.0";
+var VERSION = "0.3.1";
 var MSG_TYPE = "dsh-fnos-advanced:auth";
 var STORAGE_KEY = "dsh-fnos-advanced:auth-result";
 var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
@@ -2582,9 +2590,6 @@ async function runPickFlow(button, flow) {
     if (popup) writePopupLoading(popup);
   }
   try {
-    if (flow.directory && !Array.isArray(flow.disabledPaths)) {
-      flow.disabledPaths = await knownWorkspacePaths();
-    }
     const direct = await pickPathsDirect(flow, button);
     if (direct.handled) {
       closePopup(popup);
@@ -2625,11 +2630,11 @@ function directoryFlow(dialog, button) {
     method: "pickUserFile",
     directory: true,
     creatable: true,
-    disabledPaths: null,
     title: t2("选择工作区目录"),
     okText: t2("确认授权"),
     anchor: dialog,
     status: (text, isError) => showStatus(dialog, text, isError),
+    isDuplicate: async (paths) => isDuplicateWorkspacePath(paths[0], await knownWorkspacePaths()),
     onPaths: async (paths) => {
       const input = await ensurePathInput(dialog);
       if (!input) throw new Error(t2("没有找到目录选择器的路径输入框"));
@@ -2676,6 +2681,7 @@ function sharedFlow(dialog, button) {
     okText: t2("确认授权"),
     anchor: dialog,
     status: (text, isError) => showStatus(dialog, text, isError),
+    isDuplicate: async (paths) => isDuplicateWorkspacePath(paths[0], await knownWorkspacePaths()),
     onPaths: async (paths) => {
       const input = await ensurePathInput(dialog);
       if (!input) throw new Error(t2("没有找到目录选择器的路径输入框"));
@@ -2699,6 +2705,11 @@ function markBusy(button, flow) {
   flow.setLabel(t2("准备授权…"));
 }
 async function finishPick(button, flow, paths) {
+  if (typeof flow.isDuplicate === "function" && await flow.isDuplicate(paths)) {
+    flow.status(t2("该目录已添加为工作区"), false);
+    flow.restore();
+    return;
+  }
   await flow.onPaths(paths);
   flow.status(flow.doneText(paths), false);
   const label = flow.doneLabel();
@@ -3028,9 +3039,6 @@ function requestAuth(popup, state, appName, base, method, params) {
         }
         const targetUrl = new URL(url);
         if (params.creatable) targetUrl.searchParams.set("creatable", "true");
-        if (Array.isArray(params.disabledPaths) && params.disabledPaths.length) {
-          targetUrl.searchParams.set("disabledPaths", JSON.stringify(params.disabledPaths));
-        }
         if (settled) return;
         popup.location.replace(targetUrl.toString());
       } catch (error) {
@@ -4192,7 +4200,8 @@ if (typeof window !== "undefined") {
     addPathsToComposer,
     ensureHostPathBridge,
     getSdk,
-    pickPathsDirect
+    pickPathsDirect,
+    isDuplicateWorkspacePath
   };
 }
 

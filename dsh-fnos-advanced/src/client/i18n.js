@@ -41,6 +41,7 @@ export const EN = Object.freeze({
   '已取消授权': 'Authorization cancelled',
   '已填入授权目录：{path}': 'Folder authorized: {path}',
   '已填入路径': 'Path filled',
+  '该目录已添加为工作区': 'This folder is already a workspace',
   '打开选择器失败': 'Could not open the picker',
   '当前宿主未提供内嵌选择器，已改用网页授权。': 'The native picker is unavailable; using web authorization.',
   '浏览器拦截了授权窗口，请允许弹窗后重试。': 'The browser blocked the authorization window. Allow popups and retry.',

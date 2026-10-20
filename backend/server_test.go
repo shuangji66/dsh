@@ -427,22 +427,20 @@ func TestRefreshDshStatusUsesNewestVersion(t *testing.T) {
 	}
 }
 
-// --- 安装：镜像源逐个尝试 + 成功后打补丁 + 失败清理 ---
+// --- 安装：只用设置页选中的镜像源 + 成功后打补丁 + 失败清理 ---
 
-func TestInstallFallsBackToNextMirror(t *testing.T) {
+// 设置页选中腾讯云后，安装必须**只用腾讯云**：不能从阿里云开始按旧顺序试。
+func TestInstallUsesSelectedMirror(t *testing.T) {
 	dataDir := t.TempDir()
 	_, srv := newServerTestManager(t, dataDir)
+	cfg := GetConfig()
+	cfg.NpmRegistry = "tencent"
+	initConfig(&cfg)
 
-	var attempts []string
-	var mu sync.Mutex
+	var attempts []npmMirror
 	prev := npmInstallFn
 	npmInstallFn = func(m *ServerManager, ctx context.Context, dir, version string, mirror npmMirror) error {
-		mu.Lock()
-		attempts = append(attempts, mirror.Name)
-		mu.Unlock()
-		if mirror.Name == npmMirrors[0].Name {
-			return &os.PathError{Op: "npm", Path: dir, Err: os.ErrInvalid}
-		}
+		attempts = append(attempts, mirror)
 		return fakeNpmInstall(t, nil, nil)(m, ctx, dir, version, mirror)
 	}
 	t.Cleanup(func() { npmInstallFn = prev })
@@ -454,18 +452,17 @@ func TestInstallFallsBackToNextMirror(t *testing.T) {
 	if st.Version != "0.3.0" || st.Error != "" {
 		t.Fatalf("安装状态 = %+v, want done/0.3.0", st)
 	}
-	mu.Lock()
-	got := strings.Join(attempts, ",")
-	mu.Unlock()
-	want := npmMirrors[0].Name + "," + npmMirrors[1].Name
-	if got != want {
-		t.Fatalf("镜像源尝试顺序 = %q, want %q（不重试、按阿里→腾讯→华为顺序）", got, want)
+	if len(attempts) != 1 || attempts[0].Slug != "tencent" {
+		t.Fatalf("应当只尝试选中的腾讯云一次，实际: %+v", attempts)
+	}
+	if st.Mirror != "腾讯云" {
+		t.Fatalf("安装状态里的源标签 = %q，want 腾讯云", st.Mirror)
 	}
 	if !dshVersionInstalled(srv.versionDir("0.3.0")) {
 		t.Fatal("安装完成后版本目录里应有可执行的 dsh")
 	}
 	// 安装成功的版本可以被选中。
-	cfg := GetConfig()
+	cfg = GetConfig()
 	cfg.DshVersion = "0.3.0"
 	if err := SaveConfig(srv.renv, &cfg, false); err != nil {
 		t.Fatal(err)
@@ -475,12 +472,18 @@ func TestInstallFallsBackToNextMirror(t *testing.T) {
 	}
 }
 
-func TestInstallAllMirrorsFailedCleansUp(t *testing.T) {
+// 选中的源失败时直接报错并提示换源，不偷偷改用其它源；半成品目录要清干净。
+func TestInstallMirrorFailureCleansUp(t *testing.T) {
 	dataDir := t.TempDir()
 	_, srv := newServerTestManager(t, dataDir)
+	cfg := GetConfig()
+	cfg.NpmRegistry = "huawei"
+	initConfig(&cfg)
 
+	var attempts int
 	prev := npmInstallFn
 	npmInstallFn = func(m *ServerManager, ctx context.Context, dir, version string, mirror npmMirror) error {
+		attempts++
 		return &os.PathError{Op: "npm", Path: dir, Err: os.ErrInvalid}
 	}
 	t.Cleanup(func() { npmInstallFn = prev })
@@ -489,15 +492,11 @@ func TestInstallAllMirrorsFailedCleansUp(t *testing.T) {
 		t.Fatalf("启动安装失败: %v", err)
 	}
 	st := waitInstallPhase(t, srv, "error")
-	// 镜像源在错误里用**英文标识**（中文显示名只进界面）：这个错误会被写进日志，
-	// 中文镜像名混进去日志就不全是英文了（见 mirror_log_language_test.go）。
-	if !strings.Contains(st.Error, mirrorLogNames()) {
-		t.Fatalf("错误信息应说明三个镜像源都失败、不试官方源，实际: %v", st.Error)
+	if attempts != 1 {
+		t.Fatalf("失败后不应自动换源重试，实际调用 %d 次", attempts)
 	}
-	for _, m := range npmMirrors {
-		if strings.Contains(st.Error, m.Name) {
-			t.Fatalf("错误里不应出现中文镜像名 %q（会随日志漏出去）: %v", m.Name, st.Error)
-		}
+	if !strings.Contains(st.Error, "华为云") || !strings.Contains(st.Error, "切换 npm 镜像源") {
+		t.Fatalf("错误信息应点明所选源并提示换源，实际: %v", st.Error)
 	}
 	if _, err := os.Stat(srv.versionDir("0.4.0")); !os.IsNotExist(err) {
 		t.Fatal("全部失败后不应留下半成品目录")
@@ -796,49 +795,37 @@ func TestPatchAttachmentFsync(t *testing.T) {
 // 校验失败也要能换到下一个镜像源：verify 失败时那次安装的目录已被清掉，必须像
 // npm 失败那样重建出干净骨架 —— 否则 `npm install --prefix <dir>` 会因为目录不存在
 // 直接 chdir 失败，那一次换源就白丢了（错误还会被算到镜像源头上）。
-func TestInstallFallbackAfterVerifyFailureKeepsUsableDir(t *testing.T) {
+// 校验失败（装上了但 dsh -V 跑不起来）不能留下半个版本目录，也不该偷偷换源重来：
+// 报出真实原因，由用户决定是否换源重试。
+func TestInstallVerifyFailureCleansUp(t *testing.T) {
 	dataDir := t.TempDir()
 	_, srv := newServerTestManager(t, dataDir)
 	const version = "0.3.0"
 
-	var attempts []string
-	var dirStates []string
+	var attempts int
 	prev := npmInstallFn
 	npmInstallFn = func(m *ServerManager, ctx context.Context, dir, v string, mirror npmMirror) error {
-		attempts = append(attempts, mirror.Name)
-		// 关键断言素材：每次「真正执行 npm」时版本目录都必须存在且是目录。
-		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-			dirStates = append(dirStates, "ok")
-		} else {
-			dirStates = append(dirStates, "missing")
-		}
+		attempts++
 		bin := filepath.Join(dir, "node_modules", ".bin")
 		if err := os.MkdirAll(bin, 0o755); err != nil {
 			return err
 		}
-		if len(attempts) == 1 {
-			// 第一个镜像源「装上了」但产物不可运行 → verifyInstall 失败。
-			return os.WriteFile(filepath.Join(bin, "dsh"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
-		}
-		return os.WriteFile(filepath.Join(bin, "dsh"), []byte("#!/bin/sh\necho "+v+"\n"), 0o755)
+		return os.WriteFile(filepath.Join(bin, "dsh"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
 	}
 	t.Cleanup(func() { npmInstallFn = prev })
 
 	if err := srv.Install(version); err != nil {
 		t.Fatalf("启动安装失败: %v", err)
 	}
-	st := waitInstallPhase(t, srv, "done", "error")
-	if st.Phase != "done" || st.Error != "" {
-		t.Fatalf("校验失败后应换下一个镜像源并装成功，实际状态 = %+v", st)
+	st := waitInstallPhase(t, srv, "error")
+	if attempts != 1 {
+		t.Fatalf("校验失败不应自动换源重试，实际调用 %d 次", attempts)
 	}
-	if got := strings.Join(attempts, ","); got != npmMirrors[0].Name+","+npmMirrors[1].Name {
-		t.Fatalf("镜像源尝试顺序 = %q, want 前两个源", got)
+	if !strings.Contains(st.Error, "dsh -V failed") {
+		t.Fatalf("错误信息应带出校验失败的真实原因，实际: %v", st.Error)
 	}
-	if got := strings.Join(dirStates, ","); got != "ok,ok" {
-		t.Fatalf("每次执行 npm 时版本目录都必须已重建（否则 chdir 失败、换源白丢），实际: %s", got)
-	}
-	if !dshVersionInstalled(srv.versionDir(version)) {
-		t.Fatal("安装完成后版本目录里应有可执行的 dsh")
+	if _, err := os.Stat(srv.versionDir(version)); !os.IsNotExist(err) {
+		t.Fatal("校验失败后应删掉不可用的版本目录")
 	}
 }
 

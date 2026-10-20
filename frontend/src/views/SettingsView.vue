@@ -24,6 +24,7 @@ import { icons } from '@/utils/icons'
 //
 // ② 需点「保存配置」才落盘 —— 只改本地 config，改动后**不生效也不落盘**：
 //    · 代理地址（proxyAddr）—— 保存后落盘；dsh 需重启才用上新地址
+//    · npm 镜像源（npmRegistry）—— 保存后落盘；dsh / 插件下一次安装、更新与版本检测即用新源
 //    · dsh 端口（dshPort）—— 保存后落盘；dsh 运行中时该输入框禁用（后端保存时保留旧值）
 //    · 反代监听端口（proxyPort）—— 保存时**即时重绑**监听（绑定失败则整次拒绝保存）
 //    · node 堆内存上限（dshMemLimit）—— 保存后落盘；重启 dsh 生效
@@ -41,6 +42,15 @@ const { t } = useI18n()
 const { themeMode, setTheme } = useTheme()
 const { locale } = useI18n()
 const { defaultPage, setDefaultPage } = useConsolePrefs()
+
+// npm 镜像源选项：value 必须与后端 npmMirrors 的 Slug 一致（server.go）。
+// 默认阿里云；官方源只有用户主动选中时才会被使用。
+const npmRegistryOptions = [
+  { value: 'aliyun', label: 'settings_npm_registry_aliyun' },
+  { value: 'tencent', label: 'settings_npm_registry_tencent' },
+  { value: 'huawei', label: 'settings_npm_registry_huawei' },
+  { value: 'npmjs', label: 'settings_npm_registry_official' }
+]
 
 // node 版本切换选项：来自后端 runtime.nodeVersions。
 // node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
@@ -475,6 +485,17 @@ async function onAuthToggle() {
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
           <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" @change="onPendingChange" />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>
+        </div>
+
+        <!-- npm 镜像源：dsh 服务与两个受管插件（市场 / 增强插件）的安装、更新与版本检测
+             都使用这里选中的源（只用所选源，失败会提示换源）。与上面的代理开关无关：
+             npm 安装始终直连镜像源、不走代理。改完需点「保存配置」才落盘生效。 -->
+        <div class="mt-4 pt-4 border-t border-line dark:border-[#2A2A32]">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_npm_registry') }}</label>
+          <select v-model="config.npmRegistry" class="g-input" @change="onPendingChange">
+            <option v-for="opt in npmRegistryOptions" :key="opt.value" :value="opt.value">{{ t(opt.label) }}</option>
+          </select>
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_npm_registry_hint') }}</p>
         </div>
       </section>
 

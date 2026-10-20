@@ -7,7 +7,7 @@
 本仓库（`shuangji66/dsh`）即 DeepSeek Harness 控制台的后端 + 前端源码。
 
 > 它**不是** `dsh` 本体，而是管理 `dsh` 的“控制台”。dsh 服务本身是官方的
-> `@deepseek-ai/dsh` npm 包，由控制台按需从国内 npm 镜像源安装到
+> `@deepseek-ai/dsh` npm 包，由控制台按需从设置页选中的 npm 镜像源安装到
 > `${TRIM_PKGVAR}/server/<版本>/`（不再随 fpk 预置、也不再走 GitHub Release 压缩包）。
 
 ---
@@ -61,8 +61,8 @@
   repeated 3566 times) …`）；基础的成功操作不记日志；dsh 子进程的输出原样透传（不改格式、
   不加前缀），在终端与控制台里都固定显示为黄色。更新类日志按目标分开打标签
   （`[harness]` / `[dsh]` / `[market]`），升级控制台与升级 dsh 服务的步骤不会混在一起。
-- **dsh 服务多版本管理** — dsh 服务**不再内置在 fpk 安装包里**，而是按需从国内 npm
-  镜像源（阿里云 → 腾讯云 → 华为云）安装官方包到 `${TRIM_PKGVAR}/server/<版本>/`，
+- **dsh 服务多版本管理** — dsh 服务**不再内置在 fpk 安装包里**，而是按需从设置页选中的
+  npm 镜像源（默认阿里云，可选腾讯云 / 华为云 / 官方源）安装官方包到 `${TRIM_PKGVAR}/server/<版本>/`，
   可同时装多个版本并自由切换（切换 = 用该版本重启 dsh）；下载时支持取消（会清除安装
   目录与下载缓存），安装成功的版本可删除；未安装任何版本时控制台显示「未安装」。
   （见下文「dsh 服务的多版本管理」一节）
@@ -72,7 +72,8 @@
   **且只自更新同一主要/次要版本线内的小版本（1.4.3 → 1.4.9）—— 跨主要/次要版本
   （1.4 → 1.5、1.x → 2.x）一律拒绝下载与安装，改为提示需更新 fpk 安装包**
   （见下文「控制台只自更新小版本」一节）；
-  dsh 服务与插件市场都以 npm 镜像源为准，不走 GitHub、也不试官方 npm 源。
+  dsh 服务与插件市场都以设置页选中的 npm 镜像源为准，不走 GitHub；默认不碰官方源
+  （只有用户主动选中时才用），且只用所选源、失败即报错并提示换源。
   另有 dsh 数据备份 / 恢复（目录页）：备份在服务端异步执行，弹窗显示进度、可取消，
   关掉弹窗不会终止备份（见下文「dsh 数据备份」一节）。
 - **node-pty 自动安装** — 主进程启动后自动补齐 `node-pty` 预构建文件与 patch。
@@ -242,10 +243,12 @@ dsh 进程还会拿到 **`DSH_AGENTS_HOME=$HOME/.agents`**（共享 agent 配置
 （`ensureAgentsHome`，创建成功不记日志），dsh 启动时不会自建。
 
 运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、`proxyUpdate`、
-`proxyAddr`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、`dshMemAuto`、
-`nodeVersion`、`dshVersion`、`accessUrls`、`browserCompat`。其中 `dshVersion` 是**当前选中的
-dsh 版本**（即 `${TRIM_PKGVAR}/server/` 下的目录名，空 = 未安装），由概览页的版本列表写入，
-设置页不暴露。
+`proxyAddr`、`npmRegistry`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、
+`dshMemAuto`、`nodeVersion`、`dshVersion`、`accessUrls`、`browserCompat`。其中 `dshVersion` 是
+**当前选中的 dsh 版本**（即 `${TRIM_PKGVAR}/server/` 下的目录名，空 = 未安装），由概览页的
+版本列表写入，设置页不暴露；`npmRegistry` 是设置页「npm 镜像源」的取值（`aliyun` /
+`tencent` / `huawei` / `npmjs`，默认 `aliyun`），dsh 服务与两个受管插件的安装/更新/版本检测
+都只用它。
 
 代理卡片有**两个相互独立的开关**，共用同一个代理地址：
 
@@ -257,6 +260,10 @@ dsh 版本**（即 `${TRIM_PKGVAR}/server/` 下的目录名，空 = 未安装）
   或代理通路失败时**照旧回退直连**（下载通路是「代理在前、直连在后」）。
   **dsh 版本安装与插件市场安装始终直连 npm 镜像源，不受它影响**（国内镜像源经代理
   只会更慢或不可达）。改完立即生效，无需重启任何进程。
+
+同一张代理卡片里还有「**npm 镜像源**」下拉（`npmRegistry`，默认阿里云）：dsh 服务与两个
+受管插件（市场 / 增强插件）的安装、更新和版本检测都**只用所选源**，失败会报错并提示换源；
+它需要点「保存配置」才落盘生效，与上面两个代理开关无关（npm 安装不走代理）。
 
 node 堆内存上限（`dshMemLimit`，设置页「node 堆内存上限」）在**手动设置**
 （`dshMemAuto` 关闭）时有两档阈值：低于 **800 MB** 输入框下黄字提醒（仍可保存），
@@ -636,8 +643,8 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
 | 更新 | 同安装（再 `add` 一次最新版本号） |
 | 卸载 | `dsh plugin --profile web remove dshmarket`（**不带 `--registry`**：pnpm 的 `remove` 没有这个选项，带上会直接 `Unknown option: 'registry'` 失败；卸载也不下载任何东西，与镜像源无关，因此也不按镜像源回退） |
 
-- **安装/更新**的镜像源与 dsh 版本安装完全一致：阿里云 → 腾讯云 → 华为云，5 秒无响应换
-  下一个，不重试同一个源，三个都失败就报错，**不试官方源**。**卸载不涉及 registry**：
+- **安装/更新**的镜像源与 dsh 版本安装完全一致：**只用设置页选中的那一个源**（默认阿里云，
+  可选腾讯云 / 华为云 / 官方源），不自动换源，失败就报错并提示去设置页换源。**卸载不涉及 registry**：
   `remove` 走「执行一次」的通路（`runMarketPluginCmdOnce`），失败就把 dsh/pnpm 的原话
   报出来，不会甩锅给镜像源。
 - **未安装是正常状态**：检测**确实查到了**、只是没装时，概览页版本行显示「未安装」，
@@ -734,7 +741,7 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
 ## dsh 服务的多版本管理
 
 dsh 服务**不再是内置在 fpk 安装包里的预构建产物**，也不再从 GitHub Release 下载压缩包。
-控制台按需从**国内 npm 镜像源**安装官方 npm 包（`backend/server.go`）：
+控制台按需从设置页选中的 **npm 镜像源**安装官方 npm 包（`backend/server.go`）：
 
 ```
 ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
@@ -743,12 +750,12 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 | 环节 | 做法 |
 | --- | --- |
 | 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.2.0-rc.1` 之前的所有版本**（新版控制台锚定 0.2.0-rc.1 及更新版本；更早的 dsh 前端也不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**「有更新」的红点/「最新版本」取列表里版本号最高的一版**，标签只作展示、不参与判定（`refreshDshStatus`）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」与后台自动检测 / 手动「检查更新」会重拉（见下） |
-| 镜像源 | 阿里云 `registry.npmmirror.com` → 腾讯云 `mirrors.cloud.tencent.com/npm` → 华为云 `repo.huaweicloud.com/repository/npm`；**不试官方源** |
-| 换源时机 | `npm install --fetch-timeout=5000 --fetch-retries=0`：任意一次 HTTP 请求 5 秒拿不到响应即失败 → 换下一个镜像源**整包重跑**；同一个源**不重试**，三个都失败就报错（错误里列出尝试过的镜像源） |
+| 镜像源 | **设置页选中的那一个源**（默认阿里云）：阿里云 `registry.npmmirror.com` / 腾讯云 `mirrors.cloud.tencent.com/npm` / 华为云 `repo.huaweicloud.com/repository/npm` / 官方源 `registry.npmjs.org`；**只用所选源，不自动换源** |
+| 失败处理 | `npm install --fetch-timeout=5000 --fetch-retries=0`：任意一次 HTTP 请求 5 秒拿不到响应即失败；同一个源**不重试**，直接报错并提示去设置页切换镜像源 |
 | 安装命令 | `npm install --prefix <版本目录> @deepseek-ai/dsh@<版本> --save-exact --registry=<镜像源>`，用与 dsh 相同 node 版本自带的 npm；缓存在 `<数据目录>/npm-cache`（不写用户的 HOME） |
 | 进度 | 逐行解析 `--loglevel=http` 的包获取行：阶段（下载 / 处理依赖包 / 校验）+「已获取 N 个包」+ 输出尾行。依赖总量 npm 不预先给出，因此**不显示假百分比**（不确定进度条） |
 | 取消 | 支持取消（**不支持暂停**）：终止整个 npm 进程组、**删除安装目录与 npm 下载缓存**，状态标记为「已取消」 |
-| 安装后 | 打上 fnOS 需要的**附件 fsync 补丁**（见下），再执行 `<版本>/node_modules/.bin/dsh -V` 校验版本号；校验不过则删掉该目录并换下一个镜像源 |
+| 安装后 | 打上 fnOS 需要的**附件 fsync 补丁**（见下），再执行 `<版本>/node_modules/.bin/dsh -V` 校验版本号；校验不过则删掉该目录并报错（不自动换源） |
 | 切换 | 概览页版本列表里点「切换」→ 写 `config.json` 的 `dshVersion` → 停 dsh → 用该版本启动（`startDshCaptured` 重新换取会话凭据）。**切换前先过忙守卫**（正在装插件时拒绝） |
 | 删除 | 删除版本目录（磁盘占用约 500 MB / 版本）。**当前正在使用的版本不允许删除** |
 | 未安装 | 没有选中任何可用版本时：概览页版本行显示「未安装」，反代等待页显示「尚未安装 dsh 服务」并提示去概览页下载 + 切换（`boot.go` 的 `phaseNotInstalled`） |
@@ -760,7 +767,7 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 这样既不留下「看不见又删不掉」的 500 MB 目录，也不会把服务切回一个没人维护的版本。
 
 **版本数据的缓存策略**（`refreshVersions(force)` / `detectPluginLocal(force)`）：这两个来源
-都是「慢查询」——前者要打三个镜像源，后者要起一个 `dsh plugin --profile web list` 子进程
+都是「慢查询」——前者要打一次所选镜像源，后者要起一个 `dsh plugin --profile web list` 子进程
 （1~3 秒）——因此都按**缓存优先**处理，`force=false` 时只要有缓存就直接返回、不联网：
 
 | 触发 | dsh 版本列表 | 市场本地检测 / 最新版 |
@@ -971,7 +978,7 @@ harness 的自我更新会一并取回校验文件并用**实际下载到的字�
      未安装任何版本时控制台显示「未安装」、反代等待页显示「尚未安装 dsh 服务」。
      详见上文「dsh 服务的多版本管理」。**没有压缩包备份 / 回滚**：旧版本目录留着就是回退。
    - **插件市场**：`dsh plugin --profile web add dshmarket@<最新版本号>` /
-     `remove dshmarket`（镜像源逐个尝试；安装带精确版本号，不用 `@latest` 标签），
+     `remove dshmarket`（使用设置页选中的镜像源；安装带精确版本号，不用 `@latest` 标签），
      未安装时控制台可装上最新版；安装/卸载成功后重启 dsh 让新 bundle 生效。
      详见上文「插件市场（dshmarket）的安装与更新」。同样没有备份 / 回滚。
    - 启动时会清理 `pending/` 下的残留 harness 更新包（`pending` 只存在于内存，进程重启
@@ -996,9 +1003,9 @@ harness 的自我更新会一并取回校验文件并用**实际下载到的字�
 - **概览页 dsh 服务版本显示「未安装」** — 本机 `${TRIM_PKGVAR}/server/` 下没有任何已选中
   的可用版本：去版本列表里下载一个并点「切换」。这是新形态的正常初始状态（dsh 不再随 fpk
   预置），不是故障。
-- **下载 dsh 版本失败（三个镜像源都失败）** — 错误里会列出尝试过的镜像源。检查设备能否
-  直连 `registry.npmmirror.com` / `mirrors.cloud.tencent.com/npm` /
-  `repo.huaweicloud.com`（控制台刻意不走那套代理设置，也不试官方源）。
+- **下载 dsh 版本失败（所选 npm 镜像源不可用）** — 错误里会点明是哪个源。去设置页换一个
+  源再重试（默认阿里云，可选腾讯云 / 华为云 / 官方源）。安装直连镜像源、不走那套 http 代理
+  设置；官方源 `registry.npmjs.org` 在国内通常不可直连，只有主动选中时才会使用。
 - **dsh 装好后在 fnOS 上无法上传文件 / 图片（EACCES）** — 附件 fsync 补丁没打上。看日志里
   有没有 `attachment fsync patch not applied`（安装完成后注入，见「dsh 服务的多版本管理」）；
   该补丁失败不会让安装失败，但会让上传功能不可用。

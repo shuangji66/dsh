@@ -13,11 +13,12 @@ package main
 // 备份、没有整目录替换、没有回滚 —— 旧版本目录留着就是「回退」。
 //
 // 几条硬约束（每条都对应一个真实约束/踩过的坑）：
-//  1. 【只走国内镜像源】阿里云 → 腾讯云 → 华为云，5 秒无响应即换下一个，**不重试**，
-//     三个都失败就报错。刻意不试官方 registry.npmjs.org（用户要求）。
+//  1. 【用设置页选中的那一个镜像源】可选阿里云 / 腾讯云 / 华为云 / 官方源（默认阿里云），
+//     同一个源**不重试**，失败就报错并提示用户去设置页换源。不再自动换源 —— 用户明确
+//     要「选哪个就用哪个」，失败原因也必须能对得上他选的那个源。
 //  2. 【5 秒 = npm 单请求超时】整棵依赖树约 500MB / 45 秒（实测），按「整包 5 秒」
 //     判定会把每次安装都判死。因此用 `--fetch-timeout=5000 --fetch-retries=0`：
-//     任意一次 HTTP 请求 5 秒拿不到响应即该请求失败，进而整体换下一个镜像源重跑。
+//     任意一次 HTTP 请求 5 秒拿不到响应即该请求失败。
 //  3. 【下载后必须打附件 fsync 补丁】dsh 的 attachment-local 落盘附件时会逐级上溯
 //     fsync 到文件系统根 "/"，而 fnOS 把 /vol1 与 /vol1/@appshare 设为 mode 000
 //     （仅由 trim_acl 授予穿越），非 root 打不开 → EACCES → WEB 端上传文件/图片整体
@@ -58,7 +59,7 @@ const (
 	// 已不再维护（当年针对它们的反代兼容代码也随 dsh 上游自修陆续移除，见 README
 	// 「浏览器兼容模式」），控制台只对 0.2.0-rc.1 及更新的版本负责。
 	dshMinVersion = "0.2.0-rc.1"
-	// dshMirrorTimeout 是单次镜像源请求的超时（「5 秒没反应就换下一个」）。
+	// dshMirrorTimeout 是单次镜像源请求的超时（「5 秒没反应就判这次失败」）。
 	dshMirrorTimeout = 5 * time.Second
 	// dshInstallCancelGrace 是取消安装时先 SIGTERM、再 SIGKILL 的宽限时间。
 	dshInstallCancelGrace = 3 * time.Second
@@ -80,7 +81,7 @@ const (
 // （插件市场操作失败那条就是），中文名一旦混进去，日志里就又出现了中文镜像名。
 type npmMirror struct {
 	Name string // 显示名（仅界面）
-	Slug string // 日志/错误链里的英文标识（aliyun / tencent / huawei）
+	Slug string // 日志/错误链里的英文标识，同时是配置项 npmRegistry 的取值（aliyun / tencent / huawei / npmjs）
 	URL  string // registry 地址（不带尾斜杠）
 }
 
@@ -96,13 +97,56 @@ func (m npmMirror) mirrorLogName() string {
 	return m.URL
 }
 
-// npmMirrors 是 dsh 与插件市场的镜像源候选，顺序固定为阿里云 → 腾讯云 → 华为云。
-// 刻意不含官方 registry.npmjs.org：国内设备直连官方源普遍不可用，混进去只会让
-// 「都失败就报错」这个结论变得不可信。
+// npmRegistryDefault 是设置页「npm 镜像源」的默认值（阿里云）。
+const npmRegistryDefault = "aliyun"
+
+// npmMirrors 是可选的 npm 镜像源，也是设置页下拉框的来源。
+//
+// **默认只用设置页选中的那一个**（见 selectedNpmMirror），不再按顺序回退：
+// 用户要求「选哪个就用哪个、失败就报错并提示换源」。官方源也在候选里，但只有用户
+// 主动选中时才会被使用 —— 国内设备直连 registry.npmjs.org 通常不可用。
+//
+// 顺序只影响界面下拉框的排列（阿里云 → 腾讯云 → 华为云 → 官方源）。
 var npmMirrors = []npmMirror{
 	{Name: "阿里云", Slug: "aliyun", URL: "https://registry.npmmirror.com"},
 	{Name: "腾讯云", Slug: "tencent", URL: "https://mirrors.cloud.tencent.com/npm"},
 	{Name: "华为云", Slug: "huawei", URL: "https://repo.huaweicloud.com/repository/npm"},
+	{Name: "官方源", Slug: "npmjs", URL: "https://registry.npmjs.org"},
+}
+
+// validNpmRegistry 判断一个配置值是否是已知镜像源的 Slug。
+func validNpmRegistry(slug string) bool {
+	for _, m := range npmMirrors {
+		if m.Slug == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeNpmRegistry 把空/非法值归一化为默认的阿里云。
+func normalizeNpmRegistry(slug string) string {
+	if validNpmRegistry(slug) {
+		return slug
+	}
+	return npmRegistryDefault
+}
+
+// selectedNpmMirror 返回设置页当前选中的镜像源（dsh 安装/版本列表与两个受管插件都用它）。
+//
+// 配置里的值找不到对应项时退回列表第一个：单测会整体替换 npmMirrors（假源没有真的
+// Slug），线上则被 LoadConfig / 保存校验保证一定是合法值，因此这里只做防御。
+func selectedNpmMirror() npmMirror {
+	slug := normalizeNpmRegistry(GetConfig().NpmRegistry)
+	for _, m := range npmMirrors {
+		if m.Slug == slug {
+			return m
+		}
+	}
+	if len(npmMirrors) > 0 {
+		return npmMirrors[0]
+	}
+	return npmMirror{Name: "官方源", Slug: "npmjs", URL: "https://registry.npmjs.org"}
 }
 
 // mirrorLogNames 返回全部镜像源的日志标识（英文，逗号分隔）。
@@ -587,12 +631,16 @@ func newestVersion(versions map[string]json.RawMessage) string {
 //
 // force=false（打开弹窗、常规状态刷新）在已有缓存时直接返回、**完全不联网**；只有缓存
 // 还空着（控制台刚启动、第一次检测还没跑完）才去拉。这是刻意的：版本列表是「镜像源上
-// 有什么」的快照，不该每打开一次弹窗就打三个镜像源。
+// 有什么」的快照，不该每打开一次弹窗就打一次镜像源。
 //
-// 刷新缓存的入口只有两个（都走 force=true）：
+// 列表来自**设置页当前选中的那一个源**（selectedNpmMirror）；它失败时不做自动换源，
+// 只把错误写给界面 —— 用户可以在设置页换源后点重新获取。
+//
+// 刷新缓存的入口只有三个（都走 force=true）：
 //   - 用户在版本弹窗里点「刷新」（`GET /api/dsh/versions?refresh=1`）；
 //   - 后台自动检测（每小时）与手动「检查更新」（`/api/update/check`）——
-//     它们本来就要联网判断有没有新版本，顺带把这份列表刷新掉。
+//     它们本来就要联网判断有没有新版本，顺带把这份列表刷新掉；
+//   - 设置页保存了一个**新的 npm 镜像源**（见 handleSaveSettings，异步重拉）。
 //
 // 拉取失败时**保留上一份缓存**（旧列表仍然可用），只把 verErr 写给界面。
 func (m *ServerManager) refreshVersions(force bool) error {
@@ -603,38 +651,29 @@ func (m *ServerManager) refreshVersions(force bool) error {
 		return nil
 	}
 
-	client := mirrorClient()
-	var lastErr error
-	for _, mirror := range npmMirrors {
-		versions, tags, err := fetchMirrorPackument(client, mirror.URL, dshPackageName)
-		if err != nil {
-			lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
-			logWarn("[dsh] version list from %s failed: %v", mirror.mirrorLogName(), err)
-			continue
-		}
-		list := filterDshVersions(versions, tags)
-		newest := newestOf(list)
-		latestTag := tags["latest"]
+	mirror := selectedNpmMirror()
+	versions, tags, err := fetchMirrorPackument(mirrorClient(), mirror.URL, dshPackageName)
+	if err != nil {
+		logWarn("[dsh] version list from %s failed: %v", mirror.mirrorLogName(), err)
 		m.mu.Lock()
-		m.versions, m.tags, m.newest, m.latestTag, m.checkedAt, m.verErr = list, tags, newest, latestTag, time.Now(), ""
+		m.verErr = fmt.Sprintf("获取 dsh 版本列表失败（镜像源：%s）: %v", mirror.mirrorLogName(), err)
+		m.checkedAt = time.Now()
 		m.mu.Unlock()
-		logInfo("[dsh] version list updated from %s: %d available versions, newest=%s (dist-tags.latest=%s)",
-			mirror.mirrorLogName(), len(list), newest, latestTag)
 		m.refreshDshStatus()
 		m.notify(true)
-		return nil
+		return fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no npm mirror available")
-	}
+	list := filterDshVersions(versions, tags)
+	newest := newestOf(list)
+	latestTag := tags["latest"]
 	m.mu.Lock()
-	m.verErr = fmt.Sprintf("获取 dsh 版本列表失败（%s 均不可用）: %v", mirrorLogNames(), lastErr)
-	m.checkedAt = time.Now()
+	m.versions, m.tags, m.newest, m.latestTag, m.checkedAt, m.verErr = list, tags, newest, latestTag, time.Now(), ""
 	m.mu.Unlock()
-	logWarn("[dsh] version list unavailable: %v", lastErr)
+	logInfo("[dsh] version list updated from %s: %d available versions, newest=%s (dist-tags.latest=%s)",
+		mirror.mirrorLogName(), len(list), newest, latestTag)
 	m.refreshDshStatus()
 	m.notify(true)
-	return lastErr
+	return nil
 }
 
 // refreshDshStatus 把「选中的版本 + 列表里最高的一版」写进 dsh 更新状态，
@@ -722,7 +761,7 @@ func (m *ServerManager) Install(version string) error {
 	m.install = &DshInstallState{
 		Version: version,
 		Phase:   "downloading",
-		Mirror:  npmMirrors[0].Name,
+		Mirror:  selectedNpmMirror().Name,
 		Seq:     m.installSeq,
 	}
 	m.mu.Unlock()
@@ -822,7 +861,7 @@ func (m *ServerManager) clearInstallState() {
 	m.notify(true)
 }
 
-// doInstall 是一次安装的实际执行体：镜像源逐个尝试，成功后打补丁并校验。
+// doInstall 是一次安装的实际执行体：用设置页选中的镜像源安装，成功后打补丁并校验。
 func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 	dir := m.versionDir(version)
 	// 半成品残留（上次失败/异常退出留下）先清掉：npm 遇到残缺 node_modules 可能直接
@@ -832,70 +871,57 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 		return err
 	}
 
-	var lastErr error
-	for _, mirror := range npmMirrors {
-		if ctx.Err() != nil {
-			break
+	mirror := selectedNpmMirror()
+	m.updateInstall(func(s *DshInstallState) {
+		// 这两处是**界面**文案（版本弹窗里的源标签与进度行），刻意用中文显示名；
+		// 日志一律用下面的 mirrorLogName()（英文标识）。
+		s.Mirror = mirror.Name
+		s.Phase = "downloading"
+		setMsgFields(&s.Message, &s.MessageRef, "msg_install_from_mirror",
+			"正在从 %s 下载 %s@%s", "mirror", mirror.Name, "pkg", dshPackageName, "version", version)
+	})
+	logInfo("[dsh] installing %s from %s", version, mirror.mirrorLogName())
+
+	err := npmInstallFn(m, ctx, dir, version, mirror)
+	if ctx.Err() != nil {
+		// 用户取消：清干净（目录 + 下载缓存）后退出，错误文本由前端按「已取消」呈现。
+		m.cleanCancelledInstall(dir, version)
+		return errUpdateCancelled
+	}
+	if err == nil {
+		if verr := m.verifyInstall(ctx, version); verr != nil {
+			// 校验失败说明这份安装产物不可用，不能留下半个版本目录 —— 删干净后把真实
+			// 原因报出去（不再换源：用户选中的就是这一个源）。
+			os.RemoveAll(dir)
+			logWarn("[dsh] %s install from %s verified failed: %v", version, mirror.mirrorLogName(), verr)
+			return uiErr("err_install_mirror_failed",
+				"从 %s 安装 dsh %s 失败（请检查网络，或在设置页切换 npm 镜像源后重试）: %s",
+				"mirror", mirror.Name, "version", version, "detail", verr.Error())
 		}
 		m.updateInstall(func(s *DshInstallState) {
-			// 这两处是**界面**文案（版本弹窗里的源标签与进度行），刻意用中文显示名；
-			// 日志一律用下面的 mirrorLogName()（英文标识）。
-			s.Mirror = mirror.Name
-			s.Phase = "downloading"
-			setMsgFields(&s.Message, &s.MessageRef, "msg_install_from_mirror",
-				"正在从 %s 下载 %s@%s", "mirror", mirror.Name, "pkg", dshPackageName, "version", version)
+			s.Phase = "done"
+			setErrFields(&s.Error, &s.ErrorRef, nil)
+			s.Cancelled = false
+			setMsgFields(&s.Message, &s.MessageRef, "msg_install_done", "dsh %s 安装完成", "version", version)
 		})
-		logInfo("[dsh] installing %s from %s", version, mirror.mirrorLogName())
-		err := npmInstallFn(m, ctx, dir, version, mirror)
-		if ctx.Err() != nil {
-			// 用户取消：清干净（目录 + 下载缓存）后退出，错误文本由前端按「已取消」呈现。
-			m.cleanCancelledInstall(dir, version)
-			return errUpdateCancelled
-		}
-		if err == nil {
-			if verr := m.verifyInstall(ctx, version); verr != nil {
-				// 换下一个镜像源前必须把目录重建出来：npm install 的 --prefix 目录
-				// 不存在时 exec 会直接以 chdir 失败，那次「换源」就白丢了，错误信息
-				// 还会被算到镜像源头上（掩盖真正的校验失败原因）。
-				if rerr := m.resetVersionDir(dir, pkgJSON); rerr != nil {
-					return rerr
-				}
-				lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), verr)
-				logWarn("[dsh] %s install from %s verified failed: %v", version, mirror.mirrorLogName(), verr)
-				continue
-			}
-			m.updateInstall(func(s *DshInstallState) {
-				s.Phase = "done"
-				setErrFields(&s.Error, &s.ErrorRef, nil)
-				s.Cancelled = false
-				setMsgFields(&s.Message, &s.MessageRef, "msg_install_done", "dsh %s 安装完成", "version", version)
-			})
-			logInfo("[dsh] %s installed to %s (%s)", version, dir, mirror.mirrorLogName())
-			m.refreshDshStatus()
-			return nil
-		}
-		lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
-		logWarn("[dsh] install %s from %s failed: %v", version, mirror.mirrorLogName(), err)
-		// 换下一个镜像源前清掉这次的半成品：npm 会在残缺树上续装，跨源混装不可信。
-		if rerr := m.resetVersionDir(dir, pkgJSON); rerr != nil {
-			return rerr
-		}
+		logInfo("[dsh] %s installed to %s (%s)", version, dir, mirror.mirrorLogName())
+		m.refreshDshStatus()
+		return nil
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no npm mirror available")
-	}
+	logWarn("[dsh] install %s from %s failed: %v", version, mirror.mirrorLogName(), err)
+	// 失败后清理半成品：npm 会在残缺树上续装，下次重装会装出不可信的树。
 	os.RemoveAll(dir)
-	return uiErr("err_install_all_mirrors_failed",
-		"从 %s 下载 dsh %s 均失败（不重试、不使用官方源）: %s",
-		"mirrors", mirrorLogNames(), "version", version, "detail", lastErr.Error())
+	return uiErr("err_install_mirror_failed",
+		"从 %s 安装 dsh %s 失败（请检查网络，或在设置页切换 npm 镜像源后重试）: %s",
+		"mirror", mirror.Name, "version", version, "detail", err.Error())
 }
 
 // resetVersionDir 把版本目录恢复成「npm install 可以往里装」的干净骨架：
-// 删掉旧目录（半成品/落选镜像源的残骸），重建目录与 npm install --prefix 需要的
+// 删掉旧目录（上次失败/异常退出的残骸），重建目录与 npm install --prefix 需要的
 // package.json（与 dsh 官方安装形态一致，也让「这个目录是哪一版」在磁盘上直接可读）。
 //
-// 换镜像源重试前**必须**调用：`npm install --prefix <dir>` 的 dir 不存在时 exec 直接
-// 以 chdir 失败，那次换源就白丢了，而且错误会被算到镜像源头上（掩盖真正的原因）。
+// 安装开始前必须调用：`npm install --prefix <dir>` 的 dir 不存在时 exec 直接以
+// chdir 失败，而且错误会被算到镜像源头上（掩盖真正的原因）。
 func (m *ServerManager) resetVersionDir(dir, pkgJSON string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return uiErr("err_install_prepare_failed", "准备安装目录失败: %s", "detail", err.Error())
@@ -934,8 +960,8 @@ func (m *ServerManager) runNpmInstall(ctx context.Context, dir, version string, 
 		"--prefix", dir,
 		dshPackageName + "@" + version,
 		"--registry=" + mirror.URL,
-		// 「5 秒没反应就换下一个镜像源」：npm 的单次请求 5 秒拿不到响应即失败，
-		// 且不重试（重试会让「换源」变成「原地死等」）。
+		// 「5 秒没反应就判这次安装失败」：npm 的单次请求 5 秒拿不到响应即失败，
+		// 且不重试（重试只会让「换源」变成「原地死等」；换源是用户自己做的事）。
 		"--fetch-timeout=5000",
 		"--fetch-retries=0",
 		"--save-exact",

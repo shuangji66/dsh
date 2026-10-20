@@ -9,8 +9,8 @@ package main
 //
 // 这里钉住的契约：
 //   - `dsh plugin list` 的输出里没有 dshmarket 时版本号必须为空（前端显示「未安装」）；
-//   - 「最新版」取镜像源里**版本号最高**的一版（不是 dist-tags.latest），**不试官方源**；
-//   - 命令按镜像源顺序逐个尝试：失败的镜像不再重试，成功即返回；
+//   - 「最新版」取镜像源里**版本号最高**的一版（不是 dist-tags.latest），只用设置页选中的源；
+//   - 安装/更新命令带选中源的 --registry，失败直接报错、不自动换源；
 //   - 命令确实带上了 `--profile web` 与 `--registry=<镜像>`（否则等于没用镜像源）。
 
 import (
@@ -158,7 +158,7 @@ func TestMarketInstalledWithoutDshReportsReason(t *testing.T) {
 	}
 }
 
-// --- 最新版：镜像源，且不试官方源 ---
+// --- 最新版：镜像源（只用选中的源） ---
 
 // withMirrors 临时替换镜像源列表。
 func withMirrors(t *testing.T, mirrors []npmMirror) {
@@ -197,7 +197,7 @@ func marketPackumentMulti(t *testing.T, versions []string, latestTag string) str
 	return string(raw)
 }
 
-func TestMarketLatestFallsBackAcrossMirrors(t *testing.T) {
+func TestMarketLatestUsesSelectedMirror(t *testing.T) {
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -207,24 +207,32 @@ func TestMarketLatestFallsBackAcrossMirrors(t *testing.T) {
 		_, _ = w.Write([]byte(marketPackument(t, "1.66.11")))
 	}))
 	defer good.Close()
-	withMirrors(t, []npmMirror{{Name: "镜像一", URL: bad.URL}, {Name: "镜像二", URL: good.URL}})
+	// 两个假源：阿里云不可用、腾讯云可用。
+	withMirrors(t, []npmMirror{
+		{Name: "镜像一", Slug: "aliyun", URL: bad.URL},
+		{Name: "镜像二", Slug: "tencent", URL: good.URL},
+	})
 
 	upd := newMarketTestManager(t, t.TempDir(), "0.2.0-rc.2")
+	cfg := GetConfig()
+	cfg.NpmRegistry = "tencent"
+	initConfig(&cfg)
+
 	ver, mirror, err := upd.marketLatest()
 	if err != nil {
 		t.Fatalf("最新版检测不应报错: %v", err)
 	}
-	// 第二个返回值是**日志标识**（英文，供调用方写日志用），不是中文显示名；
-	// 这里构造的假镜像没有 Slug，按 URL 主机名兜底。
-	wantMirror := npmMirror{Name: "镜像二", URL: good.URL}.mirrorLogName()
-	if ver != "1.66.11" || mirror != wantMirror {
-		t.Fatalf("最新版 = (%q, %q), want (%q, %q)", ver, mirror, "1.66.11", wantMirror)
+	// 第二个返回值是**日志标识**（英文，供调用方写日志用），不是中文显示名。
+	if ver != "1.66.11" || mirror != "tencent" {
+		t.Fatalf("最新版 = (%q, %q), want (%q, %q)", ver, mirror, "1.66.11", "tencent")
 	}
 
-	// 全部失败：错误信息必须点出「都不试官方源」这个语义（日志/错误链英文，见规则 7）。
-	withMirrors(t, []npmMirror{{Name: "镜像一", URL: bad.URL}})
-	if _, _, err := upd.marketLatest(); err == nil || !strings.Contains(err.Error(), "mirrors tried") {
-		t.Fatalf("全部失败时应报镜像源相关错误，实得 %v", err)
+	// 选中的源失败时直接报错（不自动换到其它源），错误里点明是哪个 registry。
+	cfg = GetConfig()
+	cfg.NpmRegistry = "aliyun"
+	initConfig(&cfg)
+	if _, _, err := upd.marketLatest(); err == nil || !strings.Contains(err.Error(), "registry aliyun") {
+		t.Fatalf("所选源失败时应报出该 registry，实得 %v", err)
 	}
 }
 
@@ -361,54 +369,48 @@ func TestMarketLocalDetectionIsCached(t *testing.T) {
 	}
 }
 
-// --- 安装 / 更新 / 卸载的命令与镜像回退 ---
+// --- 安装 / 更新 / 卸载的命令与镜像源选择 ---
 
-// 镜像源逐个尝试：第一个失败换下一个，成功即返回；三个都失败则报错。
-func TestMarketPluginCmdTriesMirrorsInOrder(t *testing.T) {
+// 只用设置页选中的镜像源：命令带它的 --registry，失败只执行一次、不换源。
+// 安装/更新命令只用设置页选中的那个源：带它的 --registry，失败只执行一次、不换源。
+func TestMarketPluginCmdUsesSelectedMirror(t *testing.T) {
 	dataDir := t.TempDir()
 	upd := newMarketTestManager(t, dataDir, "0.2.0-rc.2")
-	// 假 dsh：第一次调用退出 1（第一个镜像源失败），之后退出 0（第二个镜像源成功）。
-	stateFile := filepath.Join(t.TempDir(), "state")
-	tail := "if [ -f " + stateFile + " ]; then exit 0; fi\ntouch " + stateFile + "\nexit 1\n"
-	marker := writeFakeDsh(t, dataDir, "0.2.0-rc.2", "", tail)
+	cfg := GetConfig()
+	cfg.NpmRegistry = "huawei"
+	initConfig(&cfg)
 
+	marker := writeFakeDsh(t, dataDir, "0.2.0-rc.2", "", "exit 0\n")
 	if err := upd.runMarketPluginCmd([]string{"add", marketPackageName + "@latest"}); err != nil {
-		t.Fatalf("第二个镜像源应当成功: %v", err)
+		t.Fatalf("安装命令不应失败: %v", err)
 	}
 	raw, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatal(err)
 	}
 	calls := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(calls) != 2 {
-		t.Fatalf("应当尝试两次（第一个镜像失败后换下一个，不重试同一个），实得 %d 次: %v", len(calls), calls)
+	if len(calls) != 1 {
+		t.Fatalf("应当只执行一次（只用所选源），实得 %d 次: %v", len(calls), calls)
 	}
-	// 命令行必须带 --profile web 与对应镜像的 --registry=。
-	for i, mirror := range npmMirrors[:2] {
-		if !strings.Contains(calls[i], "plugin --profile web add "+marketPackageName+"@latest") {
-			t.Errorf("第 %d 次调用缺少 plugin --profile web add 形态: %q", i+1, calls[i])
-		}
-		if !strings.Contains(calls[i], "--registry="+mirror.URL) {
-			t.Errorf("第 %d 次调用应指向 %s，实得 %q", i+1, mirror.Name, calls[i])
-		}
+	if !strings.Contains(calls[0], "plugin --profile web add "+marketPackageName+"@latest") {
+		t.Errorf("调用缺少 plugin --profile web add 形态: %q", calls[0])
+	}
+	if !strings.Contains(calls[0], "--registry="+npmMirrors[2].URL) {
+		t.Errorf("调用应指向选中的华为云（%s），实得 %q", npmMirrors[2].Name, calls[0])
 	}
 
-	// 三个都失败 → 报错，且错误里点明镜像源。
-	//
-	// 这里刻意断言「是**英文标识**、且不含中文显示名」：这条错误会被 runMarketOp 的
-	// logError 原样打进日志，中文镜像名一旦混进来，日志里就又出现中文了。
-	writeFakeDsh(t, dataDir, "0.2.0-rc.2", "", "exit 1\n")
-	err = upd.runMarketPluginCmd([]string{"remove", marketPackageName})
-	if err == nil || !strings.Contains(err.Error(), mirrorLogNames()) {
-		t.Fatalf("全部镜像失败时应报错并列出镜像源（英文标识 %q），实得 %v", mirrorLogNames(), err)
+	// 所选源失败 → 直接报错、只执行一次，并提示去设置页换源。
+	marker = writeFakeDsh(t, dataDir, "0.2.0-rc.2", "", "echo boom >&2\nexit 1\n")
+	err = upd.runMarketPluginCmd([]string{"add", marketPackageName + "@latest"})
+	if err == nil || !strings.Contains(err.Error(), "华为云") || !strings.Contains(err.Error(), "切换 npm 镜像源") {
+		t.Fatalf("失败时应点明所选源并提示换源，实得 %v", err)
 	}
-	for _, m := range npmMirrors {
-		if strings.Contains(err.Error(), m.Name) {
-			t.Fatalf("错误里不应出现中文镜像名 %q（会随日志漏出去）: %v", m.Name, err)
-		}
+	raw, err = os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "不重试") {
-		t.Fatalf("错误信息应说明不重试，实得 %v", err)
+	if got := len(strings.Split(strings.TrimSpace(string(raw)), "\n")); got != 1 {
+		t.Fatalf("失败后不应自动换源重试，实际执行 %d 次", got)
 	}
 }
 

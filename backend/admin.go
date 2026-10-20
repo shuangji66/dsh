@@ -489,6 +489,21 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_mem_zero", "dsh 内存限制必须大于 0 MB")
 		return
 	}
+	// npm 镜像源（设置页「npm 镜像源」）：只接受设置页列出的那几个值。
+	// 空串表示**旧版前端缓存**没有提交该字段，按「未修改」处理，沿用已保存的选择
+	// （不能因为一次旧版前端保存就把用户选好的源重置掉）。
+	if req.Config.NpmRegistry == "" {
+		req.Config.NpmRegistry = GetConfig().NpmRegistry
+	}
+	if req.Config.NpmRegistry == "" {
+		req.Config.NpmRegistry = npmRegistryDefault
+	}
+	if !validNpmRegistry(req.Config.NpmRegistry) {
+		writeErrU(w, http.StatusBadRequest, "err_npm_registry_invalid",
+			"未知的 npm 镜像源: %s", "registry", req.Config.NpmRegistry)
+		return
+	}
+	prevNpmRegistry := normalizeNpmRegistry(GetConfig().NpmRegistry)
 	// 手动设置的 node 堆内存上限过低时拒绝保存（前端同阈值红字提示并阻止提交）：
 	// 这个量级下 dsh 起来就会频繁 GC / OOM，比「保存成功但跑不稳」更糟。
 	// 「自动设置」不受此限：自动模式不使用这个持久化值，它可能是历史遗留的小数值。
@@ -531,6 +546,13 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if err := SaveConfig(m.renv, req.Config, locked); err != nil {
 		writeErrU(w, http.StatusInternalServerError, "err_save_failed", "保存失败: %s", "detail", err.Error())
 		return
+	}
+	// 切换镜像源后，手上那份 dsh 版本列表是**旧源**的快照：异步用新源重拉一次，
+	// 让概览页/版本弹窗尽快反映新源（拉取失败时 refreshVersions 会保留旧列表并写
+	// verErr，不会把「新源不可达」误报成「没有版本」）。插件最新版状态会在下一次
+	// 后台检测 / 手动检查时用新源刷新，这里不额外起 `dsh plugin list`。
+	if req.Config.NpmRegistry != prevNpmRegistry && m.update != nil && m.update.server != nil {
+		go m.update.server.refreshVersions(true)
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "locked": locked, "config": GetConfig()})
 }

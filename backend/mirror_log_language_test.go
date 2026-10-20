@@ -1,6 +1,6 @@
 package main
 
-// mirror_log_language_test.go —— 「三个国内镜像源在日志里不许出现中文」的回归测试。
+// mirror_log_language_test.go —— 「npm 镜像源在日志里不许出现中文」的回归测试。
 //
 // 背景：日志一律英文（AGENTS 第 4 节规则 7），但镜像源的中文显示名（阿里云/腾讯云/华为云）
 // 过去既进界面也进日志：`logWarn("[dsh] installing %s from %s", version, mirror.Name)`，
@@ -8,7 +8,7 @@ package main
 //
 // 现在的分工（见 server.go 的 npmMirror）：
 //   - Name（中文）只用于**界面**：进度文案、安装状态里的源标签；
-//   - Slug（aliyun/tencent/huawei）走日志与错误链，因此错误链里也不许出现中文镜像名。
+//   - Slug（aliyun/tencent/huawei/npmjs）走日志与错误链，因此错误链里也不许出现中文镜像名。
 //
 // 两条测试各守一边：① 日志标识本身是英文；② 源码里的日志调用不再引用中文显示名。
 
@@ -21,8 +21,8 @@ import (
 
 // TestNpmMirrorLogIdentityIsEnglish 真实镜像源的日志标识必须是英文、且与中文显示名不同。
 func TestNpmMirrorLogIdentityIsEnglish(t *testing.T) {
-	if len(npmMirrors) != 3 {
-		t.Fatalf("镜像源应恰好三个，实得 %d", len(npmMirrors))
+	if len(npmMirrors) != 4 {
+		t.Fatalf("镜像源应恰好四个（阿里云 / 腾讯云 / 华为云 / 官方源），实得 %d", len(npmMirrors))
 	}
 	for _, m := range npmMirrors {
 		logID := m.mirrorLogName()

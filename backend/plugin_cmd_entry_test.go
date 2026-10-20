@@ -154,7 +154,7 @@ func TestMarketPluginCommandsGoThroughRunPluginCommand(t *testing.T) {
 		t.Fatalf("市场命令必须经 RunPluginCommand（执行前清陈旧锁），实际记事实:\n%s", got)
 	}
 
-	// add 走「镜像源逐个尝试」的那条：第一个源成功即返回，argv 里带 registry。
+	// add 走「使用选中镜像源」的那条：argv 里带选中源的 registry。
 	if err := upd.runMarketPluginCmd([]string{"add", marketPackageName + "@1.2.3"}); err != nil {
 		t.Fatalf("add 不应失败: %v", err)
 	}

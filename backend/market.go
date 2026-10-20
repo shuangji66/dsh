@@ -16,10 +16,11 @@ package main
 //
 // 增强插件 dsh-fnos-advanced（飞牛目录选择器）是**同一形态的第二个受管插件**：它同样
 // 发布在 npm、同样由 `dsh plugin add|remove` 安装卸载，因此这里用 managedPlugin 把
-// 「包名 / 状态槽位 / 更新日志来源」参数化，两套动作共用同一份实现与同一套镜像源回退。
+// 「包名 / 状态槽位 / 更新日志来源」参数化，两套动作共用同一份实现与同一套镜像源选择。
 //
-// 镜像源与 dsh 版本安装完全一致（见 server.go 的 npmMirrors）：阿里云 → 腾讯云 →
-// 华为云，5 秒无响应换下一个，不重试，都失败就报错，不试官方源。
+// 镜像源与 dsh 版本安装完全一致（见 server.go 的 selectedNpmMirror）：**只用设置页
+// 选中的那一个源**（默认阿里云，可选腾讯 / 华为 / 官方），不重试同一个源，失败就报错
+// 并提示用户去设置页换源。
 //
 // 几条必须守住的约束：
 //  1. 【顺序：先跑插件命令，再重启 dsh】安装/卸载都是 pnpm 在 profile 目录里跑，
@@ -68,7 +69,7 @@ const (
 //
 // 两个受管插件（市场 / 增强插件）的形态完全一致，差异只有：状态写到哪个 kind、
 // npm 包名是什么、更新日志取自哪个仓库与 tag。把这三项参数化后，检测/安装/更新/
-// 卸载都只有一份实现 —— 别再为某个插件复制一份命令执行与镜像回退逻辑。
+// 卸载都只有一份实现 —— 别再为某个插件复制一份命令执行与镜像源选择逻辑。
 type managedPlugin struct {
 	kind      updateKind
 	pkg       string
@@ -341,41 +342,35 @@ func (m *UpdateManager) refreshManagedPluginsLocal(force bool) {
 
 // --- 版本检测：npm 镜像源 ---
 
-// pluginLatest 依次尝试各镜像源的元数据，返回**版本号最高**的那一版
-// （`newestVersion`）与命中的镜像源日志标识（英文标识；界面文案要用 npmMirror.Name，
+// pluginLatest 用设置页选中的那一个镜像源取元数据，返回**版本号最高**的那一版
+// （`newestVersion`）与命中源的日志标识（英文标识；界面文案要用 npmMirror.Name，
 // 别在这里返回中文显示名 —— 它会被调用方写进日志）。
 //
 // 刻意不看 `dist-tags.latest`：装的是「实际发布的最新版本号」那一版，而不是发布者
 // 手动指到哪一版的标签（标签可能滞后、可能指向稳定线而版本集合里已有更新的预览版）。
 // 安装时同一条链路的 `add <pkg>@<该版本>` 用的是这里返回的精确版本号。
 func (m *UpdateManager) pluginLatest(p managedPlugin) (string, string, error) {
-	client := mirrorClient()
-	var lastErr error
-	for _, mirror := range npmMirrors {
-		versions, _, err := fetchMirrorPackument(client, mirror.URL, p.pkg)
-		if err != nil {
-			lastErr = fmt.Errorf("%s: %w", mirror.mirrorLogName(), err)
-			continue
-		}
-		if v := newestVersion(versions); v != "" {
-			return v, mirror.mirrorLogName(), nil
-		}
-		lastErr = fmt.Errorf("%s: no usable version in metadata", mirror.mirrorLogName())
+	mirror := selectedNpmMirror()
+	versions, _, err := fetchMirrorPackument(mirrorClient(), mirror.URL, p.pkg)
+	if err != nil {
+		// 这条会顺着安装/更新链路进日志（runPluginOp 的 logError），必须英文；界面文案由
+		// pluginLatestErr 包装成 code + 中文兜底。
+		return "", "", fmt.Errorf("fetch %s latest version failed (registry %s): %v",
+			p.pkg, mirror.mirrorLogName(), err)
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no usable npm mirror")
+	v := newestVersion(versions)
+	if v == "" {
+		return "", "", fmt.Errorf("fetch %s latest version from registry %s failed: no usable version in metadata",
+			p.pkg, mirror.mirrorLogName())
 	}
-	// 这条会顺着安装/更新链路进日志（runPluginOp 的 logError），必须英文；界面文案由
-	// pluginLatestErr 包装成 code + 中文兜底。
-	return "", "", fmt.Errorf("fetch %s latest version failed (mirrors tried: %s): %v",
-		p.pkg, mirrorLogNames(), lastErr)
+	return v, mirror.mirrorLogName(), nil
 }
 
 // pluginLatestErr 把英文的底层检测错误包成面向用户的文案（code + 中文兜底）。
 func pluginLatestErr(p managedPlugin, err error) error {
 	return uiErr("err_plugin_latest_failed",
-		"获取 %s 最新版本失败（已尝试镜像源：%s）: %s",
-		"pkg", p.pkg, "mirrors", mirrorLogNames(), "detail", err.Error())
+		"获取 %s 最新版本失败（镜像源：%s）: %s",
+		"pkg", p.pkg, "mirror", selectedNpmMirror().Name, "detail", err.Error())
 }
 
 // marketLatest 是插件市场的最新版检测入口（保留给既有测试与调用方）。
@@ -475,47 +470,42 @@ func marketCommand(args []string) []string {
 	return append([]string{"plugin", "--profile", marketProfile}, args...)
 }
 
-// runPluginCmdFor 以**镜像源逐个尝试**的方式执行一次受管插件的安装/更新命令
+// runPluginCmdFor 用设置页选中的那一个镜像源执行一次受管插件的安装/更新命令
 // （`add`，它会访问 registry）。
 //
-// registry 通过 `--registry=<镜像源>` 传，只要整条命令失败（元数据取不到、tarball 下载
-// 失败、构建失败）就换下一个镜像源重跑一次；**不重试**同一个镜像源，三个都失败就报错。
+// registry 通过 `--registry=<镜像源>` 传；命令失败（元数据取不到、tarball 下载失败、
+// 构建失败）就**直接报错并提示换源**，不在内部自动换下一个源 —— 用户选的是哪个源，就
+// 用哪个源，失败原因也必须对得上。
 //
 // 注意：只有「会访问 registry 的命令」能走这里 —— pnpm 的 `add` 支持 `--registry`，
 // 而 `remove` / `list` 这类命令**不认这个选项**（会直接 `Unknown option: 'registry'`），
 // 它们走 runPluginCmdOnceFor。
 func (m *UpdateManager) runPluginCmdFor(p managedPlugin, args []string) error {
-	var lastErr error
-	for _, mirror := range npmMirrors {
-		full := append(marketCommand(args), "--registry="+mirror.URL)
-		m.updateStatus(p.kind, func(st *UpdateStatus) {
-			// 界面进度文案用中文显示名；日志用下面的 mirrorLogName()（英文标识）。
-			setMsgFields(&st.Message, &st.MessageRef, "msg_plugin_from_mirror",
-				"正在从 %s 处理 %s", "mirror", mirror.Name, "pkg", p.pkg)
-		})
-		logInfo("%s running dsh %s (via %s)", updateLogTag(p.kind), strings.Join(full, " "), mirror.mirrorLogName())
-		out, err := m.dsh.RunPluginCommand(marketCmdTimeout, full)
-		if err == nil {
-			return nil
-		}
-		lastErr = fmt.Errorf("%s: %v", mirror.mirrorLogName(), tailLines(out, 3))
+	mirror := selectedNpmMirror()
+	full := append(marketCommand(args), "--registry="+mirror.URL)
+	m.updateStatus(p.kind, func(st *UpdateStatus) {
+		// 界面进度文案用中文显示名；日志用下面的 mirrorLogName()（英文标识）。
+		setMsgFields(&st.Message, &st.MessageRef, "msg_plugin_from_mirror",
+			"正在从 %s 处理 %s", "mirror", mirror.Name, "pkg", p.pkg)
+	})
+	logInfo("%s running dsh %s (via %s)", updateLogTag(p.kind), strings.Join(full, " "), mirror.mirrorLogName())
+	out, err := m.dsh.RunPluginCommand(marketCmdTimeout, full)
+	if err != nil {
 		logWarn("%s dsh plugin command via %s failed: %v", updateLogTag(p.kind), mirror.mirrorLogName(), err)
+		return uiErr("err_plugin_op_failed",
+			"插件 %s 操作失败（镜像源：%s）: %s；可在设置页切换 npm 镜像源后重试",
+			"pkg", p.pkg, "mirror", mirror.Name, "detail", tailLines(out, 3))
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("没有可用的 npm 镜像源")
-	}
-	return uiErr("err_plugin_op_failed",
-		"插件 %s 操作失败（%s 均失败，不重试、不使用官方源）: %s",
-		"pkg", p.pkg, "mirrors", mirrorLogNames(), "detail", lastErr.Error())
+	return nil
 }
 
-// runMarketPluginCmd 是插件市场的镜像回退执行入口（保留给既有测试与调用方）。
+// runMarketPluginCmd 是插件市场的安装/更新执行入口（保留给既有测试与调用方）。
 func (m *UpdateManager) runMarketPluginCmd(args []string) error {
 	return m.runPluginCmdFor(marketPlugin, args)
 }
 
 // runPluginCmdOnceFor 执行一次**与 registry 无关**的受管插件命令（`remove` 等）：
-// 不带 `--registry`、不按镜像源回退（卸载既不下载也不解析依赖，没有任何「换个源再试」
+// 不带 `--registry`、也不涉及镜像源选择（卸载既不下载也不解析依赖，没有任何「换个源再试」
 // 的意义），失败就把 dsh/pnpm 的原话报出去。
 func (m *UpdateManager) runPluginCmdOnceFor(p managedPlugin, args []string) error {
 	full := marketCommand(args)
@@ -548,7 +538,7 @@ func tailLines(out string, n int) string {
 	return strings.Join(kept, " | ")
 }
 
-// pluginCmdFn 执行一次「镜像源逐个尝试」的 `dsh plugin …`（变量形式便于
+// pluginCmdFn 执行一次「使用选中镜像源」的 `dsh plugin …`（变量形式便于
 // 单测注入，不必真的起 dsh / pnpm）。
 var pluginCmdFn = func(m *UpdateManager, p managedPlugin, args []string) error {
 	return m.runPluginCmdFor(p, args)
@@ -595,10 +585,10 @@ func (m *UpdateManager) installPlugin(p managedPlugin) error {
 }
 
 // addNewestPluginCmd 组装「装到最新版本号」这条命令：先解析出精确版本号，再交给
-// 镜像源逐个尝试的执行器（`add <pkg>@<版本>`）。
+// 使用选中镜像源的执行器（`add <pkg>@<版本>`）。
 //
 // 用精确版本而不是 `@latest`：`@latest` 让 pnpm 自己按标签解析，标签滞后时会装到旧版本；
-// 精确版本还能让「某个镜像源还没同步到这一版」表现为该次尝试失败 → 自动换下一个镜像源。
+// 精确版本还能让「所选镜像源还没同步到这一版」表现为命令失败并带出 pnpm 的原话。
 func (m *UpdateManager) addNewestPluginCmd(p managedPlugin) error {
 	version, err := m.resolvePluginVersion(p)
 	if err != nil {
@@ -615,7 +605,7 @@ func (m *UpdateManager) addNewestPluginCmd(p managedPlugin) error {
 // RemoveMarket 卸载插件市场。
 //
 // 卸载走 runPluginCmdOnceFor：**不带 `--registry`**（pnpm 的 remove 没有这个选项）、
-// 也不按镜像源回退 —— 「装的是哪个源」与卸载无关。
+// 也不涉及镜像源选择 —— 「装的是哪个源」与卸载无关。
 func (m *UpdateManager) RemoveMarket() error {
 	return m.removePlugin(marketPlugin)
 }

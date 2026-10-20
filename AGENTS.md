@@ -118,8 +118,9 @@
   3. `DeleteDshDataBackup` 拒绝删除**正在写的那一份**（否则备份仍报成功、盘上却查无此包）。
   **dsh 服务更新与插件市场更新都不再走这里**（没有可下载的压缩包）。
 - `server.go` — **dsh 服务的多版本管理**：`${TRIM_PKGVAR}/server/<版本>/` 下的
-  `npm install --prefix` 安装产物；镜像源取自 `npmMirrors`（阿里云 → 腾讯云 → 华为云，
-  不试官方源），版本列表按 `dshMinVersion`（**0.2.0-rc.1**）过滤，下载/删除/切换与
+  `npm install --prefix` 安装产物；镜像源取自设置页选中的 `npmRegistry`（默认阿里云，
+  可选腾讯云 / 华为云 / 官方源；取用入口 `selectedNpmMirror()`，**只用所选源、不自动换源**），
+  版本列表按 `dshMinVersion`（**0.2.0-rc.1**）过滤，下载/删除/切换与
   「未安装」状态都在这里。**版本号会变成目录名与 npm 参数**，一律先过
   `validVersionArg`（与市场版本共用；`newestVersion` 取「版本号最高的一版」，见 market.go）。
   **「有更新」的红点只看版本号大小**（列表里最高的一版比选中的高就亮），不区分 `dist-tags`
@@ -138,9 +139,10 @@
 - `market.go` — **受管插件：插件市场（dshmarket）与增强插件（dsh-fnos-advanced）**：
   两者都是普通的 profile 插件（不是 dsh 包自带的 bundle），检测靠
   `dsh plugin --profile web list`，安装/更新/卸载靠
-  `dsh plugin --profile web add|remove`，镜像源与 `server.go` 同一套；没有备份/回滚。
+  `dsh plugin --profile web add|remove`，镜像源与 `server.go` 同一套（`selectedNpmMirror()`）；
+  没有备份/回滚。
   实现用 `managedPlugin{kind,pkg,notesRepo,notesTag}` 参数化（`marketPlugin` /
-  `advancedPlugin`），检测、安装、卸载、镜像回退与状态写入**只有一份** —— 新增受管插件
+  `advancedPlugin`），检测、安装、卸载、镜像源选择与状态写入**只有一份** —— 新增受管插件
   时补一个 `managedPlugin`、一个 `UpdateStatus` 槽位与初始化，别再复制一套 `dsh plugin …`
   执行逻辑。这里还放着所有「停 dsh 前」共用的忙守卫（`replaceBusyGuard` /
   `stopDshForReplacement`）。
@@ -404,15 +406,18 @@
    - **本地备份恒为 `.tar.gz`**（`tgzDir` / `tgzDirAs`），解压走 `extractTarGz`
      （`extractArchive` 只是「下载包用哪个解压器」的唯一判定点）。不要把备份改成别的格式。
 12. **dsh 版本安装 / 插件市场安装的三条硬约束（改这两条链路前必读）** ——
-   - **镜像源顺序与「不重试」**：`npmMirrors` 是阿里云 → 腾讯云 → 华为云，同一个源失败就换
-     下一个（整包重跑），三个都失败才报错，**不试官方 registry.npmjs.org**。dsh 安装用
-     `--fetch-timeout=5000 --fetch-retries=0`（「5 秒没反应就换下一个」就是这个语义：
-     单请求 5 秒拿不到响应即失败）；插件市场的**安装/更新**（`add`）用 `--registry=<镜像源>`
-     逐个尝试。**`remove` 绝对不能带 `--registry`** —— pnpm 的 remove 没有这个选项，带上
-     会以 `Unknown option: 'registry'` 失败，而错误信息还会误导成「镜像源都失败了」；
-     卸载走 `runMarketPluginCmdOnce`（执行一次、不带 registry、不回退）。
+   - **只用设置页选中的那一个镜像源、不自动换源**：`npmMirrors` 只是候选表（阿里云 /
+     腾讯云 / 华为云 / 官方源），实际取用一律经 `selectedNpmMirror()`（读
+     `AppConfig.NpmRegistry`，默认 `aliyun`）。同一个源失败就直接报错并提示去设置页换源，
+     不再「换下一个源重跑」，也**不再把官方源当作隐式兜底**（只有用户主动选中才用）。
+     dsh 安装用 `--fetch-timeout=5000 --fetch-retries=0`（单请求 5 秒拿不到响应即失败）；
+     插件市场的**安装/更新**（`add`）用 `--registry=<所选源>`。**`remove` 绝对不能带
+     `--registry`** —— pnpm 的 remove 没有这个选项，带上会以 `Unknown option: 'registry'`
+     失败，而错误信息还会误导成「镜像源都失败了」；卸载走 `runMarketPluginCmdOnce`
+     （执行一次、不带 registry）。镜像源的持久化与校验在 `config.go` /
+     `handleSaveSettings`（`npmRegistry` 字段），回归测试见 `backend/npm_registry_test.go`。
    - **镜像源的中文名只进界面，日志与错误链一律用英文标识**（`npmMirror.Slug`：
-     aliyun / tencent / huawei，取用入口 `mirrorLogName()` / `mirrorLogNames()`）——
+     aliyun / tencent / huawei / npmjs，取用入口 `mirrorLogName()`）——
      日志必须全英文（规则 7），而中文显示名（阿里云/腾讯云/华为云）过去既进界面也进日志，
      还会顺着「插件市场操作失败（…均失败）」这类错误被 `logError(..., err)` 原样打出去。
      因此 `Name` 只用于进度文案与 `DshInstallState.Mirror` 这类界面字段，日志/错误里用 Slug；
@@ -427,7 +432,8 @@
    - **版本列表 / 市场本地检测是「缓存优先」，不要顺手加回 TTL 或改成每次都查**：
      `refreshVersions(force)` 与 `detectPluginLocal(force)` 在 `force=false` 时只要有缓存就
      直接返回（不联网、不起子进程）；刷新的入口只有「弹窗里的刷新」「后台自动检测 / 手动检查」
-     与「市场装/卸完成」三处。这两个查询一个要打三个镜像源、一个要起 1~3 秒的
+     与「市场装/卸完成」三处（另加「设置页保存了新镜像源」时会异步重拉一次版本列表）。
+     这两个查询一个要打一次所选镜像源、一个要起 1~3 秒的
      `dsh plugin list` 子进程，被状态重算/页面打开这些高频场合反复触发过。
      受管插件本地检测有两个**刻意**的例外（见上面 `market.go` 那条）：检测**失败**的结果不写进
      缓存，且每个「dsh 刚就绪」的时刻补查一次 —— 否则「查不了」会被缓存住、界面一直显示「—」。
@@ -442,10 +448,10 @@
      插件页的只读命令用 `pluginCmdTimeout`、市场 `add` 用 `marketCmdTimeout`）。它做两件事：
      执行前清陈旧锁、全程登记 `PluginCmdRunning()`（忙守卫与概览页风险提示的来源）。第 5 节
      那条硬约束里有这条的完整来龙去脉与回归测试位置。
-   - **换镜像源重试前必须把版本目录重建出来**（`resetVersionDir`）：`npm install --prefix <dir>`
-     的目录不存在时 exec 直接 chdir 失败，那次换源就白丢了，错误还会被算到镜像源头上。
-     npm 失败与 verify 失败两条分支都要重建（回归测试
-     `TestInstallFallbackAfterVerifyFailureKeepsUsableDir`）。
+   - **安装开始前必须把版本目录重建出来**（`resetVersionDir`）：`npm install --prefix <dir>`
+     的目录不存在时 exec 直接 chdir 失败，错误还会被算到镜像源头上。
+     失败（npm 或校验）后要删掉整个版本目录，别留半成品（回归测试
+     `TestInstallVerifyFailureCleansUp` / `TestInstallMirrorFailureCleansUp`）。
    - **安装入口也要校验 `dshMinVersion`**：列表已经过滤掉更早的版本，直接调
      `/api/dsh/versions/install` 也必须拒绝（装出来在子路径挂载下必然 404）。
    - **忙拒绝回 409**：`busyf(...)` 产生的错误经 `writeErrOperation` 映射成 409 Conflict，

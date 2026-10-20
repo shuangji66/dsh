@@ -67,9 +67,13 @@ export interface AppConfig {
   // 「代理dsh」：只影响 dsh 进程自身的出网（下发 http_proxy/https_proxy 等），默认关闭。
   proxyEnabled: boolean
   proxyAddr: string
-  // 「代理更新」：harness 与 dsh 服务的更新（版本探测 + 下载）是否先从代理走，默认关闭。
-  // 代理地址探测不通时照旧回退直连；与 proxyEnabled 相互独立。
+  // 「代理harness更新」：只影响 harness 控制台自身的更新（版本探测 + 发布资产下载），
+  // 默认关闭；代理地址探测不通时照旧回退直连。与 proxyEnabled 相互独立。
+  // dsh 版本安装与插件安装不走代理，只连下面 npmRegistry 选中的镜像源。
   proxyUpdate: boolean
+  // 设置页「npm 镜像源」：dsh 服务与两个受管插件安装/更新/版本检测时使用的 registry。
+  // 取值 aliyun / tencent / huawei / npmjs，默认 aliyun（阿里云）；只用所选源。
+  npmRegistry: string
   authEnabled: boolean
   password?: string
   authTTLHours: number

@@ -23,14 +23,22 @@ type AppConfig struct {
 	ProxyPort    int    `json:"proxyPort"`
 	ProxyEnabled bool   `json:"proxyEnabled"`
 	ProxyAddr    string `json:"proxyAddr"`
-	// ProxyUpdate 是「代理更新」开关：harness 与 dsh 服务的更新（版本探测用的
-	// HTTP 客户端 + 发布资产下载）是否**先从代理更新**，默认关闭。
+	// ProxyUpdate 是「代理harness更新」开关：只影响 **harness 控制台自身**的更新
+	// （GitHub Release 的版本探测 + 发布资产下载），默认关闭。
 	// 与 ProxyEnabled（设置页「代理dsh」，只管 dsh 进程自身的出网）相互独立：
-	//   - 开 ProxyEnabled、关 ProxyUpdate：dsh 走代理，更新走直连；
-	//   - 开 ProxyUpdate：更新优先走代理地址，**代理地址探测不通照旧回退直连**
+	//   - 开 ProxyEnabled、关 ProxyUpdate：dsh 走代理，harness 更新走直连；
+	//   - 开 ProxyUpdate：harness 更新优先走代理地址，**代理地址探测不通照旧回退直连**
 	//     （见 updateClients 的「代理在前、直连在后」与 downloadToFile 的逐通路重试）。
-	// 插件市场的 tarball 下载刻意不受它影响（只直连，见 marketRoutesFn）。
-	ProxyUpdate  bool   `json:"proxyUpdate"`
+	// **dsh 版本安装与插件安装不走代理**：两者都直连设置页选中的 npm 镜像源
+	// （见 server.go 的 selectedNpmMirror / market.go），与这个开关无关。
+	ProxyUpdate bool `json:"proxyUpdate"`
+	// NpmRegistry 是设置页「npm 镜像源」选中的源，取值是 npmMirrors 里的 Slug
+	// （aliyun / tencent / huawei / npmjs），默认 aliyun（阿里云）。
+	//
+	// 它决定 dsh 服务与两个受管插件（市场 / 增强插件）安装、更新、版本检测时使用
+	// 哪个 registry：**只用所选源、失败即报错**，不再自动换源。空串（旧配置 / 旧版
+	// 前端没提交该字段）按默认阿里云处理，非法值在保存时拒绝、加载时回退默认。
+	NpmRegistry  string `json:"npmRegistry"`
 	AuthEnabled  bool   `json:"authEnabled"`
 	Password     string `json:"password,omitempty"`
 	AuthTTLHours int    `json:"authTTLHours"` // 登录鉴权有效期（小时），默认 4
@@ -226,8 +234,10 @@ func defaultConfig() AppConfig {
 		ProxyPort:    defaultProxyPort,
 		ProxyEnabled: proxyEnabled,
 		// 代理更新（ProxyUpdate）没有环境变量播种，默认关闭，只能由设置页开关打开。
-		ProxyUpdate:  false,
-		ProxyAddr:    envOr("proxy_addr", "http://127.0.0.1:7890"),
+		ProxyUpdate: false,
+		ProxyAddr:   envOr("proxy_addr", "http://127.0.0.1:7890"),
+		// npm 镜像源默认阿里云（见 server.go 的 npmMirror / npmRegistryDefault）。
+		NpmRegistry:  npmRegistryDefault,
 		AuthEnabled:  authEnabled,
 		Password:     os.Getenv("password"),
 		AuthTTLHours: envOrInt("auth_ttl_hours", 4),
@@ -479,6 +489,15 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	// 旧配置文件（反代端口还来自 PROXY_PORT 环境变量）没有 proxyPort 字段，
 	// 回退到默认 3079 并随下次保存落盘。
 	v.ProxyPort = normalizeProxyPort(v.ProxyPort)
+	// npm 镜像源：字段缺失（旧配置）时保留默认的阿里云；存了未知值则回退默认并留一条
+	// WARN（用户多半是手改过 config.json 或从旧版本降级）。
+	if v.NpmRegistry == "" {
+		v.NpmRegistry = npmRegistryDefault
+	} else if !validNpmRegistry(v.NpmRegistry) {
+		logWarn("[config] persisted npmRegistry %q is invalid, falling back to %s",
+			v.NpmRegistry, npmRegistryDefault)
+		v.NpmRegistry = npmRegistryDefault
+	}
 	// dsh 端口：只在**配置文件里显式写了非法值**时回退（历史上保存过 0/超范围的值会
 	// 让 dsh 起不来、反代常驻等待页）。字段缺失时保留 def 的值 —— 平台可能通过
 	// dsh_port/TARGET_PORT 环境变量播种它，不能在这里改写平台的决定。

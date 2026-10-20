@@ -1068,10 +1068,15 @@ func (m *AdminMux) handleDeleteVisitor(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
 		return
 	}
-	// 网关访问没有 harness 会话可吊销（每次请求都由网关注入身份头，注销也拦不住），
-	// 明确拒绝而不是假装成功，免得前端以为已经把这台设备踢下线。
+	// 网关访问没有 harness 会话可吊销（每次请求都由网关注入身份头，删记录也拦不住
+	// 下一次访问），但允许手动把这条展示记录删掉，不用等闲置超时自然过期。
+	// 语义必须说清楚：只清列表，不踢人；该用户再次访问会重新出现。
 	if isGatewayVisitorID(body.ID) {
-		writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "网关访问由飞牛 OS 认证，无需注销", "msgCode": "msg_visitor_gateway_no_logout"})
+		if !m.auth.RemoveGatewayVisitor(body.ID) {
+			writeJSON(w, map[string]interface{}{"ok": true, "deleted": false, "msg": "该访客不存在", "msgCode": "msg_visitor_not_found"})
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true, "deleted": true, "msg": "已删除该网关访问记录（该用户再次访问时会重新出现）", "msgCode": "msg_visitor_gateway_removed"})
 		return
 	}
 	if !m.auth.RevokeVisitor(body.ID) {

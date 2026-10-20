@@ -364,6 +364,12 @@ func (a *Auth) RevokeVisitor(token string) bool {
 	return a.visitors.Revoke(token)
 }
 
+// RemoveGatewayVisitor 从登录列表里删掉一条网关访问记录（没有凭据可吊销，
+// 只清展示；该用户再次经网关访问时会重新出现）。
+func (a *Auth) RemoveGatewayVisitor(id string) bool {
+	return a.visitors.RemoveGateway(id)
+}
+
 // realIP returns the client IP, honoring an upstream reverse proxy that sets
 // X-Forwarded-For. The leftmost (original client) entry is used when present,
 // otherwise the direct connection address is used.

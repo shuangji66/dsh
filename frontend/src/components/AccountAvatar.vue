@@ -59,10 +59,15 @@ function accountLabel(a: AccountEntryView) {
 // dsh 与控制台里会显示成两个数。
 const balanceText = computed(() => formatWallets(status.value?.balance))
 const bonusText = computed(() => formatWallets(status.value?.bonus))
+// 有赠送金时一并显示（如「¥3.39+¥5.90」）：概览页右上角不点开弹窗也要能看到这笔钱，
+// 否则用户会以为余额只有现金那部分。不加空格，免得这行小字在窄屏上先把卡片撑开。
 const avatarLabel = computed(() => {
   if (!status.value) return ''
   if (!status.value.available) return t('account_unavailable_short')
   if (!signedIn.value) return t('account_signed_out')
+  if (bonusText.value) {
+    return balanceText.value ? `${balanceText.value}+${bonusText.value}` : bonusText.value
+  }
   return balanceText.value || t('account_signed_in')
 })
 
@@ -401,11 +406,14 @@ onBeforeUnmount(stopPoll)
           <div v-if="waiting" class="space-y-3 mb-4">
             <div>
               <label class="block text-xs text-ink-faint dark:text-[#8A8A92] mb-1">{{ t('account_login_link_label') }}</label>
+              <!-- 不要用带 !important 的 !text-xs：触屏设备上它会压过 style.css 里
+                   「input 字号钉在 16px」的规则，iOS 聚焦时会把整页放大。text-xs 只在
+                   桌面生效，pointer: coarse 时由那条全局规则抬到 16px。 -->
               <input
                 :value="authorizeUrl"
                 readonly
                 autocomplete="off"
-                class="g-input w-full font-mono !text-xs"
+                class="g-input w-full font-mono text-xs"
                 @focus="selectAll"
               />
               <div class="flex flex-wrap items-center gap-2 mt-2">
@@ -419,7 +427,7 @@ onBeforeUnmount(stopPoll)
                 v-model="callback"
                 :placeholder="t('account_callback_placeholder')"
                 autocomplete="off"
-                class="g-input w-full font-mono !text-xs"
+                class="g-input w-full font-mono text-xs"
                 @keydown.enter="completeLogin"
               />
               <!-- 地址打不开是正常的这一步，就在这里说（授权流程中也要看得到） -->

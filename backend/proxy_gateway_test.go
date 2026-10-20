@@ -321,14 +321,15 @@ func TestGatewaySocketEndToEndSkipsLogin(t *testing.T) {
 	}
 }
 
-// --- 登录列表：网关条目不可注销、按闲置清理 ---
+// --- 登录列表：网关条目没有会话可注销，但可以手动删除记录 ---
 
-func TestGatewayVisitorCannotBeRevoked(t *testing.T) {
+func TestGatewayVisitorRecordCanBeRemoved(t *testing.T) {
 	auth := NewAuth()
 	auth.recordGatewayVisitor(gatewayVisitor{
 		ID: gatewayVisitorID(1000, gatewayTestIP), UserID: 1000, Username: "alice", IP: gatewayTestIP,
 	})
 
+	// 注销（吊销会话）对网关条目没有意义：没有凭据可吊销，也不该把 ID 拉黑。
 	if auth.RevokeVisitor(gatewayVisitorID(1000, gatewayTestIP)) {
 		t.Fatal("网关访问没有会话凭据可吊销，注销应返回 false")
 	}
@@ -339,22 +340,50 @@ func TestGatewayVisitorCannotBeRevoked(t *testing.T) {
 		t.Fatalf("网关条目应记录来源 IP, 实际 %q", v.IP)
 	}
 
-	// 接口层同样明确拒绝（而不是假装成功）。
+	// 接口层：手动删除记录 → deleted=true，列表清空；同一条记录再删一次 → 不存在。
 	mux := &AdminMux{auth: auth}
-	req := httptest.NewRequest(http.MethodDelete, "/api/visitors",
-		strings.NewReader(`{"id":"`+gatewayVisitorID(1000, gatewayTestIP)+`"}`))
-	rec := httptest.NewRecorder()
-	mux.handleDeleteVisitor(rec, req)
-	var resp struct {
+	deleteReq := func() (int, struct {
 		OK      bool   `json:"ok"`
 		Deleted bool   `json:"deleted"`
 		Msg     string `json:"msg"`
+		MsgCode string `json:"msgCode"`
+	}) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodDelete, "/api/visitors",
+			strings.NewReader(`{"id":"`+gatewayVisitorID(1000, gatewayTestIP)+`"}`))
+		rec := httptest.NewRecorder()
+		mux.handleDeleteVisitor(rec, req)
+		var resp struct {
+			OK      bool   `json:"ok"`
+			Deleted bool   `json:"deleted"`
+			Msg     string `json:"msg"`
+			MsgCode string `json:"msgCode"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("解析响应失败: %v (body=%q)", err, rec.Body.String())
+		}
+		return rec.Code, resp
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("解析响应失败: %v (body=%q)", err, rec.Body.String())
+
+	code, resp := deleteReq()
+	if code != http.StatusOK || !resp.OK || !resp.Deleted || resp.MsgCode != "msg_visitor_gateway_removed" {
+		t.Fatalf("网关记录应可手动删除, code=%d resp=%+v", code, resp)
 	}
-	if !resp.OK || resp.Deleted {
-		t.Fatalf("网关条目不应被注销, resp=%+v", resp)
+	if got := len(auth.Visitors()); got != 0 {
+		t.Fatalf("删除后网关条目应消失, 实际 %d 条", got)
+	}
+
+	code, resp = deleteReq()
+	if code != http.StatusOK || resp.Deleted || resp.MsgCode != "msg_visitor_not_found" {
+		t.Fatalf("重复删除应报「不存在」, code=%d resp=%+v", code, resp)
+	}
+
+	// 该用户再次访问会重新记录一条（删除只清展示，不拦访问）。
+	auth.recordGatewayVisitor(gatewayVisitor{
+		ID: gatewayVisitorID(1000, gatewayTestIP), UserID: 1000, Username: "alice", IP: gatewayTestIP,
+	})
+	if got := len(auth.Visitors()); got != 1 {
+		t.Fatalf("再次访问应重新出现一条记录, 实际 %d 条", got)
 	}
 }
 

@@ -141,7 +141,11 @@ h1, h2, h3, h4 {
    粘贴用的临时 textarea 同样会触发缩放。
    这里只按 pointer 判定、不叠加宽度条件：Tailwind v4 会把 max-width 这类连续特性改写成
    `width<=1024px` 区间语法（Safari 16.4+ 才支持），老机型（如 iOS 15/16.0 的 iPad）会
-   整块丢弃该规则，而这恰恰是最需要这条修复的设备。 */
+   整块丢弃该规则，而这恰恰是最需要这条修复的设备。
+   **输入框上不要用带 !important 的字号工具类**（如 `!text-xs`）：那会压过这里的 16px，
+   把 iOS 聚焦缩放的问题又带回来（账户弹窗的授权链接 / 回调链接输入框就是这样踩过的）。
+   需要桌面小字号时用普通工具类（`text-xs`）即可 —— 它在 utilities 层，照常压过
+   `.g-input` 的 text-sm，但压不过本规则。 */
 @media (pointer: coarse) {
   input,
   select,

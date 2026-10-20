@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -22,7 +22,7 @@ defineOptions({ name: 'OverviewView' })
 const store = useSettingsStore()
 const { status, loading, runtime } = storeToRefs(store)
 const toast = useToastStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 // 快捷访问第一行固定的「飞牛入口」：当前访问环境下经飞牛网关访问 dsh 服务的地址。
 // 优先用后端按请求头换算的结果（控制台当前访问地址剥离控制台 baseurl 得到飞牛 OS
@@ -296,7 +296,8 @@ async function removeVisitor(id: string) {
 
 // 网关访问（飞牛入口）没有 harness 会话 cookie：列表里标记来源为「网关访问」、
 // 显示飞牛用户名与来源 IP（同一个人从不同环境访问飞牛时 IP 不同，各占一条），
-// 不显示登录有效期，也没有注销按钮。
+// 不显示登录有效期。它没有会话可注销，但可以手动删除这条记录（只清列表、不踢人，
+// 该用户再次访问时会重新出现），不必干等闲置超时。
 function isGateway(v: Visitor): boolean {
   return v.source === 'gateway'
 }
@@ -316,6 +317,56 @@ const sortedVisitors = computed(() =>
   })
 )
 
+// 登录列表最多同时显示 3 条，超出后在卡片内滚动（不再把整个概览页越撑越长）。
+//
+// 高度不能写死像素：网关记录只有「来源 IP / 最近访问」两行，端口记录还多一行
+// 「登录有效期」，窄屏下文本换行也会改变行高。因此按**前 3 条记录的实际渲染高度**
+// 计算滚动区的 max-height（只限制列表、不限制卡片：同一栅格里相邻卡片更高时，
+// 卡片仍会被拉伸到同高）。
+const VISITOR_VISIBLE_COUNT = 3
+const visitorCardEl = ref<HTMLElement | null>(null)
+const visitorListEl = ref<HTMLElement | null>(null)
+const visitorListMaxHeight = ref<number | null>(null)
+
+function measureVisitorList() {
+  const el = visitorListEl.value
+  if (!el) {
+    visitorListMaxHeight.value = null
+    return
+  }
+  const items = Array.from(el.children) as HTMLElement[]
+  if (items.length <= VISITOR_VISIBLE_COUNT) {
+    visitorListMaxHeight.value = null
+    return
+  }
+  let height = 0
+  for (let i = 0; i < VISITOR_VISIBLE_COUNT; i++) {
+    height += items[i].getBoundingClientRect().height
+  }
+  visitorListMaxHeight.value = Math.ceil(height)
+}
+
+// 列表内容/条数变化（初次加载、SSE 推送、删除、语言切换）后重算；
+// immediate 在 setup 阶段跑一次时节点还没挂载，函数自己会安全返回。
+watch(
+  () => sortedVisitors.value,
+  async () => {
+    await nextTick()
+    measureVisitorList()
+  },
+  { immediate: true }
+)
+
+// 宽度变化会改变文本换行与行高（栅格列数、侧栏折叠、窗口缩放），需要重新量；
+// 切换语言会改变标签长度与换行，而列表被 max-height 固定时卡片尺寸不再变化，
+// ResizeObserver 察觉不到，因此单独监听 locale。
+watch(locale, async () => {
+  await nextTick()
+  measureVisitorList()
+})
+
+let visitorResizeObserver: ResizeObserver | null = null
+
 onMounted(() => {
   store.load()
   initialLoad()
@@ -325,6 +376,10 @@ onMounted(() => {
   uptimeTimer = window.setInterval(() => {
     uptimeTick.value = Date.now()
   }, 1000)
+  if (typeof ResizeObserver !== 'undefined' && visitorCardEl.value) {
+    visitorResizeObserver = new ResizeObserver(() => measureVisitorList())
+    visitorResizeObserver.observe(visitorCardEl.value)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -332,6 +387,8 @@ onBeforeUnmount(() => {
     clearInterval(uptimeTimer)
     uptimeTimer = null
   }
+  visitorResizeObserver?.disconnect()
+  visitorResizeObserver = null
 })
 </script>
 
@@ -348,24 +405,16 @@ onBeforeUnmount(() => {
     <div class="g-card-grid g-card-grid-2 g-fade-in">
       <!-- ① dsh 服务信息与启停 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
-        <!-- 标题 + 运行状态 + 右上角的 DeepSeek 账号头像（点击开管理弹窗，见 AccountAvatar） -->
-        <div class="flex items-start justify-between gap-3">
-          <div class="flex items-center gap-2 min-w-0 flex-wrap">
+        <!-- 标题/描述在左列，账号头像固定在右上角（点击开管理弹窗，见 AccountAvatar）。
+             头像比标题高（头像 + 「不可用」占两行），若把它和标题同处一行，整行高度
+             会被它撑高，描述就被顶到下一行、与标题之间空出一截。 -->
+        <div class="flex items-start justify-between gap-3 mb-4">
+          <div class="min-w-0">
             <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-            <!-- 运行状态标记 -->
-            <span
-              class="g-status flex-shrink-0"
-              :class="running
-                ? 'bg-success/10 text-success'
-                : 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'"
-            >
-              <span class="w-1.5 h-1.5 rounded-full" :class="running ? 'bg-success' : 'bg-ink-faint'"></span>
-              {{ running ? t('status_running') : t('status_stopped') }}
-            </span>
+            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ t('overview_dsh_desc') }}</p>
           </div>
           <AccountAvatar />
         </div>
-        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('overview_dsh_desc') }}</p>
 
         <!-- 进程信息：CPU / 内存 一行两个等宽小面板；PID 与运行时间折到下一行
              （两列栅格放四个子项：后两个自然换行，并与上面两个等宽、左对齐）。 -->
@@ -405,7 +454,7 @@ onBeforeUnmount(() => {
 
       <!-- ④ 登录列表：并入上面的栅格（不再单独占一行），
            卡片宽度只有桌面栅格的一半，因此字段沿用「移动端」的显示方式（逐项独立一行）。 -->
-      <section class="g-card g-card-hover p-5 flex flex-col">
+      <section ref="visitorCardEl" class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('login_list') }}</h2>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('login_list_desc') }}</p>
 
@@ -415,12 +464,17 @@ onBeforeUnmount(() => {
           {{ t('no_visitors') }}
         </div>
 
-        <ul v-else class="divide-y divide-line dark:divide-[#2A2A32]">
+        <ul
+          v-else
+          ref="visitorListEl"
+          class="divide-y divide-line dark:divide-[#2A2A32] overflow-y-auto overscroll-contain pr-1 -mr-1"
+          :style="visitorListMaxHeight ? { maxHeight: visitorListMaxHeight + 'px' } : undefined"
+        >
           <li v-for="v in sortedVisitors" :key="v.id" class="py-4">
             <!-- 第一行：来源标记 + 身份（端口访问显示来源 IP、网关访问显示飞牛用户名） -->
             <div class="flex items-center gap-2 mb-1">
               <!-- 来源标记：端口访问（带 harness 会话 cookie，可注销）/ 飞牛网关访问
-                   （飞牛 OS 已认证，没有 cookie，不可注销）。 -->
+                   （飞牛 OS 已认证，没有 cookie；记录可手动删除，但不影响该用户继续访问）。 -->
               <span
                 class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0"
                 :class="isGateway(v)
@@ -433,23 +487,28 @@ onBeforeUnmount(() => {
               <span v-if="isGateway(v) && v.username" class="text-sm font-medium text-ink dark:text-white truncate">{{ v.username }}</span>
               <span v-if="!isGateway(v)" class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
             </div>
-            <!-- 第二行：信息字段（逐项独立一行）+ 注销按钮。按钮与字段区同行并垂直居中，
-                 因此在窄屏下也跟「最近访问 / 登录有效期」处在一个水平线上，不单独占一行。 -->
+            <!-- 第二行：信息字段（逐项独立一行）+ 操作按钮。按钮与字段区同行并垂直居中，
+                 因此在窄屏下也跟「最近访问 / 登录有效期」处在一个水平线上，不单独占一行。
+                 端口访问是「注销」（吊销会话），网关访问是「删除记录」（只清列表）。 -->
             <div class="flex items-center gap-3">
               <div class="grid grid-cols-1 gap-y-1 text-xs text-ink-soft dark:text-[#A6A6AD] flex-1 min-w-0">
                 <!-- 网关访问的 IP 单列展示（与端口访问一致，用于区分不同访问环境），
-                     登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。 -->
-                <span v-if="isGateway(v) && v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
+                     登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。
+                     窄卡片/长 IP（如 IPv6）放不下时按单行省略号截断，悬停可看完整地址。 -->
+                <span v-if="isGateway(v) && v.ip" class="block truncate" :title="v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
                 <span>{{ t('last_access') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.lastAccess) }}</span></span>
                 <span v-if="!isGateway(v)">{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
               </div>
               <button
-                v-if="!isGateway(v)"
                 class="g-btn-danger !h-8 !px-3 !text-xs flex-shrink-0"
                 :disabled="deleting === v.id"
                 @click="removeVisitor(v.id)"
               >
-                {{ deleting === v.id ? t('logging_out') : t('logout') }}
+                {{
+                  deleting === v.id
+                    ? isGateway(v) ? t('deleting_record') : t('logging_out')
+                    : isGateway(v) ? t('visitor_delete_record') : t('logout')
+                }}
               </button>
             </div>
           </li>

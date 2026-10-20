@@ -13,8 +13,9 @@ import (
 //   - gateway：飞牛网关访问（平台网关注入身份头，见 proxy.go 的 gatewayLine）。
 //     网关请求没有 harness 会话 cookie，`ID` 按「飞牛用户 + 客户端 IP」构造：同一个人
 //     从不同环境（网络）访问飞牛时 IP 不同，各占一条记录，不会被合并刷新成同一条；
-//     没有登录有效期（记录里 `ExpiresAt` 恒为零值），也不支持注销；改为按闲置
-//     清除：超过登录有效期没有新访问就自动消失（见 gatewayVisitorIdleTTL）。
+//     没有登录有效期（记录里 `ExpiresAt` 恒为零值），也没有会话可注销；记录本身可以在
+//     登录列表里**手动删除**（RemoveGateway，只清展示、不涉及凭据，下次访问会重新出现），
+//     此外仍按闲置清除：超过登录有效期没有新访问就自动消失（见 gatewayVisitorIdleTTL）。
 const (
 	visitorSourcePort    = "port"
 	visitorSourceGateway = "gateway"
@@ -242,6 +243,26 @@ func (t *VisitorTracker) Revoke(token string) bool {
 	}
 	delete(t.byToken, token)
 	t.revoked[token] = true
+	t.mu.Unlock()
+	t.notify()
+	return true
+}
+
+// RemoveGateway 从登录列表里删掉一条网关访问记录（手动清理）。
+//
+// 网关访问**没有会话凭据可吊销**：每次请求都由平台网关注入身份头，记录只是列表里
+// 的展示。因此这里只删记录、不拉黑（也不该走 Revoke —— 那会把一个从未用作令牌的
+// ID 写进 revoked）。删掉后同一用户再次访问会重新出现一条新记录，这是预期行为。
+func (t *VisitorTracker) RemoveGateway(id string) bool {
+	if !isGatewayVisitorID(id) {
+		return false
+	}
+	t.mu.Lock()
+	if _, ok := t.byToken[id]; !ok {
+		t.mu.Unlock()
+		return false
+	}
+	delete(t.byToken, id)
 	t.mu.Unlock()
 	t.notify()
 	return true

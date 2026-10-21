@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -291,5 +292,142 @@ func TestTogglePluginRejectsNonBundleDependency(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("被拒时不得改动 profile 清单: %q -> %q", before, after)
+	}
+}
+
+// 插件安装/卸载正在进行时（控制台的 `dsh plugin …` 或活着的 profile 写锁），启停必须回 409
+// 且一个字节都不写：两边都在读-改-写同一份 package.json，各写一次原子 rename 必丢一端。
+func TestTogglePluginRejectsWhileProfileIsBeingWritten(t *testing.T) {
+	m, _, _, profileWeb := pluginGuardFixture(t)
+	manifestPath := filepath.Join(profileWeb, "package.json")
+	before, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 控制台自己发起的插件命令正在跑。
+	m.dsh.beginPluginCmd()
+	rec := postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": "@scope/my-plugin.v2", "enabled": false})
+	m.dsh.endPluginCmd()
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("插件命令进行中应回 409，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	if after, _ := os.ReadFile(manifestPath); string(after) != string(before) {
+		t.Fatalf("被拒时不得改动 profile 清单")
+	}
+
+	// ② dsh 的 profile 写锁由活着的进程持有（这里用本进程 PID 模拟 pnpm）。
+	lockPath := filepath.Join(profileWeb, "package.json.lock")
+	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec = postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": "@scope/my-plugin.v2", "enabled": false})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("写锁被持有应回 409，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	var busyResp struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &busyResp)
+	if busyResp.Code != "err_plugin_profile_busy" {
+		t.Fatalf("错误 code = %q, want err_plugin_profile_busy", busyResp.Code)
+	}
+
+	// ③ 陈旧锁（PID 已不存在）不该把用户永久挡在门外。
+	if err := os.WriteFile(lockPath, []byte("999999"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec := postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": "@scope/my-plugin.v2", "enabled": false}); rec.Code != http.StatusOK {
+		t.Fatalf("陈旧锁应放行，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	// 避免上面那次真的把插件停用了，影响后面的断言。
+	if _, err := setPluginBundleEnabled(profileWeb, "@scope/my-plugin.v2", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// ④ dsh 改设置 / 写凭据时持有的锁与 profile 清单无关，不能误拦启停。
+	settingsLock := filepath.Join(filepath.Dir(profileWeb), "..", "settings.yaml.lock")
+	settingsLock = filepath.Clean(settingsLock)
+	if err := os.WriteFile(settingsLock, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec := postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": "@scope/my-plugin.v2", "enabled": false}); rec.Code != http.StatusOK {
+		t.Fatalf("settings.yaml.lock 不应影响启停，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// 启用前必须过官方的兼容性栅栏：engines.dsh 不满足当前 dsh 版本时拒绝，
+// compatibility.json 里对该 name@version + 当前版本有显式放行时才允许。
+func TestTogglePluginRejectsIncompatibleVersionUnlessExempt(t *testing.T) {
+	m, _, _, profileWeb := pluginGuardFixture(t)
+	const pkg = "@scope/my-plugin.v2"
+	pkgPath := filepath.Join(profileWeb, "node_modules", pkg, "package.json")
+	body := `{"name":"` + pkg + `","version":"1.0.0","engines":{"dsh":">=99.0.0"},"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}`
+	if err := os.WriteFile(pkgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 先停用（停用不做兼容性判定，永远安全）。
+	if rec := postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": pkg, "enabled": false}); rec.Code != http.StatusOK {
+		t.Fatalf("停用应成功，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	rec := postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": pkg, "enabled": true})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("不兼容插件应 400，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "err_plugin_incompatible" {
+		t.Fatalf("错误 code = %q, want err_plugin_incompatible (%s)", resp.Code, rec.Body.String())
+	}
+	bundles, err := readProfileBundles(profileWeb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsString(bundles, pkg) {
+		t.Fatalf("被拒的插件不该回到 bundles: %v", bundles)
+	}
+
+	// 官方 `dsh plugin allow-version` 的放行记录：该版本 + 当前运行时。
+	exemptions := `{"` + pkg + `@1.0.0": ["1.2.3"]}`
+	if err := os.WriteFile(filepath.Join(profileWeb, "compatibility.json"), []byte(exemptions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec := postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": pkg, "enabled": true}); rec.Code != http.StatusOK {
+		t.Fatalf("显式放行后应允许启用，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	bundles, err = readProfileBundles(profileWeb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(bundles, pkg) {
+		t.Fatalf("放行后应写回 bundles: %v", bundles)
+	}
+}
+
+// 市场面板自己发起的安装/更新不在控制台的命令计数里，必须靠 marketBusyFn 补上：
+// 否则用户在「装市场插件」的同时点启停，两边仍会抢同一份 profile 清单。
+func TestTogglePluginRejectedWhileMarketOpRuns(t *testing.T) {
+	m, _, _, profileWeb := pluginGuardFixture(t)
+	manifestPath := filepath.Join(profileWeb, "package.json")
+	before, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := marketBusyFn
+	marketBusyFn = func(*UpdateManager) (bool, string) { return true, "dshmarket" }
+	t.Cleanup(func() { marketBusyFn = prev })
+
+	rec := postPlugin(t, m, "/api/plugins/toggle", map[string]interface{}{"name": "@scope/my-plugin.v2", "enabled": false})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("市场操作进行中应回 409，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	if after, _ := os.ReadFile(manifestPath); string(after) != string(before) {
+		t.Fatal("被拒时不得改动 profile 清单")
 	}
 }

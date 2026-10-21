@@ -22,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 )
 
@@ -183,40 +185,82 @@ func readProfileBundles(profileWebDir string) ([]string, error) {
 	return bundles, nil
 }
 
-// packageDeclaresBundle 判断已安装包是否声明了可用的 `dsh.bundle.patch`。
-// 官方 bundleManifest 只把带 patch 声明的包当作 bundle（`dsh.bundle: {}` 不算）；
-// 控制台的插件页也只对它们开放启停开关。
-func packageDeclaresBundle(profileWebDir, name string) (bool, error) {
+// pluginManifest 是一个已安装插件 package.json 里控制台关心的字段。
+//
+// 一次读取同时服务于三处判定（启停开关是否可用、切换后是否建议重启、兼容性栅栏），
+// 别在各处重复 os.ReadFile + json.Unmarshal。
+type pluginManifest struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Engines struct {
+		Dsh *string `json:"dsh"`
+	} `json:"engines"`
+	PeerDependencies map[string]string `json:"peerDependencies"`
+	Dependencies     map[string]string `json:"dependencies"`
+	Dsh              struct {
+		Bundle *struct {
+			Patch json.RawMessage `json:"patch"`
+		} `json:"bundle"`
+		Client json.RawMessage `json:"client"`
+	} `json:"dsh"`
+}
+
+// readPluginManifest 读取 profile/node_modules/<name>/package.json。
+func readPluginManifest(profileWebDir, name string) (*pluginManifest, error) {
 	raw, err := os.ReadFile(filepath.Join(profileWebDir, "node_modules", name, "package.json"))
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	var meta struct {
-		Dsh struct {
-			Bundle *struct {
-				Patch json.RawMessage `json:"patch"`
-			} `json:"bundle"`
-		} `json:"dsh"`
-	}
+	var meta pluginManifest
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		return false, err
+		return nil, err
 	}
-	if meta.Dsh.Bundle == nil {
-		return false, nil
+	return &meta, nil
+}
+
+// declaresBundle 判断包是否声明了可用的 `dsh.bundle.patch`。官方 bundleManifest 只把
+// 带 patch 声明的包当作 bundle（`dsh.bundle: {}` 不算）；控制台的插件页也只对它们
+// 开放启停开关（见 PluginInfo.Bundle 与 profile.go 的 setPluginBundleEnabled）。
+func (m *pluginManifest) declaresBundle() bool {
+	if m == nil || m.Dsh.Bundle == nil {
+		return false
 	}
-	patch := bytes.TrimSpace(meta.Dsh.Bundle.Patch)
+	patch := bytes.TrimSpace(m.Dsh.Bundle.Patch)
 	if len(patch) == 0 || bytes.Equal(patch, []byte("null")) {
-		return false, nil
+		return false
 	}
 	var single string
 	if err := json.Unmarshal(patch, &single); err == nil {
-		return single != "", nil
+		return single != ""
 	}
 	var many []string
 	if err := json.Unmarshal(patch, &many); err == nil {
-		return len(many) > 0, nil
+		return len(many) > 0
 	}
-	return false, nil
+	return false
+}
+
+// hasClientPart 判断包是否声明了 dsh.client（其 UI 已注入页面，切换后可能需要刷新
+// 浏览器才能看到变化）。`"client": false` / `null` 都表示没有客户端部分 —— 不能只判
+// 「字段存在」：false 也会被解析成非 nil 的 interface。
+func (m *pluginManifest) hasClientPart() bool {
+	if m == nil {
+		return false
+	}
+	raw := bytes.TrimSpace(m.Dsh.Client)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || bytes.Equal(raw, []byte("false")) {
+		return false
+	}
+	return true
+}
+
+// packageDeclaresBundle 判断已安装包是否声明了可用的 `dsh.bundle.patch`。
+func packageDeclaresBundle(profileWebDir, name string) (bool, error) {
+	meta, err := readPluginManifest(profileWebDir, name)
+	if err != nil {
+		return false, err
+	}
+	return meta.declaresBundle(), nil
 }
 
 // setPluginBundleEnabled 按官方 setBundleEnabled 的语义写入 `dsh.profile.bundles`：
@@ -357,22 +401,13 @@ func equalStrings(left, right []string) bool {
 	return true
 }
 
-// packageHasClientPart 判断一个已装包是否声明了 dsh.client（其 UI 已注入页面，
-// 切换后可能需要刷新浏览器才能看到变化）。
+// packageHasClientPart 判断一个已装包是否声明了 dsh.client。
 func packageHasClientPart(profileWebDir, name string) bool {
-	manifest, err := os.ReadFile(filepath.Join(profileWebDir, "node_modules", name, "package.json"))
+	meta, err := readPluginManifest(profileWebDir, name)
 	if err != nil {
 		return false
 	}
-	var meta struct {
-		Dsh struct {
-			Client interface{} `json:"client"`
-		} `json:"dsh"`
-	}
-	if json.Unmarshal(manifest, &meta) != nil {
-		return false
-	}
-	return meta.Dsh.Client != nil
+	return meta.hasClientPart()
 }
 
 // holdsNativeAddon 判断一个已装包是否携带原生插件（build/Release、prebuilds、
@@ -396,9 +431,7 @@ func holdsNativeAddon(profileWebDir, name string) bool {
 	if err != nil {
 		return false
 	}
-	var meta struct {
-		Dependencies map[string]string `json:"dependencies"`
-	}
+	var meta pluginManifest
 	if json.Unmarshal(manifest, &meta) != nil {
 		return false
 	}
@@ -415,6 +448,133 @@ func holdsNativeAddon(profileWebDir, name string) bool {
 // 在控制台这一侧无法确认是否已经生效）。纯后端插件走 HMR 即可。
 func needsRestart(profileWebDir, name string) bool {
 	return packageHasClientPart(profileWebDir, name) || holdsNativeAddon(profileWebDir, name)
+}
+
+// --- 官方兼容性栅栏（对齐 @deepseek-ai/dsh-plugin-manager 的 selectBundle）---
+
+// pluginCompatibilityIssues 复刻官方 evaluatePluginCompatibility 的判定，返回未满足的
+// 要求（空 = 兼容）。第二个返回值表示「范围语法是否都被本实现解析」：false 时调用方
+// 记一条 WARN —— 结论仍按官方语义（无效范围 → 不满足，见 semverSatisfies）。
+//
+// 规则（与 @deepseek-ai/dsh-app-boot 的 unmetRequirements 一致）：
+//   - 声明了 `engines.dsh` 时**只看它**，peerDependencies 不参与；
+//   - 否则检查所有 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的 peer 范围；
+//   - peer 里的 `workspace:^` / `workspace:~` / `workspace:*` 指当前运行时（恒满足），
+//     其它 `workspace:` 写法视为不满足；非 dsh 的 peer 一律忽略。
+func pluginCompatibilityIssues(meta *pluginManifest, runtimeVersion string) (issues map[string]string, parsed bool) {
+	if meta == nil {
+		return nil, true
+	}
+	if meta.Engines.Dsh != nil {
+		rangeSpec := *meta.Engines.Dsh
+		satisfied, ok := semverSatisfies(runtimeVersion, rangeSpec)
+		if !ok {
+			// 解析不了 = 无效范围：按官方语义算不满足，同时把解析缺口标出来。
+			return map[string]string{"engines.dsh": rangeSpec}, false
+		}
+		if !satisfied {
+			return map[string]string{"engines.dsh": rangeSpec}, true
+		}
+		return nil, true
+	}
+	issues = map[string]string{}
+	parsed = true
+	for name, rangeSpec := range meta.PeerDependencies {
+		if name != "@deepseek-ai/dsh" && !strings.HasPrefix(name, "@deepseek-ai/dsh-") {
+			continue
+		}
+		if strings.HasPrefix(rangeSpec, "workspace:") {
+			switch rangeSpec {
+			case "workspace:^", "workspace:~", "workspace:*":
+				continue
+			}
+			issues[name] = rangeSpec
+			continue
+		}
+		satisfied, ok := semverSatisfies(runtimeVersion, rangeSpec)
+		if !ok {
+			// 同 engines.dsh：解析不了按无效范围处理（不满足），并标记解析缺口。
+			parsed = false
+			issues[name] = rangeSpec
+			continue
+		}
+		if !satisfied {
+			issues[name] = rangeSpec
+		}
+	}
+	return issues, parsed
+}
+
+// checkPluginCompatibility 读取已装插件并给出它在 runtimeVersion 下的不兼容明细。
+// manifestName / version 用于查放行记录（compatibility.json 的键是 `name@version`，
+// 官方用的是 manifest 里的 name，依赖被 alias 时可能与目录名不同）；解析失败按兼容处理
+// （后面的 setPluginBundleEnabled 会报真正的读取错误）。
+func checkPluginCompatibility(profileWebDir, name, runtimeVersion string) (issues map[string]string, manifestName, version string, parsed bool) {
+	meta, err := readPluginManifest(profileWebDir, name)
+	if err != nil {
+		return nil, "", "", true
+	}
+	issues, parsed = pluginCompatibilityIssues(meta, runtimeVersion)
+	return issues, meta.Name, meta.Version, parsed
+}
+
+// requirementText 把未满足的要求拼成一行可读文本（按名字排序，结果稳定）：
+// `engines.dsh: <0.2.1-0, peerDependencies[@deepseek-ai/dsh]: ^0.2.1-rc.1`。
+// 这是原始 manifest 数据，不进 i18n 字典（参数里原样展示）。
+func requirementText(issues map[string]string) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(issues))
+	for name := range issues {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		label := name
+		if name != "engines.dsh" {
+			label = "peerDependencies[" + name + "]"
+		}
+		parts = append(parts, label+": "+issues[name])
+	}
+	return strings.Join(parts, ", ")
+}
+
+// profileVersionExemptions 读取 profile 里的 compatibility.json（官方
+// `dsh plugin allow-version` 写的那份放行记录：`{"name@version": ["0.2.1-rc.2"]}`）。
+// 读不到/格式不对按「没有放行记录」处理 —— 与官方一致：坏文件不会让 profile 不可用。
+func profileVersionExemptions(profileWebDir string) map[string][]string {
+	raw, err := os.ReadFile(filepath.Join(profileWebDir, "compatibility.json"))
+	if err != nil {
+		return nil
+	}
+	var parsed map[string]json.RawMessage
+	if json.Unmarshal(raw, &parsed) != nil {
+		return nil
+	}
+	out := make(map[string][]string, len(parsed))
+	for key, value := range parsed {
+		var versions []string
+		if json.Unmarshal(value, &versions) != nil {
+			continue
+		}
+		out[key] = versions
+	}
+	return out
+}
+
+// pluginVersionExempt 判断 `name@version` 是否在 compatibility.json 里被显式放行到 runtimeVersion。
+func pluginVersionExempt(profileWebDir, name, version, runtimeVersion string) bool {
+	if version == "" {
+		return false
+	}
+	for _, exempted := range profileVersionExemptions(profileWebDir)[name+"@"+version] {
+		if exempted == runtimeVersion {
+			return true
+		}
+	}
+	return false
 }
 
 func fileExists(path string) bool {

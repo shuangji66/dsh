@@ -245,32 +245,39 @@ onMounted(() => {
           <!-- 第二栏：启停开关 + 状态标记（紧邻开关右侧，disabled 状态来自 dsh.profile.bundles）
                + 卸载按钮（ml-auto 推到最右） -->
           <div class="flex flex-wrap items-center gap-3 mt-auto pt-3 border-t border-line dark:border-[#2A2A32]">
-            <button
-              type="button"
-              class="inline-flex items-center select-none"
-              :disabled="togglingPlugin === p.name || resetting"
-              :aria-label="p.disabled ? t('plugin_disable') : t('plugin_enable')"
-              :title="p.disabled ? t('plugin_enable') : t('plugin_disable')"
-              @click="togglePlugin(p)"
-            >
-              <span
-                class="inline-block w-9 h-5 rounded-full p-0.5 transition-colors duration-200"
-                :class="p.disabled ? 'bg-[#3A3A44]' : 'bg-brand'"
+            <!-- 只有声明了 dsh.bundle 的包才给启停开关：普通依赖不在 dsh.profile.bundles
+                 里，后端会以 err_plugin_not_bundle 拒绝，给开关等于给一个点下去必失败的按钮。 -->
+            <template v-if="p.bundle">
+              <button
+                type="button"
+                class="inline-flex items-center select-none"
+                :disabled="togglingPlugin === p.name || resetting"
+                :aria-label="p.disabled ? t('plugin_disable') : t('plugin_enable')"
+                :title="p.disabled ? t('plugin_enable') : t('plugin_disable')"
+                @click="togglePlugin(p)"
               >
                 <span
-                  class="block w-4 h-4 rounded-full bg-white shadow transition-transform duration-200"
-                  :class="p.disabled ? 'translate-x-0' : 'translate-x-4'"
-                ></span>
+                  class="inline-block w-9 h-5 rounded-full p-0.5 transition-colors duration-200"
+                  :class="p.disabled ? 'bg-[#3A3A44]' : 'bg-brand'"
+                >
+                  <span
+                    class="block w-4 h-4 rounded-full bg-white shadow transition-transform duration-200"
+                    :class="p.disabled ? 'translate-x-0' : 'translate-x-4'"
+                  ></span>
+                </span>
+              </button>
+              <span
+                class="g-status"
+                :class="p.disabled
+                  ? 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'
+                  : 'bg-success/10 text-success'"
+              >
+                <span class="w-1.5 h-1.5 rounded-full" :class="p.disabled ? 'bg-ink-faint' : 'bg-success'"></span>
+                {{ p.disabled ? t('plugin_status_disabled') : t('plugin_status_enabled') }}
               </span>
-            </button>
-            <span
-              class="g-status"
-              :class="p.disabled
-                ? 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'
-                : 'bg-success/10 text-success'"
-            >
-              <span class="w-1.5 h-1.5 rounded-full" :class="p.disabled ? 'bg-ink-faint' : 'bg-success'"></span>
-              {{ p.disabled ? t('plugin_status_disabled') : t('plugin_status_enabled') }}
+            </template>
+            <span v-else class="g-status bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]">
+              {{ t('plugin_plain_dependency') }}
             </span>
             <button
               class="g-btn-danger h-8 px-3 text-xs ml-auto"

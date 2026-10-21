@@ -1195,6 +1195,9 @@ type PluginInfo struct {
 	Name     string `json:"name"`
 	Version  string `json:"version"`
 	Resolved string `json:"resolved"`
+	// Bundle 表示该插件声明了 `dsh.bundle.patch`，也就是官方插件页里的「可启停项」。
+	// 没有声明的普通依赖既不在 `dsh.profile.bundles` 里，也不该给启停开关（后端会拒绝）。
+	Bundle bool `json:"bundle"`
 	// Disabled 表示该插件是否未在官方 `dsh.profile.bundles` 中启用（前端据此显示启停状态）。
 	Disabled bool `json:"disabled"`
 	// NeedsRestart 表示该插件被启用后是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）。
@@ -1309,6 +1312,37 @@ func (m *DshManager) cleanStaleProfileLocks() int {
 		m.logWarn("stale lock: removed %s (owner pid %d is gone)", path, pid)
 	}
 	return cleaned
+}
+
+// profileLockHeld 报告是否有**活着的进程**正持有 dsh 的 profile 写锁
+// （`package.json.lock` 等，见 profileLockCandidates）。
+//
+// 用途：控制台的插件启停直接读-改-写 profile 清单，而 `dsh plugin add/remove` 与插件
+// 市场的安装也在写同一个文件。写之前先问一句，能把「两个写入者各写一次原子 rename、
+// 必丢一端」的窗口挡掉。锁文件里的 PID 已经不存在时视为**没有**持有（陈旧锁由
+// cleanStaleProfileLocks 清理，不能因此把用户永久挡在门外）。
+func (m *DshManager) profileLockHeld() bool {
+	for _, path := range m.profileLockCandidates() {
+		// 只看 profile 清单那两把锁：settings.yaml.lock / .credentials.yaml.lock 是
+		// dsh 在改设置或凭据时持有的，与「谁在写 package.json」无关，算进来只会误拦启停。
+		switch filepath.Base(path) {
+		case "package.json.lock", "node_modules.lock":
+		default:
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if processAlive(pid) {
+			return true
+		}
+	}
+	return false
 }
 
 // selectedDshVersion 返回当前选中的 dsh 版本（配置里的版本号，且该版本确实装着）；

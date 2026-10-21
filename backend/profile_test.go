@@ -193,3 +193,103 @@ func TestReadProfileBundlesToleratesMissingLayers(t *testing.T) {
 		t.Fatalf("缺少 dsh/profile/bundles 时应为空，实际 %v", bundles)
 	}
 }
+
+// 兼容性判定与官方 unmetRequirements 对齐：engines.dsh 优先且忽略 peers；
+// 否则只看 @deepseek-ai/dsh / @deepseek-ai/dsh-* 的 peer；workspace:^/~/* 视为满足。
+func TestPluginCompatibilityIssues(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+	cases := []struct {
+		name   string
+		meta   pluginManifest
+		issues int
+	}{
+		{
+			name: "no requirements",
+			meta: pluginManifest{},
+		},
+		{
+			name: "engines satisfied",
+			meta: pluginManifest{Engines: struct {
+				Dsh *string `json:"dsh"`
+			}{Dsh: ptr(">=0.2.0-0 <0.3.0-0")}},
+		},
+		{
+			name: "engines unsatisfied wins over peers",
+			meta: pluginManifest{
+				Engines: struct {
+					Dsh *string `json:"dsh"`
+				}{Dsh: ptr(">=0.3.0")},
+				PeerDependencies: map[string]string{"@deepseek-ai/dsh": "^0.2.1-rc.1"},
+			},
+			issues: 1,
+		},
+		{
+			name: "peer satisfied",
+			meta: pluginManifest{PeerDependencies: map[string]string{
+				"@deepseek-ai/dsh":       "^0.2.1-rc.1",
+				"@deepseek-ai/dsh-tools": ">=0.2.0-0 <0.3.0-0",
+			}},
+		},
+		{
+			name: "non-dsh peer ignored",
+			meta: pluginManifest{PeerDependencies: map[string]string{
+				"react": "^19.0.0",
+			}},
+		},
+		{
+			name: "dsh peer unsatisfied",
+			meta: pluginManifest{PeerDependencies: map[string]string{
+				"@deepseek-ai/dsh": "^0.3.0",
+			}},
+			issues: 1,
+		},
+		{
+			name: "workspace shortcut satisfied",
+			meta: pluginManifest{PeerDependencies: map[string]string{
+				"@deepseek-ai/dsh":       "workspace:^",
+				"@deepseek-ai/dsh-tools": "workspace:*",
+			}},
+		},
+		{
+			name: "other workspace range unsatisfied",
+			meta: pluginManifest{PeerDependencies: map[string]string{
+				"@deepseek-ai/dsh": "workspace:999",
+			}},
+			issues: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			issues, parsed := pluginCompatibilityIssues(&tc.meta, "0.2.1-rc.2")
+			if len(issues) != tc.issues {
+				t.Fatalf("issues = %v, want %d", issues, tc.issues)
+			}
+			if !parsed {
+				t.Fatalf("这些范围都应能解析（parsed=false）")
+			}
+		})
+	}
+}
+
+// `"client": false` / `null` 不是客户端部分：早先只判 interface 非 nil，会把 false 当成有 UI。
+func TestPluginManifestHasClientPart(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{`{"dsh":{}}`, false},
+		{`{"dsh":{"client":null}}`, false},
+		{`{"dsh":{"client":false}}`, false},
+		{`{"dsh":{"client":{}}}`, true},
+		{`{"dsh":{"client":{"platform":"web"}}}`, true},
+	}
+	for _, tc := range cases {
+		var meta pluginManifest
+		if err := json.Unmarshal([]byte(tc.raw), &meta); err != nil {
+			t.Fatalf("%s: %v", tc.raw, err)
+		}
+		if got := meta.hasClientPart(); got != tc.want {
+			t.Errorf("%s: hasClientPart = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}

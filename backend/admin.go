@@ -714,11 +714,19 @@ func (m *AdminMux) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range plugins {
 		name := plugins[i].Name
-		if declares, err := packageDeclaresBundle(profileWebDir, name); err == nil && declares {
+		meta, err := readPluginManifest(profileWebDir, name)
+		if err != nil {
+			// 读不到 manifest 就当作「不是 bundle」：前端因此不渲染启停开关，
+			// 而不是给一个点下去必定 400 的开关。
+			logWarn("[plugin] read manifest of %s failed: %v", name, err)
+			continue
+		}
+		plugins[i].Bundle = meta.declaresBundle()
+		if plugins[i].Bundle {
 			plugins[i].Disabled = !selected[name]
 		}
 		// 该插件若被启用，是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）
-		plugins[i].NeedsRestart = needsRestart(profileWebDir, name)
+		plugins[i].NeedsRestart = meta.hasClientPart() || holdsNativeAddon(profileWebDir, name)
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "plugins": plugins, "raw": out})
 }
@@ -741,9 +749,47 @@ func validPluginName(name string) bool {
 	return packageNameRe.MatchString(name)
 }
 
+// pluginProfileWriteBusy 报告此刻是否有别的操作正在写 profile 清单。启停是「读-改-写」
+// 整个 package.json，而 `dsh plugin add/remove`（控制台插件页与插件市场都走它）也在写
+// 同一个文件：两个写入者各写一次原子 rename，必有一端静默丢失（依赖或被启停状态）。
+// 因此写之前先问一句，忙就回 409 让用户稍后重试。
+//
+// 判据三个，都是本机事实：
+//   - 控制台自己发起的 `dsh plugin …` 正在跑（PluginCmdRunning，覆盖整条命令的时长）；
+//   - dsh 的 profile 写锁仍被活着的进程持有（profileLockHeld；陈旧锁不算）——
+//     pnpm 写清单时确实持有它，但只在写的那一瞬，所以它只是补充；
+//   - 插件市场自己在装/更新（marketBusyFn，市场面板发起时控制台没有命令计数）。
+// 市场不回答（没装/未就绪）按不忙处理，与忙守卫的既有语义一致。
+func (m *AdminMux) pluginProfileWriteBusy() bool {
+	if m.dsh == nil {
+		return false
+	}
+	if m.dsh.PluginCmdRunning() || m.dsh.profileLockHeld() {
+		return true
+	}
+	if m.update != nil {
+		if busy, _ := marketBusyFn(m.update); busy {
+			return true
+		}
+	}
+	return false
+}
+
+// pluginDeclaresBundle 是 packageDeclaresBundle 的「读不到就当 false」版本，供请求路径判分支用：
+// 真正的读取错误会由随后的 setPluginBundleEnabled 原样报出来。
+func pluginDeclaresBundle(profileWebDir, name string) bool {
+	declares, err := packageDeclaresBundle(profileWebDir, name)
+	return err == nil && declares
+}
+
 // handleTogglePlugin 按官方 dsh 的包级开关启停单个插件：
 // 停用 = 从 `dsh.profile.bundles` 移除（依赖保留），启用 = 追加到列表末尾。
 // 与官方 setBundleEnabled 一致，不写 cordis.patch.yml，也不同步插件市场的 state.json。
+//
+// 启用前还要过官方那条**兼容性栅栏**（selectBundle 的 incompatible-version）：插件对
+// 当前 dsh 版本的 `engines.dsh` / dsh peer 依赖不满足时拒绝启用，除非 profile 的
+// compatibility.json 里对该 `name@version` + 当前版本有显式放行记录。
+//
 // 另外判断该插件启用后是否需要重启 dsh 服务才能生效，返回给前端决定提示文案。
 func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
 	var body togglePluginReq
@@ -756,7 +802,42 @@ func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_plugin_name_invalid", "插件名不合法（仅允许 npm 包名）")
 		return
 	}
+	// 写盘竞态：别和正在安装/卸载插件的进程抢同一份 profile 清单。
+	if m.pluginProfileWriteBusy() {
+		writeErrOperation(w, busyf("err_plugin_profile_busy",
+			"插件安装/卸载正在进行（profile 清单正在被写入），请等它结束后再启停"))
+		return
+	}
 	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
+	// 兼容性只在「启用」时判：停用永远安全，而且启用会让 dsh 在下次编排时真的加载它。
+	// 先确认它确实是 bundle（普通依赖由 setPluginBundleEnabled 回 err_plugin_not_bundle，
+	// 与官方 selectBundle 的顺序一致），再判版本栅栏。
+	if body.Enabled && pluginDeclaresBundle(profileWebDir, body.Name) {
+		if runtime := m.dsh.selectedDshVersion(); runtime != "" {
+			issues, manifestName, version, parsed := checkPluginCompatibility(profileWebDir, body.Name, runtime)
+			if len(issues) > 0 {
+				// 放行记录的键用 manifest 里的 name（官方就是这么写的），目录名只作兜底。
+				if pluginVersionExempt(profileWebDir, firstNonEmpty(manifestName, body.Name), version, runtime) {
+					logInfo("[plugin] %s@%s is incompatible with dsh %s but explicitly exempted; enabling",
+						body.Name, version, runtime)
+				} else {
+					requirement := requirementText(issues)
+					if !parsed {
+						// 解析不了的写法按官方语义算「无效范围 → 不满足」，同时把缺口记出来。
+						logWarn("[plugin] compatibility range of %s is not understood by the console (%s)",
+							body.Name, requirement)
+					} else {
+						logWarn("[plugin] %s@%s refused for dsh %s: %s",
+							body.Name, version, runtime, requirement)
+					}
+					writeErrU(w, http.StatusBadRequest, "err_plugin_incompatible",
+						"插件 %s 与当前 dsh %s 不兼容（%s），启用后 dsh 可能崩溃或直接跳过它；请升级插件，或在 dsh 的插件管理里显式放行该版本",
+						"pkg", body.Name, "runtime", runtime, "requirement", requirement)
+					return
+				}
+			}
+		}
+	}
 	changed, err := setPluginBundleEnabled(profileWebDir, body.Name, body.Enabled)
 	if errors.Is(err, errNotBundle) {
 		logWarn("[plugin] toggle %s -> enabled=%v refused: not a bundle (%v)", body.Name, body.Enabled, err)

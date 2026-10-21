@@ -111,6 +111,9 @@ export interface PluginInfo {
   name: string
   version: string
   resolved?: string
+  // 该插件是否声明了 dsh.bundle.patch（官方插件页里的「可启停项」）。为 false 的是普通
+  // 依赖：不在 dsh.profile.bundles 里，控制台因此不渲染启停开关（后端也会拒绝）。
+  bundle?: boolean
   // 该插件是否未在官方 dsh.profile.bundles 中启用（前端据此显示启停状态）
   disabled?: boolean
   // 该插件被启用后是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）
@@ -206,6 +209,7 @@ export interface DshVersionEntry {
 // 一次 dsh 版本下载/安装的进行中状态（同一时刻只有一个）。
 export interface DshInstallState {
   version: string
+  // 当前镜像源的 **slug**（aliyun / tencent / huawei / npmjs）：界面文案由 tr() 按语言翻译。
   mirror?: string
   // ''(空闲) / downloading(下载中) / installing(处理依赖包) / verifying(校验) / done / error
   phase?: string

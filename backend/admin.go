@@ -709,9 +709,9 @@ func (m *AdminMux) handleDshRestart(w http.ResponseWriter, r *http.Request) {
 // --- Plugin management (work 区插件卡片) ---
 
 // handleListPlugins 返回 dsh 的 web 插件列表（解析 `dsh plugin --profile web list`），
-// 并读取用户补丁层 cordis.patch.yml 与 state.json 的禁用情况，给每个插件标注启停状态。
-// 插件的包名与补丁行 id 可能不一致（如 @linxin666/dsh-client-ui-git-graph 的 id 是
-// ui-git-graph），故按包名读出其行 id 再与补丁层比对。
+// 并按官方 dsh 的 bundle 选择给每个插件标注启停状态：
+//   - 包声明了 `dsh.bundle`：在 `dsh.profile.bundles` 里 = 已启用，不在 = 已停用；
+//   - 没有声明 `dsh.bundle` 的普通依赖不是官方插件页里的 bundle，控制台不提供启停。
 func (m *AdminMux) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 	out, err := m.dsh.runPluginCmd("list")
 	if err != nil {
@@ -720,32 +720,21 @@ func (m *AdminMux) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 	}
 	plugins := parsePluginList(out)
 	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
-	// 前端冷启动/刷新插件列表时，从这里读取 cordis.patch.yml 的禁用情况，以显示启停状态。
-	disabledIDs := readDisabledPluginIds(pluginPatchPath(m.dsh.effectiveHome()))
-	disabledIDSet := make(map[string]bool, len(disabledIDs))
-	for _, id := range disabledIDs {
-		disabledIDSet[id] = true
+	bundles, err := readProfileBundles(profileWebDir)
+	if err != nil {
+		logWarn("[plugin] read profile bundles failed: %v", err)
+		writeErrU(w, http.StatusInternalServerError, "err_plugin_profile_failed", "读取 profile 失败: %s", "detail", err.Error())
+		return
 	}
-	// state.json 的 disabled 数组用的是包名，一并读取（供前端兜底/回放）。
-	stateDisabled := readMarketDisabled(profileWebDir)
-	stateDisabledSet := make(map[string]bool, len(stateDisabled))
-	for _, name := range stateDisabled {
-		stateDisabledSet[name] = true
+	selected := make(map[string]bool, len(bundles))
+	for _, name := range bundles {
+		selected[name] = true
 	}
 	for i := range plugins {
 		name := plugins[i].Name
-		rows := readPackageRowIds(profileWebDir, name)
-		off := false
-		for _, id := range rows {
-			if disabledIDSet[id] {
-				off = true
-				break
-			}
+		if declares, err := packageDeclaresBundle(profileWebDir, name); err == nil && declares {
+			plugins[i].Disabled = !selected[name]
 		}
-		if stateDisabledSet[name] {
-			off = true
-		}
-		plugins[i].Disabled = off
 		// 该插件若被启用，是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）
 		plugins[i].NeedsRestart = needsRestart(profileWebDir, name)
 	}
@@ -758,63 +747,52 @@ type togglePluginReq struct {
 }
 
 // validPluginName 校验请求体里的插件名。名字会参与两处危险动作：
-//   - `readPackageRowIds(profileWebDir, name)` 把它拼进
-//     `filepath.Join(profileWebDir, "node_modules", name)`（或 $HOME/.dsh 下的
-//     node_modules）—— `../../..` 之类的名字可以穿越到任意目录读 package.json /
-//     补丁文件，其中的 `- id:` 行会被写进补丁层；
+//   - `packageDeclaresBundle(profileWebDir, name)` 把它拼进
+//     `filepath.Join(profileWebDir, "node_modules", name, "package.json")` ——
+//     `../../..` 之类的名字可以穿越到任意目录读 package.json；
 //   - `dsh plugin --profile web remove <name>` 把它当 argv —— 以 `-` 开头的名字
 //     会被 dsh 当成选项（argv 注入）。
 //
-// 规则与 patch.go 的 packageNameRe 一致（npm 包名），不合法的一律 400：宁可拒掉
+// 规则与 profile.go 的 packageNameRe 一致（npm 包名），不合法的一律 400：宁可拒掉
 // 一个奇怪但合法的名字，也不能让控制台变成任意文件读取/选项注入的入口。
 func validPluginName(name string) bool {
 	return packageNameRe.MatchString(name)
 }
 
-// handleTogglePlugin 通过编辑 cordis.patch.yml 启停单个插件（机制学自 dsh-market）。
-// 关键改进：
-//   - 用插件在补丁层实际的“行 id”（由包名映射得到，可能不同名，如 ui-git-graph）
-//     写入 cordis.patch.yml，而非直接写包名（@linxin666/dsh-client-ui-git-graph 含 @
-//     与 /，根本不能作为行 id 写入）。
-//   - 同步更新 state.json 的 disabled 数组（该数组用的是包名）。
-//   - 判断该插件启用后是否需要重启 dsh 服务才能生效，返回给前端决定提示文案。
+// handleTogglePlugin 按官方 dsh 的包级开关启停单个插件：
+// 停用 = 从 `dsh.profile.bundles` 移除（依赖保留），启用 = 追加到列表末尾。
+// 与官方 setBundleEnabled 一致，不写 cordis.patch.yml，也不同步插件市场的 state.json。
+// 另外判断该插件启用后是否需要重启 dsh 服务才能生效，返回给前端决定提示文案。
 func (m *AdminMux) handleTogglePlugin(w http.ResponseWriter, r *http.Request) {
 	var body togglePluginReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErrU(w, http.StatusBadRequest, "err_need_plugin_name", "缺少插件名")
 		return
 	}
-	// 名字会参与拼路径读取 package.json / 补丁行，必须先校验（见 validPluginName）。
+	// 名字会参与拼路径读取 package.json，必须先校验（见 validPluginName）。
 	if !validPluginName(body.Name) {
 		writeErrU(w, http.StatusBadRequest, "err_plugin_name_invalid", "插件名不合法（仅允许 npm 包名）")
 		return
 	}
 	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
-	patchPath := pluginPatchPath(m.dsh.effectiveHome())
-	rows := readPackageRowIds(profileWebDir, body.Name)
-	if len(rows) == 0 {
-		// 没有可写的行 id（纯客户端插件等）：补丁层无从下手，仅靠 state.json 记录。
-		// 仍返回 ok，前端据 needsRestart 提示刷新/重启。
-		logInfo("[plugin] toggle %s: no patch rows (client-only?), state.json only", body.Name)
+	changed, err := setPluginBundleEnabled(profileWebDir, body.Name, body.Enabled)
+	if errors.Is(err, errNotBundle) {
+		logWarn("[plugin] toggle %s -> enabled=%v refused: not a bundle (%v)", body.Name, body.Enabled, err)
+		writeErrU(w, http.StatusBadRequest, "err_plugin_not_bundle", "该插件未声明 dsh.bundle，无法按官方插件层启停")
+		return
 	}
-	for _, id := range rows {
-		if err := setPluginDisabled(patchPath, id, !body.Enabled); err != nil {
-			logError("[plugin] toggle %s id %s -> %v failed: %v", body.Name, id, body.Enabled, err)
-			writeErrU(w, http.StatusInternalServerError, "err_plugin_patch_failed", "写入补丁层失败: %s", "detail", err.Error())
-			return
-		}
-	}
-	// 同步 state.json 的 disabled 数组（包名）
-	if err := writeMarketDisabled(profileWebDir, body.Name, !body.Enabled); err != nil {
-		logError("[plugin] toggle %s: state.json sync failed: %v", body.Name, err)
+	if err != nil {
+		logError("[plugin] toggle %s -> enabled=%v failed: %v", body.Name, body.Enabled, err)
+		writeErrU(w, http.StatusInternalServerError, "err_plugin_profile_failed", "更新 profile 失败: %s", "detail", err.Error())
+		return
 	}
 	restart := body.Enabled && needsRestart(profileWebDir, body.Name)
-	logInfo("[plugin] toggle %s -> enabled=%v rows=%v restart=%v", body.Name, body.Enabled, rows, restart)
+	logInfo("[plugin] bundle %s -> enabled=%v changed=%v restart=%v", body.Name, body.Enabled, changed, restart)
 	writeJSON(w, map[string]interface{}{
 		"ok":      true,
 		"name":    body.Name,
 		"enabled": body.Enabled,
-		"rows":    rows,
+		"changed": changed,
 		"restart": restart,
 		"refresh": true,
 	})

@@ -1200,7 +1200,7 @@ type PluginInfo struct {
 	Name     string `json:"name"`
 	Version  string `json:"version"`
 	Resolved string `json:"resolved"`
-	// Disabled 表示该插件是否被 cordis.patch.yml 用户补丁层停用（前端据此显示启停状态）。
+	// Disabled 表示该插件是否未在官方 `dsh.profile.bundles` 中启用（前端据此显示启停状态）。
 	Disabled bool `json:"disabled"`
 	// NeedsRestart 表示该插件被启用后是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）。
 	NeedsRestart bool `json:"needsRestart"`

@@ -35,7 +35,7 @@ export const usePluginsStore = defineStore('plugins', () => {
     plugins.value = []
   }
 
-  // 通过编辑 cordis.patch.yml 启停单个插件；成功后清缓存并重拉列表。
+  // 按官方 dsh 的包级开关启停：增删 dsh.profile.bundles（依赖保留）；成功后清缓存并重拉列表。
   // 返回 { ok, name, enabled, restart } 供视图决定是弹“重启 dsh”还是“刷新页面”的 toast。
   async function togglePlugin(name: string, enabled: boolean): Promise<{ ok: boolean; name: string; enabled: boolean; restart: boolean; msg?: string }> {
     const p = await api.togglePlugin(name, enabled)

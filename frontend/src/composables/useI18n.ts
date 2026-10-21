@@ -270,7 +270,7 @@ const zh: Record<string, string> = {
   plugin_removing: '卸载中…',
   plugin_removed: '已卸载 {name}',
   plugin_remove_failed: '卸载失败',
-  // 启停开关（cordis.patch.yml 补丁层机制）
+  // 启停开关（官方 dsh.profile.bundles bundle 层机制）
   plugin_enable: '启用',
   plugin_disable: '停用',
   plugin_status_enabled: '已启用',
@@ -522,7 +522,8 @@ const zh: Record<string, string> = {
   err_plugin_list_failed: '执行插件列表失败: {detail}',
   err_need_plugin_name: '缺少插件名',
   err_plugin_name_invalid: '插件名不合法（仅允许 npm 包名）',
-  err_plugin_patch_failed: '写入补丁层失败: {detail}',
+  err_plugin_profile_failed: '读写 profile 失败: {detail}',
+  err_plugin_not_bundle: '该插件未声明 dsh.bundle，无法按官方插件层启停',
   err_plugin_remove_failed: '卸载失败: {detail}',
   err_need_id: '缺少 id',
   err_uid_missing: '无法获取当前用户 UID',
@@ -890,7 +891,7 @@ const en: Record<string, string> = {
   plugin_removing: 'Uninstalling…',
   plugin_removed: 'Removed {name}',
   plugin_remove_failed: 'Remove failed',
-  // Enable/disable toggle (cordis.patch.yml patch-layer mechanism)
+  // Enable/disable toggle (official dsh.profile.bundles bundle selection)
   plugin_enable: 'Enable',
   plugin_disable: 'Disable',
   plugin_status_enabled: 'Enabled',
@@ -1141,7 +1142,8 @@ const en: Record<string, string> = {
   err_plugin_list_failed: 'Failed to list plugins: {detail}',
   err_need_plugin_name: 'Missing plugin name',
   err_plugin_name_invalid: 'Invalid plugin name (npm package names only)',
-  err_plugin_patch_failed: 'Failed to write the patch layer: {detail}',
+  err_plugin_profile_failed: 'Failed to read or write the profile: {detail}',
+  err_plugin_not_bundle: 'This plugin declares no dsh.bundle and cannot be toggled through the official bundle layer',
   err_plugin_remove_failed: 'Uninstall failed: {detail}',
   err_need_id: 'Missing id',
   err_uid_missing: 'Cannot determine the current user UID',

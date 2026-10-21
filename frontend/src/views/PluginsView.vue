@@ -87,9 +87,8 @@ async function resetPlugins() {
   }
 }
 
-// 切换插件启停状态（通过编辑 cordis.patch.yml，机制学自 dsh-market）。
-// 后端已用插件在补丁层的正确行 id 写入，并同步 state.json 的 disabled 数组
-// （包名）。成功后再依据是否需要重启决定提示方式：
+// 切换插件启停状态（按官方 dsh 的包级开关增删 dsh.profile.bundles，依赖保留）。
+// 成功后再依据是否需要重启决定提示方式：
 //   - 需要重启（客户端插件/带原生依赖）：不弹 toast，改在列表内联提示 + 重启生效按钮
 //   - 仅需刷新：弹 toast 提示刷新 dsh 页面
 async function togglePlugin(p: { name: string; disabled?: boolean }) {
@@ -243,7 +242,7 @@ onMounted(() => {
             <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ p.version }}</div>
           </div>
 
-          <!-- 第二栏：启停开关 + 状态标记（紧邻开关右侧，disabled 状态来自 cordis.patch.yml）
+          <!-- 第二栏：启停开关 + 状态标记（紧邻开关右侧，disabled 状态来自 dsh.profile.bundles）
                + 卸载按钮（ml-auto 推到最右） -->
           <div class="flex flex-wrap items-center gap-3 mt-auto pt-3 border-t border-line dark:border-[#2A2A32]">
             <button

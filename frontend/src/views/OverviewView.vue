@@ -59,6 +59,24 @@ const entryFrameVisible = ref(false)
 const entryFrameUrl = ref('')
 const entryFrameError = ref(false)
 const entryFrameKey = ref(0)
+// 打开覆盖层时压入一条同 URL 的历史记录，返回手势/浏览器后退会把它弹掉 ——
+// 我们据此关闭覆盖层、回到控制台（而不是被 App 的返回手势直接带出控制台）。
+// App.vue 里那条「后退不切子页面」的守卫在 URL 未变时只是 replace 同一地址，不冲突。
+// dsh 内部自己的前进/后退发生在 iframe 的历史里（popstate 派发给 iframe 的 window），
+// 因此不会提前关掉覆盖层。
+let entryHistoryPushed = false
+
+function closeEntryFrame() {
+  entryFrameVisible.value = false
+  entryFrameError.value = false
+  entryFrameUrl.value = ''
+  entryHistoryPushed = false
+}
+
+function onEntryPopState() {
+  if (!entryFrameVisible.value) return
+  closeEntryFrame()
+}
 
 function normalizeEntryURL(url: string): string {
   const u = url.trim()
@@ -76,6 +94,12 @@ function openDshEntry() {
   entryFrameUrl.value = final
   entryFrameError.value = false
   entryFrameKey.value++
+  if (!entryHistoryPushed) {
+    // 同 URL 压栈：不改变当前页面，只是给返回手势一个「先关覆盖层」的落点。
+    const prevState = typeof history.state === 'object' && history.state ? history.state : {}
+    history.pushState({ ...prevState, harnessDshEntry: true }, '', location.href)
+    entryHistoryPushed = true
+  }
   entryFrameVisible.value = true
 }
 
@@ -452,6 +476,7 @@ onMounted(() => {
     visitorResizeObserver = new ResizeObserver(() => measureVisitorList())
     visitorResizeObserver.observe(visitorCardEl.value)
   }
+  window.addEventListener('popstate', onEntryPopState)
 })
 
 onBeforeUnmount(() => {
@@ -461,6 +486,7 @@ onBeforeUnmount(() => {
   }
   visitorResizeObserver?.disconnect()
   visitorResizeObserver = null
+  window.removeEventListener('popstate', onEntryPopState)
 })
 </script>
 

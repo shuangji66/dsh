@@ -480,6 +480,11 @@ const loginPageHTML = `<!DOCTYPE html>
     transition:border-color .15s ease,box-shadow .15s ease}
   input::placeholder{color:var(--ink-faint)}
   input:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+  /* 移动端输入框保持 16px：iOS Safari 对 <16px 的输入框会在聚焦时自动放大页面，
+     端口访问的登录页也走同一规则。 */
+  @media (max-width: 768px) {
+    input{font-size:16px}
+  }
   button{width:100%;margin-top:20px;padding:11px;border:none;border-radius:6px;
     background:var(--brand);color:#fff;font-size:14px;font-weight:600;cursor:pointer;
     transition:background .15s ease,transform .15s ease,box-shadow .15s ease}

@@ -3,17 +3,13 @@ import { RouterView, useRoute } from 'vue-router'
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useTheme } from '@/composables/useTheme'
 import { useI18n } from '@/composables/useI18n'
-import { useConsolePrefs } from '@/composables/useConsolePrefs'
 import { useKeyboardInset } from '@/composables/useKeyboardInset'
-import { useSettingsStore } from '@/stores/settings'
 import Toast from '@/components/Toast.vue'
 import router from './router'
 import { icons } from '@/utils/icons'
 
 const route = useRoute()
 const { t, locale, setLocale } = useI18n()
-const settings = useSettingsStore()
-const { defaultPage } = useConsolePrefs()
 const { themeMode, cycleTheme } = useTheme() // 初始化/跟随系统主题 + 侧边栏主题切换
 
 // 软键盘遮挡量（--kb-inset）：底部导航栏与终端页据此抬到键盘之上，
@@ -41,20 +37,12 @@ const nav = [
   { name: 'logs', labelKey: 'nav_logs', icon: 'logs' }
 ] as const
 
-// 打开时的默认页面
-function defaultView(): string {
-  if (defaultPage.value === 'last') {
-    return localStorage.getItem('last-view') || 'overview'
-  }
-  if (defaultPage.value) return defaultPage.value
-  return 'overview'
-}
-
-// 当前子页面：优先 URL 查询参数，否则用配置的默认页面
+// 当前子页面：优先 URL 查询参数，否则固定为概览页。
+// 「打开时的默认页面」设置已移除：控制台打开就是概览，页面切换只走 ?view=。
 const current = computed(() => {
   const q = route.query.view as string | undefined
   if (q && nav.some((n) => n.name === q)) return q
-  return defaultView()
+  return 'overview'
 })
 
 // 控制台 HTML 标题随子页面切换动态显示（只显示子页面标题，如“概览/设置”，无前缀）
@@ -68,32 +56,23 @@ watch(
 )
 
 // 子页面统一在 / 路径下通过 ?view= 切换；用 replace 避免产生历史记录。
-// 同时记录“最后访问的页面”，供“保持退出时的页面”使用。
 function navigate(name: string) {
-  localStorage.setItem('last-view', name)
   router.replace({ path: '/', query: { view: name } })
 }
 
 let appliedDefault = false
-// URL 未指定子页面时，写入配置的默认页面（让 ?view= 始终反映当前子页面）。
+// URL 未指定子页面时补上 ?view=overview（让地址栏始终反映当前子页面）。
+// 必须等 `router.isReady()` 再判断：初始导航（含子页面懒加载 chunk）解析完成之前
+// `route.query` 还是 START_LOCATION 的空 Query —— 那时判断会把 `?view=logs`
+// 这类直达链接（含 /logs、/terminal 旧路径的 302 目标）覆盖成概览。
+// isReady() 在初始导航失败时会 reject（chunk 取不到等），那种情况下保持现状即可，别抛未处理拒绝。
 function applyDefaultView() {
   if (appliedDefault) return
   appliedDefault = true
   if (!route.query.view) {
-    router.replace({ path: '/', query: { view: defaultView() } })
+    router.replace({ path: '/', query: { view: 'overview' } })
   }
 }
-// 配置加载完成后触发；且必须等 `router.isReady()` 再判断：初始导航（含子页面懒加载 chunk）
-// 解析完成之前 `route.query` 还是 START_LOCATION 的空 Query —— 那时判断会把 `?view=logs`
-// 这类直达链接（含 /logs、/terminal 旧路径的 302 目标）覆盖成默认页。
-// isReady() 在初始导航失败时会 reject（chunk 取不到等），那种情况下保持现状即可，别抛未处理拒绝。
-watch(
-  () => settings.config,
-  () => {
-    router.isReady().then(applyDefaultView, () => {})
-  },
-  { immediate: true }
-)
 
 // ===== 图标：统一放在 utils/icons.ts（侧边栏与子页面标题栏共用同一套） =====
 
@@ -112,6 +91,9 @@ const languageTitle = computed(() => t(locale.value === 'zh' ? 'lang_zh' : 'lang
 
 // 阻止浏览器后退/滑动返回切换子页面
 onMounted(() => {
+  // 打开时一律先到概览页；带 ?view= 的直达链接由 current/applyDefaultView 保留。
+  router.isReady().then(applyDefaultView, () => {})
+
   // 用 replace 切换子页面，URL 始终保持在 / 路径下；兜底处理浏览器后退/手势，
   // 若触发 popstate 则把当前子页面重新压回，阻断切页
   const blockBack = () => {

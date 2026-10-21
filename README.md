@@ -120,7 +120,7 @@
         ├── main.ts / App.vue / style.css
         ├── router/index.ts  # /?view= 切换 + 旧路径 302 重定向
         ├── stores/          # Pinia：settings / toast / plugins / directories
-        ├── composables/     # useTheme / useI18n / useConsolePrefs / useMobileLayout / useKeypadPage
+        ├── composables/     # useTheme / useI18n / useMobileLayout / useKeypadPage
         ├── serverapi/index.ts   # 运行时 baseurl 感知的 API / SSE 客户端
         ├── components/      # Toast / ConfirmDialog / 快捷指令 / 终端辅助键条 / 版本与更新区
         └── views/           # 概览 / 设置 / 目录 / 插件 / 终端 / 日志

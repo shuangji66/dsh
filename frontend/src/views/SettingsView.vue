@@ -5,7 +5,6 @@ import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { useI18n, setLocale } from '@/composables/useI18n'
 import { useTheme } from '@/composables/useTheme'
-import { useConsolePrefs, type DefaultPage } from '@/composables/useConsolePrefs'
 import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
 
@@ -19,7 +18,7 @@ import { icons } from '@/utils/icons'
 //    · 「自动设置」（堆内存）开关 —— 重启 dsh 生效
 //    · 「启用登录鉴权」开关 —— 立即生效
 //    · 快捷访问地址的添加/删除 —— 立即生效
-//    · 控制台设置（主题/语言/默认页面）—— 只写浏览器 localStorage，连后端都不过
+//    · 控制台设置（主题/语言）—— 只写浏览器 localStorage，连后端都不过
 //    这些项各自弹的提示见下面各 on* 处理函数。
 //
 // ② 需点「保存配置」才落盘 —— 只改本地 config，改动后**不生效也不落盘**：
@@ -41,7 +40,6 @@ const toast = useToastStore()
 const { t } = useI18n()
 const { themeMode, setTheme } = useTheme()
 const { locale } = useI18n()
-const { defaultPage, setDefaultPage } = useConsolePrefs()
 
 // npm 镜像源选项：value 必须与后端 npmMirrors 的 Slug 一致（server.go）。
 // 默认阿里云；官方源只有用户主动选中时才会被使用。
@@ -70,9 +68,6 @@ function onThemeChange() {
 }
 function onLanguageChange() {
   setLocale(locale.value)
-}
-function onDefaultPageChange() {
-  setDefaultPage(defaultPage.value as DefaultPage)
 }
 
 // 安全标点：与后端 auth.go 的 safePunctStr 保持一致
@@ -511,8 +506,11 @@ async function onAuthToggle() {
         <p v-else class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('access_urls_empty') }}</p>
       </section>
 
-      <!-- ⑥ 控制台设置：主题 / 语言 / 默认页面（仅存浏览器 localStorage） -->
-      <section class="g-card g-card-hover p-5 flex flex-col">
+      <!-- ⑥ 控制台设置：主题 / 语言（仅存浏览器 localStorage）。
+           只在移动端（<md，左侧边栏被隐藏时）显示：桌面端的主题/语言入口在侧边栏底部，
+           这里再摆一份是重复的。断点与侧边栏的 `hidden md:flex` 严格互补，别改用
+           useMobileLayout —— 那是「触屏/窄视口」判据，iPad 横屏会同时出现侧边栏和本卡片。 -->
+      <section class="g-card g-card-hover p-5 flex flex-col md:hidden">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('console_title') }}
         </h2>
@@ -531,18 +529,6 @@ async function onAuthToggle() {
             <select v-model="locale" @change="onLanguageChange" class="g-input">
               <option value="zh">{{ t('lang_zh') }}</option>
               <option value="en">{{ t('lang_en') }}</option>
-            </select>
-          </div>
-          <div>
-            <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('console_default_page') }}</label>
-            <select v-model="defaultPage" @change="onDefaultPageChange" class="g-input">
-              <option value="overview">{{ t('default_overview') }}</option>
-              <option value="last">{{ t('default_last') }}</option>
-              <option value="settings">{{ t('default_settings') }}</option>
-              <option value="directory">{{ t('default_directory') }}</option>
-              <option value="plugins">{{ t('default_plugins') }}</option>
-              <option value="terminal">{{ t('default_terminal') }}</option>
-              <option value="logs">{{ t('default_logs') }}</option>
             </select>
           </div>
         </div>

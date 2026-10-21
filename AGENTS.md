@@ -243,10 +243,11 @@
 
 - **强制 Composition API + `<script setup>` + TypeScript**（Vue 3，SSR 下用 Volar / vue-tsc）。
 - 子页面统一经 `/` 下的 `?view=xxx` 查询参数切换（`router/index.ts`），避免真实历史
-  记录；旧 `/directory` 等路径做 302 重定向。**默认页跳转（`App.vue` 的 `applyDefaultView`）
-  必须等 `router.isReady()` 再读 `route.query`** —— 初始导航（含懒加载子页面 chunk）解析
-  完成前 query 还是空的，那时判断会把 `?view=logs` 这类直达链接（含旧路径 302 的目标）
-  覆盖成默认页。
+  记录；旧 `/directory` 等路径做 302 重定向。**打开控制台固定进概览页**：没有
+  「打开时的默认页面」设置（`useConsolePrefs` 已删除），`App.vue` 的 `applyDefaultView`
+  只在 URL 未带 `?view=` 时补上 `view=overview`；它**必须等 `router.isReady()` 再读
+  `route.query`** —— 初始导航（含懒加载子页面 chunk）解析完成前 query 还是空的，那时
+  判断会把 `?view=logs` 这类直达链接（含旧路径 302 的目标）覆盖成概览。
 - 状态用 **Pinia**（`stores/`）；主题 / i18n / 偏好用 `composables/`。
 - 终端视图被 `<KeepAlive>` 缓存，切换标签不销毁会话。
 - `views/TerminalView.vue` + `components/KeypadBar.vue` — Web 终端页：xterm + `/terminal`

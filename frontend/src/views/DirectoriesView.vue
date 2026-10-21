@@ -9,6 +9,7 @@ import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { useDshBackup } from '@/composables/useDshBackup'
 import { api, type DshDataBackup } from '@/serverapi'
 import { trimAppReady } from '@/utils/trimApp'
+import { isFnosApp } from '@/utils/fnosApp'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -19,6 +20,10 @@ const settings = useSettingsStore()
 const { paths, loading, convertedPaths } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
+
+// 飞牛 App 内置 WebView：目录授权依赖宿主桥接，当前在 App 内不可用 ——
+// 页面顶部给一条常驻提示（不挡住页面，也不禁用按钮：宿主后续开放后无需再改代码）。
+const fnosApp = isFnosApp()
 
 // 宿主 SDK（@trimjs/web-app）是 utils/trimApp.ts 里的单例，且在页面加载时（main.ts）
 // 就已开始握手 —— 不能在这里 new：宿主桌面的握手监听只保留 60 秒，等本页挂载再握手，
@@ -367,6 +372,15 @@ onBeforeUnmount(() => {
       </button>
       <button class="g-btn-secondary h-8 px-3 text-xs flex-shrink-0" @click="openPicker()">{{ t('directory_add') }}</button>
     </PageHeader>
+
+    <!-- 飞牛 App 访问：目录授权暂不可用。黄色提示常驻在标题栏下（与「插件操作进行中」
+         的风险提示同一套配色），说明「添加授权」当前点了也没有结果。 -->
+    <div
+      v-if="fnosApp"
+      class="mb-3 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-3 py-2 text-xs leading-relaxed text-[#B45309] dark:bg-[#F59E0B]/15 dark:text-[#FBBF24]"
+    >
+      {{ t('directory_fnapp_auth_unavailable') }}
+    </div>
 
     <!-- 每个目录一张卡片，按容器宽度自适应分栏（.g-card-grid）：
          主目录固定为第一张，备份目录紧随其后，其余为已授权目录；加载/空态卡片占满整行。 -->

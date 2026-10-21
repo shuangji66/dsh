@@ -185,6 +185,7 @@ const zh: Record<string, string> = {
 
   // 资源页
   directory_title: '资源',
+  directory_fnapp_auth_unavailable: '飞牛APP暂时无法添加授权',
   directory_add: '添加',
   directory_loading: '加载中…',
   directory_empty: '暂无已授权的目录',
@@ -746,6 +747,7 @@ const en: Record<string, string> = {
 
   // 资源页
   directory_title: 'Resources',
+  directory_fnapp_auth_unavailable: 'Adding directory authorization is not available in the fnOS app yet.',
   directory_add: 'Add',
   directory_loading: 'Loading…',
   directory_empty: 'No authorized directories',

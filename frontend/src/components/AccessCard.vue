@@ -9,6 +9,7 @@
 import { computed, ref } from 'vue'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { isFnosApp } from '@/utils/fnosApp'
 
 const props = defineProps<{ accessUrls?: string[]; fnosEntry?: string }>()
 
@@ -37,10 +38,6 @@ const frameUrl = ref('')
 const frameError = ref(false)
 const frameKey = ref(0)
 useBodyScrollLock(frameVisible)
-
-function isFnosApp(): boolean {
-  return /FNAppType\//.test(navigator.userAgent || '')
-}
 
 function normalizeURL(url: string): string {
   const u = url.trim()

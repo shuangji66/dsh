@@ -816,6 +816,10 @@ type reverseProxy struct {
 	// 暴露，只有本机网关进程能连；TCP 端口线在局域网内可达，认这三个头等于把
 	// 端口鉴权交给客户端自己声明。
 	gatewayLine bool
+	// trusted 跳过 harness 登录鉴权（仅用于挂在**控制台自己的 admin socket** 下的
+	// 内部 dsh 挂载点：该 socket 不在网络上暴露，请求要么来自平台网关，要么来自本机
+	// 受信进程；控制台本身也没有登录包装）。TCP 端口线与网关 socket 都不设它。
+	trusted bool
 	// account 是控制台的账号管理（见 account.go）：账号登录的回调路径是**反代自留路径**
 	// （不转发给 dsh），由它与 admin 线共用同一个 handler —— 同一个登录尝试的进程内状态
 	// 只此一份，两条线谁收到回调都能完成它。nil 表示该实例不支持（测试用小实例）。
@@ -1066,7 +1070,7 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// marketBusyFn），不经过反代；免鉴权分支在仓库内没有使用者，却让本机任意进程
 	// （或同机嵌套反代）无口令拿到市场全部控制面接口（install/uninstall/restart/
 	// recovery）。普通浏览器流量（含经 nginx 嵌套反代到达的）必须通过面板登录鉴权。
-	if !viaGateway && !p.auth.isAuthed(r) {
+	if !p.trusted && !viaGateway && !p.auth.isAuthed(r) {
 		// next 记的是挂载内路径（如 "/api/x"），登录成功后由 handleAuthRoutes
 		// 用 mount.join 补回前缀，浏览器因此留在子路径下。
 		next := safeNext(r.URL.Path + "?" + r.URL.RawQuery)
@@ -1142,7 +1146,7 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request, via
 	// Auth guard: browsers can't follow a 302 on an upgrade, so reject with 401.
 	// 与 HTTP 请求一致，WebSocket 连接也必须通过面板登录鉴权（harness_session），
 	// 不得仅凭 dsh 的会话 cookie 放行，以免绕过控制台登录鉴权。
-	if !viaGateway && !p.auth.isAuthed(r) {
+	if !p.trusted && !viaGateway && !p.auth.isAuthed(r) {
 		hj, ok := w.(http.Hijacker)
 		if ok {
 			conn, _, _ := hj.Hijack()

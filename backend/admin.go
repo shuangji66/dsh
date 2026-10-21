@@ -36,6 +36,12 @@ type AdminMux struct {
 	// **可能为 nil**：主密钥读不到/解不出时进程照常启动（控制台是这个 NAS 的带外访问
 	// 入口，不该为一条快捷指令把整个控制台停掉），但写路径一律拒绝，绝不退化成写明文。
 	crypt *cryptor
+	// dshUI 是挂在控制台自己的 admin socket 下的 dsh 反代（baseurl 之下的一层
+	// `/gui`）。它存在的唯一目的：让「飞牛入口」落在**控制台同一个网关入口**
+	// （/app/Harness）里，复用平台给控制台入口的鉴权；App 的网关鉴权是按入口注入的，
+	// 跨到独立的 /app/Harness/dsh 入口时带不过去（详见 proxy.go 的 gatewayLine/trusted）。
+	// nil 表示未启用（测试或没有 auth/dsh 的实例）。
+	dshUI *reverseProxy
 }
 
 // newAdminMux wires the admin SPA mux onto the unix socket. crypt 可以为 nil，
@@ -44,7 +50,7 @@ func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManag
 	if boot == nil {
 		boot = newBootState()
 	}
-	return &AdminMux{
+	m := &AdminMux{
 		renv:     renv,
 		dsh:      dsh,
 		auth:     auth,
@@ -54,6 +60,15 @@ func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManag
 		boot:     boot,
 		crypt:    crypt,
 	}
+	// 控制台入口下的 dsh 反代：路径 = 控制台 baseurl + "/gui"（例如
+	// /app/Harness/gui）。它由 trim_http_cgi 按控制台 entry 鉴权后转发到 app.sock，
+	// 因此 App 里打开它不会跨到独立的 dsh 入口、也就没有入口 token 的注入问题。
+	if auth != nil && dsh != nil {
+		guiBase := strings.TrimRight(renv.AdminBaseURL, "/") + "/gui"
+		m.dshUI = newReverseProxyMount(auth, dsh, boot, guiBase, true)
+		m.dshUI.trusted = true
+	}
+	return m
 }
 
 // writeJSON writes an indented JSON response.
@@ -367,19 +382,27 @@ func firstHeaderValue(v string) string {
 }
 
 // fnosEntryURL 计算当前访问环境下的「飞牛入口」：控制台的当前访问地址剥离控制台
-// baseurl（HARNESS_ADMIN_BASEURL）后得到飞牛 OS 的访问源，再拼接 dsh 服务挂载的
-// baseurl（HARNESS_PROXY_BASEURL，反代在 fnOS 网关下的子路径挂载点）。
+// baseurl（HARNESS_ADMIN_BASEURL）后得到飞牛 OS 的访问源，再拼上控制台入口下的
+// dsh 反代路径 `/gui`。
 //
-// 例：控制台 http://192.168.1.111:5666/app/Harness + baseurl /app/Harness
-// → 飞牛 OS 访问源 http://192.168.1.111:5666 + /app/Harness/dsh
-// → http://192.168.1.111:5666/app/Harness/dsh
+// 为什么不拼独立 dsh 入口（HARNESS_PROXY_BASEURL，/app/Harness/dsh）：
+// 飞牛 App 的网关鉴权是**按入口（gatewayPrefix）注入**的，控制台入口的凭据不会
+// 自动带到独立的 dsh 入口；App 内从控制台跳过去会先收到 trim_http_cgi 的
+// `invalid token`（需手动刷新）。把 dsh 挂在控制台入口之下（/app/Harness/gui），
+// 由控制台自己的 app.sock 反代到 dsh，请求就始终在控制台入口的鉴权范围内。
+//
+// 例：控制台 http://192.168.1.111:5666/app/Harness
+// → 飞牛 OS 访问源 http://192.168.1.111:5666
+// → http://192.168.1.111:5666/app/Harness/gui
 //
 // 拿不到访问地址（无 Origin/Referer/Host）时返回空串，由前端退回浏览器自身地址。
 func (m *AdminMux) fnosEntryURL(r *http.Request) string {
-	mount := newProxyMount(m.renv.ProxyBaseURL)
-	if mount.root() {
-		// 未启用网关子路径挂载（HARNESS_PROXY_BASEURL 为空或 "/"）：
-		// 没有可供浏览器访问的飞牛入口，不要给出一个指向站点根的错地址。
+	base := strings.TrimRight(m.renv.AdminBaseURL, "/")
+	if base == "" {
+		// 没有控制台 baseurl（例如端口直连、非网关部署）：没有可拼的网关入口。
+		return ""
+	}
+	if m.dshUI == nil {
 		return ""
 	}
 	origin := browserOrigin(r)
@@ -387,13 +410,12 @@ func (m *AdminMux) fnosEntryURL(r *http.Request) string {
 		return ""
 	}
 	// 控制台在当前访问环境下的完整地址，剥离控制台 baseurl 后剩下的就是飞牛 OS 访问源。
-	base := strings.TrimRight(m.renv.AdminBaseURL, "/")
 	consoleURL := strings.TrimRight(origin, "/") + base
 	fnosOrigin := strings.TrimSuffix(consoleURL, base)
 	if fnosOrigin == "" {
 		return ""
 	}
-	return fnosOrigin + mount.prefix
+	return fnosOrigin + m.dshUI.mount.dir()
 }
 
 // --- Settings API ---
@@ -417,6 +439,9 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			// dsh 服务在平台网关（fnOS）下占据的挂载 baseurl，前端据此自行换算
 			// 「飞牛入口」（后端换算不出来时兜底用）。
 			"proxyBaseURL": m.renv.ProxyBaseURL,
+			// 控制台入口下的 dsh 反代路径（/app/Harness/gui/）。「飞牛入口」用它，
+			// 不再用独立的 /app/Harness/dsh（App 的网关鉴权按入口注入，跨入口带不过去）。
+			"consoleDshURL": strings.TrimRight(m.renv.AdminBaseURL, "/") + "/gui/",
 			// 当前访问环境下的「飞牛入口」地址；推不出（拿不到访问地址）时为空。
 			"fnosEntryURL": m.fnosEntryURL(r),
 			// node 版本切换选项：列出可用版本及其标识，前端据此显示下拉选项。
@@ -1153,6 +1178,23 @@ func (m *AdminMux) buildHandler() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// 控制台入口下的 dsh 反代先于 baseurl 剥离：它的 mount 是完整浏览器路径
+		// （/app/Harness/gui），由反代自己剥离；交给它之前不能先把 base 去掉。
+		if m.dshUI != nil {
+			gui := base + "/gui"
+			if r.URL.Path == gui || strings.HasPrefix(r.URL.Path, gui+"/") {
+				m.dshUI.ServeHTTP(w, r)
+				return
+			}
+			// 兼容网关先把控制台 baseurl 剥掉再转发的部署：补回完整路径后交给反代。
+			if base != "" && (r.URL.Path == "/gui" || strings.HasPrefix(r.URL.Path, "/gui/")) {
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = base + r.URL.Path
+				r2.URL.RawPath = ""
+				m.dshUI.ServeHTTP(w, r2)
+				return
+			}
+		}
 		p := r.URL.Path
 		if base != "" && strings.HasPrefix(p, base) {
 			p = strings.TrimPrefix(p, base)

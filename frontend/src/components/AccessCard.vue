@@ -5,9 +5,10 @@
 //   - fnosEntry：固定第一行的「飞牛入口」（当前访问环境下经飞牛网关访问 dsh 的地址），
 //     由概览页按请求头/浏览器地址换算后传入，不参与用户配置；
 //   - accessUrls：用户在设置页配置的 dsh 访问地址。
-// 两者都只是「点击即新标签页打开」，因此这里不需要任何后端请求与状态，保持纯展示。
-import { computed } from 'vue'
+// 桌面浏览器里两者都直接新标签页打开；飞牛 App 的「飞牛入口」需要特殊处理，见下。
+import { computed, ref } from 'vue'
 import { useI18n } from '@/composables/useI18n'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps<{ accessUrls?: string[]; fnosEntry?: string }>()
 
@@ -17,12 +18,71 @@ const { t } = useI18n()
 const urls = computed(() => (props.accessUrls || []).map((u) => u.trim()).filter(Boolean))
 const empty = computed(() => !props.fnosEntry && urls.value.length === 0)
 
-// 打开访问地址（新标签页）。裸地址（没有 scheme）补 http://，否则 window.open 会当相对路径。
-function open(url: string) {
+// 飞牛 App 内「飞牛入口」用全屏 iframe 承载 dsh。
+//
+// 为什么不用 window.open / location.assign：App 的网关鉴权是**按入口
+// （gatewayPrefix）注入**的，不是浏览器那种 host 级 Cookie。控制台入口
+// （/app/Harness）的凭据不会自动带到 dsh 入口（/app/Harness/dsh）：
+//   - window.open 新建的 WebView 首个导航没有 dsh 入口的凭据；
+//   - 同窗口 location.assign 也一样（实测控制台页面确实被导航走了，dsh 仍收到
+//     trim_http_cgi 的 200 + 13 字节 "invalid token"）。
+// 但 iframe 是**控制台页面自己的子资源请求**，走的是控制台这个 WebView 的请求栈；
+// 而且入口地址现在改成了控制台 baseurl 之下的 /gui/（由控制台的 app.sock 反代到
+// dsh，见 backend/admin.go 的 dshUI），不再跨到独立的 dsh 入口。如果仍然被网关
+// 拒绝（iframe 里出现 13 字节错误页），只显示一个全屏的重试面板；不提供
+// 「在浏览器打开」，也不提供返回控制台的按钮。
+// 桌面浏览器不受影响，仍新标签页打开。
+const frameVisible = ref(false)
+const frameUrl = ref('')
+const frameError = ref(false)
+const frameKey = ref(0)
+useBodyScrollLock(frameVisible)
+
+function isFnosApp(): boolean {
+  return /FNAppType\//.test(navigator.userAgent || '')
+}
+
+function normalizeURL(url: string): string {
   const u = url.trim()
-  if (!u) return
-  const final = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u) ? u : 'http://' + u
-  window.open(final, '_blank', 'noopener')
+  if (!u) return ''
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u) ? u : 'http://' + u
+}
+
+// 打开访问地址（设置页里的自定义地址）：桌面/App 都按原行为新标签页打开。
+function open(url: string) {
+  const final = normalizeURL(url)
+  if (final) window.open(final, '_blank', 'noopener')
+}
+
+function openFnosEntry() {
+  const final = normalizeURL(props.fnosEntry || '')
+  if (!final) return
+  if (!isFnosApp()) {
+    window.open(final, '_blank', 'noopener')
+    return
+  }
+  frameUrl.value = final
+  frameError.value = false
+  frameKey.value++
+  frameVisible.value = true
+}
+
+function retryFrame() {
+  frameError.value = false
+  frameKey.value++
+}
+
+function onFrameLoad(ev: Event) {
+  const el = ev.target as HTMLIFrameElement
+  let text = ''
+  try {
+    text = (el.contentDocument?.body?.innerText || '').trim()
+  } catch {
+    return // 理论上同源；读不到就不动
+  }
+  if (text === 'invalid token') {
+    frameError.value = true
+  }
 }
 </script>
 
@@ -41,7 +101,7 @@ function open(url: string) {
           border border-brand/30 text-xs font-medium text-brand
           hover:bg-brand/10 dark:hover:bg-brand/20 transition-colors duration-150"
         :title="fnosEntry"
-        @click="open(fnosEntry)"
+        @click="openFnosEntry"
       >
         <span class="truncate">{{ t('access_urls_fnos_entry') }}</span>
         <svg class="w-3.5 h-3.5 shrink-0 transition-transform duration-200 group-hover:translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M9 7h8v8"/></svg>
@@ -61,4 +121,26 @@ function open(url: string) {
       </button>
     </div>
   </section>
+
+  <!-- App 内的全屏 dsh 容器：走控制台 WebView 的请求栈，避免新 WebView 的入口凭据缺失。
+       按要求不保留顶栏：没有「在浏览器打开」，也没有返回控制台的按钮。 -->
+  <Teleport to="body">
+    <div v-if="frameVisible" class="fixed inset-0 z-[200] bg-bg dark:bg-[#0B0B0F]">
+      <div v-if="frameError" class="h-full flex items-center justify-center p-6">
+        <div class="g-card p-5 w-full max-w-sm text-center">
+          <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed">{{ t('access_urls_fnos_blocked') }}</p>
+          <div class="flex items-center justify-center gap-2 mt-4">
+            <button class="g-btn-secondary" @click="retryFrame">{{ t('access_urls_retry') }}</button>
+          </div>
+        </div>
+      </div>
+      <iframe
+        v-else
+        :key="frameKey"
+        :src="frameUrl"
+        class="w-full h-full border-0 bg-white dark:bg-[#0B0B0F]"
+        @load="onFrameLoad"
+      ></iframe>
+    </div>
+  </Teleport>
 </template>

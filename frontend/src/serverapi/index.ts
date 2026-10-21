@@ -41,9 +41,12 @@ export interface RuntimeInfo {
   adminBaseURL: string
   appName: string
   fnosAvailable: boolean
-  // dsh 服务在 fnOS 网关下占据的挂载 baseurl（HARNESS_PROXY_BASEURL），
-  // 前端换算「飞牛入口」时使用。
+  // dsh 服务在 fnOS 网关下占据的挂载 baseurl（HARNESS_PROXY_BASEURL）。
+  // 独立 dsh 入口仍在用；「飞牛入口」已改走 consoleDshURL（控制台入口下的 /gui/）。
   proxyBaseURL?: string
+  // 控制台入口下的 dsh 反代路径（/app/Harness/gui/）。App 的网关鉴权按入口注入，
+  // 跨到独立的 dsh 入口会带不过去，所以「飞牛入口」用这一条。
+  consoleDshURL?: string
   // 当前访问环境下的飞牛入口地址（控制台访问源 + dsh 挂载 baseurl），
   // 后端拿不到访问地址时为空，前端退回浏览器自身地址自行换算。
   fnosEntryURL?: string

@@ -414,19 +414,26 @@ dsh **自己没有多账号概念**：账号凭据只有一条固定键（`deeps
 概览页「快捷访问」的第一行固定显示**飞牛入口**——当前访问环境下经平台网关访问
 dsh 服务的地址，无需用户配置：控制台的当前访问地址（由请求的 `Origin` / `Referer`
 推断，缺失时退回 `Host` + `X-Forwarded-Proto`）**剥离控制台 baseurl**
-（`HARNESS_ADMIN_BASEURL`）得到飞牛 OS 的访问源，再拼接 dsh 服务挂载的 baseurl
-（`HARNESS_PROXY_BASEURL`）：
+（`HARNESS_ADMIN_BASEURL`）得到飞牛 OS 的访问源，再拼上**控制台入口下的 dsh
+反代路径 `/gui/`**：
 
 ```text
 控制台 http://192.168.1.111:5666/app/Harness
   ├─ 剥离 /app/Harness      → 飞牛 OS 访问源 http://192.168.1.111:5666
-  └─ 拼接 /app/Harness/dsh  → http://192.168.1.111:5666/app/Harness/dsh
+  └─ 拼接 /app/Harness/gui/ → http://192.168.1.111:5666/app/Harness/gui/
 ```
+
+为什么不拼独立的 `/app/Harness/dsh`（`HARNESS_PROXY_BASEURL`）：飞牛 App 的网关
+鉴权是**按入口（gatewayPrefix）注入**的，控制台入口的凭据不会自动带到独立的 dsh
+入口。App 内从控制台跳过去时，第一请求会被 `trim_http_cgi` 以 `200 + 13 字节
+"invalid token"` 拒绝（手动刷新一次才好）。`/gui/` 由控制台自己的 `app.sock`
+反代到 dsh（`AdminMux.dshUI`，见 `backend/admin.go`），请求始终落在控制台入口的
+鉴权范围内；dsh 前端仍然靠 `<base href="./">` 在 `/gui/` 下解析相对路径。
 
 换算在 `backend/admin.go` 的 `fnosEntryURL` 完成，随 `GET /api/settings` 的
 `runtime.fnosEntryURL` 下发；后端拿不到访问地址时前端退回浏览器自身地址
-（`document.baseURI` 同样剥掉 baseurl）自行换算。未启用网关子路径挂载
-（`HARNESS_PROXY_BASEURL` 为空或 `/`）时该行不显示，避免给出指向站点根的错地址。
+（`document.baseURI` 的 origin + `runtime.consoleDshURL`）自行换算。未设置控制台
+baseurl（非网关部署）时该行不显示，避免给出指向站点根的错地址。
 
 ---
 

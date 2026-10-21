@@ -1123,6 +1123,7 @@ func (m *AdminMux) handleFnos(w http.ResponseWriter, r *http.Request) {
 		}
 		paths, msg, err := m.fnos.GetUserAccessibleFolders(uid)
 		if err != nil {
+			logWarn("[fnos] get user accessible folders failed uid=%d", uid)
 			writeJSON(w, map[string]interface{}{"ok": false, "error": err.Error()})
 			return
 		}
@@ -1143,6 +1144,7 @@ func (m *AdminMux) handleFnos(w http.ResponseWriter, r *http.Request) {
 		}
 		ok, msg, err := m.fnos.DelUserAccessibleFolder(uid, body.Path)
 		if err != nil {
+			logWarn("[fnos] delete user accessible folder failed uid=%d", uid)
 			writeJSON(w, map[string]interface{}{"ok": false, "error": err.Error()})
 			return
 		}

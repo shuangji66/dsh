@@ -554,12 +554,14 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusInternalServerError, "err_save_failed", "保存失败: %s", "detail", err.Error())
 		return
 	}
-	// 切换镜像源后，手上那份 dsh 版本列表是**旧源**的快照：异步用新源重拉一次，
-	// 让概览页/版本弹窗尽快反映新源（拉取失败时 refreshVersions 会保留旧列表并写
-	// verErr，不会把「新源不可达」误报成「没有版本」）。插件最新版状态会在下一次
-	// 后台检测 / 手动检查时用新源刷新，这里不额外起 `dsh plugin list`。
+	// 切换镜像源后，手上那些版本快照都来自**旧源**：异步跑一次完整检测（checkOnce），
+	// 用新源重拉 dsh 版本列表与两个受管插件的最新版，让概览页尽快反映新源。
+	//   - 拉取失败时 refreshVersions / refreshPluginStatus 都保留上一份缓存并写错误，
+	//     不会把「新源不可达」误报成「没有版本」；
+	//   - 它确实会顺带起一次只读的 `dsh plugin list`（本函数最后一次检测），用户可以
+	//     接受这一次开销：换源之后界面继续显示旧源的「最新版」更容易误导人。
 	if req.Config.NpmRegistry != prevNpmRegistry && m.update != nil && m.update.server != nil {
-		go m.update.server.refreshVersions(true)
+		go m.update.checkOnce()
 	}
 	writeJSON(w, map[string]interface{}{"ok": true, "locked": locked, "config": GetConfig()})
 }

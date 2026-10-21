@@ -402,7 +402,7 @@ func TestMarketPluginCmdUsesSelectedMirror(t *testing.T) {
 	// 所选源失败 → 直接报错、只执行一次，并提示去设置页换源。
 	marker = writeFakeDsh(t, dataDir, "0.2.0-rc.2", "", "echo boom >&2\nexit 1\n")
 	err = upd.runMarketPluginCmd([]string{"add", marketPackageName + "@latest"})
-	if err == nil || !strings.Contains(err.Error(), "华为云") || !strings.Contains(err.Error(), "切换 npm 镜像源") {
+	if err == nil || !strings.Contains(err.Error(), "huawei") || !strings.Contains(err.Error(), "切换 npm 镜像源") {
 		t.Fatalf("失败时应点明所选源并提示换源，实得 %v", err)
 	}
 	raw, err = os.ReadFile(marker)

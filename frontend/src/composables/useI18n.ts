@@ -1134,13 +1134,26 @@ export function setLocale(l: Locale) {
 
 // tr 是本模块的翻译实现：useI18n().t 与下面的 uiText / uiErrText 共用。
 // 取不到 key 时返回 key 本身（调用方据此判断「这条没有译文」）。
+// npm 镜像源的 slug（后端只下发这个，见 backend/server.go 的 npmMirror）：参数值正好是
+// 其中一种时替换成当前语言的显示名，否则原样替换（detail / version / 包名等）。
+// 这样 `err_plugin_op_failed`、`msg_install_from_mirror` 这些文案里的「镜像源：aliyun」
+// 在中文界面显示「阿里云」、英文界面显示「Aliyun」，后端不必猜界面语言。
+const MIRROR_REGISTRY_SLUGS = new Set(['aliyun', 'tencent', 'huawei', 'npmjs'])
+function localizeParam(value: string | number): string {
+  const text = String(value)
+  if (!MIRROR_REGISTRY_SLUGS.has(text)) return text
+  const key = `settings_npm_registry_${text}`
+  const translated = tr(key)
+  return translated === key ? text : translated // 字典没收录时退回 slug，不显示 key
+}
+
 function tr(key: string, params?: Record<string, string | number>): string {
   let s = dict[locale.value][key]
   if (s === undefined) s = dict.zh[key]
   if (s === undefined) s = key
   if (params) {
     for (const k of Object.keys(params)) {
-      s = s.replace(new RegExp(`\\{${k}\\}`, 'g'), String(params[k]))
+      s = s.replace(new RegExp(`\\{${k}\\}`, 'g'), localizeParam(params[k]))
     }
   }
   return s

@@ -90,7 +90,7 @@ func isBusyErr(err error) bool {
 // uiMsgPair 返回（原文, 引用），供状态载荷成对赋值：
 //
 //	st.Message, st.MessageRef = uiMsgPair("msg_install_from_mirror", "正在从 %s 下载 %s@%s",
-//	    "mirror", mirror.Name, "pkg", pkg, "version", v)
+//	    "mirror", mirror.Slug, "pkg", pkg, "version", v)
 func uiMsgPair(code, zh string, kv ...string) (string, *uiMsg) {
 	return formatKV(zh, kv), &uiMsg{Code: code, Params: kvMap(kv)}
 }

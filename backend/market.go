@@ -343,7 +343,7 @@ func (m *UpdateManager) refreshManagedPluginsLocal(force bool) {
 // --- 版本检测：npm 镜像源 ---
 
 // pluginLatest 用设置页选中的那一个镜像源取元数据，返回**版本号最高**的那一版
-// （`newestVersion`）与命中源的日志标识（英文标识；界面文案要用 npmMirror.Name，
+// （`newestVersion`）与命中源的日志标识（英文 slug；界面文案也一律用它，由前端翻译，
 // 别在这里返回中文显示名 —— 它会被调用方写进日志）。
 //
 // 刻意不看 `dist-tags.latest`：装的是「实际发布的最新版本号」那一版，而不是发布者
@@ -370,7 +370,7 @@ func (m *UpdateManager) pluginLatest(p managedPlugin) (string, string, error) {
 func pluginLatestErr(p managedPlugin, err error) error {
 	return uiErr("err_plugin_latest_failed",
 		"获取 %s 最新版本失败（镜像源：%s）: %s",
-		"pkg", p.pkg, "mirror", selectedNpmMirror().Name, "detail", err.Error())
+		"pkg", p.pkg, "mirror", selectedNpmMirror().Slug, "detail", err.Error())
 }
 
 // marketLatest 是插件市场的最新版检测入口（保留给既有测试与调用方）。
@@ -390,8 +390,9 @@ func (m *UpdateManager) refreshPluginStatus(p managedPlugin) {
 func (m *UpdateManager) refreshPluginStatusWith(p managedPlugin, snap marketLocalSnapshot) {
 	now := time.Now()
 	latest, _, err := m.pluginLatest(p)
-	// 更新日志：与 harness 同一套做法 —— 只取**要装的那一版**（最新版）的 release 正文，
-	// 按 tag 单次请求（见 managedPlugin.notesTag），不做整仓索引。
+	// 更新日志：只取**要装的那一版**（最新版）的 release 正文，按 tag 单次请求
+	// （见 managedPlugin.notesTag），不做整仓索引 —— dsh 版本列表那套索引只服务于
+	// 「点某个版本看那一版」，受管插件没有这个入口。
 	// 只在「确实有更新」时才取：没更新时弹窗不显示日志块，取回来也没人看，白打一次 GitHub。
 	// 必须在这里取 —— updateStatus 的回调在 m.mu 里执行，不能在里面发网络请求。
 	notes := ""
@@ -484,9 +485,9 @@ func (m *UpdateManager) runPluginCmdFor(p managedPlugin, args []string) error {
 	mirror := selectedNpmMirror()
 	full := append(marketCommand(args), "--registry="+mirror.URL)
 	m.updateStatus(p.kind, func(st *UpdateStatus) {
-		// 界面进度文案用中文显示名；日志用下面的 mirrorLogName()（英文标识）。
+		// 界面进度文案给 slug（前端按语言翻译）；日志用下面的 mirrorLogName()（英文标识）。
 		setMsgFields(&st.Message, &st.MessageRef, "msg_plugin_from_mirror",
-			"正在从 %s 处理 %s", "mirror", mirror.Name, "pkg", p.pkg)
+			"正在从 %s 处理 %s", "mirror", mirror.Slug, "pkg", p.pkg)
 	})
 	logInfo("%s running dsh %s (via %s)", updateLogTag(p.kind), strings.Join(full, " "), mirror.mirrorLogName())
 	out, err := m.dsh.RunPluginCommand(marketCmdTimeout, full)
@@ -494,7 +495,7 @@ func (m *UpdateManager) runPluginCmdFor(p managedPlugin, args []string) error {
 		logWarn("%s dsh plugin command via %s failed: %v", updateLogTag(p.kind), mirror.mirrorLogName(), err)
 		return uiErr("err_plugin_op_failed",
 			"插件 %s 操作失败（镜像源：%s）: %s；可在设置页切换 npm 镜像源后重试",
-			"pkg", p.pkg, "mirror", mirror.Name, "detail", tailLines(out, 3))
+			"pkg", p.pkg, "mirror", mirror.Slug, "detail", tailLines(out, 3))
 	}
 	return nil
 }

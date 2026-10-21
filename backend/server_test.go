@@ -455,8 +455,8 @@ func TestInstallUsesSelectedMirror(t *testing.T) {
 	if len(attempts) != 1 || attempts[0].Slug != "tencent" {
 		t.Fatalf("应当只尝试选中的腾讯云一次，实际: %+v", attempts)
 	}
-	if st.Mirror != "腾讯云" {
-		t.Fatalf("安装状态里的源标签 = %q，want 腾讯云", st.Mirror)
+	if st.Mirror != "tencent" {
+		t.Fatalf("安装状态里的源标签 = %q，want tencent（界面文案由前端按 slug 翻译）", st.Mirror)
 	}
 	if !dshVersionInstalled(srv.versionDir("0.3.0")) {
 		t.Fatal("安装完成后版本目录里应有可执行的 dsh")
@@ -495,7 +495,7 @@ func TestInstallMirrorFailureCleansUp(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("失败后不应自动换源重试，实际调用 %d 次", attempts)
 	}
-	if !strings.Contains(st.Error, "华为云") || !strings.Contains(st.Error, "切换 npm 镜像源") {
+	if !strings.Contains(st.Error, "huawei") || !strings.Contains(st.Error, "切换 npm 镜像源") {
 		t.Fatalf("错误信息应点明所选源并提示换源，实际: %v", st.Error)
 	}
 	if _, err := os.Stat(srv.versionDir("0.4.0")); !os.IsNotExist(err) {

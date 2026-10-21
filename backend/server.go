@@ -74,8 +74,10 @@ const (
 // npmMirror 是一个 npm 镜像源。
 //
 // **显示名与日志标识是两回事，别混用**：
-//   - Name 中文显示名：只进界面（进度文案「正在从 阿里云 下载 …」、安装状态里的源标签）；
-//   - Slug 英文标识：只进日志与错误链（日志一律英文，见 AGENTS 第 4 节规则 7）。
+//   - Name 中文显示名：仅供后端内部/测试使用（界面文案一律下发 slug，由前端按界面
+//     语言翻译，见 useI18n 的 tr()）；
+//   - Slug 英文标识：进日志与错误链（日志一律英文，见 AGENTS 第 4 节规则 7），同时是
+//     界面进度文案与 DshInstallState.Mirror 的取值。
 //
 // 为什么错误链也用 Slug 而不是中文名：这些错误会被 `logError(..., err)` 原样打进日志
 // （插件市场操作失败那条就是），中文名一旦混进去，日志里就又出现了中文镜像名。
@@ -296,7 +298,9 @@ type DshVersionEntry struct {
 // 同一时刻只允许一个安装（见 applying），因此整份状态是单槽的。
 type DshInstallState struct {
 	Version string `json:"version"`
-	// Mirror 是当前正在使用的镜像源显示名（阿里云 / 腾讯云 / 华为云）。
+	// Mirror 是当前正在使用的镜像源 **slug**（aliyun / tencent / huawei / npmjs）。
+	// 这里刻意不下发中文显示名：界面文案要能随语言切换，前端把 slug 翻成对应名称
+	// （settings_npm_registry_*），日志侧则一律用 mirrorLogName()。
 	Mirror string `json:"mirror,omitempty"`
 	// Phase：""（空闲）/ downloading（解析并下载依赖）/ installing（npm 处理依赖树：
 	// 解压、执行依赖构建脚本）/ verifying（校验可执行文件并打补丁）/ done / error。
@@ -761,7 +765,7 @@ func (m *ServerManager) Install(version string) error {
 	m.install = &DshInstallState{
 		Version: version,
 		Phase:   "downloading",
-		Mirror:  selectedNpmMirror().Name,
+		Mirror:  selectedNpmMirror().Slug,
 		Seq:     m.installSeq,
 	}
 	m.mu.Unlock()
@@ -873,12 +877,12 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 
 	mirror := selectedNpmMirror()
 	m.updateInstall(func(s *DshInstallState) {
-		// 这两处是**界面**文案（版本弹窗里的源标签与进度行），刻意用中文显示名；
-		// 日志一律用下面的 mirrorLogName()（英文标识）。
-		s.Mirror = mirror.Name
+		// 界面文案只给 slug（前端翻成当前语言的名称）；日志一律用下面的
+		// mirrorLogName()（英文标识）。
+		s.Mirror = mirror.Slug
 		s.Phase = "downloading"
 		setMsgFields(&s.Message, &s.MessageRef, "msg_install_from_mirror",
-			"正在从 %s 下载 %s@%s", "mirror", mirror.Name, "pkg", dshPackageName, "version", version)
+			"正在从 %s 下载 %s@%s", "mirror", mirror.Slug, "pkg", dshPackageName, "version", version)
 	})
 	logInfo("[dsh] installing %s from %s", version, mirror.mirrorLogName())
 
@@ -896,7 +900,7 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 			logWarn("[dsh] %s install from %s verified failed: %v", version, mirror.mirrorLogName(), verr)
 			return uiErr("err_install_mirror_failed",
 				"从 %s 安装 dsh %s 失败（请检查网络，或在设置页切换 npm 镜像源后重试）: %s",
-				"mirror", mirror.Name, "version", version, "detail", verr.Error())
+				"mirror", mirror.Slug, "version", version, "detail", verr.Error())
 		}
 		m.updateInstall(func(s *DshInstallState) {
 			s.Phase = "done"
@@ -913,7 +917,7 @@ func (m *ServerManager) doInstall(ctx context.Context, version string) error {
 	os.RemoveAll(dir)
 	return uiErr("err_install_mirror_failed",
 		"从 %s 安装 dsh %s 失败（请检查网络，或在设置页切换 npm 镜像源后重试）: %s",
-		"mirror", mirror.Name, "version", version, "detail", err.Error())
+		"mirror", mirror.Slug, "version", version, "detail", err.Error())
 }
 
 // resetVersionDir 把版本目录恢复成「npm install 可以往里装」的干净骨架：

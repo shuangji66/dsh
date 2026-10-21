@@ -149,6 +149,21 @@
   `RefreshMarketAfterDshStart()` 补查一次（启动流水线收尾 / 概览页启动·重启 dsh /
   切换 dsh 版本），否则「—」会挂到下一次小时级检测。回归测试见
   `backend/market_unavailable_test.go`。
+- `profile.go` — **插件启停（官方 bundle 层）**：按
+  `@deepseek-ai/dsh-plugin-manager` 的 `setBundleEnabled` 语义直接改 profile 清单的
+  `dsh.profile.bundles`（停用=从列表移除、启用=追加到末尾，**依赖保留**；不写
+  `cordis.patch.yml`，也不碰插件市场的 `.dsh-market/state.json`）。清单读-改-写保留键顺序、
+  原子 rename、0600（与官方 `saveManifest` 一致）。
+  **启用前过官方的兼容性栅栏**：`engines.dsh` / `@deepseek-ai/dsh*` peer 范围不满足当前
+  选中版本时拒绝（`semver.go` 复刻 node-semver 的 `includePrerelease` 语义），
+  profile 的 `compatibility.json`（官方 `dsh plugin allow-version` 写的放行记录）里的
+  `name@version` + 当前版本可以放行；只停在 bundle 选择，**没有**官方的
+  `management-required`（管理 bundle 保护 —— 插件页只列 profile 依赖，列不到管理 bundle）。
+  **写清单前必须过忙守卫**（`AdminMux.pluginProfileWriteBusy`：控制台正在跑的
+  `dsh plugin …` 或仍被活进程持有的 profile 写锁）：启停是整份 package.json 的
+  read-modify-write，pnpm 安装/卸载也在写同一个文件，不挡就会静默丢掉一端的改动（409）。
+  `PluginInfo.Bundle` 表示「声明了 dsh.bundle.patch、可启停」，普通依赖不给开关。
+  回归测试见 `backend/profile_test.go` / `admin_plugin_name_test.go` / `semver_test.go`。
 - `release-notes` — **两条链路取日志的路子刻意不同，别混**：
   1. **dsh 版本列表**（`update.go` 的 `notesIndex` + `/api/dsh/versions/notes`）：取上游
      `deepseek-ai/deepseek-harness` 的 GitHub Release 正文（tag `dsh-v<版本>`，见
@@ -412,13 +427,13 @@
      失败，而错误信息还会误导成「镜像源都失败了」；卸载走 `runMarketPluginCmdOnce`
      （执行一次、不带 registry）。镜像源的持久化与校验在 `config.go` /
      `handleSaveSettings`（`npmRegistry` 字段），回归测试见 `backend/npm_registry_test.go`。
-   - **镜像源的中文名只进界面，日志与错误链一律用英文标识**（`npmMirror.Slug`：
-     aliyun / tencent / huawei / npmjs，取用入口 `mirrorLogName()`）——
-     日志必须全英文（规则 7），而中文显示名（阿里云/腾讯云/华为云）过去既进界面也进日志，
-     还会顺着「插件市场操作失败（…均失败）」这类错误被 `logError(..., err)` 原样打出去。
-     因此 `Name` 只用于进度文案与 `DshInstallState.Mirror` 这类界面字段，日志/错误里用 Slug；
-     回归测试见 `backend/mirror_log_language_test.go`（含一条「日志调用不得引用
-     `mirror.Name`」的源码守卫）。
+   - **镜像源一律用英文 slug 标识**（`npmMirror.Slug`：aliyun / tencent / huawei / npmjs，
+     取用入口 `mirrorLogName()`）：日志必须全英文（规则 7），而界面文案要能随语言切换 ——
+     后端下发的进度/错误文案与 `DshInstallState.Mirror` 里都只放 slug，前端 `useI18n` 的
+     `tr()` 把「参数值正好是镜像源 slug」换成 `settings_npm_registry_*` 的译文
+     （中文「阿里云」/ 英文「Aliyun」）。**别把 `mirror.Name`（中文）写进日志、错误链或
+     fixture 之外的界面字段**，它现在只用于后端内部与测试；回归测试见
+     `backend/mirror_log_language_test.go`（含一条「日志调用不得引用 `mirror.Name`」的源码守卫）。
    - **插件市场装的是「版本号最高的一版」，不是 `dist-tags.latest`**：`latest` 是手动标签，
      会滞后或指向另一条线。检测与安装都走 `newestVersion`（版本号排序取最高），安装命令是
      `add dshmarket@<精确版本号>`（**不要写回 `@latest`**）。**dsh 版本行的红点现在也是同一套
@@ -467,6 +482,8 @@
      命名：错误 `err_*`、进度/状态 `msg_*`，小写 snake_case；参数名用 `detail` / `version` /
      `min` / `max` 这类，中文原文里用 `%s`（按参数顺序填），前端译文的占位符用 `{参数名}`。
      参数是「k/v 成对展开」的实参列表，不要传 map。
+   - **参数值要能翻译时不要传已经本地化的文本**：镜像源传 slug（`aliyun`），前端 `tr()`
+     会换成 `settings_npm_registry_*`（见规则 12）。
    - **只有面向用户的文案才带 code**：诊断类错误（会进日志、或只是 npm/exec 的原始输出）
      保持英文原文；状态里的诊断文本（npm 尾行、平台返回的原始 msg）用 `setMsgFields(…, "", line)`
      原样直出、**不带引用**（翻译原始输出没有意义）。

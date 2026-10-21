@@ -27,7 +27,7 @@ func TestBytesToMB(t *testing.T) {
 		{mb, 1},
 		{mb + mb/2 - 1, 1}, // 1.499… MB → 1
 		{mb + mb/2, 2},     // 1.5 MB → 2
-		{2248146944, 2144}, // node v26 实测默认堆上限
+		{2248146944, 2144}, // node 实测默认堆上限
 		{4344760320, 4143}, // ≈4143.49 MB → 4143
 	}
 	for _, tc := range cases {
@@ -60,29 +60,25 @@ func TestDetectNodeHeapLimitMBMatchesNode(t *testing.T) {
 	}
 	want := bytesToMB(bytes)
 	for i := 0; i < 2; i++ {
-		if got := detectNodeHeapLimitMB("node24"); got != want {
-			t.Fatalf("第 %d 次 detectNodeHeapLimitMB(node24) = %d, want %d", i+1, got, want)
+		if got := detectNodeHeapLimitMB(); got != want {
+			t.Fatalf("第 %d 次 detectNodeHeapLimitMB() = %d, want %d", i+1, got, want)
 		}
-	}
-	// 非法/空版本号归一化为 node24，取到同一份缓存。
-	if got := detectNodeHeapLimitMB(""); got != want {
-		t.Fatalf("detectNodeHeapLimitMB(\"\") = %d, want %d", got, want)
 	}
 }
 
 // defaultDshMemLimit：已设置时原样保留；未设置（0）时用探测值兜底。
 func TestDefaultDshMemLimit(t *testing.T) {
-	if got := defaultDshMemLimit(4096, "node24"); got != 4096 {
+	if got := defaultDshMemLimit(4096); got != 4096 {
 		t.Fatalf("已设置的内存限制被改写: %d", got)
 	}
-	got := defaultDshMemLimit(0, "node24")
+	got := defaultDshMemLimit(0)
 	if _, err := exec.LookPath("node"); err != nil {
 		if got != 0 {
 			t.Fatalf("没有 node 时 defaultDshMemLimit(0) = %d, want 0", got)
 		}
 		return
 	}
-	if want := detectNodeHeapLimitMB("node24"); got != want || got <= 0 {
+	if want := detectNodeHeapLimitMB(); got != want || got <= 0 {
 		t.Fatalf("defaultDshMemLimit(0) = %d, want %d", got, want)
 	}
 }
@@ -96,7 +92,7 @@ func TestGetSettingsExposesNodeHeapLimitMB(t *testing.T) {
 	t.Cleanup(func() { initConfig(&prev) })
 	// 走真实的默认值路径：配置里没有 dshMemLimit，由 LoadConfig 按 node 堆上限补齐。
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"dshPort":13080,"nodeVersion":"node24"}`), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"dshPort":13080}`), 0o644); err != nil {
 		t.Fatalf("写测试配置失败: %v", err)
 	}
 	cfg := LoadConfig(&RuntimeEnv{ConfigFile: cfgPath})
@@ -123,7 +119,7 @@ func TestGetSettingsExposesNodeHeapLimitMB(t *testing.T) {
 		t.Fatalf("响应缺少 runtime.nodeHeapLimitMB: %s", rec.Body.String())
 	}
 	got, _ := raw.(float64)
-	want := detectNodeHeapLimitMB(cfg.NodeVersion)
+	want := detectNodeHeapLimitMB()
 	if int(got) != want || want <= 0 {
 		t.Fatalf("runtime.nodeHeapLimitMB = %v, want %d", raw, want)
 	}
@@ -133,56 +129,22 @@ func TestGetSettingsExposesNodeHeapLimitMB(t *testing.T) {
 	}
 }
 
-// 探测二进制必须与 node 版本对应：node26 用绝对路径（PATH 里的 node 可能是 node24，
-// 也可能是别的版本），node24 用 PATH 里的 node。
-func TestNodeHeapProbeBin(t *testing.T) {
-	if got := nodeHeapProbeBin("node24"); got != "node" {
-		t.Fatalf("nodeHeapProbeBin(node24) = %q, want %q", got, "node")
-	}
-	want26 := "node"
-	if node26Available() {
-		want26 = filepath.Join(node26BinDir, "node")
-	}
-	if got := nodeHeapProbeBin("node26"); got != want26 {
-		t.Fatalf("nodeHeapProbeBin(node26) = %q, want %q", got, want26)
-	}
-}
-
-// node26 可用时，必须探到 node26 自己的上限（而不是 PATH 里第一个 node 的）：
-// 机器上两个版本的默认上限可以不同（如 v24=2240 MB、v26=2144 MB）。
-func TestDetectNodeHeapLimitMBNode26(t *testing.T) {
-	if !node26Available() {
-		t.Skip("宿主机没有 node v26")
-	}
-	out, err := exec.Command(filepath.Join(node26BinDir, "node"), "-e", nodeHeapLimitProbe).Output()
-	if err != nil {
-		t.Fatalf("运行 node26 失败: %v", err)
-	}
-	bytes, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if err != nil {
-		t.Fatalf("node26 输出无法解析: %q", strings.TrimSpace(string(out)))
-	}
-	if got, want := detectNodeHeapLimitMB("node26"), bytesToMB(bytes); got != want {
-		t.Fatalf("detectNodeHeapLimitMB(node26) = %d, want %d", got, want)
-	}
-}
-
 // 旧配置缺 dshMemLimit 字段时，默认值取当前 node 的堆上限，而不是写死的 2048。
 func TestLoadConfigFillsMemLimitFromNode(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skipf("宿主机没有可用的 node: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"dshPort":13080,"nodeVersion":"node24"}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"dshPort":13080}`), 0o644); err != nil {
 		t.Fatalf("写测试配置失败: %v", err)
 	}
 	cfg := LoadConfig(&RuntimeEnv{ConfigFile: path})
-	if want := detectNodeHeapLimitMB("node24"); cfg.DshMemLimit != want {
+	if want := detectNodeHeapLimitMB(); cfg.DshMemLimit != want {
 		t.Fatalf("缺 dshMemLimit 时 LoadConfig 得到 %d, want %d", cfg.DshMemLimit, want)
 	}
 	// 已显式配置的值必须原样保留。
 	path2 := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path2, []byte(`{"dshMemLimit":1234,"nodeVersion":"node24"}`), 0o644); err != nil {
+	if err := os.WriteFile(path2, []byte(`{"dshMemLimit":1234}`), 0o644); err != nil {
 		t.Fatalf("写测试配置失败: %v", err)
 	}
 	if cfg := LoadConfig(&RuntimeEnv{ConfigFile: path2}); cfg.DshMemLimit != 1234 {

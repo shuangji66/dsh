@@ -234,11 +234,12 @@ dsh 进程还会拿到 **`DSH_AGENTS_HOME=$HOME/.agents`**（共享 agent 配置
 
 运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、
 `proxyAddr`、`npmRegistry`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、
-`dshMemAuto`、`nodeVersion`、`dshVersion`、`accessUrls`、`browserCompat`。其中 `dshVersion` 是
+`dshMemAuto`、`dshVersion`、`browserCompat`。其中 `dshVersion` 是
 **当前选中的 dsh 版本**（即 `${TRIM_PKGVAR}/server/` 下的目录名，空 = 未安装），由概览页的
 版本列表写入，设置页不暴露；`npmRegistry` 是设置页「npm 镜像源」的取值（`aliyun` /
 `tencent` / `huawei` / `npmjs`，默认 `aliyun`），dsh 服务与两个受管插件的安装/更新/版本检测
-都只用它。
+都只用它。控制台只使用平台通过环境变量（`PATH`）提供的 **node24**，
+不再检测或切换 node 版本（`nodeVersion` 配置项已移除）。
 
 代理卡片只有一个开关：
 
@@ -246,7 +247,7 @@ dsh 进程还会拿到 **`DSH_AGENTS_HOME=$HOME/.agents`**（共享 agent 配置
   下发 `http_proxy` / `https_proxy`（大小写与 `all_proxy` 一组，见 `dsh.go` 的 `buildEnv`），
   保存后需**重启 dsh** 才生效。控制台自身的版本检测、dsh 版本安装与插件安装都不走它。
 
-同一张代理卡片里还有「**npm 镜像源**」下拉（`npmRegistry`，默认阿里云）：dsh 服务与两个
+「node 环境」卡片里还有「**npm 镜像源**」下拉（`npmRegistry`，默认阿里云）：dsh 服务与两个
 受管插件（市场 / 增强插件）的安装、更新和版本检测都**只用所选源**，失败会报错并提示换源；
 它需要点「保存配置」才落盘生效（npm 安装不走代理）。
 
@@ -397,8 +398,8 @@ dsh **自己没有多账号概念**：账号凭据只有一条固定键（`deeps
 
 ### 概览页的「飞牛入口」
 
-概览页「快捷访问」的第一行固定显示**飞牛入口**——当前访问环境下经平台网关访问
-dsh 服务的地址，无需用户配置：控制台的当前访问地址（由请求的 `Origin` / `Referer`
+概览页 dsh 卡片右上角的**「进入」**按钮打开**飞牛入口**——当前访问环境下经平台网关
+访问 dsh 服务的地址，无需用户配置：控制台的当前访问地址（由请求的 `Origin` / `Referer`
 推断，缺失时退回 `Host` + `X-Forwarded-Proto`）**剥离控制台 baseurl**
 （`HARNESS_ADMIN_BASEURL`）得到飞牛 OS 的访问源，再拼上**控制台入口下的 dsh
 反代路径 `/gui/`**：
@@ -419,7 +420,9 @@ dsh 服务的地址，无需用户配置：控制台的当前访问地址（由�
 换算在 `backend/admin.go` 的 `fnosEntryURL` 完成，随 `GET /api/settings` 的
 `runtime.fnosEntryURL` 下发；后端拿不到访问地址时前端退回浏览器自身地址
 （`document.baseURI` 的 origin + `runtime.consoleDshURL`）自行换算。未设置控制台
-baseurl（非网关部署）时该行不显示，避免给出指向站点根的错地址。
+baseurl（非网关部署）时按钮不显示，避免给出指向站点根的错地址。桌面浏览器点击后
+新标签页打开；飞牛 App 内则用全屏 iframe 承载（网关鉴权按入口注入，新 WebView
+拿不到控制台入口的凭据）。
 
 ---
 
@@ -746,7 +749,7 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 | 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.2.0-rc.1` 之前的所有版本**（新版控制台锚定 0.2.0-rc.1 及更新版本；更早的 dsh 前端也不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**「有更新」的红点/「最新版本」取列表里版本号最高的一版**，标签只作展示、不参与判定（`refreshDshStatus`）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」与后台自动检测 / 手动「检查更新」会重拉（见下） |
 | 镜像源 | **设置页选中的那一个源**（默认阿里云）：阿里云 `registry.npmmirror.com` / 腾讯云 `mirrors.cloud.tencent.com/npm` / 华为云 `repo.huaweicloud.com/repository/npm` / 官方源 `registry.npmjs.org`；**只用所选源，不自动换源** |
 | 失败处理 | `npm install --fetch-timeout=5000 --fetch-retries=0`：任意一次 HTTP 请求 5 秒拿不到响应即失败；同一个源**不重试**，直接报错并提示去设置页切换镜像源 |
-| 安装命令 | `npm install --prefix <版本目录> @deepseek-ai/dsh@<版本> --save-exact --registry=<镜像源>`，用与 dsh 相同 node 版本自带的 npm；缓存在 `<数据目录>/npm-cache`（不写用户的 HOME） |
+| 安装命令 | `npm install --prefix <版本目录> @deepseek-ai/dsh@<版本> --save-exact --registry=<镜像源>`，用 `PATH` 中 node24 自带的 npm；缓存在 `<数据目录>/npm-cache`（不写用户的 HOME） |
 | 进度 | 逐行解析 `--loglevel=http` 的包获取行：阶段（下载 / 处理依赖包 / 校验）+「已获取 N 个包」+ 输出尾行。依赖总量 npm 不预先给出，因此**不显示假百分比**（不确定进度条） |
 | 取消 | 支持取消（**不支持暂停**）：终止整个 npm 进程组、**删除安装目录与 npm 下载缓存**，状态标记为「已取消」 |
 | 安装后 | 打上 fnOS 需要的**附件 fsync 补丁**（见下），再执行 `<版本>/node_modules/.bin/dsh -V` 校验版本号；校验不过则删掉该目录并报错（不自动换源） |

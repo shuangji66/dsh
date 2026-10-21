@@ -14,10 +14,8 @@ import { icons } from '@/utils/icons'
 //    · 「代理dsh」开关 —— 重启 dsh 生效（代理是 dsh 启动时下发的环境变量）
 //    · 「代理harness更新」开关 —— 立即生效（只影响 harness 自身的更新探测/下载）
 //    · 「浏览器兼容模式」开关 —— 刷新页面生效
-//    · node 版本下拉 —— 重启 dsh 生效
 //    · 「自动设置」（堆内存）开关 —— 重启 dsh 生效
 //    · 「启用登录鉴权」开关 —— 立即生效
-//    · 快捷访问地址的添加/删除 —— 立即生效
 //    · 控制台设置（主题/语言）—— 只写浏览器 localStorage，连后端都不过
 //    这些项各自弹的提示见下面各 on* 处理函数。
 //
@@ -49,15 +47,6 @@ const npmRegistryOptions = [
   { value: 'huawei', label: 'settings_npm_registry_huawei' },
   { value: 'npmjs', label: 'settings_npm_registry_official' }
 ]
-
-// node 版本切换选项：来自后端 runtime.nodeVersions。
-// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
-const nodeVersions = computed(() => runtime.value?.nodeVersions ?? [])
-
-// node26 是否可用（未安装时提示可安装 v26 进行切换，但可能存在未知问题）
-const node26Usable = computed(() =>
-  nodeVersions.value.some((v) => v.id === 'node26' && v.available)
-)
 
 // 访问密码明文/密文切换
 const showPassword = ref(false)
@@ -158,30 +147,6 @@ watch(
 
 onMounted(() => store.load())
 
-// --- dsh 访问地址（DynamicList 风格） ---
-const newAccessUrl = ref('')
-
-// 确保 config.accessUrls 为数组，并返回该数组（便于调用处获得非 undefined 的窄化类型）
-function ensureAccessUrls(): string[] {
-  if (!Array.isArray(config.value.accessUrls)) config.value.accessUrls = []
-  return config.value.accessUrls
-}
-
-// 添加一个访问地址并自动保存（每添加一个就刷新概览页数据）
-function addAccessUrl() {
-  const url = newAccessUrl.value.trim()
-  if (!url) return
-  ensureAccessUrls().push(url)
-  newAccessUrl.value = ''
-  store.save()
-}
-
-// 移除一个访问地址
-function removeAccessUrl(idx: number) {
-  ensureAccessUrls().splice(idx, 1)
-  store.save()
-}
-
 // --- 开关即时保存 ---
 // 以下即时保存都要看 store.save() 的返回值：返回 false 表示这次保存被拒绝
 // （如堆内存上限过低）或后端报错，此时不能再弹「已保存」的成功提示。
@@ -224,12 +189,6 @@ async function onBrowserCompatToggle() {
   toast.show(t('settings_browser_compat_saved'), 'success', 5000)
 }
 
-// node 版本切换：即时保存，切换后需重启 dsh 服务生效
-async function onNodeVersionChange() {
-  if (!(await store.save(false))) return
-  toast.show(t('saved_node_version_restart'), 'info', 5000)
-}
-
 // 鉴权登录开关：即时保存。开启前先做前端密码强度校验（i18n 提示，失败回滚开关）；
 // 关闭鉴权时不校验密码，允许直接关闭。
 async function onAuthToggle() {
@@ -256,9 +215,10 @@ async function onAuthToggle() {
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
-    <!-- 六个卡片自适应分栏：端口与兼容 / node 版本与内存 / 登录鉴权 / 代理 / 快捷访问 / 控制台设置。
-         列数由容器宽度自动决定（见 style.css 的 .g-card-grid），窄屏自动降为单列。 -->
-    <div class="g-card-grid g-fade-in">
+    <!-- 五个卡片：端口与兼容 / node 环境 / 登录鉴权 / 代理 / 控制台设置。
+         桌面固定两列（2×2：控制台设置卡片在桌面隐藏），窄屏沿用 .g-card-grid
+         的自适应列数（手机为单列）。 -->
+    <div class="g-card-grid g-card-grid-2 g-fade-in">
       <!-- ① 端口与兼容：dsh 端口 / 反代监听端口 / 浏览器兼容模式 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
@@ -313,25 +273,13 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ② node 版本与内存：node 版本切换 + node 堆内存上限（含自动设置） -->
+      <!-- ② node 环境：node 堆内存上限（含自动设置）+ npm 镜像源 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_node') }}
         </h2>
 
         <div class="flex flex-col gap-4">
-          <!-- node 版本切换 -->
-          <div>
-            <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_node_version') }}</label>
-            <select v-model="config.nodeVersion" class="g-input" @change="onNodeVersionChange">
-              <option v-for="v in nodeVersions" :key="v.id" :value="v.id">{{ v.label }}</option>
-            </select>
-            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
-              <template v-if="node26Usable">{{ t('settings_node_version_hint') }}</template>
-              <template v-else>{{ t('settings_node_version_no26_hint') }}</template>
-            </p>
-          </div>
-
           <!-- node 堆内存上限（MB，单位已在标签里说明，输入框内不再重复） -->
           <div>
             <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">
@@ -369,6 +317,16 @@ async function onAuthToggle() {
                 <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
               </label>
             </div>
+          </div>
+
+          <!-- npm 镜像源：dsh 服务与两个受管插件（市场 / 增强插件）的安装、更新与版本检测
+               都使用这里选中的源（只用所选源，失败会提示换源）。改完需点「保存配置」才落盘生效。 -->
+          <div>
+            <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_npm_registry') }}</label>
+            <select v-model="config.npmRegistry" class="g-input" @change="onPendingChange">
+              <option v-for="opt in npmRegistryOptions" :key="opt.value" :value="opt.value">{{ t(opt.label) }}</option>
+            </select>
+            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_npm_registry_hint') }}</p>
           </div>
         </div>
       </section>
@@ -437,7 +395,7 @@ async function onAuthToggle() {
       </section>
 
       <!-- ④ 代理：「代理dsh」开关 + 代理地址（开启时显示）。
-           位置在「登录鉴权」之后、「快捷访问」之前（用户指定的卡片顺序）。 -->
+           位置在「登录鉴权」之后（用户指定的卡片顺序）。 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_proxy') }}
@@ -460,53 +418,9 @@ async function onAuthToggle() {
           <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" @change="onPendingChange" />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>
         </div>
-
-        <!-- npm 镜像源：dsh 服务与两个受管插件（市场 / 增强插件）的安装、更新与版本检测
-             都使用这里选中的源（只用所选源，失败会提示换源）。与上面的代理开关无关：
-             npm 安装始终直连镜像源、不走代理。改完需点「保存配置」才落盘生效。 -->
-        <div class="mt-4 pt-4 border-t border-line dark:border-[#2A2A32]">
-          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_npm_registry') }}</label>
-          <select v-model="config.npmRegistry" class="g-input" @change="onPendingChange">
-            <option v-for="opt in npmRegistryOptions" :key="opt.value" :value="opt.value">{{ t(opt.label) }}</option>
-          </select>
-          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_npm_registry_hint') }}</p>
-        </div>
       </section>
 
-      <!-- ⑤ 快捷访问：概览页快捷访问地址（DynamicList 风格） -->
-      <section class="g-card g-card-hover p-5 flex flex-col">
-        <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
-          {{ t('access_urls_hint') }}
-        </h2>
-
-        <div class="flex gap-2 mb-3">
-          <input
-            v-model="newAccessUrl"
-            :placeholder="t('access_urls_placeholder')"
-            autocomplete="off"
-            class="g-input flex-1"
-            @keydown.enter="addAccessUrl"
-          />
-          <!-- 添加按钮与标题栏按钮同一风格：不填充底色 + 细边框（高度与输入框对齐） -->
-          <button class="g-btn-secondary !h-10 shrink-0" @click="addAccessUrl">{{ t('access_urls_add') }}</button>
-        </div>
-        <div v-if="config.accessUrls && config.accessUrls.length" class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32]">
-          <div v-for="(url, i) in config.accessUrls" :key="i" class="flex items-center justify-between gap-2 px-3 py-2">
-            <span class="g-access-url text-ink dark:text-[#EDEDF0] truncate">{{ url }}</span>
-            <button
-              type="button"
-              class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger dark:hover:text-[#EF4444] transition-colors"
-              :title="t('access_urls_remove')"
-              @click="removeAccessUrl(i)"
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-          </div>
-        </div>
-        <p v-else class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('access_urls_empty') }}</p>
-      </section>
-
-      <!-- ⑥ 控制台设置：主题 / 语言（仅存浏览器 localStorage）。
+      <!-- ⑤ 控制台设置：主题 / 语言（仅存浏览器 localStorage）。
            只在移动端（<md，左侧边栏被隐藏时）显示：桌面端的主题/语言入口在侧边栏底部，
            这里再摆一份是重复的。断点与侧边栏的 `hidden md:flex` 严格互补，别改用
            useMobileLayout —— 那是「触屏/窄视口」判据，iPad 横屏会同时出现侧边栏和本卡片。 -->

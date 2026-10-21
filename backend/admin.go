@@ -420,11 +420,6 @@ func (m *AdminMux) fnosEntryURL(r *http.Request) string {
 
 // --- Settings API ---
 func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	// 每次拉取设置前自愈：若配置为 node26 但 node v26 已被卸载/不存在，
-	// 主动回退到 node24 并改写持久化配置，保证前端拿到的总是有效状态。
-	if ensureValidNodeVersion(m.renv) {
-		logWarn("[node] node26 no longer present, node version reverted to node24 (persisted)")
-	}
 	cfg := GetConfig()
 	locked := m.dsh.Running()
 	writeJSON(w, map[string]interface{}{
@@ -444,13 +439,11 @@ func (m *AdminMux) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"consoleDshURL": strings.TrimRight(m.renv.AdminBaseURL, "/") + "/gui/",
 			// 当前访问环境下的「飞牛入口」地址；推不出（拿不到访问地址）时为空。
 			"fnosEntryURL": m.fnosEntryURL(r),
-			// node 版本切换选项：列出可用版本及其标识，前端据此显示下拉选项。
-			// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
-			"nodeVersions": m.nodeVersionsInfo(),
-			// 当前 node 版本自身的堆上限（MB，由 v8.getHeapStatistics().heap_size_limit
-			// 折算）。它就是「自动设置」时 dsh 实际拿到的上限，前端在开关打开时用它
-			// 展示，不再展示持久化的手动值。探测不到时为 0，前端显示空。
-			"nodeHeapLimitMB": detectNodeHeapLimitMB(cfg.NodeVersion),
+			// 当前 node（平台经 PATH 提供的 node24）自身的堆上限（MB，由
+			// v8.getHeapStatistics().heap_size_limit 折算）。它就是「自动设置」时
+			// dsh 实际拿到的上限，前端在开关打开时用它展示，不再展示持久化的手动值。
+			// 探测不到时为 0，前端显示空。
+			"nodeHeapLimitMB": detectNodeHeapLimitMB(),
 			// 主目录（即 dsh 的 HOME）的语义路径与实际系统路径。主目录固定为本应用的
 			// shares 目录，**不可切换**（见 DshManager.effectiveHome 的说明）。
 			"defaultHomeSemantic": m.defaultHomeSemantic(),
@@ -495,20 +488,9 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_mem_too_big", "dsh 内存限制不能超过 65536 MB（64GB）")
 		return
 	}
-	// 校验 node 版本：只允许 node24/node26。
-	if !validNodeVersions()[req.Config.NodeVersion] {
-		writeErrU(w, http.StatusBadRequest, "err_node_version_invalid", "无效的 node 版本: %s", "version", req.Config.NodeVersion)
-		return
-	}
-	// node26 已不再可用（如被卸载）时，不拒绝保存，而是静默回退到 node24，
-	// 与"卸载后自动回退"语义一致，并随本次保存一并把 node24 持久化。
-	if req.Config.NodeVersion == "node26" && !node26Available() {
-		logWarn("[node] node26 unavailable while saving, falling back to node24")
-		req.Config.NodeVersion = "node24"
-	}
-	// 内存限制的兜底放在 node 版本确定之后：默认值取决于具体用哪个 node。
+	// 内存限制的兜底：默认值取决于 PATH 中 node 自身的堆上限。
 	if req.Config.DshMemLimit <= 0 {
-		req.Config.DshMemLimit = defaultDshMemLimit(0, req.Config.NodeVersion)
+		req.Config.DshMemLimit = defaultDshMemLimit(0)
 	}
 	if req.Config.DshMemLimit <= 0 {
 		writeErrU(w, http.StatusBadRequest, "err_mem_zero", "dsh 内存限制必须大于 0 MB")
@@ -930,22 +912,6 @@ func (m *AdminMux) defaultHomeSemantic() string {
 		name = "Harness"
 	}
 	return "/var/apps/" + name + "/shares/" + name
-}
-
-// nodeVersionsInfo 返回 node 版本切换选项列表，供前端渲染下拉菜单。
-// node24 始终可用；node26 仅当宿主机存在对应 node 二进制时可用。
-func (m *AdminMux) nodeVersionsInfo() []map[string]interface{} {
-	info := []map[string]interface{}{
-		{"id": "node24", "label": "Node.js v24", "available": true},
-	}
-	if node26Available() {
-		info = append(info, map[string]interface{}{
-			"id":        "node26",
-			"label":     "Node.js v26",
-			"available": true,
-		})
-	}
-	return info
 }
 
 // handleDshBackup 启动一次 dsh 数据备份（异步）：把当前 HOME 的 ~/.dsh 整体压缩打包为

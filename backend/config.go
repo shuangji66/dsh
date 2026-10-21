@@ -43,10 +43,6 @@ type AppConfig struct {
 	// DshMemAuto 为 true（默认）时由系统 node 自动分配内存，不传 NODE_OPTIONS。
 	DshMemLimit int  `json:"dshMemLimit"`
 	DshMemAuto  bool `json:"dshMemAuto"`
-	// NodeVersion 指定 dsh 启动时使用的 node 版本（"node24" / "node26"）。
-	// 默认 "node24"（系统默认 node）。当宿主机存在 /var/apps/nodejs_v26/target/bin/node
-	// 时，用户可切换到 "node26"，dsh 启动时会把对应版本的 bin 目录前置到 PATH。
-	NodeVersion string `json:"nodeVersion"`
 	// DshVersion 是**当前选中的 dsh 服务版本**，即 `${TRIM_PKGVAR}/server/<版本>`
 	// 的那个目录名（如 "0.2.0-rc.2"）。空串表示未选中任何版本：控制台版本行显示
 	// 「未安装」，dsh 也无法启动（见 server.go）。
@@ -59,8 +55,6 @@ type AppConfig struct {
 	// 曾经存在的 homeDir 配置项与资源页的「设置为主目录」功能已整体移除 —— 目标目录的
 	// 平台权限模型（飞牛共享目录的 ACL / `system.trim_acl` 扩展属性）会让 dsh 的 profile
 	// 文件对应用用户不可读，插件安装直接崩，风险不可控。
-	// AccessURLs 是用户配置的 dsh 访问地址列表，显示在概览页供快速访问。
-	AccessURLs []string `json:"accessUrls,omitempty"`
 	// BrowserCompat 为浏览器兼容模式开关，默认关闭。
 	//
 	// 现在只管一处引擎兼容修复（只影响触屏 iOS / WebKit，桌面与 Chromium 开启无副作用）：
@@ -235,8 +229,7 @@ func defaultConfig() AppConfig {
 		AuthTTLHours: envOrInt("auth_ttl_hours", 4),
 		// DshMemLimit 不在此写死：留 0 表示「未设置」，由 LoadConfig 按当前 node
 		// 的实际堆上限补齐（见 detectNodeHeapLimitMB）。
-		DshMemAuto:  true,
-		NodeVersion: "node24",
+		DshMemAuto: true,
 	}
 }
 
@@ -294,42 +287,6 @@ func envBool(s string) bool {
 	return true
 }
 
-// --- node 版本切换 ---
-
-// nodeVersionBinDir 为每个可切换的 node 版本对应的 bin 目录路径。
-// node24 使用系统默认 node（即启动时的 PATH），不需要额外 bin 目录。
-const node26BinDir = "/var/apps/nodejs_v26/target/bin"
-
-// validNodeVersions 返回当前合法的 node 版本标识集合（用于校验配置值）。
-func validNodeVersions() map[string]bool {
-	return map[string]bool{"node24": true, "node26": true}
-}
-
-// normalizeNodeVersion 把非法/空值归一化为默认的 "node24"。
-func normalizeNodeVersion(v string) string {
-	if validNodeVersions()[v] {
-		return v
-	}
-	return "node24"
-}
-
-// node26Available 检测宿主机是否存在 node v26 的 node 二进制。
-// 仅当 /var/apps/nodejs_v26/target/bin/node 存在时，node26 才可作为切换选项。
-func node26Available() bool {
-	fi, err := os.Stat(node26BinDir + "/node")
-	return err == nil && fi.Mode().IsRegular()
-}
-
-// nodeVersionBinPrefix 返回指定 node 版本要前置到 PATH 的 bin 目录。
-// node24 返回空串（使用系统默认 node）；node26 返回 node26 的 bin 目录
-// （仅当该版本可用时才返回）。
-func nodeVersionBinPrefix(v string) string {
-	if normalizeNodeVersion(v) == "node26" && node26Available() {
-		return node26BinDir
-	}
-	return ""
-}
-
 // --- node 堆上限探测（栈内存默认值 / 「自动设置」展示值） ---
 
 // nodeHeapLimitProbe 打印 node 在没有任何 --max-old-space-size 覆盖时的堆上限（字节）。
@@ -339,59 +296,51 @@ func nodeVersionBinPrefix(v string) string {
 const nodeHeapLimitProbe = "console.log(require('v8').getHeapStatistics().heap_size_limit)"
 
 var (
-	nodeHeapMu    sync.Mutex
-	nodeHeapCache = map[string]int{} // key: node 版本标识（node24/node26）
+	nodeHeapMu       sync.Mutex
+	nodeHeapCachedMB int
+	nodeHeapCachedOK bool
 )
 
-// detectNodeHeapLimitMB 探测指定 node 版本的默认堆上限并折算为 MB（四舍五入）。
-// 结果按版本缓存：同一台机器上 node 的默认上限只取决于 node 版本与可用内存，不必
-// 每次拉设置都起一个 node 进程。探测失败（node 不存在 / 输出无法解析 / 超时）返回 0，
-// 由调用方决定回退；失败结果不缓存，留待下次重试。
-func detectNodeHeapLimitMB(nodeVersion string) int {
-	key := normalizeNodeVersion(nodeVersion)
+// detectNodeHeapLimitMB 探测 PATH 中 node 的默认堆上限并折算为 MB（四舍五入）。
+// 控制台只使用平台通过环境变量（PATH）提供的 node24，不再有版本切换，因此结果只需
+// 缓存一份：同一台机器上 node 的默认上限只取决于该 node 与可用内存，不必每次拉设置
+// 都起一个 node 进程。探测失败（node 不存在 / 输出无法解析 / 超时）返回 0，由调用方
+// 决定回退；失败结果不缓存，留待下次重试。
+func detectNodeHeapLimitMB() int {
 	nodeHeapMu.Lock()
-	cached, ok := nodeHeapCache[key]
-	nodeHeapMu.Unlock()
-	if ok {
-		return cached
+	if nodeHeapCachedOK {
+		mb := nodeHeapCachedMB
+		nodeHeapMu.Unlock()
+		return mb
 	}
-	mb := probeNodeHeapLimitMB(key)
+	nodeHeapMu.Unlock()
+	mb := probeNodeHeapLimitMB()
 	if mb > 0 {
 		nodeHeapMu.Lock()
-		nodeHeapCache[key] = mb
+		nodeHeapCachedMB = mb
+		nodeHeapCachedOK = true
 		nodeHeapMu.Unlock()
 	}
 	return mb
 }
 
 // probeNodeHeapLimitMB 起一个 node 进程做探测，5 秒超时。
-func probeNodeHeapLimitMB(nodeVersion string) int {
+func probeNodeHeapLimitMB() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, nodeHeapProbeBin(nodeVersion), "-e", nodeHeapLimitProbe)
+	cmd := exec.CommandContext(ctx, "node", "-e", nodeHeapLimitProbe)
 	out, err := cmd.Output()
 	if err != nil {
-		logWarn("[node] failed to probe %s default heap limit: %v", nodeVersion, err)
+		logWarn("[node] failed to probe default heap limit: %v", err)
 		return 0
 	}
 	s := strings.TrimSpace(string(out))
 	bytes, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || bytes <= 0 {
-		logWarn("[node] failed to parse %s default heap limit: %q", nodeVersion, s)
+		logWarn("[node] failed to parse default heap limit: %q", s)
 		return 0
 	}
 	return bytesToMB(bytes)
-}
-
-// nodeHeapProbeBin 返回探测某个 node 版本堆上限时要执行的二进制。
-// node26 必须用绝对路径指向它自己的 node：exec.Command 的 LookPath 走的是本进程的
-// PATH，光给子进程前置 PATH 是选不到 node26 的（那样探到的还是 node24 的上限）。
-// node24 用 PATH 里的 node，与 dsh 的启动环境一致。
-func nodeHeapProbeBin(nodeVersion string) string {
-	if prefix := nodeVersionBinPrefix(nodeVersion); prefix != "" {
-		return filepath.Join(prefix, "node")
-	}
-	return "node"
 }
 
 // bytesToMB 把字节数折算为 MB（四舍五入）。node 的 heap_size_limit 通常不是整数 MB
@@ -402,14 +351,14 @@ func bytesToMB(b int64) int {
 	return int((b + mb/2) / mb)
 }
 
-// defaultDshMemLimit 在内存限制未设置（cur <= 0）时返回按 nodeVersion 探测到的 node
-// 堆上限（MB）；已设置则原样返回。探测不到（宿主机没有 node）时同样原样返回 0，
-// 语义是「交给 node 自己决定」，buildEnv 会因此不下发 NODE_OPTIONS。
-func defaultDshMemLimit(cur int, nodeVersion string) int {
+// defaultDshMemLimit 在内存限制未设置（cur <= 0）时返回探测到的 node 堆上限（MB）；
+// 已设置则原样返回。探测不到（宿主机没有 node）时同样原样返回 0，语义是「交给 node
+// 自己决定」，buildEnv 会因此不下发 NODE_OPTIONS。
+func defaultDshMemLimit(cur int) int {
 	if cur > 0 {
 		return cur
 	}
-	if mb := detectNodeHeapLimitMB(nodeVersion); mb > 0 {
+	if mb := detectNodeHeapLimitMB(); mb > 0 {
 		return mb
 	}
 	return cur
@@ -422,26 +371,6 @@ func defaultDshMemLimit(cur int, nodeVersion string) int {
 // 使用这个持久化值，它可能是历史遗留的小数值。
 const minDshMemLimitMB = 500
 
-// ensureValidNodeVersion 检测当前持久化配置里的 node 版本是否仍可用。
-// 若配置为 node26，但宿主机上 node v26 已被卸载/不存在，则主动回退到 node24
-// 并把持久化配置改写为 node24（自动落盘）。返回 true 表示发生了回退。
-// 这样用户此前选了 node26 后即便 node26 被卸载，下次启动或拉取设置时也能自愈。
-func ensureValidNodeVersion(renv *RuntimeEnv) bool {
-	cur := GetConfig()
-	if cur.NodeVersion != "node26" {
-		return false
-	}
-	if node26Available() {
-		return false
-	}
-	next := cur
-	next.NodeVersion = "node24"
-	if err := SaveConfig(renv, &next, false); err != nil {
-		return false
-	}
-	return true
-}
-
 // LoadConfig reads the JSON config file; falls back to defaults if missing.
 func LoadConfig(renv *RuntimeEnv) AppConfig {
 	def := defaultConfig()
@@ -449,7 +378,7 @@ func LoadConfig(renv *RuntimeEnv) AppConfig {
 		return *c
 	}
 	// 没有配置文件（首次启动）：内存限制同样按当前 node 的堆上限补齐。
-	def.DshMemLimit = defaultDshMemLimit(def.DshMemLimit, def.NodeVersion)
+	def.DshMemLimit = defaultDshMemLimit(def.DshMemLimit)
 	return def
 }
 
@@ -471,13 +400,9 @@ func loadJSONFile(path string, def *AppConfig) *AppConfig {
 	if v.AuthTTLHours <= 0 {
 		v.AuthTTLHours = 4
 	}
-	// 旧配置文件可能没有 nodeVersion 字段，回退到默认 node24。
-	if v.NodeVersion == "" {
-		v.NodeVersion = "node24"
-	}
-	// 内存限制缺失/为 0（旧配置没有该字段）时，用当前 node 版本自身的堆上限兜底，
-	// 不再写死 2048 —— 不同 node 版本与不同机器上的默认上限并不相同。
-	v.DshMemLimit = defaultDshMemLimit(v.DshMemLimit, v.NodeVersion)
+	// 内存限制缺失/为 0（旧配置没有该字段）时，用 PATH 中 node 自身的堆上限兜底，
+	// 不再写死 2048 —— 不同机器上的默认上限并不相同。
+	v.DshMemLimit = defaultDshMemLimit(v.DshMemLimit)
 	// 旧配置文件（反代端口还来自 PROXY_PORT 环境变量）没有 proxyPort 字段，
 	// 回退到默认 3079 并随下次保存落盘。
 	v.ProxyPort = normalizeProxyPort(v.ProxyPort)
@@ -525,7 +450,7 @@ func GetConfig() AppConfig {
 // 注意：反代端口（ProxyPort）由本配置保存，但它不是 dsh 自己绑定的端口 ——
 // 端口值写完内存后需要调用方重新绑定监听（见 admin.go 的 rebindProxyPort）。
 //
-// 并发正确性（三个调用点：保存设置 / 切换主目录 / node 版本回填，彼此可能重叠）：
+// 并发正确性（两个调用点：保存设置 / 切换 dsh 版本，彼此可能重叠）：
 //   - 序列化必须在 cfgLock 内、针对**本次的 next** 完成，不能解锁后再读全局 cfg ——
 //     否则 A 的请求可能把 B 的配置写盘（自己的改动静默丢失）；
 //   - 临时文件必须唯一（os.CreateTemp），不能共用一个 <config>.tmp —— 否则两个保存

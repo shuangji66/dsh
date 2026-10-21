@@ -127,12 +127,12 @@ onMounted(() => {
   <div class="min-h-screen bg-bg dark:bg-[#0B0B0F] text-ink dark:text-[#EDEDF0] transition-colors">
     <Toast />
     <!-- ===== 桌面端：左侧边栏 (md 及以上) =====
-         浮动圆角面板（与页面留出边距），宽度在 w-16 / w-48 之间过渡折叠。
+         浮动圆角面板（与页面留出边距），宽度在 w-16 / w-60 之间过渡折叠。
          折叠动效统一走「图标不动、文字用 max-w + opacity 收起」：
          直接 v-if 掉文字会让宽度骤变、文字闪现，这里改用可过渡的最大宽度。 -->
     <aside
       class="hidden md:flex fixed inset-y-0 left-0 my-3 ml-3 bg-surface dark:bg-[#111115] border border-line dark:border-[#2A2A32] rounded-2xl shadow-card flex-col z-10 overflow-hidden transition-all duration-300"
-      :class="collapsed ? 'w-16' : 'w-48'">
+      :class="collapsed ? 'w-16' : 'w-60'">
 
       <!-- 顶部：Logo + 标题（整行可点击折叠/展开），右侧箭头仅在展开时出现 -->
       <div class="flex items-center gap-1 px-2 h-14 shrink-0 border-b border-line dark:border-[#2A2A32]">
@@ -182,7 +182,8 @@ onMounted(() => {
         </button>
       </nav>
 
-      <!-- 底部：主题 / 语言（展开时左右并排，折叠时上下堆叠；文字同样用 max-w 过渡收起） -->
+      <!-- 底部：主题 / 语言（展开时左右并排，折叠时上下堆叠；文字同样用 max-w 过渡收起）。
+           按钮上直接显示当前选择：浅色 / 深色 / 跟随系统，中文 / English（title 同值）。 -->
       <div class="border-t border-line dark:border-[#2A2A32] p-2 shrink-0">
         <div class="flex w-full transition-all duration-300"
           :class="collapsed ? 'flex-col items-center gap-1.5' : 'flex-row gap-2'">
@@ -195,7 +196,7 @@ onMounted(() => {
             <span
               class="text-xs font-medium whitespace-nowrap overflow-hidden transition-all duration-300 ease-in-out"
               :class="collapsed ? 'opacity-0 max-w-0 ml-0' : 'opacity-100 max-w-[5rem] ml-2'"
-            >{{ t('theme_label') }}</span>
+            >{{ themeTitle }}</span>
           </button>
           <button
             class="flex items-center justify-center rounded-xl bg-black/[0.03] dark:bg-white/[0.06] text-ink-soft dark:text-[#A6A6AD] hover:text-ink dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 transition-all duration-300 active:scale-95 group overflow-hidden"
@@ -206,7 +207,7 @@ onMounted(() => {
             <span
               class="text-xs font-medium whitespace-nowrap overflow-hidden transition-all duration-300 ease-in-out"
               :class="collapsed ? 'opacity-0 max-w-0 ml-0' : 'opacity-100 max-w-[5rem] ml-2'"
-            >{{ t('language_label') }}</span>
+            >{{ languageTitle }}</span>
           </button>
         </div>
       </div>
@@ -242,12 +243,12 @@ onMounted(() => {
            · [data-scroll-lock] 是给 useBodyScrollLock 的锚点：弹窗打开时要连它一起冻住
              （锁文档对元素级滚动容器无效）；桌面端 main 是 overflow: visible，会被跳过；
            · 桌面端（md 起）恢复文档滚动：h-auto + overflow-visible。
-         左侧留白 = 侧边栏左边距(0.75rem) + 侧边栏宽度 + 间隙(0.75rem)：展开 13.5rem、
-         折叠 5.5rem，与 aside 的 w-48 / w-16 严格对应，两侧必须同步改。 -->
+         左侧留白 = 侧边栏左边距(0.75rem) + 侧边栏宽度 + 间隙(0.75rem)：展开 16.5rem、
+         折叠 5.5rem，与 aside 的 w-60 / w-16 严格对应，两侧必须同步改。 -->
     <main
       data-scroll-lock
       class="pl-0 h-[calc(100dvh_-_var(--bottom-nav-h))] overflow-y-auto pb-[var(--kb-inset,0px)] md:h-auto md:overflow-visible md:pb-0 transition-all duration-300"
-      :class="collapsed ? 'md:pl-[5.5rem]' : 'md:pl-[13.5rem]'"
+      :class="collapsed ? 'md:pl-[5.5rem]' : 'md:pl-[16.5rem]'"
     >
       <KeepAlive>
         <RouterView />

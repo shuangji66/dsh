@@ -12,10 +12,10 @@ import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
 import { repoSlugs, repoURL } from '@/constants/repos'
 import UpdateSection from '@/components/UpdateSection.vue'
-import AccessCard from '@/components/AccessCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AccountCard from '@/components/account/AccountCard.vue'
 import { useWideLayout } from '@/composables/useMobileLayout'
+import { isFnosApp } from '@/utils/fnosApp'
 import { icons } from '@/utils/icons'
 
 defineOptions({ name: 'OverviewView' })
@@ -25,7 +25,7 @@ const { status, loading, runtime } = storeToRefs(store)
 const toast = useToastStore()
 const { t, locale } = useI18n()
 
-// 快捷访问第一行固定的「飞牛入口」：当前访问环境下经飞牛网关访问 dsh 服务的地址。
+// dsh 卡片右上角「进入」的目标：当前访问环境下经飞牛网关访问 dsh 服务的地址。
 // 优先后端按请求头换算的结果（控制台访问源 + 控制台入口下的 /gui/ 反代）；后端推不出
 // 时退回浏览器自身地址 —— document.baseURI 就是控制台当前地址，origin 拼上
 // consoleDshURL（/app/Harness/gui/）即可。
@@ -42,6 +42,60 @@ const fnosEntry = computed(() => {
     return ''
   }
 })
+
+// 「进入」：桌面浏览器新标签页打开；飞牛 App 内用全屏 iframe 承载 dsh。
+//
+// 为什么 App 内不用 window.open / location.assign：App 的网关鉴权是**按入口
+// （gatewayPrefix）注入**的，不是浏览器那种 host 级 Cookie。控制台入口
+// （/app/Harness）的凭据不会自动带到 dsh 入口（/app/Harness/dsh）：
+//   - window.open 新建的 WebView 首个导航没有 dsh 入口的凭据；
+//   - 同窗口 location.assign 也一样（实测控制台页面确实被导航走了，dsh 仍收到
+//     trim_http_cgi 的 200 + 13 字节 "invalid token"）。
+// 但 iframe 是**控制台页面自己的子资源请求**，走的是控制台这个 WebView 的请求栈；
+// 而且入口地址是控制台 baseurl 之下的 /gui/（由控制台的 app.sock 反代到 dsh，
+// 见 backend/admin.go 的 dshUI），不跨到独立的 dsh 入口。如果仍然被网关拒绝
+// （iframe 里出现 13 字节错误页），只显示一个全屏的重试面板。
+const entryFrameVisible = ref(false)
+const entryFrameUrl = ref('')
+const entryFrameError = ref(false)
+const entryFrameKey = ref(0)
+
+function normalizeEntryURL(url: string): string {
+  const u = url.trim()
+  if (!u) return ''
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u) ? u : 'http://' + u
+}
+
+function openDshEntry() {
+  const final = normalizeEntryURL(fnosEntry.value)
+  if (!final) return
+  if (!isFnosApp()) {
+    window.open(final, '_blank', 'noopener')
+    return
+  }
+  entryFrameUrl.value = final
+  entryFrameError.value = false
+  entryFrameKey.value++
+  entryFrameVisible.value = true
+}
+
+function retryEntryFrame() {
+  entryFrameError.value = false
+  entryFrameKey.value++
+}
+
+function onEntryFrameLoad(ev: Event) {
+  const el = ev.target as HTMLIFrameElement
+  let text = ''
+  try {
+    text = (el.contentDocument?.body?.innerText || '').trim()
+  } catch {
+    return // 理论上同源；读不到就不动
+  }
+  if (text === 'invalid token') {
+    entryFrameError.value = true
+  }
+}
 
 const visitors = ref<Visitor[]>([])
 const visitorsLoading = ref(false)
@@ -102,8 +156,10 @@ function openGithubUser(user: string) {
 const lifecycleAction = ref<'stop' | 'restart' | null>(null)
 const lifecycleDialogVisible = ref(false)
 
-// 任一弹窗（停止/重启确认、"关于"）打开期间锁定页面滚动
-useBodyScrollLock(() => lifecycleDialogVisible.value || aboutVisible.value)
+// 任一弹窗（停止/重启确认、"关于"）或 App 内的 dsh 全屏容器打开期间锁定页面滚动
+useBodyScrollLock(
+  () => lifecycleDialogVisible.value || aboutVisible.value || entryFrameVisible.value
+)
 
 // 打开弹窗时顺便查一次「有没有插件操作在跑」：有的话弹窗里多显示一条风险提示
 // （停 dsh 会中断那次安装/卸载，并可能留下陈旧的 profile 写锁，之后插件列表与
@@ -415,15 +471,23 @@ onBeforeUnmount(() => {
       <button class="g-btn-secondary h-8 px-3 text-xs" @click="openAbout()">{{ t('about') }}</button>
     </PageHeader>
 
-    <!-- 卡片栅格：dsh 信息与启停 / DeepSeek 账号 / 三个版本 / 快捷访问 / 登录列表。
-         桌面固定两列（见 style.css 的 .g-card-grid-2），窄屏沿用 .g-card-grid
-         的自适应列数（手机为单列）。登录列表在桌面横跨两列，避免最后一行只剩半格。 -->
+    <!-- 卡片栅格：dsh 信息与启停 / 三个版本 / DeepSeek 账号 / 登录列表。
+         桌面固定两列（见 style.css 的 .g-card-grid-2），四张卡片正好 2×2；
+         窄屏沿用 .g-card-grid 的自适应列数（手机为单列）。 -->
     <div class="g-card-grid g-card-grid-2 g-fade-in">
-      <!-- ① dsh 服务信息与启停 -->
+      <!-- ① dsh 服务信息与启停（右上角「进入」= 当前访问环境下的飞牛入口） -->
       <section class="g-card g-card-hover p-5 flex flex-col">
-        <div class="mb-4">
-          <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ t('overview_dsh_desc') }}</p>
+        <div class="flex items-start justify-between gap-3 mb-4">
+          <div class="min-w-0">
+            <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
+            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ t('overview_dsh_desc') }}</p>
+          </div>
+          <!-- 拿不到网关入口（非网关部署）时不显示，避免给出指向站点根的错地址 -->
+          <button
+            v-if="fnosEntry"
+            class="g-btn-secondary !h-8 !px-3 !text-xs !border-brand flex-shrink-0"
+            @click="openDshEntry"
+          >{{ t('dsh_enter') }}</button>
         </div>
 
         <!-- 进程信息：CPU / 内存 一行两个等宽小面板；PID 与运行时间折到下一行
@@ -456,18 +520,16 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- ② DeepSeek 官方账号：头像 / 余额 / 多账号管理（登录弹窗在卡片内部） -->
-      <AccountCard />
-
-      <!-- ③ 三个版本：dsh 服务 / 插件市场 / 增强插件（控制台自身只能走 fpk 升级） -->
+      <!-- ② 三个版本：dsh 服务 / 插件市场 / 增强插件（控制台自身只能走 fpk 升级） -->
       <UpdateSection />
 
-      <!-- ④ 快捷访问 -->
-      <AccessCard :access-urls="store.config.accessUrls || []" :fnos-entry="fnosEntry" />
+      <!-- ③ DeepSeek 官方账号：头像 / 余额 / 多账号管理（登录弹窗在卡片内部） -->
+      <AccountCard />
 
-      <!-- ⑤ 登录列表：桌面横跨两列（最后一行只有它，半格会空着）。
-           字段仍按「逐项独立一行」排列，宽卡片下只是留白多一些。 -->
-      <section ref="visitorCardEl" class="g-card g-card-hover p-5 flex flex-col md:col-span-2">
+      <!-- ④ 登录列表：与其它卡片同宽（桌面 2×2 的最后半格），不再独占一行。
+           桌面端仍按「最多显示 3 条」限高并内部滚动，移动端不限制高度、随页面滚动。
+           字段仍按「逐项独立一行」排列。 -->
+      <section ref="visitorCardEl" class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('login_list') }}</h2>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('login_list_desc') }}</p>
 
@@ -550,6 +612,28 @@ onBeforeUnmount(() => {
         {{ lifecycleBusyText }}
       </div>
     </ConfirmDialog>
+
+    <!-- App 内的全屏 dsh 容器：走控制台 WebView 的请求栈，避免新 WebView 的入口凭据缺失。
+         按要求不保留顶栏：没有「在浏览器打开」，也没有返回控制台的按钮。 -->
+    <Teleport to="body">
+      <div v-if="entryFrameVisible" class="fixed inset-0 z-[200] bg-bg dark:bg-[#0B0B0F]">
+        <div v-if="entryFrameError" class="h-full flex items-center justify-center p-6">
+          <div class="g-card p-5 w-full max-w-sm text-center">
+            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed">{{ t('dsh_enter_blocked') }}</p>
+            <div class="flex items-center justify-center gap-2 mt-4">
+              <button class="g-btn-secondary" @click="retryEntryFrame">{{ t('dsh_enter_retry') }}</button>
+            </div>
+          </div>
+        </div>
+        <iframe
+          v-else
+          :key="entryFrameKey"
+          :src="entryFrameUrl"
+          class="w-full h-full border-0 bg-white dark:bg-[#0B0B0F]"
+          @load="onEntryFrameLoad"
+        ></iframe>
+      </div>
+    </Teleport>
 
     <!-- 关于弹窗 -->
     <Teleport to="body">

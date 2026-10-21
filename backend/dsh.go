@@ -906,11 +906,7 @@ func (m *DshManager) buildEnv() []string {
 
 	if m.renv.Path != "" {
 		pathVal := m.renv.Path
-		// 根据配置的 node 版本，把对应版本的 bin 目录前置到 PATH。
-		// node24（默认）使用系统默认 node，不额外前置；node26 在可用时前置其 bin。
-		if prefix := nodeVersionBinPrefix(cfg.NodeVersion); prefix != "" {
-			pathVal = prefix + ":" + pathVal
-		}
+		// 控制台只使用平台通过环境变量（PATH）提供的 node24，不再前置其它 node 版本。
 		// 当前选中的 dsh 版本自带的 node_modules/.bin 前置到 PATH：dsh 本体与它派生
 		// 的 CLI 子进程（`dsh plugin …`）都按 PATH 解析可执行文件，插件安装时 pnpm
 		// 也要靠这条路径找到 dsh 的 CLI。没有选中版本（未安装）时不前置，PATH 保持

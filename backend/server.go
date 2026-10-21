@@ -1072,29 +1072,19 @@ func (m *ServerManager) consumeNpmOutput(r io.Reader) {
 
 // npmBin 返回要使用的 npm 可执行文件。
 //
-// 必须与 dsh 将运行在的 node 版本一致：node 版本可配置（node24/node26），而 npm 装
-// 原生依赖（node-pty / sharp / sherpa-onnx 的 prebuilds）时要按当前 node 的 ABI 解析。
+// 直接使用 PATH 中的 npm：控制台只使用平台通过环境变量（PATH）提供的 node24，
+// 而 npm 装原生依赖（node-pty / sharp / sherpa-onnx 的 prebuilds）时要按该 node 的
+// ABI 解析，两者必须来自同一套安装。
 func (m *ServerManager) npmBin() string {
-	cfg := GetConfig()
-	if prefix := nodeVersionBinPrefix(cfg.NodeVersion); prefix != "" {
-		candidate := filepath.Join(prefix, "npm")
-		if fi, err := os.Stat(candidate); err == nil && fi.Mode().IsRegular() {
-			return candidate
-		}
-	}
 	return "npm"
 }
 
 // installEnv 构造 npm install 的环境变量。
 func (m *ServerManager) installEnv() []string {
-	cfg := GetConfig()
 	env := os.Environ()
 	path := os.Getenv("PATH")
 	if m.renv != nil && m.renv.Path != "" {
 		path = m.renv.Path
-	}
-	if prefix := nodeVersionBinPrefix(cfg.NodeVersion); prefix != "" {
-		path = prefix + ":" + path
 	}
 	env = setEnv(env, "PATH", path)
 	env = setEnv(env, "npm_config_cache", m.npmCacheDir())

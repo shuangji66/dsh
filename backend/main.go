@@ -119,12 +119,6 @@ func main() {
 	cfg := LoadConfig(&renv)
 	initConfig(&cfg)
 
-	// 启动时检测 node 版本：若此前选了 node26 但 node v26 已被卸载/不存在，
-	// 主动回退到 node24 并改写持久化配置，避免用失效版本启动 dsh。
-	if ensureValidNodeVersion(&renv) {
-		logWarn("[node] node26 no longer present, node version reverted to node24 (persisted)")
-	}
-
 	// 校准终端里的 dsh 稳定入口（${数据目录}/server/.bin/dsh → 当前选中版本）。
 	// 启动时对账一次，覆盖「版本目录被外部删掉 / 配置里选中的版本已不存在」；
 	// 之后每次切换版本由 ServerManager.Switch 更新同一个链接。

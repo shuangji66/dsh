@@ -29,12 +29,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
-export interface NodeVersionInfo {
-  id: string // "node24" / "node26"
-  label: string // 显示名，如 "Node.js v24"
-  available: boolean
-}
-
 export interface RuntimeInfo {
   configFile: string
   adminSock: string
@@ -51,8 +45,6 @@ export interface RuntimeInfo {
   // 后端拿不到访问地址时为空，前端退回浏览器自身地址自行换算。
   fnosEntryURL?: string
   proxyPort: number
-  // node 版本切换选项（node24 始终可用；node26 仅在宿主机存在时可用）
-  nodeVersions?: NodeVersionInfo[]
   // 当前 node 版本自身的堆上限（MB，由 v8.getHeapStatistics().heap_size_limit 折算）。
   // 即「自动设置」时 dsh 实际拿到的上限：开关打开时输入框展示它，而不是持久化的手动值。
   // 后端探测不到时为 0（此时前端显示空）。
@@ -81,8 +73,6 @@ export interface AppConfig {
   // （见 runtime.nodeHeapLimitMB），不再写死 2048。
   dshMemLimit: number
   dshMemAuto: boolean
-  nodeVersion: string // dsh 启动使用的 node 版本，"node24"/"node26"，默认 "node24"
-  accessUrls?: string[] // 用户配置的 dsh 访问地址列表
   // 浏览器兼容模式：修正 dsh 客户端只适配 V8 的原生函数格式判断，
   // 供 Firefox/Zen/Safari 等非 V8 内核正常加载会话历史。默认关闭。
   browserCompat: boolean

@@ -481,15 +481,13 @@ export const api = {
     request<{ ok: boolean; busy: boolean; source?: 'market' | 'console'; detail?: string }>('/api/dsh/busy'),
   // 读取日志文件内容
   logs: () => request<{ ok: boolean; path: string; content: string; exists: boolean }>('/api/logs'),
-  // 用户授权相关：uid 只是**兜底**。正常经飞牛网关访问时，网关注入的
-  // X-Trim-Userid 才是真实用户；前端拿不到 uid（store.uid 默认为 0）时
-  // **绝不能**再发一个 "X-Trim-Userid: 0" —— 它会覆盖/遮蔽网关注入的值，
-  // 让后端 getUIDFromRequest 拿到 0，平台侧就会报鉴权异常。
+  // 用户授权相关（已存在，确认导出）
+  // 用户授权相关：通过请求头传递 uid
   fnosUserAccess: (uid: number) =>
     requestWithHeaders<{ ok: boolean; paths: string[]; msg: string; error?: string; code?: string; params?: Record<string, string> }>(
       '/api/fnos/user-access',
       undefined,
-      uid > 0 ? { 'X-Trim-Userid': String(uid) } : undefined
+      { 'X-Trim-Userid': String(uid) }
     ),
 
   fnosDeleteUserAccess: (uid: number, path: string) =>
@@ -499,7 +497,7 @@ export const api = {
         method: 'DELETE',
         body: JSON.stringify({ path })
       },
-      uid > 0 ? { 'X-Trim-Userid': String(uid) } : undefined
+      { 'X-Trim-Userid': String(uid) }
     ),
   // 路径转换：通过后端代理调用 fnOS 的 trim.file.convertPath
   convertPath: (paths: string[], language?: string) =>

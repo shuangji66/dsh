@@ -29,24 +29,21 @@ export const useDirectoriesStore = defineStore('directories', () => {
   const toast = useToastStore()
   const { t } = useI18n()
 
-  // 返回是否真的加载成功：调用方（目录页的授权流程）不能在失败时还弹「授权成功」。
-  async function load(): Promise<boolean> {
+  async function load() {
     loading.value = true
     try {
       const p = (await api.fnosUserAccess(uid.value)) as unknown as FnosResult
       if (p.ok === false) {
         // 失败时**不动**本地 paths：否则页面会从「有目录」变成「暂无授权目录」，误导用户
         toast.show(uiText(p.error, p, p.msg || t('directory_load_failed')), 'error')
-        return false
+        return
       }
       paths.value = p.paths || []
       if (paths.value.length > 0) {
         await convertPaths(paths.value)
       }
-      return true
     } catch (e) {
       toast.show(uiErrText(e, t('common_op_failed')), 'error')
-      return false
     } finally {
       loading.value = false
     }

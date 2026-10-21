@@ -9,7 +9,6 @@ import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { useDshBackup } from '@/composables/useDshBackup'
 import { api, type DshDataBackup } from '@/serverapi'
 import { trimAppReady } from '@/utils/trimApp'
-import type { TrimApp } from '@trimjs/web-app'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -20,10 +19,6 @@ const settings = useSettingsStore()
 const { paths, loading, convertedPaths } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
-
-// 目录授权走了「系统浏览器 OAuth」后，用户切回 App 时靠这个标记自动刷新列表
-// （Safari 里的 callback.html 无法 postMessage 回 App 的 WebView）。
-const pendingBrowserAuth = ref(false)
 
 // 宿主 SDK（@trimjs/web-app）是 utils/trimApp.ts 里的单例，且在页面加载时（main.ts）
 // 就已开始握手 —— 不能在这里 new：宿主桌面的握手监听只保留 60 秒，等本页挂载再握手，
@@ -259,15 +254,7 @@ onMounted(() => {
   // 这样进度能续上、结束时也能给出提示；没有备份在跑时这次同步没有副作用。
   backup.sync()
   window.addEventListener('message', handleAuthCallback)
-  document.addEventListener('visibilitychange', onVisibilityChange)
 })
-
-function onVisibilityChange() {
-  if (document.visibilityState === 'visible' && pendingBrowserAuth.value) {
-    pendingBrowserAuth.value = false
-    void store.load()
-  }
-}
 
 function handleAuthCallback(event: MessageEvent) {
   if (event.origin !== window.location.origin) return
@@ -289,41 +276,6 @@ function handleAuthCallback(event: MessageEvent) {
   toast.show(t('directory_auth_updated'), 'success')
 }
 
-async function startBrowserAuth(sdk: TrimApp) {
-  // 独立 Web 环境 / App 内原生 pickUserFile 失败时的兜底：打开平台 OAuth 授权页。
-  // App 端会交给系统浏览器（Safari 有完整 fnos-token）；授权结果落在平台，
-  // callback.html 无法跨浏览器通知 App，因此返回 App 时用 visibilitychange 刷新列表。
-  let appName = settings.runtime?.appName
-  if (!appName) {
-    await settings.load()
-    appName = settings.runtime?.appName
-  }
-  if (!appName) {
-    toast.show(t('directory_appid_missing'), 'error')
-    return
-  }
-  // 回调地址指向本应用基路径下的 callback.html（由后端托管提供）
-  const basePath = document.baseURI ? new URL(document.baseURI).pathname.replace(/\/$/, '') : ''
-  const redirectUri = window.location.origin + basePath + '/callback.html'
-  // 注意：openAppAuth 的 pickUserFile 只支持 appName / redirectUri / state /
-  // directory / accept / sidebarGroup（见 SDK 的 buildAppAuthUrl），title 与
-  // okText 不在 AppAuthPickFileParams 内、也不会被拼进 URL；弹窗标题由宿主
-  // 授权页自行决定，故此处不传。
-  pendingBrowserAuth.value = true
-  try {
-    await sdk.openAppAuth('pickUserFile', {
-      appName,
-      redirectUri,
-      directory: true,
-      sidebarGroup: ['myFiles', 'external', 'favorites', 'team'],
-    })
-    toast.show(t('directory_open_window'), 'info', 5000)
-  } catch (err) {
-    pendingBrowserAuth.value = false
-    throw err
-  }
-}
-
 async function openPicker() {
   // 等宿主桥接就绪；返回 null = 宿主的握手监听已销毁（重开应用窗口才能恢复）
   const sdk = await trimAppReady()
@@ -333,50 +285,46 @@ async function openPicker() {
   }
   try {
     if (sdk.isStandaloneWeb) {
-      await startBrowserAuth(sdk)
-      return
-    }
-
-    const params = {
-      directory: true,
-      title: t('directory_pick_title'),
-      okText: t('directory_pick_ok'),
-      sidebarGroup: ['myFiles', 'external', 'favorites', 'team'],
-    }
-
-    let picked: string[] = []
-    try {
-      // iframe/桥接模式：SDK 选择用户文件并授权给当前应用
-      const result = await sdk.pickUserFile(params)
-      picked = result?.data || []
-    } catch {
-      // App 原生 pickUserFile 实测会报「鉴权异常」；拆成 pickFile + authorizeUserFile
-      // 再试一次。两步都失败才交给系统浏览器，避免直接跳走。
-      const files = await sdk.pickFile(params)
-      if (files?.length) {
-        for (const path of files) {
-          const r = await sdk.authorizeUserFile(path)
-          if (!r?.data) throw new Error('authorizeUserFile failed')
-        }
-        picked = files
+      // 独立 Web 环境（移动端直达/桌面独立窗口）：无宿主桥接，
+      // 需打开 OAuth 授权页，结果经 callback.html 回传
+      let appName = settings.runtime?.appName
+      if (!appName) {
+        await settings.load()
+        appName = settings.runtime?.appName
       }
-    }
-
-    if (picked.length) {
-      // 只有列表真的刷新成功才提示「授权成功」；鉴权失败时 store.load 会自己弹错误，
-      // 这里不能再补一条成功提示（旧实现无论成功失败都会弹）。
-      if (await store.load()) {
+      if (!appName) {
+        toast.show(t('directory_appid_missing'), 'error')
+        return
+      }
+      // 回调地址指向本应用基路径下的 callback.html（由后端托管提供）
+      const basePath = document.baseURI ? new URL(document.baseURI).pathname.replace(/\/$/, '') : ''
+      const redirectUri = window.location.origin + basePath + '/callback.html'
+      // 注意：openAppAuth 的 pickUserFile 只支持 appName / redirectUri / state /
+      // directory / accept / sidebarGroup（见 SDK 的 buildAppAuthUrl），title 与
+      // okText 不在 AppAuthPickFileParams 内、也不会被拼进 URL；弹窗标题由宿主
+      // 授权页自行决定，故此处不传（桥接模式 pickUserFile 仍支持，见下方分支）。
+      await sdk.openAppAuth('pickUserFile', {
+        appName,
+        redirectUri,
+        directory: true,
+        sidebarGroup: ['myFiles', 'external', 'favorites', 'team'],
+      })
+      toast.show(t('directory_open_window'), 'info', 4000)
+    } else {
+      // iframe/桥接模式：SDK 选择用户文件并授权给当前应用
+      const result = await sdk.pickUserFile({
+        directory: true,
+        title: t('directory_pick_title'),
+        okText: t('directory_pick_ok'),
+        sidebarGroup: ['myFiles', 'external', 'favorites', 'team'],
+      })
+      if (result?.data?.length) {
+        await store.load()
         toast.show(t('directory_auth_success'), 'success')
       }
     }
   } catch (err) {
-    // 原生选择器/授权都失败：最后兜底到系统浏览器 OAuth。
-    // 只要不是用户主动取消，就尝试打开授权页；打不开再把原始错误提示出来。
-    try {
-      await startBrowserAuth(sdk)
-    } catch {
-      toast.show(uiErrText(err, t('common_op_failed')), 'error')
-    }
+    toast.show(uiErrText(err, t('common_op_failed')), 'error')
   }
 }
 
@@ -396,7 +344,6 @@ async function openFileManager(path: string) {
 
 onBeforeUnmount(() => {
   window.removeEventListener('message', handleAuthCallback)
-  document.removeEventListener('visibilitychange', onVisibilityChange)
   if (restorePollTimer) clearInterval(restorePollTimer)
   // 刻意**不**停掉 useDshBackup 的轮询：备份在服务端跑，切走视图后它仍在进行 ——
   // 轮询会一直持续到这次备份落定（那时才给提示并自动停止），不留下长期计时器。

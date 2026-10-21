@@ -215,7 +215,7 @@ const zh: Record<string, string> = {
   directory_appid_missing: '无法获取应用标识，请稍后重试',
   directory_pick_title: '选择授权目录',
   directory_pick_ok: '确认授权',
-  directory_open_window: '已打开授权窗口；完成授权后返回本页，列表会自动刷新',
+  directory_open_window: '已打开授权窗口，完成选择后将自动刷新',
   directory_open_failed: '打开文件管理器失败: {msg}',
   directory_host_bridge_lost: '与飞牛桌面的连接已失效，请关闭本应用窗口后重新打开（刷新页面无效）',
   // 主目录固定卡片（主目录不可切换，见后端 effectiveHome）
@@ -836,7 +836,7 @@ const en: Record<string, string> = {
   directory_appid_missing: 'Unable to get app ID, please try again',
   directory_pick_title: 'Select directory to authorize',
   directory_pick_ok: 'Confirm authorization',
-  directory_open_window: 'Authorization window opened. Return here after authorizing; the list will refresh automatically.',
+  directory_open_window: 'Authorization window opened, refreshing after selection',
   directory_open_failed: 'Failed to open file manager: {msg}',
   directory_host_bridge_lost: 'Connection to the fnOS desktop was lost. Close and reopen this app window (reloading the page does not help).',
   // Home pinned card (the home directory cannot be switched, see effectiveHome)

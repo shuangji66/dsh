@@ -61,6 +61,16 @@ const entryFrameError = ref(false)
 const entryFrameKey = ref(0)
 // 打开覆盖层时压入一条同 URL 的历史记录，返回手势/浏览器后退会把它弹掉 ——
 // 我们据此关闭覆盖层、回到控制台（而不是被 App 的返回手势直接带出控制台）。
+//
+// 飞牛 App / 桌面上的这一页是 portal 的 `/appview?anchor=…`（同一个文档里用 iframe 承载
+// 控制台），返回键的逻辑是「**挂载时**读一次 window.history.length，>1 就 history.back()，
+// 否则 navigate('/index')」（appview 的 createAppViewCloseHandler）。所以：
+//   - 这里 pushState 的是控制台自己的 window（= portal 里那个 iframe）。同源 iframe 的
+//     same-document 条目属于 joint session history：顶层 history.back() 会先把它弹掉，
+//     popstate 派发给我们这个 window，正好用来关覆盖层；再返回一次才回应用列表。
+//   - 那一次读数是闭包捕获的，之后再 pushState 也改不了它：若 App 把 `/appview` 当首个
+//     历史条目打开（length=1），返回键会直接 navigate('/index')，前端无从拦截。正常从
+//     应用列表点进来时 length ≥ 2，走的才是 history.back()。
 // App.vue 里那条「后退不切子页面」的守卫在 URL 未变时只是 replace 同一地址，不冲突。
 // dsh 内部自己的前进/后退发生在 iframe 的历史里（popstate 派发给 iframe 的 window），
 // 因此不会提前关掉覆盖层。

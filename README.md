@@ -429,6 +429,13 @@ dsh **自己没有多账号概念**：账号凭据只有一条固定键（`deeps
 会压入一条同 URL 的历史记录：返回手势/浏览器后退先关掉这层全屏容器回到控制台，而不是
 把用户直接带出应用。
 
+这条历史记录之所以有效，是因为 portal 的返回键（`/appview` 的
+`createAppViewCloseHandler`）在 `history.length > 1` 时调用 `history.back()`，而同源
+iframe 里的 same-document 条目属于 joint session history —— 顶层回退会先弹掉它，并把
+popstate 派发到控制台的 window。注意这个长度是**组件挂载时**读取并闭包捕获的：若 App 把
+`/appview` 当作首个历史条目打开（length=1），返回键会直接 `navigate('/index')`，任何前端
+代码都拦不住 —— 那种情况需要页面内的关闭入口，不能只依赖宿主返回。
+
 ---
 
 ## 飞牛网关访问（跳过登录鉴权）

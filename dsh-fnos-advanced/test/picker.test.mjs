@@ -20,8 +20,8 @@ test('directory pickers enable folder creation without disabling subtrees', () =
   assert.ok(Array.isArray(params.sidebarGroup));
 });
 
-test('shared pickers leave directory to the host', () => {
-  const params = pickerParams({ title: 'Shared', okText: 'OK' });
+test('flows that omit directory keep it out of the params', () => {
+  const params = pickerParams({ title: 'Pick', okText: 'OK' });
   assert.equal('directory' in params, false);
   assert.equal('creatable' in params, false);
 });

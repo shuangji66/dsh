@@ -1590,15 +1590,11 @@ var EN = Object.freeze({
   "重试": "Retry",
   // Picker
   "选择飞牛目录": "Choose fnOS folder",
-  "共享目录": "Shared folder",
-  "共享": "Shared",
   "通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）": "Choose a folder through fnOS (grants the current app access)",
-  "选择飞牛共享目录": "Choose an fnOS shared folder",
   "选择工作区目录": "Choose workspace folder",
   "确认授权": "Authorize",
   "选择文件": "Choose files",
   "添加引用": "Add reference",
-  "选择共享目录": "Choose shared folder",
   "飞牛授权": "fnOS authorization",
   "正在打开飞牛授权页面…": "Opening the fnOS authorization page…",
   "准备授权…": "Preparing…",
@@ -1800,7 +1796,7 @@ function translateError(error) {
 
 // src/client/index.js
 var LOG_PREFIX = "[dsh-fnos-advanced]";
-var VERSION = "0.3.1";
+var VERSION = "0.3.2";
 var MSG_TYPE = "dsh-fnos-advanced:auth";
 var STORAGE_KEY = "dsh-fnos-advanced:auth-result";
 var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
@@ -2487,8 +2483,6 @@ function injectButton(dialog) {
     return button;
   };
   const primary = make("directory", t2("选择飞牛目录"), t2("通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）"));
-  const shared = make("shared", t2("共享"), t2("选择飞牛共享目录"));
-  footer.insertBefore(shared, footer.firstChild);
   footer.insertBefore(primary, footer.firstChild);
 }
 function findPathInput(dialog) {
@@ -2558,8 +2552,7 @@ async function ensurePathInput(dialog) {
 async function handlePick(button) {
   const dialog = button.closest('[role="dialog"]');
   if (!dialog) return;
-  const shared = button.dataset.pick === "shared";
-  await runPickFlow(button, shared ? sharedFlow(dialog, button) : directoryFlow(dialog, button));
+  await runPickFlow(button, directoryFlow(dialog, button));
 }
 async function handlePickFiles(button) {
   const active = findActiveComposerInput();
@@ -2667,33 +2660,6 @@ function composerFlow(input, button) {
     },
     doneLabel: () => "",
     restore: () => {
-      button.disabled = false;
-      delete button.dataset.busy;
-    }
-  };
-}
-function sharedFlow(dialog, button) {
-  const initialText = button.textContent || t2("共享");
-  return {
-    button,
-    method: "pickSharedFile",
-    title: t2("选择共享目录"),
-    okText: t2("确认授权"),
-    anchor: dialog,
-    status: (text, isError) => showStatus(dialog, text, isError),
-    isDuplicate: async (paths) => isDuplicateWorkspacePath(paths[0], await knownWorkspacePaths()),
-    onPaths: async (paths) => {
-      const input = await ensurePathInput(dialog);
-      if (!input) throw new Error(t2("没有找到目录选择器的路径输入框"));
-      fillAndEnter(input, paths[0]);
-    },
-    doneText: (paths) => t2("已填入授权目录：{path}", { path: paths[0] }),
-    setLabel: (text) => {
-      button.textContent = text;
-    },
-    doneLabel: () => t2("已填入路径"),
-    restore: () => {
-      button.textContent = initialText;
       button.disabled = false;
       delete button.dataset.busy;
     }

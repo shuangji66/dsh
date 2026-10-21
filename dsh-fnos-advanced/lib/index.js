@@ -32,7 +32,7 @@ const FILE_BYTES_PATH = `${ROUTE_PREFIX}/file-bytes`;
 const HEALTH_PATH = `${ROUTE_PREFIX}/health`;
 
 /** Package version shown by the config endpoint; keep in sync with package.json. */
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 
 /**
  * The fnOS app identity is injected by the system when it starts the app.

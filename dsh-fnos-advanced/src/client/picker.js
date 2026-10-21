@@ -1,8 +1,8 @@
 /**
  * Build fnOS picker parameters and compare workspace paths (pure, unit-tested).
  *
- * Shared pickers omit `directory` entirely: the host decides what a shared
- * picker returns. `creatable` only applies to the user folder picker.
+ * A picker only carries `directory` / `creatable` when the caller asks for
+ * them; `creatable` only applies to the user folder picker.
  *
  * We deliberately do NOT send `disabledPaths` for existing workspaces: fnOS
  * disables the whole subtree of a disabled path, which would also prevent
@@ -10,7 +10,7 @@
  * path comparison after the user picks, not a picker-level block.
  */
 
-/** Sidebar groups shown by both folder and shared pickers. */
+/** Sidebar groups shown by the native folder picker. */
 export const SIDEBAR_GROUPS = Object.freeze([
   'myFiles',
   'otherShare',

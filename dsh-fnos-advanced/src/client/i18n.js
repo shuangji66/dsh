@@ -22,15 +22,11 @@ export const EN = Object.freeze({
 
   // Picker
   '选择飞牛目录': 'Choose fnOS folder',
-  '共享目录': 'Shared folder',
-  '共享': 'Shared',
   '通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）': 'Choose a folder through fnOS (grants the current app access)',
-  '选择飞牛共享目录': 'Choose an fnOS shared folder',
   '选择工作区目录': 'Choose workspace folder',
   '确认授权': 'Authorize',
   '选择文件': 'Choose files',
   '添加引用': 'Add reference',
-  '选择共享目录': 'Choose shared folder',
   '飞牛授权': 'fnOS authorization',
   '正在打开飞牛授权页面…': 'Opening the fnOS authorization page…',
   '准备授权…': 'Preparing…',

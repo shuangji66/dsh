@@ -30,7 +30,7 @@ import { pickerParams, isDuplicateWorkspacePath } from './picker.js';
 import { t, translateError, getLanguagePreference, setLanguagePreference, currentLanguage } from './i18n.js';
 
 const LOG_PREFIX = '[dsh-fnos-advanced]';
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 
 const MSG_TYPE = 'dsh-fnos-advanced:auth';
 const STORAGE_KEY = 'dsh-fnos-advanced:auth-result';
@@ -852,11 +852,11 @@ function injectButton(dialog) {
   };
 
   const primary = make('directory', t('选择飞牛目录'), t('通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）'));
-  const shared = make('shared', t('共享'), t('选择飞牛共享目录'));
 
-  // Keep both before the leading footer action (New folder / 新建文件夹), so
-  // neither sits between Cancel and Open.
-  footer.insertBefore(shared, footer.firstChild);
+  // Keep it before the leading footer action (New folder / 新建文件夹), so it
+  // does not sit between Cancel and Open. The fnOS shared-folder picker was
+  // removed on purpose: /app-auth/pick-shared-file needs a shared-scope grant
+  // this app does not have, so it always ended in an authorization error.
   footer.insertBefore(primary, footer.firstChild);
 }
 
@@ -941,8 +941,7 @@ async function ensurePathInput(dialog) {
 async function handlePick(button) {
   const dialog = button.closest('[role="dialog"]');
   if (!dialog) return;
-  const shared = button.dataset.pick === 'shared';
-  await runPickFlow(button, shared ? sharedFlow(dialog, button) : directoryFlow(dialog, button));
+  await runPickFlow(button, directoryFlow(dialog, button));
 }
 
 async function handlePickFiles(button) {
@@ -1070,32 +1069,6 @@ function composerFlow(input, button) {
     setLabel: () => { /* icon-only button: progress goes to the toast */ },
     doneLabel: () => '',
     restore: () => {
-      button.disabled = false;
-      delete button.dataset.busy;
-    },
-  };
-}
-
-function sharedFlow(dialog, button) {
-  const initialText = button.textContent || t('共享');
-  return {
-    button,
-    method: 'pickSharedFile',
-    title: t('选择共享目录'),
-    okText: t('确认授权'),
-    anchor: dialog,
-    status: (text, isError) => showStatus(dialog, text, isError),
-    isDuplicate: async (paths) => isDuplicateWorkspacePath(paths[0], await knownWorkspacePaths()),
-    onPaths: async (paths) => {
-      const input = await ensurePathInput(dialog);
-      if (!input) throw new Error(t('没有找到目录选择器的路径输入框'));
-      fillAndEnter(input, paths[0]);
-    },
-    doneText: (paths) => t('已填入授权目录：{path}', { path: paths[0] }),
-    setLabel: (text) => { button.textContent = text; },
-    doneLabel: () => t('已填入路径'),
-    restore: () => {
-      button.textContent = initialText;
       button.disabled = false;
       delete button.dataset.busy;
     },

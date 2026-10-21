@@ -190,9 +190,12 @@
   回调路径同时挂在 admin 线（`buildHandler`）与反代线
   （`reverseProxy.account`，放在就绪门禁之前）—— **路径必须是 `/oauth/callback`**（平台
   在授权那一步只认它，见「常见的坑」），且反代线自留它会遮蔽 dsh 自己的账号回调路由
-  （本部署里那条路走不通）。前端入口是概览页「DeepSeek Harness」卡片右上角的
-  `components/AccountAvatar.vue`（头像 + 管理弹窗：登录 / 复制授权链接 / 跳转登录 /
-  回调链接输入框 / 余额 / 退出登录），弹窗里**不自动开标签页** —— 跳转是用户点的按钮。
+  （本部署里那条路走不通）。前端入口是概览页独立的「DeepSeek 账号」卡片：
+  `components/account/AccountCard.vue`（大头像 / 联系方式 / 余额 + 多账号列表的切换 /
+  移除 / 退出登录）、`components/account/AddAccountDialog.vue`（两步登录流程：
+  打开授权链接 → 粘贴回调链接）、`components/account/AccountAvatar.vue`（头像兜底渲染）；
+  状态与轮询都在 `stores/account.ts`（卡片与弹窗共用同一份，弹窗关掉后仍会轮询到授权
+  完成）。弹窗里**不自动开标签页** —— 跳转是用户点的按钮。
   多账号在 `accountvault.go`：dsh 只认一条凭据记录，所以「多账号」= 控制台自己的账号库
   （`$HARNESS_DATA_DIR/dsh-accounts.json`，0600）存多份 token，切换时把对应那份写进那条记录
   并等 dsh 认账（失败回滚）；**当前生效的账号是推导的**（拿凭据 token 与库条目比对），库里没有

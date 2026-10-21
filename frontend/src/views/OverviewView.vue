@@ -14,7 +14,7 @@ import { repoSlugs, repoURL } from '@/constants/repos'
 import UpdateSection from '@/components/UpdateSection.vue'
 import AccessCard from '@/components/AccessCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
-import AccountAvatar from '@/components/AccountAvatar.vue'
+import AccountCard from '@/components/account/AccountCard.vue'
 import { useWideLayout } from '@/composables/useMobileLayout'
 import { icons } from '@/utils/icons'
 
@@ -73,7 +73,7 @@ const aboutFeatureGroups = [
   {
     title: 'about_group_access',
     // 账号与「凭据/快捷指令加密存储」都归在这里：它们解决的正是「谁拿着这台设备上的凭据」
-    // （账号见 AccountAvatar.vue / backend/account.go，加密见 backend/secret.go 的威胁模型）。
+    // （账号见 components/account/AccountCard.vue / backend/account.go，加密见 backend/secret.go 的威胁模型）。
     features: [
       'about_feature_auth',
       'about_feature_account',
@@ -415,21 +415,15 @@ onBeforeUnmount(() => {
       <button class="g-btn-secondary h-8 px-3 text-xs" @click="openAbout()">{{ t('about') }}</button>
     </PageHeader>
 
-    <!-- 四卡片栅格：dsh 信息与启停 / 三个版本 / 快捷访问 / 登录列表。
-         桌面固定两列（2×2，见 style.css 的 .g-card-grid-2），窄屏沿用 .g-card-grid
-         的自适应列数（手机为单列）。 -->
+    <!-- 卡片栅格：dsh 信息与启停 / DeepSeek 账号 / 三个版本 / 快捷访问 / 登录列表。
+         桌面固定两列（见 style.css 的 .g-card-grid-2），窄屏沿用 .g-card-grid
+         的自适应列数（手机为单列）。登录列表在桌面横跨两列，避免最后一行只剩半格。 -->
     <div class="g-card-grid g-card-grid-2 g-fade-in">
       <!-- ① dsh 服务信息与启停 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
-        <!-- 标题/描述在左列，账号头像固定在右上角（点击开管理弹窗，见 AccountAvatar）。
-             头像比标题高（头像 + 「不可用」占两行），若把它和标题同处一行，整行高度
-             会被它撑高，描述就被顶到下一行、与标题之间空出一截。 -->
-        <div class="flex items-start justify-between gap-3 mb-4">
-          <div class="min-w-0">
-            <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
-            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ t('overview_dsh_desc') }}</p>
-          </div>
-          <AccountAvatar />
+        <div class="mb-4">
+          <h2 class="font-display text-base font-semibold text-ink dark:text-white">DeepSeek Harness</h2>
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ t('overview_dsh_desc') }}</p>
         </div>
 
         <!-- 进程信息：CPU / 内存 一行两个等宽小面板；PID 与运行时间折到下一行
@@ -462,15 +456,18 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- ② 三个版本：dsh 服务 / 插件市场 / 增强插件（控制台自身只能走 fpk 升级） -->
+      <!-- ② DeepSeek 官方账号：头像 / 余额 / 多账号管理（登录弹窗在卡片内部） -->
+      <AccountCard />
+
+      <!-- ③ 三个版本：dsh 服务 / 插件市场 / 增强插件（控制台自身只能走 fpk 升级） -->
       <UpdateSection />
 
-      <!-- ③ 快捷访问 -->
+      <!-- ④ 快捷访问 -->
       <AccessCard :access-urls="store.config.accessUrls || []" :fnos-entry="fnosEntry" />
 
-      <!-- ④ 登录列表：并入上面的栅格（不再单独占一行），
-           卡片宽度只有桌面栅格的一半，因此字段沿用「移动端」的显示方式（逐项独立一行）。 -->
-      <section ref="visitorCardEl" class="g-card g-card-hover p-5 flex flex-col">
+      <!-- ⑤ 登录列表：桌面横跨两列（最后一行只有它，半格会空着）。
+           字段仍按「逐项独立一行」排列，宽卡片下只是留白多一些。 -->
+      <section ref="visitorCardEl" class="g-card g-card-hover p-5 flex flex-col md:col-span-2">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('login_list') }}</h2>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('login_list_desc') }}</p>
 

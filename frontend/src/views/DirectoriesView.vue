@@ -319,8 +319,11 @@ async function openPicker() {
         sidebarGroup: ['myFiles', 'external', 'favorites', 'team'],
       })
       if (result?.data?.length) {
-        await store.load()
-        toast.show(t('directory_auth_success'), 'success')
+        // 只有列表真的刷新成功才提示「授权成功」；鉴权失败时 store.load 会自己弹错误，
+        // 这里不能再补一条成功提示（旧实现无论成功失败都会弹）。
+        if (await store.load()) {
+          toast.show(t('directory_auth_success'), 'success')
+        }
       }
     }
   } catch (err) {

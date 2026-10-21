@@ -15,6 +15,7 @@ import UpdateSection from '@/components/UpdateSection.vue'
 import AccessCard from '@/components/AccessCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AccountAvatar from '@/components/AccountAvatar.vue'
+import { useWideLayout } from '@/composables/useMobileLayout'
 import { icons } from '@/utils/icons'
 
 defineOptions({ name: 'OverviewView' })
@@ -319,20 +320,26 @@ const sortedVisitors = computed(() =>
   })
 )
 
-// 登录列表最多同时显示 3 条，超出后在卡片内滚动（不再把整个概览页越撑越长）。
+// 登录列表的限高**只在桌面端**生效：最多同时显示 3 条，超出后在卡片内滚动
+// （桌面栅格里卡片高度受相邻卡片影响，不限高会把整行越撑越长）。
+//
+// 移动端刻意**不限制高度**：手机上没有「相邻卡片同高」的约束，页面本身就在 `main`
+// 里滚动；再套一层内部滚动只会让触屏手势和底栏互相打架。列表随内容增长，由页面滚动。
 //
 // 高度不能写死像素：网关记录只有「来源 IP / 最近访问」两行，端口记录还多一行
 // 「登录有效期」，窄屏下文本换行也会改变行高。因此按**前 3 条记录的实际渲染高度**
 // 计算滚动区的 max-height（只限制列表、不限制卡片：同一栅格里相邻卡片更高时，
 // 卡片仍会被拉伸到同高）。
 const VISITOR_VISIBLE_COUNT = 3
+const wideLayout = useWideLayout()
 const visitorCardEl = ref<HTMLElement | null>(null)
 const visitorListEl = ref<HTMLElement | null>(null)
 const visitorListMaxHeight = ref<number | null>(null)
 
 function measureVisitorList() {
   const el = visitorListEl.value
-  if (!el) {
+  // 移动端（<md）不限高：直接清掉 max-height，列表随内容自然增长。
+  if (!el || !wideLayout.value) {
     visitorListMaxHeight.value = null
     return
   }
@@ -363,6 +370,13 @@ watch(
 // 切换语言会改变标签长度与换行，而列表被 max-height 固定时卡片尺寸不再变化，
 // ResizeObserver 察觉不到，因此单独监听 locale。
 watch(locale, async () => {
+  await nextTick()
+  measureVisitorList()
+})
+
+// 跨过 md 断点（窗口缩放 / 旋转）时重新决定是否限高：进入桌面要重新量，
+// 回到移动端要立刻清掉已有的 max-height。
+watch(wideLayout, async () => {
   await nextTick()
   measureVisitorList()
 })
@@ -469,7 +483,8 @@ onBeforeUnmount(() => {
         <ul
           v-else
           ref="visitorListEl"
-          class="divide-y divide-line dark:divide-[#2A2A32] overflow-y-auto overscroll-contain pr-1 -mr-1"
+          class="divide-y divide-line dark:divide-[#2A2A32] overflow-y-auto overscroll-contain pr-4 -mr-4"
+          :class="wideLayout ? '[scrollbar-gutter:stable]' : ''"
           :style="visitorListMaxHeight ? { maxHeight: visitorListMaxHeight + 'px' } : undefined"
         >
           <li v-for="v in sortedVisitors" :key="v.id" class="py-4">

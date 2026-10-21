@@ -1,11 +1,11 @@
 <script setup lang="ts">
-// CheckUpdateButton.vue —— 版本行右侧的「检查更新」图标按钮（harness / dsh / 市场三行共用一份）。
+// CheckUpdateButton.vue —— 版本行右侧的「检查更新」图标按钮（dsh / 市场 / 增强插件三行共用一份）。
 //
 // 图标刻意与「dsh 服务回退」那个按钮成对：这里顺时针（Lucide rotate-cw）、回退逆时针
 // （Lucide rotate-ccw），同一套线稿 —— 9 半径的圆 + 由圆弧收尾的箭头，摆在一行里才像一家人。
 // 之前用的是 Feather 的 refresh-cw：圆上缺口更大、箭头是两条直边，跟回退图标并排明显不是
-// 一套（反馈：「不够圆，箭头有点直」）。换图标时请连回退那个一起看（UpdateSection.vue 里
-// 的 rollback 按钮）。
+// 一套（反馈：「不够圆，箭头有点直」）。换图标时请连回退那个一起看（ServerVersionsDialog
+// 里的回退按钮）。
 //
 // 检查进行中图标转圈并禁用（animate-spin 顺时针，与图标自身方向一致），避免重复触发。
 // 悬停色与回退按钮一致用品牌色（两个都是「图标按钮」，风格保持同一套）。

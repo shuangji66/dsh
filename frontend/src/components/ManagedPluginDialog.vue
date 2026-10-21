@@ -102,7 +102,7 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
         <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
           <DialogCloseButton :label="t('dialog_close')" @close="close" />
           <!-- 标题 + 对应仓库的 GitHub 裸图标外链，紧靠标题；右侧留出 X 的位置。
-               与 harness 弹窗、dsh 版本弹窗同一形态。 -->
+               与 dsh 版本弹窗同一形态。 -->
           <div class="flex items-center gap-2 pr-11 mb-3">
             <h3 class="g-dialog-title !pr-0">{{ targetName }}</h3>
             <GithubIconLink :href="repoURL(repoSlug)" :label="repoSlug" />
@@ -158,7 +158,7 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
               {{ t('plugin_dialog_latest_unknown') }}
             </p>
 
-            <!-- 更新内容（release 正文，不含标题）：与 harness 更新弹窗**同一套显示逻辑**
+            <!-- 更新内容（release 正文，不含标题）：与 dsh 版本弹窗**同一套显示逻辑**
                  ——正文由后端在状态里给（只取要装的那一版，见 market.go 的 refreshPluginStatus），
                  这里 Markdown 渲染、超长可滚动、不撑破弹窗，字号与其它弹窗正文同档。
                  没有正文时整块不渲染。 -->

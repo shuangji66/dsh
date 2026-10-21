@@ -3,27 +3,21 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -32,8 +26,8 @@ import (
 // 与 dsh 服务版本（dsh -V）相互独立。
 var harnessVersion = "1.0.0"
 
-// errUpdateCancelled 表示更新下载被用户主动取消（前端点“取消更新”触发）：
-// 半成品文件会被删除，状态回到空闲，下次从零开始。
+// errUpdateCancelled 表示一次安装被用户主动取消（目前是 dsh 版本安装：
+// server.go 中止 npm 并清掉安装目录与缓存，状态回到空闲）。
 var errUpdateCancelled = errors.New("用户取消更新")
 
 // busyf 构造一条「并发拒绝」的用户错误（HTTP 层回 409，文案走前端 i18n）。
@@ -42,45 +36,21 @@ func busyf(code, zh string, kv ...string) error {
 	return &userError{msg: uiMsg{Code: code, Params: kvMap(kv)}, text: formatKV(zh, kv), busy: true}
 }
 
-// errUpdatePaused 表示更新下载被用户暂停（前端点“暂停”触发）：半成品文件保留，
-// 状态置 paused，下次“继续下载”用 HTTP Range 从已下载字节续传。
-var errUpdatePaused = errors.New("用户暂停下载")
-
-// errUpdateNetworkFailed 表示「代理」与「直连」两条路各 2 次机会全部失败。
-// 用它把「网络/代理问题」与「包本身的问题」（如完整性校验失败、404）区分开：
-// 前端据此显示“请检查网络或代理”的本地化提示，而不是让用户去猜。
-var errUpdateNetworkFailed = errors.New("代理与直连均失败")
-
-// --- GitHub 仓库与发布资源常量 ---
+// --- GitHub 仓库常量 ---
 const (
 	updateRepoOwner = "shuangji66"
 	updateRepoName  = "dsh"
-	updateRepoURL   = "https://github.com/" + updateRepoOwner + "/" + updateRepoName
 
 	// updateCheckInterval 是每小时自动检测更新的周期。
 	updateCheckInterval = time.Hour
-
-	// updateHeaderTimeout 是单次下载请求等待响应头的上限（不限制整体时长：
-	// 大包在慢网下可能下很久，整体超时会把它掐断）。
-	updateHeaderTimeout = 30 * time.Second
 )
 
-// updateIdleTimeout 是「传输空闲」上限：连续这么久没有新字节才判定本次尝试失败。
-// 变量而非常量：测试里会调小，用来覆盖「响应头已到、正文迟迟不来」的半开连接窗口
-// （见 update_interrupt_test.go）。它必须大于 updateHeaderTimeout，否则会误伤正常的
-// 建连/握手阶段。
-var updateIdleTimeout = 60 * time.Second
-
-// updateRetryBackoff 是同一通路上两次尝试之间的退避时间（变量而非常量：测试里会调小）。
-var updateRetryBackoff = 800 * time.Millisecond
-
-// updateKind 表示更新目标：harness 控制台、dsh 服务、插件市场（dshmarket）或
-// 增强插件（dsh-fnos-advanced）。
+// updateKind 表示更新目标：dsh 服务、插件市场（dshmarket）或增强插件
+// （dsh-fnos-advanced）。
 type updateKind string
 
 const (
-	updateKindHarness updateKind = "harness"
-	updateKindDsh     updateKind = "dsh"
+	updateKindDsh updateKind = "dsh"
 	// updateKindMarket 表示「就地把 server 目录里那份 dshmarket 换成 npm 最新版」。
 	// 它不是 GitHub release 资产（版本来自 npm registry），细节见 market.go。
 	updateKindMarket updateKind = "market"
@@ -89,13 +59,10 @@ const (
 	updateKindAdvanced updateKind = "advanced"
 )
 
-// updateLogTag 返回某个更新目标的日志标签：harness（控制台）与 dsh（dsh 服务）
-// 的更新日志分开输出，便于按目标筛日志、看清「这次更新的是谁」；
-// market（插件市场）与 advanced（增强插件）的作用域同样独立，因此各自一个标签。
+// updateLogTag 返回某个更新目标的日志标签：dsh（dsh 服务）、market（插件市场）
+// 与 advanced（增强插件）的更新日志分开输出，便于按目标筛日志、看清「这次更新的是谁」。
 func updateLogTag(k updateKind) string {
 	switch k {
-	case updateKindHarness:
-		return "[harness]"
 	case updateKindDsh:
 		return "[dsh]"
 	case updateKindMarket:
@@ -107,77 +74,28 @@ func updateLogTag(k updateKind) string {
 	}
 }
 
-// pendingKind 从待安装包文件名反推更新目标（现在只有 harness 还会落包：
-// `harness-1.2.6.tar.gz`）；认不出时返回空串，日志退化为通用的 [update]。
-// 旧控制台的 dsh-*/market-* 包不会再产生，但这里仍认它们 —— 那些残留文件要被
-// clearOrphanPending 回收，日志上得看得出原本是什么。只看 `<kind>-` 前缀、不看扩展名。
-func pendingKind(name string) updateKind {
-	for _, k := range []updateKind{updateKindHarness, updateKindDsh, updateKindMarket} {
-		if strings.HasPrefix(name, string(k)+"-") {
-			return k
-		}
-	}
-	return ""
-}
-
-// pendingPkgName 返回待安装包在 pending 目录下的文件名（`<kind>-<版本>.tar.gz`）。
-//
-// 现在只有 harness 控制台会下载更新包（见 downloadUpdate），扩展名恒为 `.tar.gz`；
-// 保留这个函数是为了让「待安装包叫什么」在下载与安装两侧只有一个来源。
-func pendingPkgName(k updateKind, version string) string {
-	return string(k) + "-" + version + ".tar.gz"
-}
-
-// tagInfo 描述一个从仓库读取到的 tag 及其解析出的版本号。
-type tagInfo struct {
-	name    string // 完整 tag 名，如 harness-1.0.1 / dsh-0.1.2-alpha.5
-	version string // 去掉前缀后的版本号，如 1.0.1 / 0.1.2-alpha.5
-}
-
-// UpdateStatus 是一次更新检测的状态（harness / dsh / 市场各一份）。
+// UpdateStatus 是一次更新检测的状态（dsh 服务 / 插件市场 / 增强插件各一份）。
 //
 // 三条链路的**状态字段同构，数据来源完全不同**：
-//   - harness：GitHub Release 的 tag 与资产（可下载、可安装、可暂停/取消）；
 //   - dsh：本地已安装版本目录 + npm 镜像源的 dist-tags（只有版本号与「有更新」，
 //     下载/切换走 server.go 自己的进度状态，不再经这里）；
-//   - 市场：`dsh plugin --profile web list` 的检测结果 + npm 镜像源（安装/卸载/更新
-//     走 market.go，进度用 Phase/Message 表达）。
+//   - 市场与增强插件：`dsh plugin --profile web list` 的检测结果 + npm 镜像源
+//     （安装/卸载/更新走 market.go，进度用 Phase/Message 表达）。
 type UpdateStatus struct {
 	Kind          updateKind `json:"kind"`
 	LocalVersion  string     `json:"localVersion"`  // 本地版本号
 	LatestVersion string     `json:"latestVersion"` // 最新版本号（空表示未获取到）
-	// HasUpdate 表示「有可就地安装的更新」。它的语义**只有**这一条：能下载、能安装。
-	// harness 跨 major/minor 的版本（1.4 → 1.5、1.x → 2.x）不在此列，那些版本只能去
-	// 换 fpk 安装包，走 StoreUpdate（见下）。别的链路不受影响。
-	HasUpdate bool `json:"hasUpdate"`
-	// StoreUpdate / StoreVersion 仅 harness 使用：仓库最新版跨过了 major/minor 线，
-	// 控制台**不能**就地自更新，只能更新本应用的 fpk 安装包（换包）。
-	// StoreUpdate 为真时 HasUpdate 恒为 false，StoreVersion 给出要换上去的版本号。
-	// 前端据此亮红点、在弹窗里给「需更新 fpk 安装包」的提示（并隐藏下载按钮）。
-	StoreUpdate  bool      `json:"storeUpdate,omitempty"`
-	StoreVersion string    `json:"storeVersion,omitempty"`
+	// HasUpdate 表示「有可就地安装的更新」（dsh 服务 / 受管插件）。
+	HasUpdate    bool      `json:"hasUpdate"`
 	CheckedAt    time.Time `json:"checkedAt"`              // 最近检测时间
 	Error        string    `json:"error,omitempty"`        // 最近一次检测/拉取失败原因
 	ReleaseNotes string    `json:"releaseNotes,omitempty"` // 最新 release 的更新内容（正文，不含标题）
 
-	// 下载进度（仅 harness 更新包下载期间有值；下载完成后清空）。
-	Downloading     bool  `json:"downloading,omitempty"`     // 是否正在下载更新包
-	DownloadPct     int   `json:"downloadPct,omitempty"`     // 下载进度百分比（0-100）
-	DownloadedBytes int64 `json:"downloadedBytes,omitempty"` // 已下载字节数
-	TotalBytes      int64 `json:"totalBytes,omitempty"`      // 总字节数（未知为 0）
-
-	// 流程阶段：""(空闲) / downloading(下载中) / downloaded(已下载待安装) / installing(安装中)
-	// / removing(卸载中，仅市场)。dsh 版本安装的进度不走这里（见 ServerVersions.Install）。
+	// 流程阶段：""(空闲) / installing(安装中) / removing(卸载中)。dsh 版本安装的进度
+	// 不走这里（见 ServerVersions.Install）。
 	Phase string `json:"phase,omitempty"`
-	// ReadyToInstall 表示更新包已下载就绪，等待用户点击“安装”（仅 harness）。
-	ReadyToInstall bool `json:"readyToInstall,omitempty"`
-	// Cancelled 表示最近一次更新被用户主动取消（仅失败推送时置位）。
+	// Cancelled 表示最近一次操作被用户主动取消（仅失败推送时置位）。
 	Cancelled bool `json:"cancelled,omitempty"`
-	// Paused 表示下载被用户暂停，半成品已保留，可继续下载（phase=paused）。
-	Paused bool `json:"paused,omitempty"`
-	// ErrorHint 是给前端的结构化错误归类（目前只有 "network"：代理与直连均失败），
-	// 前端据此显示本地化的“请检查网络或代理”提示；Error 里则是原始错误文本。
-	ErrorHint string `json:"errorHint,omitempty"`
 	// Message 是当前阶段的说明/实时尾行（受管插件用：`dsh plugin …` 的进度与输出尾行）。
 	Message string `json:"message,omitempty"`
 	// 市场安装位置诊断（kind=market / advanced）：`dsh plugin --profile web list` 的
@@ -201,26 +119,13 @@ type UpdateStatus struct {
 	MessageRef *uiMsg `json:"messageRef,omitempty"`
 }
 
-// PendingUpdate 记录某个 kind 已下载完成、等待用户确认安装的更新包。
-// 只会保留一个 kind 的一份待安装包；重新下载或安装完成后即被清理。
-// 目前只有 harness 控制台会用到它（dsh 与插件市场都不再下载压缩包）。
-type PendingUpdate struct {
-	Kind    updateKind
-	Version string
-	PkgPath string // 已下载更新包的完整路径（.tar.gz）
-	// harness 发布资产使用：下载阶段校验通过过的 sha256（64 位小写十六进制）。
-	// 空表示该版本没有校验文件（退化为不校验，见 releaseChecksum）。安装前再复核一次，
-	// 防止「下载 → 安装」两步之间文件被截断或替换。
-	SHA256 string
-}
-
-// UpdateManager 管理控制台与 dsh 的版本检测、SSE 推送与自我更新。
+// UpdateManager 管理 dsh 与受管插件的版本检测、SSE 推送，以及 dsh 数据备份/恢复。
 type UpdateManager struct {
 	mu   sync.Mutex
 	subs map[chan struct{}]struct{}
-	// statuses 分别保存 harness 与 dsh 的最近检测结果。
+	// statuses 分别保存 dsh、插件市场与增强插件的最近检测结果。
 	statuses map[updateKind]*UpdateStatus
-	// applying 用于防止并发执行自我更新（同一时刻只允许一个更新任务）。
+	// applying 用于防止并发执行会停/启 dsh 或改 ~/.dsh 的操作（同一时刻只允许一个）。
 	applying sync.Mutex
 	// pluginOpSeq 是受管插件操作的序号（每次安装/更新/卸载 +1，市场与增强插件共用），
 	// 随状态推给前端用于「结果只提示一次」的去重键。用原子量：它只在 runPluginOp 里
@@ -235,18 +140,6 @@ type UpdateManager struct {
 	// server 管理 dsh 服务的多版本（列表/安装/删除/切换），见 server.go。
 	server *ServerManager
 
-	// ctrlMu 保护 ctrl：ctrl 非 nil 表示正在下载更新包。中断原因决定半成品的
-	// 去留：取消（cancel）删除，暂停（pause）保留以便续传（见 downloadControl）。
-	ctrlMu sync.Mutex
-	ctrl   *downloadControl
-
-	// pendingMu 保护 pending：按 kind 记录「已下载完成、等待用户确认安装」的更新包。
-	// 必须是按 kind 隔离的（不是单槽）：harness 与 dsh 的包可以先后下载，单槽会让
-	// 先下的那份变成幽灵 —— 状态仍显示「已下载待安装」，安装时报「尚未下载」，
-	// 而「删除更新包」还会误删另一种 kind 的文件。
-	pendingMu sync.Mutex
-	pending   map[updateKind]*PendingUpdate
-
 	// marketLocalMu 保护 pluginLocalCache：受管插件（市场 / 增强插件）「本机装的是
 	// 哪一版」的本地检测结果，按 kind 分开缓存。那次检测要起一个
 	// `dsh plugin --profile web list` 子进程（1~3 秒），因此像版本列表一样缓存起来，
@@ -260,11 +153,9 @@ type UpdateManager struct {
 	lastCheckSig map[updateKind]string
 
 	// dshNotes 是「按版本号查更新日志」的索引（见 notesIndex）：dsh 版本列表里点某个
-	// 版本号时按需拉取，结果缓存在这里。客户端用 httpClientForUpdate() 现取（它跟随
-	// 「代理更新」开关，而开关可以随时改），因此存的是构造函数而不是客户端实例。
-	// 受管插件（插件市场 / 增强插件）**不用索引**：它们和 harness 一样只取「要装的那
-	// 一版」的正文（见 market.go 的 refreshPluginStatus）——一个 tag 一次请求，不需要
-	// 整仓日志。
+	// 版本号时按需拉取，结果缓存在这里。存的是构造函数而不是客户端实例。
+	// 受管插件（插件市场 / 增强插件）**不用索引**：它们只取「要装的那一版」的正文
+	// （见 market.go 的 refreshPluginStatus）——一个 tag 一次请求，不需要整仓日志。
 	dshNotes *notesIndex
 }
 
@@ -273,11 +164,9 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	m := &UpdateManager{
 		subs:     make(map[chan struct{}]struct{}),
 		statuses: make(map[updateKind]*UpdateStatus),
-		pending:  make(map[updateKind]*PendingUpdate),
 		renv:     renv,
 		dsh:      dsh,
 	}
-	m.statuses[updateKindHarness] = &UpdateStatus{Kind: updateKindHarness, LocalVersion: harnessVersion}
 	// 「按版本号查更新日志」的索引（只有 dsh 版本列表用）。超时 15 秒：更新日志是点开才
 	// 看的次要内容，不能像版本检测那样握着请求慢慢等。
 	// **只拉最近 dshNotesReleases 个 release**：版本列表本身也只有最近这些版本（更早的
@@ -305,12 +194,29 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 		m.refreshManagedPluginsLocal(true)
 	}()
 	m.server.refreshDshStatus()
-	// 启动时清理上次未能回收的更新包（自我更新 exec、异常退出等场景的残留）。
-	m.clearOrphanPending()
-	// 以及上次打包中途被杀留下的半成品备份（<名称>.part）：它不会被备份列表列出，
+	// 清理旧版自我更新遗留的待安装包（backup/pending/）：升级只走 fpk，这些包不会再被
+	// 任何路径读取，留着只会占磁盘。
+	m.removeLegacyPendingDir()
+	// 清理上次打包中途被杀留下的半成品备份（<名称>.part）：它不会被备份列表列出，
 	// 但一直占着磁盘 —— 备份是 GB 级，漏一个就够明显。
 	m.sweepPartialBackups()
 	return m
+}
+
+// removeLegacyPendingDir 删除旧版自我更新遗留的「已下载待安装」包目录。
+//
+// 自我更新已整体移除（见 AGENTS 规则 14）：pending 包只用于「下载 → 安装」两步之间，
+// 现在既没有下载入口也没有安装入口，任何一份留在盘上都是永远用不到的几十 MB。
+func (m *UpdateManager) removeLegacyPendingDir() {
+	dir := filepath.Join(m.backupDir(), "pending")
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		logWarn("[backup] failed to remove legacy pending update packages: %v", err)
+		return
+	}
+	logInfo("[backup] removed legacy pending update packages")
 }
 
 // subscribe 注册一个 SSE 订阅通道，返回退订函数。
@@ -452,227 +358,6 @@ func compareVersion(a, b string) int {
 	return 0
 }
 
-// --- 「控制台只自更新小版本」的判定 ---
-//
-// harness 控制台**只允许就地自更新同一 major.minor 线内的补丁版**（1.4.3 → 1.4.9）。
-// 跨主要/次要版本（1.4 → 1.5、1.x → 2.x）一律拒绝下载与安装，只提示用户更新 fpk
-// 安装包（换包，而不是控制台自己就地升级）：这类升级不只是换控制台二进制，平台侧的
-// 部署脚本/依赖与 dsh 的配套版本都在 fpk 里，换包才会把它们一起换掉；让控制台自己
-// 解开一个跨线的包，会得到一个「二进制换了、平台侧没换」的半升级状态。
-//
-// 判定基准是**仓库最新版**（不是「本线最高补丁版」）：最新版一旦跨线，就地自更新整体
-// 停用（即使同一条线里还挂着更早发布的补丁版）—— 否则用户会在一个已被新线取代的旧线
-// 上继续升级，且永远看不到「需要换包」的提示。
-
-// sameMinorLine 报告两个版本号是否属于同一条 major.minor 线（只看前两段数字，
-// 预发布后缀不影响）。任一侧解析不出两段数字时返回 false（判不了就不自更新）。
-func sameMinorLine(a, b string) bool {
-	an, _ := splitVersion(a)
-	bn, _ := splitVersion(b)
-	if len(an) < 2 || len(bn) < 2 {
-		return false
-	}
-	return an[0] == bn[0] && an[1] == bn[1]
-}
-
-// harnessSelfUpdateAllowed 报告某个 harness 版本能否由控制台就地更新（同一 major.minor 线）。
-func harnessSelfUpdateAllowed(version string) bool {
-	return sameMinorLine(harnessVersion, version)
-}
-
-// harnessUpdateTarget 判定「本地当前版本 → 仓库最新版本 latest」这次检测该走哪条路：
-//   - selfUpdate=true：允许就地下载安装（同线补丁版）；
-//   - storeUpdate=true：跨了 major/minor，只能更新 fpk 安装包；
-//   - 两者都 false：latest 不比本地新（没有更新）。
-func harnessUpdateTarget(latest string) (selfUpdate, storeUpdate bool) {
-	if latest == "" || compareVersion(latest, harnessVersion) <= 0 {
-		return false, false
-	}
-	if harnessSelfUpdateAllowed(latest) {
-		return true, false
-	}
-	return false, true
-}
-
-// errHarnessStoreUpdate 构造「该版本不能由控制台自更新，需更新 fpk 安装包」的用户错误。
-// 面向用户的文案走 code + 参数（见 uimsg.go），错误串本身会被 logError 打进日志，
-// 因此这里保持中文原文作为兜底（与 err_update_pack_gone 等既有 code 一致）。
-func errHarnessStoreUpdate(version string) error {
-	return uiErr("err_update_store_required",
-		"新版本 %s 需要更新 fpk 安装包（控制台只支持同一主要/次要版本线内的小版本自更新，如 1.4.3 → 1.4.9）",
-		"version", version)
-}
-
-// pickLatest 从全部 tag 中筛出指定前缀（harness- / dsh-）的 tag，按版本号排序取最新。
-func pickLatest(tags []string, prefix string) *tagInfo {
-	var matched []tagInfo
-	for _, t := range tags {
-		if !strings.HasPrefix(t, prefix) {
-			continue
-		}
-		ver := strings.TrimPrefix(t, prefix)
-		if ver == "" {
-			continue
-		}
-		// 只接受看起来像版本号的（以数字开头），避免误收 harness-notes 之类的 tag。
-		if !regexp.MustCompile(`^[0-9]`).MatchString(ver) {
-			continue
-		}
-		matched = append(matched, tagInfo{name: t, version: ver})
-	}
-	if len(matched) == 0 {
-		return nil
-	}
-	sort.SliceStable(matched, func(i, j int) bool {
-		return compareVersion(matched[i].version, matched[j].version) > 0
-	})
-	best := matched[0]
-	return &best
-}
-
-// --- tag 获取 ---
-
-// fetchGitTags 从仓库获取全部 tag 名。依次尝试：GitHub API -> tags.atom 订阅源
-// -> tags 页面 HTML。任一成功即返回。返回错误表示所有来源都失败。
-func (m *UpdateManager) fetchGitTags() ([]string, error) {
-	// 先取持久化配置中的代理地址可用性，决定是否经代理请求。
-	client := m.httpClientForUpdate()
-
-	// 1) GitHub API tags（最多 100 个/页，语义上按 ref 创建时间倒序，最新在前）。
-	if names, err := fetchTagsViaAPI(client); err == nil && len(names) > 0 {
-		return names, nil
-	}
-	// 2) tags.atom 订阅源（无需 API token，不受速率限制）。
-	if names, err := fetchTagsViaAtom(client); err == nil && len(names) > 0 {
-		return names, nil
-	}
-	// 3) tags 页面 HTML 兜底。
-	if names, err := fetchTagsViaHTML(client); err == nil && len(names) > 0 {
-		return names, nil
-	}
-	return nil, fmt.Errorf("无法获取 GitHub tag 列表（API/Atom/HTML 均失败）")
-}
-
-// fetchTagsViaAPI 从 GitHub REST API 的 tags 接口读取 tag 名。
-func fetchTagsViaAPI(client *http.Client) ([]string, error) {
-	var all []string
-	next := fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=100", updateRepoOwner, updateRepoName)
-	for next != "" {
-		req, err := http.NewRequest("GET", next, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("User-Agent", "harness-console")
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("GitHub API 返回 %d", resp.StatusCode)
-		}
-		var items []struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(body, &items); err != nil {
-			return nil, err
-		}
-		for _, it := range items {
-			all = append(all, it.Name)
-		}
-		// 分页：GitHub API 用响应头 Link 指示下一页。
-		next = ""
-		if link := resp.Header.Get("Link"); link != "" {
-			for _, seg := range strings.Split(link, ",") {
-				if strings.Contains(seg, `rel="next"`) {
-					if i := strings.IndexByte(seg, '<'); i >= 0 {
-						if j := strings.IndexByte(seg, '>'); j > i {
-							next = seg[i+1 : j]
-							break
-						}
-					}
-				}
-			}
-		}
-		if len(all) > 0 && next == "" {
-			break
-		}
-	}
-	return all, nil
-}
-
-// fetchTagsViaAtom 解析 tags.atom 订阅源，从条目链接里提取 tag 名。
-func fetchTagsViaAtom(client *http.Client) ([]string, error) {
-	feedURL := fmt.Sprintf("%s/tags.atom", updateRepoURL)
-	req, err := http.NewRequest("GET", feedURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "harness-console")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tags.atom 返回 %d", resp.StatusCode)
-	}
-	var names []string
-	// <id>tag:github.com,2008:Repository/<repoId>/<tagName></id> 或
-	// <link rel="alternate" href=".../releases/tag/<tagName>"/>
-	idRe := regexp.MustCompile(`<id>[^<]*Repository/[^/<]+/([^<]+)</id>`)
-	for _, m := range idRe.FindAllStringSubmatch(string(body), -1) {
-		names = append(names, m[1])
-	}
-	// 若 id 未匹配，退回用链接路径提取
-	if len(names) == 0 {
-		linkRe := regexp.MustCompile(`/releases/tag/([A-Za-z0-9._-]+)`)
-		for _, m := range linkRe.FindAllStringSubmatch(string(body), -1) {
-			names = append(names, m[1])
-		}
-	}
-	return names, nil
-}
-
-// fetchTagsViaHTML 解析 tags 页面 HTML，从 /releases/tag/<name> 链接提取 tag 名。
-func fetchTagsViaHTML(client *http.Client) ([]string, error) {
-	tagsURL := fmt.Sprintf("%s/tags", updateRepoURL)
-	req, err := http.NewRequest("GET", tagsURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "harness-console")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 6<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tags 页面返回 %d", resp.StatusCode)
-	}
-	re := regexp.MustCompile(`/releases/tag/([A-Za-z0-9._-]+)`)
-	seen := map[string]bool{}
-	var names []string
-	for _, m := range re.FindAllStringSubmatch(string(body), -1) {
-		n := m[1]
-		if !seen[n] {
-			seen[n] = true
-			names = append(names, n)
-		}
-	}
-	return names, nil
-}
-
 // releaseRepo 描述「更新日志取自哪个 GitHub 仓库」。
 type releaseRepo struct {
 	owner string
@@ -683,9 +368,6 @@ type releaseRepo struct {
 func (r releaseRepo) url() string {
 	return "https://github.com/" + r.owner + "/" + r.name
 }
-
-// harnessReleaseRepo 是本控制台的发布仓库（harness-* 两类发布资产在这里）。
-var harnessReleaseRepo = releaseRepo{owner: updateRepoOwner, name: updateRepoName}
 
 // dshReleaseRepo / marketReleaseRepo / advancedReleaseRepo 是 dsh 服务、插件市场与
 // 增强插件各自的**上游**发布仓库。三者与 npm 包一一对应（包元数据里的
@@ -847,7 +529,7 @@ type releaseNotes struct {
 }
 
 // notesIndex 按「npm 版本号」索引某个 GitHub 仓库的 release 更新日志（目前只有 dsh
-// 版本列表在用；插件市场的日志走 harness 那套「只取最新一版」的单 tag 拉取）。
+// 版本列表在用；受管插件的日志只取「要装的那一版」走单 tag 拉取，不用这个索引）。
 //
 // 为什么要按版本号索引、而不是每次都去问 GitHub：一个版本点一次就发一次请求，
 // 用户来回点几下就会撞上未认证 API 的限流（60 次/小时）。这里把**最近 perPage 个
@@ -1071,154 +753,52 @@ func stripNotesNav(block string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-// --- HTTP 客户端（代理回退） ---
+// --- HTTP 客户端 ---
 
-// httpClientForUpdate 构造用于「元数据拉取」（GitHub tag / release notes / npm
-// registry）的 HTTP 客户端：「代理更新」开关打开且代理地址探测可达时优先走代理，
-// 否则直连，带 60s 总超时。
-// 注意大文件下载不走它 —— 下载用 updateClients() 的「代理/直连」双通路 + 断点续传，
-// 且不设总超时（见该函数注释）。探测代理可用性通过一次轻量 HEAD 完成。
+// httpClientForUpdate 构造用于「元数据拉取」（GitHub release notes / npm registry）
+// 的 HTTP 客户端，带 60s 总超时。控制台不再下载更新包，因此没有「代理/直连双通路」
+// 那套逻辑，也不需要代理探测。
 func (m *UpdateManager) httpClientForUpdate() *http.Client {
-	cfg := GetConfig()
-	if cfg.ProxyUpdate && cfg.ProxyAddr != "" && proxyReachableFn(cfg.ProxyAddr) {
-		proxyURL, err := url.Parse(cfg.ProxyAddr)
-		if err == nil {
-			tr := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-			return &http.Client{Timeout: 60 * time.Second, Transport: tr}
-		}
-	}
 	return &http.Client{Timeout: 60 * time.Second}
-}
-
-// proxyReachable 探测某个代理地址是否可用：尝试经它访问 GitHub（超时 8 秒）。
-func proxyReachable(proxyAddr string) bool {
-	proxyURL, err := url.Parse(proxyAddr)
-	if err != nil {
-		return false
-	}
-	tr := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-	client := &http.Client{Timeout: 8 * time.Second, Transport: tr}
-	req, _ := http.NewRequest("HEAD", updateRepoURL, nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 500
 }
 
 // --- 检测主流程 ---
 
-// checkOnce 执行一次完整的版本检测：harness 走 GitHub tag，dsh 走 npm 镜像源的
-// dist-tags，插件市场与增强插件走 `dsh plugin list` + 镜像源的 dist-tags（四条独立链路）。
+// checkOnce 执行一次完整的版本检测：dsh 走 npm 镜像源的版本列表，插件市场与增强插件
+// 走 `dsh plugin list` + 镜像源的版本列表（三条独立链路）。
+// harness 控制台自身的版本不在这里检测：它只能通过更新 fpk 安装包升级。
 func (m *UpdateManager) checkOnce() {
-	tags, err := m.fetchGitTags()
-	now := time.Now()
-
-	if err != nil {
-		logWarn("[update] failed to fetch tags: %v", err)
-		m.mu.Lock()
-		// 只把 tag 拉取失败写进 harness：dsh 的版本来自 npm 镜像源、插件市场与增强插件
-		// 来自 `dsh plugin list` + 镜像源，与 GitHub tag 无关，把 tag 的错误盖上去只会
-		// 误导（它们的错误由 refreshVersions / refreshManagedPluginStatuses 各自负责写）。
-		if st, ok := m.statuses[updateKindHarness]; ok {
-			st.LatestVersion = ""
-			st.HasUpdate = false
-			st.StoreUpdate = false
-			st.StoreVersion = ""
-			st.CheckedAt = now
-			setErrFields(&st.Error, &st.ErrorRef, err)
-			st.ReleaseNotes = ""
-		}
-		m.mu.Unlock()
-		m.notify()
-		// 自动检测同时负责刷新版本列表缓存（force=true）：它就是「后台发现有没有新版本」
-		// 的那个时机，顺手把列表更新掉，之后用户打开弹窗看到的就是这一次的结果。
-		m.server.refreshVersions(true)
-		m.refreshManagedPluginStatuses()
-		return
-	}
-
-	h := pickLatest(tags, "harness-")
-
-	// 更新内容：只取最新 release 的正文（不含标题），失败时保持空串。
-	notesClient := m.httpClientForUpdate()
-	harnessNotes := ""
-	if h != nil {
-		harnessNotes = fetchReleaseNotes(notesClient, harnessReleaseRepo, h.name)
-	}
-
-	// 用 updateStatus 就地修改（而非 setStatus 全量替换），保留 Phase / ReadyToInstall
-	// 等“两阶段更新”的进行中状态，避免每小时自动检测把“已下载待安装”状态清掉。
-	m.updateStatus(updateKindHarness, func(st *UpdateStatus) {
-		st.Kind = updateKindHarness
-		st.LocalVersion = harnessVersion
-		st.CheckedAt = now
-		setErrFields(&st.Error, &st.ErrorRef, nil)
-		st.ReleaseNotes = harnessNotes
-		// 三个字段一起写：HasUpdate（可下载安装）与 StoreUpdate/StoreVersion（跨线，只能
-		// 换包）是互斥的两条结论，逐个分支清空才不会把上一轮的结论留在快照里。
-		st.LatestVersion = ""
-		st.HasUpdate = false
-		st.StoreUpdate = false
-		st.StoreVersion = ""
-		if h != nil {
-			self, store := harnessUpdateTarget(h.version)
-			st.LatestVersion = h.version
-			st.HasUpdate = self
-			st.StoreUpdate = store
-			if store {
-				st.StoreVersion = h.version
-			}
-		}
-	})
-
 	// dsh 服务版本：本地版本 = 选中的版本目录，最新版 = 版本列表里**版本号最高**的一版
 	// （不看 dist-tags，见 server.go 的 refreshDshStatus）。
 	// force=true：这一趟本来就是联网检测，顺带刷新版本列表缓存（见 refreshVersions 注释）。
 	m.server.refreshVersions(true)
 
-	// 插件市场 / 增强插件：版本来自 `dsh plugin list` + 镜像源，与 GitHub tag 是
+	// 插件市场 / 增强插件：版本来自 `dsh plugin list` + 镜像源，与 dsh 的版本列表是
 	// 两条独立链路。
 	m.refreshManagedPluginStatuses()
 
-	// harness、dsh、市场、增强插件各自一行，且只有**自己**的结论变化时才打印（四者的
-	// 「上次结论」分别记录）：四类更新是彼此独立的升级动作，合并成一行既难读、也没法
+	// dsh、市场、增强插件各自一行，且只有**自己**的结论变化时才打印（三者的
+	// 「上次结论」分别记录）：三类更新是彼此独立的升级动作，合并成一行既难读、也没法
 	// 按目标筛日志；而每小时自动检测若每次都输出同样的结论，只会把日志刷满。
-	hs := m.getStatus(updateKindHarness)
 	ds := m.getStatus(updateKindDsh)
 	ms := m.getStatus(updateKindMarket)
 	as := m.getStatus(updateKindAdvanced)
-	// changed 判断某目标的结论是否与上次不同（true 才允许输出该目标那一行）。
-	// store 也进签名：同一条「最新版」在「可就地更新」与「只能换包」之间切换时，
-	// 日志必须跟着变一句，否则会留下「有更新却没有任何下载入口」的现场。
-	changed := func(k updateKind, has, store bool, latest string) bool {
-		sig := fmt.Sprintf("%v/%v/%s", has, store, latest)
-		if m.lastCheckSig[k] == sig {
+	changed := func(k updateKind, latest string) bool {
+		if m.lastCheckSig[k] == latest {
 			return false
 		}
-		m.lastCheckSig[k] = sig
+		m.lastCheckSig[k] = latest
 		return true
 	}
 	m.checkLogMu.Lock()
 	if m.lastCheckSig == nil {
 		m.lastCheckSig = map[updateKind]string{}
 	}
-	showHarness := changed(updateKindHarness, hs.HasUpdate, hs.StoreUpdate, hs.LatestVersion)
-	showDsh := changed(updateKindDsh, ds.HasUpdate, false, ds.LatestVersion)
-	showMarket := changed(updateKindMarket, ms.HasUpdate, false, ms.LatestVersion)
-	showAdvanced := changed(updateKindAdvanced, as.HasUpdate, false, as.LatestVersion)
+	showDsh := changed(updateKindDsh, ds.LatestVersion)
+	showMarket := changed(updateKindMarket, ms.LatestVersion)
+	showAdvanced := changed(updateKindAdvanced, as.LatestVersion)
 	m.checkLogMu.Unlock()
 
-	if showHarness && hs.HasUpdate {
-		logInfo("%s update available: %s -> %s",
-			updateLogTag(updateKindHarness), harnessVersion, hs.LatestVersion)
-	}
-	// 跨 major/minor：控制台不下载、不安装，只提示需更新 fpk 安装包（见 harnessUpdateTarget）。
-	if showHarness && hs.StoreUpdate {
-		logInfo("%s update requires a new fpk package (major/minor change, self-update disabled): %s -> %s",
-			updateLogTag(updateKindHarness), harnessVersion, hs.StoreVersion)
-	}
 	if showDsh && ds.HasUpdate {
 		logInfo("%s update available: %s -> %s",
 			updateLogTag(updateKindDsh), ds.LocalVersion, ds.LatestVersion)
@@ -1267,213 +847,15 @@ func (m *UpdateManager) startAutoCheck() {
 	}()
 }
 
-// updateArch 返回用于文件名的架构后缀：x86 / arm。优先读 TRIM_SYS_ARCH，否则
-// 按 runtime.GOARCH 推断。
-func (m *UpdateManager) updateArch() string {
-	if a := os.Getenv("TRIM_SYS_ARCH"); a != "" {
-		al := strings.ToLower(a)
-		if strings.HasPrefix(al, "arm") {
-			return "arm"
-		}
-		return "x86"
-	}
-	switch runtime.GOARCH {
-	case "arm64", "arm":
-		return "arm"
-	default:
-		return "x86"
-	}
-}
+// --- 归档解压 / 打包 ---
 
-// assetURL 构造某个 kind/version/arch 对应的发布资源下载地址。
-//
-// 现在只有 harness 控制台从这里下载：dsh 服务与插件市场都不再用「预构建压缩包」这条
-// 通路 —— dsh 由控制台 `npm install` 官方包（见 server.go），市场由 `dsh plugin add`
-// 安装（见 market.go）。因此这里只有 harness 一种资产，形如
-// `harness-<版本>-<架构>.tar.gz`，且与同名 `.sha256` 成对（见 checksumURL）。
-func (m *UpdateManager) assetURL(k updateKind, version, arch string) string {
-	tag := string(k) + "-" + version
-	asset := fmt.Sprintf("harness-%s-%s.tar.gz", version, arch)
-	return fmt.Sprintf("%s/releases/download/%s/%s", updateRepoURL, tag, asset)
-}
-
-// assetURLFn 便于测试注入发布资产地址（生产实现见 assetURL）。
-var assetURLFn = func(m *UpdateManager, k updateKind, version, arch string) string {
-	return m.assetURL(k, version, arch)
-}
-
-// --- 发布资产的 sha256 校验 ---
-//
-// 构建流程（.github/workflows/harness-build.yaml / server-build.yaml）打包后额外生成同名
-// `.sha256` 文件（`sha256sum` 的输出：`<64 位十六进制>  <文件名>`），与压缩包一并上传到
-// Release。harness 控制台与 dsh 服务自我更新时一并取回它，用**实际下载到的字节**复核摘要：
-// 下载链路上的代理 / CDN 缓存损坏或替换了字节时当场失败（错误在更新弹窗里提示），
-// 而不是把坏包装上去。
-//
-// 两条刻意保留的性质：
-//   - **静默**：取校验文件、算摘要都不写更新状态、不进弹窗（状态里只有下载进度），
-//     只有失败才由下载 / 安装流程把错误推给前端（见 UpdateSection.vue 的失败提示）。
-//     校验成功不记日志 —— 那是正常路径，不是状态变化。
-//   - **不阻塞**：校验文件不存在（老版本发布资产没带）或取不到时只记一行 WARN，
-//     退化为不校验，更新照常进行。
-
-// sha256HexLen 是 sha256 十六进制摘要的字符数。
-const sha256HexLen = 64
-
-// maxChecksumBytes 是校验文件正文的读取上限（正常只有一行、几十字节）。
-const maxChecksumBytes = 4 << 10
-
-// errChecksumNotFound 表示发布资产里没有 `.sha256` 文件（HTTP 404）——多半是该版本发布在
-// 「一并上传校验文件」之前。只用来说清日志，不改变「跳过校验」的行为。
-var errChecksumNotFound = errors.New("发布资产中没有 sha256 校验文件")
-
-// checksumURL 返回发布资产对应的 sha256 校验文件地址（同目录、文件名加 `.sha256` 后缀）。
-func checksumURL(pkgURL string) string { return pkgURL + ".sha256" }
-
-// releaseChecksum 取回并解析发布资产的期望 sha256（64 位小写十六进制）。
-//
-// 返回空串表示「这次不校验」，只可能是：资产里没有 `.sha256`、请求全部失败、内容无法解析
-// —— 三种情况都只记一行 WARN 并让更新继续（见上面的策略说明）。
-// 用户取消 / 暂停导致的中断不在这里报错也不记日志：中断本身由随后的下载流程收尾。
-func (m *UpdateManager) releaseChecksum(k updateKind, pkgURL string, plan downloadPlan, ctrl *downloadControl) string {
-	raw := checksumURL(pkgURL)
-	text, err := m.fetchChecksumText(raw, plan, ctrl)
-	if err != nil {
-		if errors.Is(err, errUpdateCancelled) || errors.Is(err, errUpdatePaused) {
-			return ""
-		}
-		if errors.Is(err, errChecksumNotFound) {
-			logWarn("%s release has no .sha256 asset (%s), updating without integrity check", updateLogTag(k), raw)
-		} else {
-			logWarn("%s checksum file unavailable (%v), updating without integrity check", updateLogTag(k), err)
-		}
-		return ""
-	}
-	want, perr := parseChecksumFile(text)
-	if perr != nil {
-		logWarn("%s checksum file unreadable (%v): %s", updateLogTag(k), perr, raw)
-		return ""
-	}
-	return want
-}
-
-// fetchChecksumText 用与更新包相同的通路序列（代理 → 直连，各 2 次机会）取回校验文件正文。
-//
-// 刻意不复用 downloadToFile：那一套（Range 续传、进度、空闲看门狗、半成品落盘）是为几十 MB
-// 的包准备的，而校验文件只有几十字节 —— 这里只要「两条通路各 2 次 + 单次请求整体限时」。
-// ctrl 仍会检查：用户取消 / 暂停后不再继续重试。
-func (m *UpdateManager) fetchChecksumText(rawURL string, plan downloadPlan, ctrl *downloadControl) (string, error) {
-	const attemptsPerRoute = 2
-	var lastErr error
-	for _, route := range plan.routes {
-		for try := 1; try <= attemptsPerRoute; try++ {
-			if stop, reason := ctrlState(ctrl); stop {
-				return "", interruptedError(reason)
-			}
-			text, err := fetchTextOnce(route, rawURL)
-			if err == nil {
-				return text, nil
-			}
-			lastErr = fmt.Errorf("%s 第 %d 次: %w", route.label, try, err)
-			if try < attemptsPerRoute {
-				time.Sleep(updateRetryBackoff)
-			}
-		}
-	}
-	if lastErr == nil {
-		lastErr = errors.New("没有可用的下载通路")
-	}
-	return "", lastErr
-}
-
-// fetchTextOnce 单次拉取一个小文本文件。
-// 单次请求整体限时 updateHeaderTimeout（30 秒取几十字节足够），正文用 io.LimitReader 截断，
-// 避免异常响应把内存吃满。
-func fetchTextOnce(route updateRoute, rawURL string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), updateHeaderTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "harness-console")
-	resp, err := route.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return "", errChecksumNotFound
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumBytes))
-	if err != nil {
-		return "", err
-	}
-	return string(body), nil
-}
-
-// parseChecksumFile 从 `.sha256` 文件正文里取出摘要（64 位小写十六进制）。
-// 构建流程每个资产一个 `.sha256`（`sha256sum <资产>` 的输出，只有一行且带文件名），
-// 这里取第一个可识别的字段，不强求文件名与资产一致。
-func parseChecksumFile(text string) (string, error) {
-	for _, line := range strings.Split(text, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		sum := strings.ToLower(fields[0])
-		if len(sum) != sha256HexLen {
-			return "", fmt.Errorf("无法识别的摘要 %q", fields[0])
-		}
-		if _, err := hex.DecodeString(sum); err != nil {
-			return "", fmt.Errorf("摘要不是十六进制: %q", fields[0])
-		}
-		return sum, nil
-	}
-	return "", errors.New("校验文件为空")
-}
-
-// verifyFileSHA256 校验文件的实际 sha256 是否等于期望值（都是小写十六进制）。
-func verifyFileSHA256(path, want string) error {
-	sum, err := fileHash(path)
-	if err != nil {
-		return err
-	}
-	got := hex.EncodeToString(sum)
-	if !strings.EqualFold(got, want) {
-		return fmt.Errorf("摘要不匹配：期望 %s，实际 %s", want, got)
-	}
-	return nil
-}
-
-// fileHash 计算文件的 sha256 摘要（发布资产校验用）。
-func fileHash(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
-	}
-	return h.Sum(nil), nil
-}
-
-// extractArchive 解压一个下载下来的更新包到目标目录。
-//
-// 现在只剩 harness 控制台一条下载链路（`.tar.gz`），因此这里等价于 extractTarGz；
-// 保留这个入口是为了让「待安装包是什么格式」在安装路径上仍然只有一个判定点 ——
-// 将来若真的引入另一种格式（如 xz），改这里一处即可，不用去翻安装流程。
+// extractArchive 解压一个下载下来的备份包（当前只支持 .tar.gz）。
 func extractArchive(src, dest string) error {
 	return extractTarGz(src, dest)
 }
 
-// extractTarGz 解压 .tar.gz（.tgz 同理）到目标目录。用于 harness 发布资产与
-// dsh 数据备份的还原（`dsh-data-*`）。
+// extractTarGz 解压 .tar.gz（.tgz 同理）到目标目录，用于 dsh 数据备份的还原
+// （`dsh-data-*`）。
 func extractTarGz(src, dest string) error {
 	f, err := os.Open(src)
 	if err != nil {
@@ -1885,25 +1267,8 @@ func tgzCopy(dst io.Writer, src io.Reader, prog *tgzProgress) error {
 	}
 }
 
-// harnessBinPath 返回控制台二进制所在目录与路径。优先用 /var/apps/Harness/target，
-// 否则用运行时 TRIM_APPDEST。
-func (m *UpdateManager) harnessBinDir() string {
-	if fi, err := os.Stat("/var/apps/Harness/target/bin/harness"); err == nil && fi.Mode().IsRegular() {
-		return "/var/apps/Harness/target/bin"
-	}
-	app := m.renv.TRIMAppDest
-	if app != "" {
-		return filepath.Join(app, "bin")
-	}
-	return "/var/apps/Harness/target/bin"
-}
-
-// harnessBinDirFn 是「控制台二进制装在哪」的唯一入口（与 serverRootFor 同一模式）：
-// 变量形式便于测试注入临时目录，否则测试会去写真实的 /var/apps/Harness/target/bin/harness。
-var harnessBinDirFn = func(m *UpdateManager) string { return m.harnessBinDir() }
-
 // backupDir 返回备份产物的存放目录（统一数据目录下的 backup/，避免写入只读的
-// target）。pending/ 待安装包也挂在它下面（见 pendingDir）。
+// target）。
 func (m *UpdateManager) backupDir() string {
 	dir := filepath.Join(m.dataDir(), "backup")
 	os.MkdirAll(dir, 0755)
@@ -1919,30 +1284,7 @@ func (m *UpdateManager) dataDir() string {
 	return dataDirFromEnv()
 }
 
-// removeUnusedBackup 删除一次更新留下的备份包（收尾动作）。
-//
-// **现在没有任何回滚入口**：dsh 版本靠「已安装的版本目录」回退（另一个目录就是另一个
-// 版本，见 server.go），harness 自我更新靠 exec 换映像，插件市场靠 `dsh plugin add`。
-// 因此更新过程生成的备份包不会被任何代码读取，收尾时必须删掉，否则只会在 backup/ 里
-// 堆积垃圾（老版本留下的 harness-/server-/market- 包仍由每日清理按 30 天回收）。
-// 唯一要长期保留的是**用户主动**的 dsh 数据备份（`dsh-data-*`，见 BackupDshData）。
-// 新增更新分支时按同一条规则处理：没有回滚入口就不要留备份。
-//
-// 删除失败只记警告：「更新已经成功」不该因为备份目录不可写而变成失败。
-func (m *UpdateManager) removeUnusedBackup(path string, k updateKind) {
-	if path == "" {
-		return
-	}
-	if err := os.Remove(path); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			logWarn("%s failed to remove update backup %s: %v", updateLogTag(k), path, err)
-		}
-		return
-	}
-	logInfo("%s update backup removed: %s", updateLogTag(k), path)
-}
-
-// --- 下载取消与进度 ---
+// --- 状态推送 ---
 
 // updateStatus 修改并广播某个 kind 的状态（线程安全）。
 func (m *UpdateManager) updateStatus(k updateKind, f func(*UpdateStatus)) {
@@ -1954,964 +1296,6 @@ func (m *UpdateManager) updateStatus(k updateKind, f func(*UpdateStatus)) {
 	m.notify()
 }
 
-// setDownloadProgress 更新某个 kind 的下载进度状态并广播给前端（SSE）。
-func (m *UpdateManager) setDownloadProgress(k updateKind, downloading bool, pct int, downloaded, total int64) {
-	m.updateStatus(k, func(st *UpdateStatus) {
-		st.Downloading = downloading
-		st.DownloadPct = pct
-		st.DownloadedBytes = downloaded
-		st.TotalBytes = total
-	})
-}
-
-// pendingDir 返回存放“已下载待安装”更新包的目录（在持久备份目录下，跨两步保留）。
-func (m *UpdateManager) pendingDir() string {
-	dir := filepath.Join(m.backupDir(), "pending")
-	os.MkdirAll(dir, 0755)
-	return dir
-}
-
-// getPending 读取指定 kind 的待安装更新包（可能为 nil）。
-func (m *UpdateManager) getPending(k updateKind) *PendingUpdate {
-	m.pendingMu.Lock()
-	defer m.pendingMu.Unlock()
-	return m.pending[k]
-}
-
-// setPending 记录新的待安装更新包；若该 kind 已有旧包则清理旧文件。
-// 其它 kind 的待安装包不动 —— 它们是各自独立的「下载→安装」两步流程。
-func (m *UpdateManager) setPending(p *PendingUpdate) {
-	m.pendingMu.Lock()
-	defer m.pendingMu.Unlock()
-	// 懒初始化：部分单测直接构造 UpdateManager 字面量（不走 newUpdateManager）。
-	if m.pending == nil {
-		m.pending = make(map[updateKind]*PendingUpdate)
-	}
-	if old := m.pending[p.Kind]; old != nil && old.PkgPath != "" && old.PkgPath != p.PkgPath {
-		os.Remove(old.PkgPath)
-	}
-	m.pending[p.Kind] = p
-}
-
-// clearPending 清除指定 kind 的待安装更新包并删除其文件。
-// **只删这一个 kind**：早期实现是无条件清空唯一那个槽，于是「删除 harness 更新包」
-// 会把 dsh 刚下好的包一起删掉（dsh 的 UI 却仍显示已下载待安装）。
-func (m *UpdateManager) clearPending(k updateKind) {
-	m.pendingMu.Lock()
-	defer m.pendingMu.Unlock()
-	if p := m.pending[k]; p != nil && p.PkgPath != "" {
-		os.Remove(p.PkgPath)
-	}
-	delete(m.pending, k)
-}
-
-// clearOrphanPending 删除 pendingDir 下所有“无主”更新包文件。
-//
-// pending 只存在于内存，进程重启后即丢失：无论上次是安装前崩溃、安装过程被中断，
-// 还是 harness 自我更新（旧进程被 exec 换掉，内存中的 pending 随进程消亡），重启后
-// 磁盘上都会留下永远不会被 clearPending 回收的更新包。这些文件只用于“下载→安装”
-// 两步之间传递，没有任何跨重启续用价值（版本号变化后也无法复用），因此在启动时
-// 整目录清理，避免每次自我更新都残留一个更新包。
-//
-// 注意：只清 pendingDir，不触碰 backupDir —— 那里既有用户主动的 dsh 数据备份
-// （dsh-data-*，由用户自己管理），也有老版本留下的 harness-/server-/market- 包
-// （由 30 天清理任务回收）。
-func (m *UpdateManager) clearOrphanPending() {
-	dir := m.pendingDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	removed := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		full := filepath.Join(dir, e.Name())
-		if err := os.Remove(full); err == nil {
-			removed++
-			logInfo("%s removing leftover package: %s", updateLogTag(pendingKind(e.Name())), e.Name())
-		}
-	}
-	if removed > 0 {
-		logInfo("[update] removed %d leftover packages", removed)
-	}
-}
-
-// --- 下载中断控制 ---
-
-// downloadControl 承载一次下载的中断信号，并区分原因：取消要删半成品、暂停要留。
-//
-// 中断是「原因 + 打断当前请求」两件事：
-//   - reason 记录原因，io.Copy 的每次 Read 入口据此判定，并决定半成品的去留；
-//   - abort 用来**立刻打断阻塞中的那次读**。下载客户端刻意不设总超时（大包/慢网会被
-//     整体掐断），因此只靠 reason 是不够的：卡在 resp.Body.Read 里时根本不会去查
-//     reason，用户的「取消/暂停」会表现为毫无反应，一直挂到看门狗超时（甚至更久）。
-type downloadControl struct {
-	mu sync.Mutex
-	// reason 为空表示未被中断；"cancel" / "pause" 由前端按钮设置。
-	reason string
-	// abort 取消当前这次请求的 context（由 downloadOnce 建立 ctx 后注入、尝试结束时清掉）。
-	abort func()
-	// pausable 为 false 时忽略暂停请求（插件市场：包小、不走续传，暂停没有意义）。
-	pausable bool
-	// kind 只用于日志标签（取消/暂停时把日志归到对应目标下）。
-	kind updateKind
-}
-
-func newDownloadControl(pausable bool, kind updateKind) *downloadControl {
-	return &downloadControl{pausable: pausable, kind: kind}
-}
-
-// setAbort 登记「打断本次请求」的回调（nil 安全，便于 ctrl 为 nil 的调用点复用）。
-func (c *downloadControl) setAbort(fn func()) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.abort = fn
-	c.mu.Unlock()
-}
-
-// clearAbort 清除打断回调。同一份 downloadControl 的多次尝试（重试/续传）是**串行**的，
-// 所以无条件清空即可（不会误清下一次尝试刚登记的回调）。
-func (c *downloadControl) clearAbort() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.abort = nil
-	c.mu.Unlock()
-}
-
-// stop 记录中断原因并打断正在进行的请求（只生效一次：先到者为准）。
-// 返回 true 表示这次请求真的生效了（暂停在不支持暂停的下载上会被忽略）。
-func (c *downloadControl) stop(reason string) bool {
-	c.mu.Lock()
-	if reason == "pause" && !c.pausable {
-		c.mu.Unlock()
-		return false
-	}
-	if c.reason != "" {
-		c.mu.Unlock()
-		return false
-	}
-	c.reason = reason
-	abort := c.abort
-	c.mu.Unlock()
-	// 在锁外打断：取消 context 会连带唤醒阻塞在 Read 上的协程，不必占着这把锁。
-	if abort != nil {
-		abort()
-	}
-	return true
-}
-
-// stopped 返回是否被中断及原因。
-func (c *downloadControl) stopped() (bool, string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.reason != "", c.reason
-}
-
-// stopDownload 请求中断当前下载（reason 为 "cancel" 或 "pause"）。
-// 返回是否真的生效；没有进行中的下载、或该下载不支持暂停时返回 false。
-func (m *UpdateManager) stopDownload(reason string) bool {
-	m.ctrlMu.Lock()
-	c := m.ctrl
-	m.ctrlMu.Unlock()
-	if c == nil {
-		return false
-	}
-	if !c.stop(reason) {
-		return false
-	}
-	tag := updateLogTag(c.kind)
-	if reason == "pause" {
-		logInfo("%s download pause requested (partial file kept for resume)", tag)
-	} else {
-		logInfo("%s download cancel requested", tag)
-	}
-	return true
-}
-
-// CancelUpdate 请求取消当前正在进行的更新下载：半成品文件会被删除，状态回到空闲。
-func (m *UpdateManager) CancelUpdate() {
-	m.stopDownload("cancel")
-}
-
-// PauseUpdate 请求暂停当前正在进行的更新下载：半成品文件保留，可继续续传。
-// 返回是否真的命中了一个进行中的下载（没有则忽略）。
-func (m *UpdateManager) PauseUpdate() bool {
-	return m.stopDownload("pause")
-}
-
-// --- 下载策略（通路 / 续传 / 暂停） ---
-
-// updateRoute 是一条下载通路：要么走配置里的代理（仅当「代理更新」开关打开且地址可达），
-// 要么直连。
-// 按用户要求已移除 GitHub 加速源前缀分支 —— 只剩这两条。
-// label 是给用户看的通路名（中文，会进「下载失败」那类错误文案）；logLabel 是**日志**里的
-// 通路名（英文 direct / proxy）—— 日志一律英文（AGENTS 第 4 节规则 7），别把 label 打进日志。
-//
-// 日志侧统一走 logName()，不要在日志里直接写 logLabel：漏设时它会给出显式信号。
-type updateRoute struct {
-	label    string
-	logLabel string
-	client   *http.Client
-}
-
-// logName 返回日志里使用的通路名。**刻意不回退到中文 label** —— 漏设 logLabel 时
-// 日志里会出现 "unnamed"（而不是悄悄又冒出中文），一眼就能看出哪里没配对。
-func (r updateRoute) logName() string {
-	if r.logLabel != "" {
-		return r.logLabel
-	}
-	return "unnamed"
-}
-
-// downloadPlan 描述一次下载的策略：走哪些通路、能否续传、能否暂停、属于哪个目标。
-//
-// harness 控制台的发布资产（当前唯一的下载目标）：代理+直连各 2 次，支持 Range
-// 续传与暂停（包几十 MB、网络可能很差，值得这些复杂度）。
-type downloadPlan struct {
-	routes   []updateRoute
-	resume   bool
-	pausable bool
-	// kind 只用于日志标签：底层下载函数拿不到更新目标，靠它把日志归到
-	// [harness] 之下（见 updateLogTag）。
-	kind updateKind
-}
-
-// downloadPlanFor 给出下载策略（当前只有 harness 一种目标）。
-func (m *UpdateManager) downloadPlanFor(k updateKind) downloadPlan {
-	return downloadPlan{routes: updateRoutesFn(m), resume: true, pausable: true, kind: k}
-}
-
-// updateRoutesFn 便于测试注入发布资产的通路列表；生产实现见 updateClients。
-var updateRoutesFn = func(m *UpdateManager) []updateRoute { return m.updateClients() }
-
-// updateClients 构造发布资产的下载通路序列：代理（「代理更新」开关打开且地址可达时）
-// 在前，直连兜底 —— 开关关闭或代理地址探测不通时只剩直连，即「不通回退直连」。
-//
-// 说明两点与旧实现不同的地方：
-//   - 是否走代理只看 ProxyUpdate（设置页「代理更新」），不再跟随 ProxyEnabled
-//     （「代理dsh」只管 dsh 进程自身的出网，与更新无关）；
-//   - 不再使用 GitHub 加速源前缀（用户要求），包只能从原始地址取；
-//   - 下载客户端不设总超时（Timeout=0）：旧的 60 秒总超时会掐断大包/慢网，
-//     改为「建连 30s + 响应头 30s + 传输空闲 60s」三个更贴合实际的限制
-//     （见 updateTransport 与 downloadOnce 的看门狗）。
-func (m *UpdateManager) updateClients() []updateRoute {
-	routes := make([]updateRoute, 0, 2)
-	cfg := GetConfig()
-	if cfg.ProxyUpdate && cfg.ProxyAddr != "" && proxyReachableFn(cfg.ProxyAddr) {
-		if proxyURL, err := url.Parse(cfg.ProxyAddr); err == nil {
-			routes = append(routes, updateRoute{
-				label:    "代理 " + cfg.ProxyAddr,
-				logLabel: "proxy " + cfg.ProxyAddr,
-				client:   &http.Client{Transport: updateTransport(proxyURL)},
-			})
-		} else {
-			logWarn("[update] proxy address unparsable, direct download only: %v", err)
-		}
-	}
-	routes = append(routes, m.directRoute())
-	return routes
-}
-
-// directRoute 构造直连通路。
-func (m *UpdateManager) directRoute() updateRoute {
-	return updateRoute{label: "直连", logLabel: "direct", client: &http.Client{Transport: updateTransport(nil)}}
-}
-
-// updateTransport 构造下载用的 Transport：proxyURL 为 nil 表示直连。
-// 显式给建连/TLS/响应头超时，避免黑洞路由下无限等待（http.Transport 的零值
-// DialContext 是不带超时的 net.Dial）。
-func updateTransport(proxyURL *url.URL) *http.Transport {
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-	tr := &http.Transport{
-		DialContext:           dialer.DialContext,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: updateHeaderTimeout,
-		ExpectContinueTimeout: time.Second,
-	}
-	if proxyURL != nil {
-		tr.Proxy = http.ProxyURL(proxyURL)
-	}
-	return tr
-}
-
-// proxyReachableFn 便于测试注入代理可达性探测；生产实现见 proxyReachable。
-var proxyReachableFn = func(addr string) bool { return proxyReachable(addr) }
-
-// downloadToFile 下载 rawURL 到 dest，支持断点续传、暂停与重试。
-//
-// 重试策略（用户要求）：每条通路各 2 次机会，代理在前、直连在后；每次失败后保留
-// 已下载字节，下一次用 `Range: bytes=<offset>-` 续传，所以代理断在 60% 时直连会
-// 从 60% 接着下，而不是重来。
-//
-// 返回：(已下载总字节, 错误)。错误可能是：
-//   - errUpdateCancelled：用户取消（半成品已删除）；
-//   - errUpdatePaused：用户暂停（半成品保留，可续传）；
-//   - errUpdateNetworkFailed：所有通路与重试均失败（前端据此提示检查网络/代理）。
-//
-// progress 为节流后的进度回调；ctrl 为中断信号（可为 nil，表示不可中断）；
-// plan 决定通路与续传/暂停能力（见 downloadPlan）。
-func (m *UpdateManager) downloadToFile(rawURL, dest string, progress func(downloaded, total int64), ctrl *downloadControl, plan downloadPlan) (int64, error) {
-	const attemptsPerRoute = 2
-
-	var lastErr error
-	// networkOnly 记录「所有失败都是网络/服务端性质」。只要有任何一次败在本地磁盘
-	// （目录不可写、磁盘满），最终就不该提示用户「检查网络或代理」。
-	networkOnly := true
-	for _, route := range plan.routes {
-		for try := 1; try <= attemptsPerRoute; try++ {
-			if ctrl != nil {
-				if stop, reason := ctrl.stopped(); stop {
-					return finishInterruptedDownload(dest, reason, plan.kind)
-				}
-			}
-			if !plan.resume {
-				// 不支持续传（插件市场）：每次尝试都从零开始，清掉上一轮的残留，
-				// 避免半截文件与本次写入拼在一起。
-				os.Remove(dest)
-			}
-			offset := partialSize(dest)
-			logInfo("%s download attempt via %s %d/%d (offset %d bytes)", updateLogTag(plan.kind), route.logName(), try, attemptsPerRoute, offset)
-
-			n, err := m.downloadOnce(route, rawURL, dest, progress, ctrl, plan.resume)
-			if err == nil {
-				logInfo("%s download finished via %s (%d bytes)", updateLogTag(plan.kind), route.logName(), n)
-				return n, nil
-			}
-			if errors.Is(err, errUpdateCancelled) || errors.Is(err, errUpdatePaused) {
-				reason := "cancel"
-				if stop, r := ctrlState(ctrl); stop {
-					reason = r
-				}
-				return finishInterruptedDownload(dest, reason, plan.kind)
-			}
-			if isLocalIOError(err) {
-				networkOnly = false
-			}
-			lastErr = fmt.Errorf("%s 第 %d 次: %w", route.label, try, err)
-			logWarn("%s download attempt failed via %s (%d/%d): %v", updateLogTag(plan.kind), route.logName(), try, attemptsPerRoute, err)
-			if try < attemptsPerRoute {
-				// 短暂退避再试，避免对同一故障点连续猛打。
-				time.Sleep(updateRetryBackoff)
-			}
-		}
-	}
-	if !plan.resume {
-		// 不留半成品：这份下载的语义就是「要么完整拿到，要么什么都没有」。
-		os.Remove(dest)
-	}
-	if lastErr == nil {
-		lastErr = errors.New("没有可用的下载通路")
-	}
-	if !networkOnly {
-		// 败在本地磁盘（写不进去）：修网络没用，不要给「检查网络」的误导性提示。
-		return partialSize(dest), fmt.Errorf("下载失败（%d 条通路各 %d 次均未成功）: %v", len(plan.routes), attemptsPerRoute, lastErr)
-	}
-	return partialSize(dest), fmt.Errorf("%w（%d 条通路各 %d 次均未成功）: %v；请检查网络或代理设置后重试",
-		errUpdateNetworkFailed, len(plan.routes), attemptsPerRoute, lastErr)
-}
-
-// isLocalIOError 判断失败是否来自本地文件系统（而非网络/服务端）。
-// 用于决定要不要提示用户「检查网络或代理」。
-func isLocalIOError(err error) bool {
-	var pathErr *os.PathError
-	return errors.As(err, &pathErr)
-}
-
-// finishInterruptedDownload 处理被取消/暂停的下载：取消要删半成品，暂停要留。
-// k 只用于日志标签（把这条日志归到 harness / dsh / market 之下）。
-func finishInterruptedDownload(dest, reason string, k updateKind) (int64, error) {
-	if reason == "pause" {
-		n := partialSize(dest)
-		logInfo("%s download paused, partial file kept at %s (%d bytes)", updateLogTag(k), dest, n)
-		return n, errUpdatePaused
-	}
-	os.Remove(dest)
-	logInfo("%s download cancelled, partial file removed: %s", updateLogTag(k), dest)
-	return 0, errUpdateCancelled
-}
-
-// partialSize 返回已下载的字节数（文件不存在时为 0）。
-func partialSize(path string) int64 {
-	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
-		return fi.Size()
-	}
-	return 0
-}
-
-// removeOtherPendingFiles 清掉同 kind 的其它待安装/半成品文件（保留 keep 这一个）。
-//
-// 为什么需要：包名按 kind+版本固定，换版本后旧版本的半成品不会被自动覆盖，
-// 否则会在 pending 目录里无限堆积（只有启动时和“删除更新包”才清）。
-func (m *UpdateManager) removeOtherPendingFiles(k updateKind, keep string) {
-	dir := m.pendingDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	prefix := string(k) + "-"
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		full := filepath.Join(dir, name)
-		if filepath.Clean(full) == filepath.Clean(keep) {
-			continue
-		}
-		if err := os.Remove(full); err == nil {
-			logInfo("%s removing stale partial file: %s", updateLogTag(k), name)
-		}
-	}
-}
-
-// downloadOnce 执行一次下载尝试（resume 为真时可续传），返回「已下载总字节」。
-//
-// 续传规则（仅 resume=true，即 harness/dsh 的发布资产）：
-//   - 本地已有 offset 字节时带 Range 头；服务器回 206 则追加写入；
-//   - 服务器忽略 Range 回 200（有些代理/CDN 会剥掉 Range）→ 截断重写，本次从头下，
-//     保证文件内容一定是「从头开始的连续前缀」，不会拼出坏包；
-//   - 回 416（本地字节比远端还长）→ 删除半成品重新完整下载，绝不把坏文件当「已下完」。
-//
-// resume=false（插件市场）时：不发 Range、永远截断重写，任何中断都从零重来。
-//
-// 注意：resume=true 时任何错误路径都保留已写入的字节（先 Sync + Close），供下一次续传。
-func (m *UpdateManager) downloadOnce(route updateRoute, rawURL, dest string, progress func(int64, int64), ctrl *downloadControl, resume bool) (int64, error) {
-	offset := int64(0)
-	if resume {
-		offset = partialSize(dest)
-	}
-	req, err := http.NewRequest("GET", rawURL, nil)
-	if err != nil {
-		return offset, err
-	}
-	req.Header.Set("User-Agent", "harness-console")
-	if resume && offset > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
-	}
-
-	// 传输空闲看门狗：超过 updateIdleTimeout 没有任何新字节就中断本次尝试
-	// （HTTP 客户端本身不设总超时，否则大包/慢网会被整体掐断）。
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	idle := &idleWatchdog{timeout: updateIdleTimeout, onIdle: cancel}
-	defer idle.stop()
-	// 立刻武装看门狗，而不是等到读到第一个字节才武装（reset 只在读到数据时被调用）：
-	// 否则「响应头到达后对端不再给字节」这种半开连接没有任何超时能兜住 —— 请求会永久
-	// 阻塞，用户的取消/暂停也无效（那时还没登记 abort），整条更新链路要等重启进程。
-	// updateIdleTimeout(60s) > updateHeaderTimeout(30s)，因此它不会误伤正常的建连/握手。
-	idle.reset()
-	// 登记「立刻打断本次请求」的回调：取消/暂停要能唤醒阻塞中的 Read（见 downloadControl）。
-	ctrl.setAbort(cancel)
-	defer ctrl.clearAbort()
-	req = req.WithContext(ctx)
-
-	resp, err := route.client.Do(req)
-	if err != nil {
-		return offset, err
-	}
-	defer resp.Body.Close()
-
-	// 不续传时永远从头写：O_TRUNC 保证不会把上一轮的残留拼进来。
-	truncate := !resume
-	switch resp.StatusCode {
-	case http.StatusPartialContent:
-		// 206：按 Range 续传（只在 resume=true 时可能收到）
-		if !resume {
-			return 0, fmt.Errorf("服务器返回 206，但本次下载不支持续传")
-		}
-	case http.StatusOK:
-		// 200：服务器未按 Range 返回（或 offset 本来为 0）→ 从头写
-		offset = 0
-		truncate = true
-	case http.StatusRequestedRangeNotSatisfiable:
-		// 416：本地字节数与远端不一致（远端换了资产，或半成品本身损坏）。
-		// 删掉半成品让下一次尝试从头开始 —— 绝不能把这份坏文件当成「已下完」。
-		os.Remove(dest)
-		return 0, fmt.Errorf("远端拒绝了续传（本地 %d 字节与远端不匹配），已清理半成品", offset)
-	default:
-		return offset, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	total := int64(0)
-	if resp.ContentLength > 0 {
-		total = resp.ContentLength + offset
-	}
-	flags := os.O_CREATE | os.O_WRONLY
-	if truncate {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_APPEND
-	}
-	out, err := os.OpenFile(dest, flags, 0o644)
-	if err != nil {
-		return offset, err
-	}
-
-	reader := &downloadReader{
-		r:        resp.Body,
-		ctrl:     ctrl,
-		progress: progress,
-		offset:   offset,
-		total:    total,
-		idle:     idle,
-	}
-	n, copyErr := io.Copy(out, reader)
-	// 先落盘再关闭：半成品必须是「已完整写入的字节」，否则下次续传会从错误位置接。
-	syncErr := out.Sync()
-	closeErr := out.Close()
-	if copyErr == nil {
-		if syncErr != nil {
-			copyErr = syncErr
-		} else if closeErr != nil {
-			copyErr = closeErr
-		}
-	}
-	done := offset + n
-	if copyErr != nil {
-		if wasSet, reason := ctrlState(ctrl); wasSet {
-			return done, fmt.Errorf("%w", interruptedError(reason))
-		}
-		if idle.fired() {
-			return done, fmt.Errorf("传输空闲超过 %s（已下载 %d 字节）", updateIdleTimeout, done)
-		}
-		return done, copyErr
-	}
-	if progress != nil {
-		progress(done, total)
-	}
-	return done, nil
-}
-
-// ctrlState 安全读取中断状态（ctrl 为 nil 时视为未中断）。
-func ctrlState(ctrl *downloadControl) (bool, string) {
-	if ctrl == nil {
-		return false, ""
-	}
-	return ctrl.stopped()
-}
-
-// interruptedError 把中断原因映射为哨兵错误。
-func interruptedError(reason string) error {
-	if reason == "pause" {
-		return errUpdatePaused
-	}
-	return errUpdateCancelled
-}
-
-// idleWatchdog 是「传输空闲」看门狗：每次读取成功都重置截止时间，
-// 到点没有新字节则触发回调（取消本次请求）。
-type idleWatchdog struct {
-	timeout time.Duration
-	onIdle  func()
-	mu      sync.Mutex
-	timer   *time.Timer
-	dead    bool
-}
-
-func (w *idleWatchdog) reset() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.timer == nil {
-		w.timer = time.AfterFunc(w.timeout, func() {
-			w.mu.Lock()
-			w.dead = true
-			w.mu.Unlock()
-			w.onIdle()
-		})
-		return
-	}
-	w.timer.Reset(w.timeout)
-}
-
-func (w *idleWatchdog) stop() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
-	}
-}
-
-func (w *idleWatchdog) fired() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.dead
-}
-
-// downloadReader 包装响应体：检查中断信号、按节流上报进度（含续传偏移量），
-// 并在每次读到数据时重置空闲看门狗。
-type downloadReader struct {
-	r        io.Reader
-	ctrl     *downloadControl
-	progress func(downloaded, total int64)
-	offset   int64
-	total    int64
-	n        int64
-	lastAt   time.Time
-	lastN    int64
-	idle     *idleWatchdog
-}
-
-func (dr *downloadReader) Read(p []byte) (int, error) {
-	if stop, reason := ctrlState(dr.ctrl); stop {
-		return 0, interruptedError(reason)
-	}
-	n, err := dr.r.Read(p)
-	if n > 0 {
-		dr.n += int64(n)
-		if dr.idle != nil {
-			dr.idle.reset()
-		}
-		// 节流上报：每 500ms 或每 256KB 一次，避免高频回调刷爆 SSE。
-		if dr.progress != nil {
-			now := time.Now()
-			if now.Sub(dr.lastAt) >= 500*time.Millisecond || dr.n-drrLastN(dr) >= 256<<10 {
-				dr.progress(dr.offset+dr.n, dr.total)
-				dr.lastAt = now
-			}
-		}
-	}
-	return n, err
-}
-
-// drrLastN 返回自上次上报以来新增的字节数，并推进上报水位。
-// （把「读取水位」与「上次上报水位」分开，是因为进度回调必须报「含续传偏移」的总量，
-// 而节流判断只看本次尝试新增了多少。）
-func drrLastN(dr *downloadReader) int64 {
-	delta := dr.n - dr.lastN
-	dr.lastN = dr.n
-	return delta
-}
-
-// downloadUpdate 只下载更新包（第一步），不安装。可在下载过程中取消（CancelUpdate
-// 关闭 cancelCh 中断），下载成功后把包（harness 的 .tar.gz）放到持久的
-// “待安装”目录并记入 pending，
-// 推送 phase=downloaded / readyToInstall=true，等待用户在弹窗里点“安装”。
-// 返回错误表示下载失败或被用户取消。
-//
-// harness / dsh 的发布资产在这一步还会做 sha256 校验（见本文件「发布资产的 sha256 校验」
-// 一节）：校验文件与包一并取回、用实际字节复核，全程静默；失败（摘要不符）即报错。
-func (m *UpdateManager) downloadUpdate(k updateKind) error {
-	m.applying.Lock()
-	defer m.applying.Unlock()
-
-	// 只有 harness 控制台还走「下载压缩包 → 安装」这条两步链路：dsh 服务由控制台
-	// `npm install` 官方 npm 包（见 server.go），插件市场由 `dsh plugin add` 安装
-	// （见 market.go），两者都不再存在「可下载的更新包」。
-	if k != updateKindHarness {
-		return fmt.Errorf("%s 不再使用更新包，请在控制台对应的入口操作", k)
-	}
-	st := m.getStatus(k)
-	if st.LatestVersion == "" {
-		return fmt.Errorf("尚未获取到最新版本号，请先执行检查更新")
-	}
-	version := st.LatestVersion
-	// 只允许同 major.minor 线的补丁版：跨线的版本靠更新 fpk 安装包，一律不下这份字节。
-	// 这里再挡一次（handler 已经先挡）是因为「检测结论」与「点下载」之间隔着一段时间，
-	// 期间每小时自动检测可能刚好把最新版换成跨线的那一版。
-	if !harnessSelfUpdateAllowed(version) {
-		return errHarnessStoreUpdate(version)
-	}
-	rawURL := assetURLFn(m, k, version, m.updateArch())
-	// wantSHA 是发布资产期望的 sha256（空表示这次不校验，见 releaseChecksum）。
-	var wantSHA string
-	arch := m.updateArch()
-	logInfo("%s downloading %s (arch=%s)", updateLogTag(k), version, arch)
-
-	// 下载策略：代理+直连各 2 次 + Range 续传 + 可暂停（见 downloadPlanFor）。
-	plan := m.downloadPlanFor(k)
-
-	// 目标包持久保存在“待安装”目录，跨“下载→安装”两步保留。
-	// 文件名刻意「按 kind+版本固定」（不再带时间戳）：这样暂停后继续、或失败后重试
-	// 都能命中同一个半成品，断点续传才有意义（市场不续传，另有清理）。
-	// 同 kind 其它版本的残留会被清掉 —— 包括旧控制台留下的 `.tar.gz` 半成品
-	// （扩展名随下载地址变，见 pendingPkgName）。
-	pkgPath := filepath.Join(m.pendingDir(), pendingPkgName(k, version))
-	m.removeOtherPendingFiles(k, pkgPath)
-	resumeBytes := int64(0)
-	if plan.resume {
-		resumeBytes = partialSize(pkgPath)
-	}
-
-	// 建立中断信号：取消（删半成品）与暂停（留半成品）都经它传达。
-	// 不支持暂停的下载（市场）会直接忽略暂停请求。
-	ctrl := newDownloadControl(plan.pausable, k)
-	m.ctrlMu.Lock()
-	m.ctrl = ctrl
-	m.ctrlMu.Unlock()
-	defer func() {
-		m.ctrlMu.Lock()
-		m.ctrl = nil
-		m.ctrlMu.Unlock()
-	}()
-	// 进入“下载中”状态。注意保留续传起点：从 0 开始会让进度条瞬间回跳。
-	m.updateStatus(k, func(s *UpdateStatus) {
-		s.Phase = "downloading"
-		s.ReadyToInstall = false
-		s.Cancelled = false
-		s.Paused = false
-		setErrFields(&s.Error, &s.ErrorRef, nil)
-		s.ErrorHint = ""
-		s.Downloading = true
-		s.DownloadedBytes = resumeBytes
-		s.DownloadPct = 0
-		if resumeBytes == 0 {
-			s.TotalBytes = 0
-		}
-	})
-
-	progress := func(downloaded, total int64) {
-		pct := 0
-		if total > 0 {
-			pct = int(downloaded * 100 / total)
-			if pct > 100 {
-				pct = 100
-			}
-		}
-		m.setDownloadProgress(k, true, pct, downloaded, total)
-	}
-	// 发布资产：先把 sha256 校验文件一并取回（取不到即退化为不校验，只记 WARN），
-	// 包下载完成后用实际字节复核摘要。校验全程静默，只有失败才进弹窗。
-	wantSHA = m.releaseChecksum(k, rawURL, plan, ctrl)
-	// GitHub release 资产：代理 / 直连各 2 次机会，支持 Range 续传。
-	n, err := m.downloadToFile(rawURL, pkgPath, progress, ctrl, plan)
-	if err == nil && wantSHA != "" {
-		if verr := verifyFileSHA256(pkgPath, wantSHA); verr != nil {
-			// 摘要不符：这份字节既不可信、也不该留着续传（会从错误位置接，或直接撞
-			// 416 白跑一轮），删掉让用户“重新下载”时从零开始。
-			os.Remove(pkgPath)
-			err = fmt.Errorf("更新包 sha256 校验失败（%v）：下载到的字节与校验文件不一致，可能被中间代理或缓存损坏，请重新下载", verr)
-		}
-	}
-
-	switch {
-	case err == nil:
-		// 继续走下面的“已下载待安装”。
-	case errors.Is(err, errUpdatePaused):
-		// 暂停（只有可暂停的下载会走到这里）：半成品保留（downloadToFile 已处理），
-		// 状态置 paused 供前端显示“继续下载”。
-		m.updateStatus(k, func(s *UpdateStatus) {
-			s.Phase = "paused"
-			s.Paused = true
-			s.Downloading = false
-			s.DownloadedBytes = partialSize(pkgPath)
-			setErrFields(&s.Error, &s.ErrorRef, nil)
-			s.ErrorHint = ""
-			s.Cancelled = false
-		})
-		logInfo("%s download paused after %d bytes", updateLogTag(k), partialSize(pkgPath))
-		return err
-	case errors.Is(err, errUpdateCancelled):
-		m.updateStatus(k, func(s *UpdateStatus) {
-			s.Phase = ""
-			s.Paused = false
-			s.Downloading = false
-			s.DownloadPct = 0
-			s.DownloadedBytes = 0
-			s.TotalBytes = 0
-			// 取消是中性结果，**结构化**地告诉前端（Cancelled 标记 + code）：
-			// 前端不要再靠「错误文案里有没有『用户取消』」来判断（语言一换就失效）。
-			s.Cancelled = true
-			setErrFields(&s.Error, &s.ErrorRef, uiErr("err_update_cancelled", "用户取消更新"))
-		})
-		return fmt.Errorf("download cancelled by user: %w", err)
-	default:
-		// 失败：失败位置之后会被删掉续传文件，保留半成品等下次重试。
-		m.updateStatus(k, func(s *UpdateStatus) {
-			s.Phase = ""
-			s.Paused = false
-			s.Downloading = false
-			if errors.Is(err, errUpdateNetworkFailed) {
-				s.ErrorHint = "network"
-			}
-		})
-		return fmt.Errorf("下载失败: %w", err)
-	}
-
-	// 下载成功：记录待安装包，推送“已下载待安装”。
-	m.setPending(&PendingUpdate{Kind: k, Version: version, PkgPath: pkgPath, SHA256: wantSHA})
-	m.updateStatus(k, func(s *UpdateStatus) {
-		s.Phase = "downloaded"
-		s.ReadyToInstall = true
-		s.Downloading = false
-		s.Paused = false
-		s.ErrorHint = ""
-		s.DownloadPct = 100
-		s.DownloadedBytes = n
-		if s.TotalBytes <= 0 {
-			s.TotalBytes = n
-		}
-		setErrFields(&s.Error, &s.ErrorRef, nil)
-		s.Cancelled = false
-	})
-	logInfo("%s package downloaded to %s (%d bytes), waiting to install", updateLogTag(k), pkgPath, n)
-	return nil
-}
-
-// installUpdate 安装已下载的更新包（第二步，目前只有 harness 控制台）。
-// 读取 pending 中的包（.tar.gz）解压后调用 installHarness 执行“备份→替换→重启”。
-// 安装阶段耗时短、不可取消。
-// 安装失败时保留 pending（用户可重试安装）；成功路径先清 pending 再 exec 换新映像，
-// 本函数永不返回（故不会有 phase=done 推送，前端以轮询新进程版本号判定就绪 ——
-// 见 UpdateSection.vue 的 startHarnessReadyPoll）。
-func (m *UpdateManager) installUpdate(k updateKind) error {
-	m.applying.Lock()
-	defer m.applying.Unlock()
-
-	if k != updateKindHarness {
-		return fmt.Errorf("%s 不再使用更新包，请在控制台对应的入口操作", k)
-	}
-	p := m.getPending(k)
-	if p == nil {
-		return fmt.Errorf("尚未下载 %s 更新包，请先下载更新", k)
-	}
-	// 安装侧也复核一次线：待安装包是「下载 → 安装」两步之间留在盘上的东西，安装是
-	// 最后一道闸门 —— 跨 major/minor 的包绝不能被装上去（那会得到「二进制换了、平台
-	// 侧没换」的半升级状态）。正常情况下下载侧已挡住，这里只作兜底。
-	if !harnessSelfUpdateAllowed(p.Version) {
-		return errHarnessStoreUpdate(p.Version)
-	}
-	if _, err := os.Stat(p.PkgPath); err != nil {
-		m.clearPending(k)
-		return fmt.Errorf("待安装更新包已不存在（可能被清理），请重新下载: %w", err)
-	}
-	// 下载阶段校验过摘要的在安装前再复核一次：这份文件要跨「下载 → 安装」两步留在盘上，
-	// 期间可能被截断或替换。校验静默执行，不通过才把错误推给弹窗；文件保留，用户可
-	// 删除后重新下载。
-	if p.SHA256 != "" {
-		if err := verifyFileSHA256(p.PkgPath, p.SHA256); err != nil {
-			m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
-			return fmt.Errorf("待安装的更新包 sha256 校验失败（文件可能已损坏或被替换），请删除更新包后重新下载: %v", err)
-		}
-	}
-	logInfo("%s installing %s", updateLogTag(k), p.Version)
-
-	// 进入“安装中”状态。
-	m.updateStatus(k, func(s *UpdateStatus) {
-		s.Phase = "installing"
-		s.ReadyToInstall = false
-		s.Cancelled = false
-		setErrFields(&s.Error, &s.ErrorRef, nil)
-	})
-
-	// 解压到临时目录。
-	tmpDir, err := os.MkdirTemp("", "harness-install-"+string(k)+"-"+time.Now().Format("20060102150405"))
-	if err != nil {
-		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
-		return fmt.Errorf("创建临时目录失败: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-	if err := extractArchive(p.PkgPath, tmpDir); err != nil {
-		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
-		return fmt.Errorf("解压更新包失败: %w", err)
-	}
-
-	installErr := m.installHarness(tmpDir)
-	if installErr != nil {
-		// 安装失败：保留待安装包（可重试安装），退出“安装中”状态。
-		m.updateStatus(k, func(s *UpdateStatus) { s.Phase = "" })
-		return installErr
-	}
-	return nil
-}
-
-// installHarness 完成 harness 自我更新的最后阶段：替换二进制、停止 dsh、清理
-// 更新包与临时目录，最后 exec 换新映像。
-//
-// 关键顺序约束：syscall.Exec 会**立刻**用新程序替换当前进程映像，本进程此后的
-// 任何语句都不会再执行（defer 也不会触发）。因此删除待安装更新包、清理解压临时
-// 目录这些收尾动作必须在 exec 之前显式完成，否则它们会永久残留——这正是此前
-// 「harness 自我更新后更新包未被删除」的原因。
-//
-// 返回值：exec 成功则永不返回；exec 失败返回错误（此时新二进制已就位，重启后生效）。
-func (m *UpdateManager) installHarness(extractDir string) error {
-	// 停在最前面：这条路径随后会替换自身二进制并停 dsh，若此时有插件操作在跑，
-	// 同样会把它的 profile 写锁一起带走。被拒绝时什么都不动，更新包保留（可重试）。
-	if err := m.replaceBusyGuard("更新 harness 控制台"); err != nil {
-		return err
-	}
-	newBin, err := m.applyHarness(extractDir)
-	if err != nil {
-		return err
-	}
-	// 收尾（必须在 exec 之前）：删除待安装更新包、清理解压临时目录。
-	m.clearPending(updateKindHarness)
-	os.RemoveAll(extractDir)
-	logInfo("[harness] package and temp dir cleaned, restarting console")
-	m.restartHarness(newBin)
-	// 仅当 exec 失败时才会走到这里。
-	return fmt.Errorf("重启控制台失败（新二进制已就位，手动重启后生效）")
-}
-
-// DiscardUpdate 删除已下载待安装的更新包（前端“删除更新包”按钮触发），
-// 并把该 kind 重置为初始待更新状态（phase 清空、readyToInstall=false、
-// 取消/错误/暂停标记清空），前端按钮回到“下载更新”。
-//
-// 同时清理该 kind 的「半成品」（暂停或失败留下的续传文件）—— 用户点“删除更新包”
-// 的语义就是「这些字节我不要了」，否则下次下载会莫名从中间继续。
-func (m *UpdateManager) DiscardUpdate(k updateKind) error {
-	m.applying.Lock()
-	defer m.applying.Unlock()
-
-	m.removeOtherPendingFiles(k, "")
-	// 只处理这个 kind 的待安装包（clearPending 也只删这一份文件）：另一种 kind 的
-	// 待安装包不受影响 —— 用户点的是这个弹窗里的「删除更新包」。
-	hadPending := m.getPending(k) != nil
-	if hadPending {
-		m.clearPending(k)
-	}
-	m.updateStatus(k, func(s *UpdateStatus) {
-		s.Phase = ""
-		s.Paused = false
-		s.ReadyToInstall = false
-		s.Downloading = false
-		s.DownloadPct = 0
-		s.DownloadedBytes = 0
-		s.TotalBytes = 0
-		setErrFields(&s.Error, &s.ErrorRef, nil)
-		s.ErrorHint = ""
-		s.Cancelled = false
-	})
-	if hadPending {
-		logInfo("%s removed pending package", updateLogTag(k))
-	}
-	return nil
-}
-
-// findExecutable 在解压目录中递归查找可执行文件 harness。
-func findExecutable(dir, name string) (string, error) {
-	var found string
-	filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !info.IsDir() && info.Mode().IsRegular() && filepath.Base(p) == name {
-			found = p
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if found == "" {
-		return "", fmt.Errorf("解压包中未找到 %s 二进制", name)
-	}
-	return found, nil
-}
-
-// ensureNodePtyAfterBoot 在 dsh 启动后校正 node-pty 的 profile 配置（固定版本 overrides
-// 与旧 patch 清理，见 install.go）；需要重建依赖时停/起一次 dsh 让它生效。返回是否重启过。
-//
-// 为什么需要它：主流程的那次校正发生在「控制台启动且 dsh 启动成功」之后。而「未安装 →
-// 下载 → 切换」这条路径上，控制台启动时 dsh 根本没起来（`boot.go` 的 not-installed），
-// 校正就没跑；切换成功后补这一次，避免用户装的插件按未固定的 node-pty 1.1.0 解析。
 func (m *UpdateManager) ensureNodePtyAfterBoot() bool {
 	if m.renv == nil {
 		return false
@@ -2936,90 +1320,6 @@ func (m *UpdateManager) ensureNodePtyAfterBoot() bool {
 	return true
 }
 
-// applyHarness 备份并替换控制台二进制，并停止 dsh 服务；**不**重启控制台，而是
-// 返回新二进制路径交由调用方在收尾之后 exec。
-//
-// 备份包只在本函数内存在：现在没有任何回滚入口，替换结束（无论成败）就删掉它
-// （见 removeUnusedBackup）。
-//
-// 之所以不在此处直接 exec：exec 会立刻用新映像替换当前进程，本进程的内存状态与
-// 后续语句（清理更新包、清理解压目录）全部消失——这正是此前“自我更新后更新包
-// 残留”的原因。所有收尾动作必须由调用方在 exec 之前完成。
-func (m *UpdateManager) applyHarness(extractDir string) (string, error) {
-	newBin, err := findExecutable(extractDir, "harness")
-	if err != nil {
-		return "", err
-	}
-	binDir := harnessBinDirFn(m)
-	dest := filepath.Join(binDir, "harness")
-
-	// 先做备份（压缩当前二进制）。用独立 staging 目录避免打包整棵临时树。
-	// 这里**不用 defer** 清理 staging 目录：本函数返回后调用方还会 exec 换新映像，
-	// 但 exec 只发生在 applyHarness 返回之后，因此只要在返回前显式删除即可；
-	// 用 defer 反而会在 exec 后永不执行、留下 /tmp 残留（此前 /tmp/backup-stage
-	// 就是这样攒下来的）。目录名带随机后缀，避免并发/残留目录互相干扰。
-	stage, err := os.MkdirTemp("", "harness-backup-stage-")
-	if err != nil {
-		return "", fmt.Errorf("创建备份临时目录失败: %w", err)
-	}
-	backupName := fmt.Sprintf("harness-%s-%s.tar.gz", harnessVersion, time.Now().Format("20060102150405"))
-	backupPath := filepath.Join(m.backupDir(), backupName)
-	if err := copyFile(dest, filepath.Join(stage, "harness")); err != nil {
-		os.RemoveAll(stage)
-		return "", fmt.Errorf("读取当前二进制用于备份失败: %w", err)
-	}
-	if err := tgzDir(stage, backupPath); err != nil {
-		os.RemoveAll(stage)
-		return "", fmt.Errorf("备份当前二进制失败: %w", err)
-	}
-	os.RemoveAll(stage)
-	logInfo("[harness] backed up current binary to %s", backupPath)
-	// 现在没有任何回滚入口，这份备份包不会被任何路径读取：替换成功或失败都删掉，
-	// 别在 backup/ 里留垃圾。这里用 defer 是安全的 —— 本函数是正常返回的，
-	// 「永不返回」的是随后 exec 的 installHarness。
-	defer m.removeUnusedBackup(backupPath, updateKindHarness)
-
-	// 替换二进制：在目标同目录下先写入临时文件，再 atomic rename 替换。
-	// 不能用 copyFile 直接覆盖（os.Create 截断正在运行的可执行文件会报 "text file busy"）；
-	// 临时文件必须与 dest 同目录（否则跨文件系统的 rename 会报 "invalid cross-device link"）。
-	tmpNew := filepath.Join(binDir, ".harness.new")
-	if err := copyFile(newBin, tmpNew); err != nil {
-		os.Remove(tmpNew)
-		return "", fmt.Errorf("复制新二进制失败: %w", err)
-	}
-	if err := os.Rename(tmpNew, dest); err != nil {
-		os.Remove(tmpNew)
-		return "", fmt.Errorf("替换二进制失败: %w", err)
-	}
-	if err := os.Chmod(dest, 0755); err != nil {
-		logError("[harness] chmod failed: %v", err)
-	}
-
-	// 先停止 dsh 服务，再由新二进制 exec 覆盖当前进程镜像（保持同一 PID，fnOS 监管不失效）。
-	// 新 harness 进程启动时会自动拉起 dsh，先停止可避免端口冲突或残留进程。
-	logInfo("[harness] stopping dsh service")
-	if err := m.dsh.Stop(); err != nil {
-		logError("[harness] failed to stop dsh: %v", err)
-	}
-	logInfo("[harness] binary updated, waiting to restart console")
-	return dest, nil
-}
-
-// restartHarness 用新二进制替换当前进程镜像。正常情况下不会返回（进程映像已被
-// 替换）；仅当 exec 失败时返回，此时进程仍以旧镜像运行。
-func (m *UpdateManager) restartHarness(newBin string) {
-	// 让当前进程以新二进制重新 exec；若失败，记录错误（进程仍以旧镜像运行）。
-	env := os.Environ()
-	argv := append([]string{newBin}, os.Args[1:]...)
-	if err := syscall.Exec(newBin, argv, env); err != nil {
-		logError("[harness] failed to restart console: %v", err)
-	}
-}
-
-// startDshCaptured 启动 dsh 并异步捕获新的一次性访问 token、换取 dsh 会话 cookie。
-// 每次 dsh 启动都会生成新的 token（Start 也会重置旧 token 与会话 cookie），因此
-// 数据恢复 / 切换 dsh 版本 / 市场变更后重启等“重启 dsh 后必须刷新会话凭据”的路径都
-// 必须经过本方法，否则反代仍携带旧 cookie（或空 cookie）转发到新启动的 dsh，会话失效。
 func (m *UpdateManager) startDshCaptured() error {
 	if err := m.dsh.Start(); err != nil {
 		return err
@@ -3029,34 +1329,10 @@ func (m *UpdateManager) startDshCaptured() error {
 	return nil
 }
 
-// copyFile 复制单个文件（保留权限）。
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	if info, err := os.Stat(src); err == nil {
-		os.Chmod(dst, info.Mode())
-	}
-	return nil
-}
-
 // --- dsh 数据备份：列表 / 删除 / 恢复 ---
 
-// backupTimestampRe 匹配新格式备份文件名尾部的 -<YYYYMMDDHHMMSS>.tar.gz 时间戳后缀。
-// 新格式：<类型>-<版本号>-<时间戳>.tar.gz，如 harness-1.0.0-20260903154421.tar.gz。
+// backupTimestampRe 匹配备份文件名尾部的 -<YYYYMMDDHHMMSS>.tar.gz 时间戳后缀。
+// 格式：<类型>-<版本号>-<时间戳>.tar.gz，如 dsh-data-0.2.1-20260903154421.tar.gz。
 var backupTimestampRe = regexp.MustCompile(`-\d{14}\.tar\.gz$`)
 
 // isBackupFile 判断文件名是否为指定类型的备份文件（以 prefix 开头，且以 -<14位时间戳>.tar.gz 结尾）。
@@ -3554,8 +1830,8 @@ func (m *UpdateManager) BackupDir() string {
 }
 
 // startDailyCleanup 启动每天一次的备份清理任务。
-// 扫描 backupDir 中的 harness-<版本>-<时间戳>.tar.gz 与 server-<版本>-<时间戳>.tar.gz，
-// 超过 30 天的自动删除；dsh-data-<版本>-<时间戳>.tar.gz 不在自动清理范围内。
+// 扫描 backupDir 中老版本更新留下的 harness-/server-/market- 备份包，超过 30 天的
+// 自动删除；dsh-data-<版本>-<时间戳>.tar.gz 不在自动清理范围内。
 func (m *UpdateManager) startDailyCleanup() {
 	go func() {
 		// 启动后延迟 30 秒执行首次清理
@@ -3571,8 +1847,8 @@ func (m *UpdateManager) startDailyCleanup() {
 
 // runBackupCleanup 扫描 backupDir，删除超过 30 天的 harness/server/market 备份文件。
 //
-// 新版本安装成功时不再留下 harness / market 备份（见 removeUnusedBackup），这里的
-// harness-*/market-* 主要是给「老版本安装留下的包」和「失败路径的残留」兜底。
+// 控制台不再产生这些更新包备份（自我更新与发布资产下载已整体移除），这里只为
+// 「老版本安装留下的包」兜底，避免它们永久占着磁盘。
 func (m *UpdateManager) runBackupCleanup() {
 	dir := m.backupDir()
 	entries, err := os.ReadDir(dir)

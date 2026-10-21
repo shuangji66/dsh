@@ -197,16 +197,6 @@ async function onProxyToggle() {
   toast.show(t('saved_proxy_restart'), 'info', 5000)
 }
 
-// 「代理更新」开关：即时保存。它只影响 harness 自身的更新探测与下载，不需要重启 dsh。
-async function onProxyUpdateToggle() {
-  if (!(await store.save(false))) return
-  toast.show(
-    config.value.proxyUpdate ? t('settings_proxy_update_on') : t('settings_proxy_update_off'),
-    'success',
-    5000
-  )
-}
-
 // 堆内存「自动设置」开关：即时保存，提示需重启 dsh 生效。
 // 注意：保存被拒时（手动值 < MEM_LIMIT_MIN_MB）**不把开关回滚**，与鉴权开关的处理
 // 相反 —— 回滚成「自动设置」会让上面的输入框重新禁用，用户就没法把值改大了。
@@ -451,7 +441,7 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ④ 代理：「代理dsh」与「代理harness更新」两个开关 + 共用的代理地址（任一开启时显示）。
+      <!-- ④ 代理：「代理dsh」开关 + 代理地址（开启时显示）。
            位置在「登录鉴权」之后、「快捷访问」之前（用户指定的卡片顺序）。 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
@@ -468,20 +458,9 @@ async function onAuthToggle() {
         </label>
         <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_enable_proxy_hint') }}</p>
 
-        <!-- 代理harness更新：只控制 **harness 控制台自身** 的更新是否先从代理走
-             （探测不通自动回退直连），与上面的「代理dsh」相互独立。
+        <!-- 代理地址：只在「代理dsh」开启时显示。
              dsh 版本安装与插件市场安装都是直连 npm 镜像源，不受这个开关影响。 -->
-        <label class="mt-4 flex items-center justify-between gap-3 cursor-pointer select-none">
-          <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_proxy_update') }}</span>
-          <span class="relative inline-flex items-center flex-shrink-0">
-            <input type="checkbox" v-model="config.proxyUpdate" class="sr-only peer" @change="onProxyUpdateToggle">
-            <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
-            <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
-          </span>
-        </label>
-
-        <!-- 代理地址：两个开关共用，任一开启即显示 -->
-        <div v-if="config.proxyEnabled || config.proxyUpdate" class="mt-4">
+        <div v-if="config.proxyEnabled" class="mt-4">
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
           <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" @change="onPendingChange" />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>

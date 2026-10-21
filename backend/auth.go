@@ -163,7 +163,7 @@ func setProcessSecret(v string) {
 }
 
 // sessionSecret 读取（首次调用则生成并落盘）与访问密码无关的随机会话密钥。
-// 落盘保证控制台重启/自更新后已登录的浏览器不会被踢出登录；密钥文件不可写/不可读时
+// 落盘保证控制台重启后已登录的浏览器不会被踢出登录；密钥文件不可写/不可读时
 // 退化为进程内共享的随机密钥（功能一致，重启后需重新登录一次）。
 func (a *Auth) sessionSecret() string {
 	a.secretMu.Lock()

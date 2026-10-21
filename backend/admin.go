@@ -1249,19 +1249,6 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleUpdateCheck(w, r)
 		case p == "/api/market/info" && r.Method == http.MethodGet:
 			m.handleMarketInfo(w, r)
-		case p == "/api/update/apply" && r.Method == http.MethodPost:
-			// 兼容旧版一键更新：更新已拆分为“下载”与“安装”两步。
-			writeErrU(w, http.StatusGone, "err_update_two_step", "更新已拆分为“下载”与“安装”两步，请使用 /api/update/download 与 /api/update/install")
-		case p == "/api/update/download" && r.Method == http.MethodPost:
-			m.handleUpdateDownload(w, r)
-		case p == "/api/update/install" && r.Method == http.MethodPost:
-			m.handleUpdateInstall(w, r)
-		case p == "/api/update/discard" && r.Method == http.MethodPost:
-			m.handleDiscardUpdate(w, r)
-		case p == "/api/update/cancel" && r.Method == http.MethodPost:
-			m.handleCancelUpdate(w, r)
-		case p == "/api/update/pause" && r.Method == http.MethodPost:
-			m.handlePauseUpdate(w, r)
 		case p == "/api/update/stream" && r.Method == http.MethodGet:
 			m.handleUpdateStream(w, r)
 		// dsh 服务多版本：列表 / 下载安装 / 取消 / 删除 / 切换（见 server.go）
@@ -1404,7 +1391,7 @@ func (m *AdminMux) handleConvertPath(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"ok": true, "result": result})
 }
 
-// --- 自我更新 API ---
+// --- 版本检测 API ---
 
 // dshBusySnapshot 汇总「是否有插件操作正在进行」，供停止/重启 dsh 的确认弹窗提示。
 //
@@ -1447,21 +1434,11 @@ func (m *AdminMux) busyGuard(action string) error {
 	return m.update.replaceBusyGuard(action)
 }
 
-// validUpdateKind 校验更新类型：harness（控制台）/ dsh（服务）/ market（插件市场）。
-func validUpdateKind(k updateKind) bool {
-	switch k {
-	case updateKindHarness, updateKindDsh, updateKindMarket:
-		return true
-	}
-	return false
-}
-
-// handleUpdateStatus 返回当前 harness、dsh、插件市场与增强插件的版本检测结果。
+// handleUpdateStatus 返回当前 dsh、插件市场与增强插件的版本检测结果。
 func (m *AdminMux) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	snap := m.update.snapshot()
 	writeJSON(w, map[string]interface{}{
 		"ok":       true,
-		"harness":  snap[updateKindHarness],
 		"dsh":      snap[updateKindDsh],
 		"market":   snap[updateKindMarket],
 		"advanced": snap[updateKindAdvanced],
@@ -1472,8 +1449,8 @@ func (m *AdminMux) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateCheck 执行一次手动检查更新（“检查更新”按钮）并返回最新结果。
 // 同步执行：前端在拿到响应后即可依据结果提示“暂无更新”或显示红点。
-// 四条链路一起检测：harness 走 GitHub Release tag，dsh、插件市场与增强插件走 npm
-// 镜像源（见 server.go 的 refreshVersions 与 market.go 的 refreshManagedPluginStatuses）。
+// 三条链路一起检测：dsh、插件市场与增强插件都走 npm 镜像源（见 server.go 的
+// refreshVersions 与 market.go 的 refreshManagedPluginStatuses）。
 //
 // 手动检查一律强制刷新 dsh 版本列表：用户点「检查更新」时看到的是缓存里那份
 // 可能已过期的列表（TTL 5 分钟），而 dsh 的发布节奏很快。
@@ -1485,7 +1462,6 @@ func (m *AdminMux) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	snap := m.update.snapshot()
 	writeJSON(w, map[string]interface{}{
 		"ok":       true,
-		"harness":  snap[updateKindHarness],
 		"dsh":      snap[updateKindDsh],
 		"market":   snap[updateKindMarket],
 		"advanced": snap[updateKindAdvanced],
@@ -1499,178 +1475,12 @@ func (m *AdminMux) handleMarketInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, m.update.marketInfo())
 }
 
-// handleUpdateDownload 执行“下载更新包”（第一步，可取消）。body 中 kind 为 harness
-// （dsh 与市场都不再下载压缩包，见 server.go / market.go）。
-// 下载进度经 SSE 推送；下载成功后推送 phase=downloaded，弹窗按钮变为“安装”。
-func (m *AdminMux) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Kind string `json:"kind"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
-		return
-	}
-	kind := updateKind(body.Kind)
-	if !validUpdateKind(kind) {
-		writeErrU(w, http.StatusBadRequest, "err_kind_invalid", "kind 必须为 harness、dsh 或 market")
-		return
-	}
-	// 只有 harness 还有「下载更新包」这一步：dsh 走 npm install（server.go）、
-	// 市场走 dsh plugin add（market.go），同步拒绝比让前端先看到进度再收到错误更清楚。
-	if kind != updateKindHarness {
-		writeErrU(w, http.StatusGone, "err_update_pack_gone", "%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", "kind", string(kind))
-		return
-	}
-	// 控制台只自更新同一 major.minor 线内的补丁版（1.4.3 → 1.4.9）。跨主要/次要版本
-	// （1.4 → 1.5、1.x → 2.x）要提示需更新 fpk 安装包，**同步**拒绝：既不下字节，
-	// 也不把这轮状态改成 downloading（否则弹窗会先闪一下进度条再变成错误）。
-	if v := m.update.getStatus(kind).LatestVersion; v != "" && !harnessSelfUpdateAllowed(v) {
-		writeErrOperation(w, errHarnessStoreUpdate(v))
-		return
-	}
-	// 同步置“下载中”状态：在返回 HTTP 响应前后端状态即已就绪（downloadUpdate
-	// goroutine 内还会再置一次，幂等）。这样即使 SSE 首帧丢失或断线重连，
-	// 前端拿到的快照也必然是 downloading，不会退回空闲页。
-	m.update.updateStatus(kind, func(st *UpdateStatus) {
-		st.Phase = "downloading"
-		st.ReadyToInstall = false
-		st.Cancelled = false
-		st.Paused = false
-		setErrFields(&st.Error, &st.ErrorRef, nil)
-		st.ErrorHint = ""
-		st.Downloading = true
-		st.DownloadPct = 0
-		// 不在这里清零 DownloadedBytes / TotalBytes：续传时立即清零会让进度条
-		// 瞬间回跳到 0（downloadUpdate 会用真实的续传起点覆盖这两个值）。
-	})
-	// 后台执行，避免占用请求线程；进度/完成/取消/暂停均经 SSE 推送。
-	go func() {
-		if err := m.update.downloadUpdate(kind); err != nil {
-			logError("%s download failed: %v", updateLogTag(kind), err)
-			// 暂停/取消都不是「错误」，downloadUpdate 已经推送了对应状态，
-			// 这里不要再覆盖成失败（否则弹窗会同时显示“已暂停”和一条红色错误）。
-			if errors.Is(err, errUpdatePaused) || errors.Is(err, errUpdateCancelled) {
-				return
-			}
-			// 在原有状态副本上追加失败信息推送，避免版本号、hasUpdate 等
-			// 字段被冲掉（失败后前端仍可再次发起下载续传）。
-			upd := m.update
-			st := upd.getStatus(kind)
-			st.CheckedAt = time.Now()
-			setErrFields(&st.Error, &st.ErrorRef, err)
-			st.Cancelled = false
-			st.Paused = false
-			st.Downloading = false
-			st.Phase = ""
-			if errors.Is(err, errUpdateNetworkFailed) {
-				st.ErrorHint = "network"
-			}
-			upd.setStatus(kind, &st)
-		}
-		// 下载成功：downloadUpdate 已推送 phase=downloaded / readyToInstall=true。
-	}()
-	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始下载更新"})
-}
-
-// handleUpdateInstall 执行“安装更新包”（第二步，不可取消）。读取待安装包并执行
-// 备份替换+重启。目前只有 harness 控制台会走到这里（dsh 版本与插件市场都不再下载
-// 压缩包，见 server.go / market.go）。harness：安装成功即 exec 换新进程，由新进程
-// 重启 dsh，前端靠轮询新进程版本号兜底。
-func (m *AdminMux) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Kind string `json:"kind"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
-		return
-	}
-	kind := updateKind(body.Kind)
-	if !validUpdateKind(kind) {
-		writeErrU(w, http.StatusBadRequest, "err_kind_invalid", "kind 必须为 harness、dsh 或 market")
-		return
-	}
-	if kind != updateKindHarness {
-		writeErrU(w, http.StatusGone, "err_update_pack_gone", "%s 不再使用更新包：dsh 服务请在版本列表里下载/切换，插件市场请在市场弹窗里安装/更新", "kind", string(kind))
-		return
-	}
-	go func() {
-		if err := m.update.installUpdate(kind); err != nil {
-			logError("%s install failed: %v", updateLogTag(kind), err)
-			upd := m.update
-			st := upd.getStatus(kind)
-			st.CheckedAt = time.Now()
-			setErrFields(&st.Error, &st.ErrorRef, err)
-			st.Cancelled = false
-			st.Phase = ""
-			upd.setStatus(kind, &st)
-			return
-		}
-		logInfo("%s installed", updateLogTag(kind))
-		// 成功后立即推送成功状态：完成更新解压/备份替换动作即可结束弹窗，
-		// 不等待 dsh 启动成功（会话 cookie 由异步 captureDshSession 换取）。
-		// 用 updateStatus 就地修改（而非 getStatus+setStatus 副本替换），
-		// 避免与并发的版本检测（refreshVersions / refreshDshStatus）互相覆盖。
-		// 注意：phase 必须置为非空的 "done"——Phase 字段带 json omitempty，
-		// 空字符串会被省略导致前端收不到（前端以 phase==="done" 为成功信号关弹窗）。
-		// 另外：kind==harness 时安装成功会 exec 换新映像，本 goroutine 随之消亡，
-		// 这段推送**实际不会执行**（只有 exec 失败、以错误返回时才会走上面的错误
-		// 分支）；harness 的成功判定由前端轮询新进程版本号完成。
-		upd := m.update
-		upd.updateStatus(kind, func(st *UpdateStatus) {
-			st.CheckedAt = time.Now()
-			setErrFields(&st.Error, &st.ErrorRef, nil)
-			st.HasUpdate = false
-			st.Phase = "done"
-			st.ReadyToInstall = false
-			st.LocalVersion = harnessVersion
-			st.LatestVersion = harnessVersion
-		})
-	}()
-	writeJSON(w, map[string]interface{}{"ok": true, "started": true, "kind": kind, "msg": "已开始安装更新"})
-}
-
-// handleCancelUpdate 取消正在进行的更新下载（下载完成后取消无效，忽略即可）。
-// 取消会删除半成品文件；若想保留已下载字节下次续传，用 /api/update/pause。
-func (m *AdminMux) handleCancelUpdate(w http.ResponseWriter, r *http.Request) {
-	m.update.CancelUpdate()
-	writeJSON(w, map[string]interface{}{"ok": true, "cancelled": true})
-}
-
-// handlePauseUpdate 暂停正在进行的更新下载：半成品保留，状态置 paused，
-// 前端可再次调 /api/update/download 从已下载字节续传（Range）。
-func (m *AdminMux) handlePauseUpdate(w http.ResponseWriter, r *http.Request) {
-	paused := m.update.PauseUpdate()
-	writeJSON(w, map[string]interface{}{"ok": true, "paused": paused})
-}
-
-// handleDiscardUpdate 删除已下载待安装的更新包，重置为待更新状态（前端“删除更新包”按钮）。
-func (m *AdminMux) handleDiscardUpdate(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Kind string `json:"kind"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
-		return
-	}
-	kind := updateKind(body.Kind)
-	if !validUpdateKind(kind) {
-		writeErrU(w, http.StatusBadRequest, "err_kind_invalid", "kind 必须为 harness、dsh 或 market")
-		return
-	}
-	if err := m.update.DiscardUpdate(kind); err != nil {
-		writeErr(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, map[string]interface{}{"ok": true, "discarded": true})
-}
-
-// handleUpdateStream 通过 SSE 推送更新检测结果变更（harness / dsh / 市场 / 增强插件四份）。
+// handleUpdateStream 通过 SSE 推送更新检测结果变更（dsh / 市场 / 增强插件三份）。
 func (m *AdminMux) handleUpdateStream(w http.ResponseWriter, r *http.Request) {
 	setSSEHeaders(w)
 	ctx := r.Context()
 	send := func() {
 		sseSend(w, "update", sseJSON(map[string]interface{}{
-			"harness":  m.update.getStatus(updateKindHarness),
 			"dsh":      m.update.getStatus(updateKindDsh),
 			"market":   m.update.getStatus(updateKindMarket),
 			"advanced": m.update.getStatus(updateKindAdvanced),

@@ -1,16 +1,13 @@
 package main
 
-// update_backup_test.go —— 「哪些备份要留、哪些收尾即删」的回归测试。
+// update_backup_test.go —— dsh 数据备份测试的公共夹具。
 //
-// 规则（见 update.go 的 removeUnusedBackup）：**只有用户主动的 dsh-data-* 要留存**。
-// harness 控制台、dsh 服务版本、插件市场都没有「回滚/回退」入口（换版本 = 换一个已
-// 安装的版本目录，见 server.go），因此这些路径产生的备份包收尾时必须删掉，否则只会
-// 在 backup/ 里堆积。
+// 规则：**只有用户主动的 dsh-data-* 要留存**（见 BackupDshData）；备份目录里的
+// .part 半成品会被清理（见 update_backup_progress_test.go）。
 
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 )
 
@@ -43,49 +40,5 @@ func newBackupTestManager(t *testing.T, home, appDest string) *UpdateManager {
 		renv:     renv,
 		dsh:      &DshManager{renv: renv, logf: logAt, cmd: &exec.Cmd{Process: &os.Process{Pid: 0}}},
 		statuses: map[updateKind]*UpdateStatus{updateKindDsh: {Kind: updateKindDsh}},
-	}
-}
-
-// 更新 harness 成功后：新二进制就位，且 backup/ 里不留 harness- 备份包。
-func TestApplyHarnessLeavesNoBackup(t *testing.T) {
-	t.Setenv("TRIM_PKGVAR", t.TempDir())
-
-	appDest := t.TempDir()
-	binDir := filepath.Join(appDest, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "harness"), []byte("old-binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	extractDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(extractDir, "harness"), []byte("new-binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	prevCfg := GetConfig()
-	// DshPort 取一个不会出现在任何进程 argv 里的端口：applyHarness 会调 dsh.Stop()，
-	// 而 Stop 在「没有受管进程」时按 `--port <DshPort>` 扫 /proc 找 dsh。
-	initConfig(&AppConfig{DshPort: 65535})
-	prevBinDir := harnessBinDirFn
-	harnessBinDirFn = func(*UpdateManager) string { return binDir }
-	t.Cleanup(func() {
-		initConfig(&prevCfg)
-		harnessBinDirFn = prevBinDir
-	})
-
-	m := newBackupTestManager(t, t.TempDir(), appDest)
-	got, err := m.applyHarness(extractDir)
-	if err != nil {
-		t.Fatalf("applyHarness 失败: %v", err)
-	}
-	if want := filepath.Join(binDir, "harness"); got != want {
-		t.Fatalf("返回的新二进制路径 = %q, want %q", got, want)
-	}
-	if raw, err := os.ReadFile(got); err != nil || string(raw) != "new-binary" {
-		t.Fatalf("替换后的二进制内容 = %q err=%v, want new-binary", raw, err)
-	}
-	if names := listBackupNames(t, m, "harness-"); len(names) != 0 {
-		t.Fatalf("harness 备份应当被删除（没有回滚入口），实得 %v", names)
 	}
 }

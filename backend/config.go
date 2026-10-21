@@ -20,18 +20,12 @@ type AppConfig struct {
 	// 它只决定 harness 自身监听哪个端口对外提供 dsh 界面，不再是
 	// 「dsh 端口」的对偶（dsh 只监听本机，由反代转发），因此改端口只影响反代自身：
 	// 保存后立即重新绑定（见 rebindProxyPort），不需要重启 dsh 或控制台。
-	ProxyPort    int    `json:"proxyPort"`
+	ProxyPort int `json:"proxyPort"`
+	// ProxyEnabled 是设置页「代理dsh」开关：只影响 dsh 进程自身的出网环境变量
+	// （见 dsh.go 的 buildEnv）。控制台自身的版本检测与 dsh 版本安装、插件安装都
+	// 直连各自的数据源，不走这个代理。
 	ProxyEnabled bool   `json:"proxyEnabled"`
 	ProxyAddr    string `json:"proxyAddr"`
-	// ProxyUpdate 是「代理harness更新」开关：只影响 **harness 控制台自身**的更新
-	// （GitHub Release 的版本探测 + 发布资产下载），默认关闭。
-	// 与 ProxyEnabled（设置页「代理dsh」，只管 dsh 进程自身的出网）相互独立：
-	//   - 开 ProxyEnabled、关 ProxyUpdate：dsh 走代理，harness 更新走直连；
-	//   - 开 ProxyUpdate：harness 更新优先走代理地址，**代理地址探测不通照旧回退直连**
-	//     （见 updateClients 的「代理在前、直连在后」与 downloadToFile 的逐通路重试）。
-	// **dsh 版本安装与插件安装不走代理**：两者都直连设置页选中的 npm 镜像源
-	// （见 server.go 的 selectedNpmMirror / market.go），与这个开关无关。
-	ProxyUpdate bool `json:"proxyUpdate"`
 	// NpmRegistry 是设置页「npm 镜像源」选中的源，取值是 npmMirrors 里的 Slug
 	// （aliyun / tencent / huawei / npmjs），默认 aliyun（阿里云）。
 	//
@@ -91,7 +85,7 @@ type AppConfig struct {
 // 注意：反向代理端口不在其中 —— 它是可变的用户配置（AppConfig.ProxyPort）。
 //
 // 所有「后端自己产生的文件」都统一落在 DataDir 下（见 dataDirFromEnv）：
-// 日志、PID、配置文件、会话密钥、终端会话镜像、更新备份与待安装包。单独设置这些
+// 日志、PID、配置文件、会话密钥、终端会话镜像与 dsh 数据备份。单独设置这些
 // 路径的环境变量（HARNESS_CONFIG_FILE / HARNESS_LOG_FILE / HARNESS_PID_FILE /
 // HARNESS_DSH_PID_FILE / HARNESS_QUICK_CMDS_FILE / HARNESS_SESSION_DIR /
 // HARNESS_SESSION_KEY_FILE）已移除，要换位置就换 DataDir。
@@ -233,9 +227,7 @@ func defaultConfig() AppConfig {
 		DshPort:      dshPort,
 		ProxyPort:    defaultProxyPort,
 		ProxyEnabled: proxyEnabled,
-		// 代理更新（ProxyUpdate）没有环境变量播种，默认关闭，只能由设置页开关打开。
-		ProxyUpdate: false,
-		ProxyAddr:   envOr("proxy_addr", "http://127.0.0.1:7890"),
+		ProxyAddr:    envOr("proxy_addr", "http://127.0.0.1:7890"),
 		// npm 镜像源默认阿里云（见 server.go 的 npmMirror / npmRegistryDefault）。
 		NpmRegistry:  npmRegistryDefault,
 		AuthEnabled:  authEnabled,

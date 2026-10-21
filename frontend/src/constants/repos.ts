@@ -1,15 +1,12 @@
-// src/constants/repos.ts —— 各更新目标在上游的 GitHub 仓库（全站唯一一份）。
+// src/constants/repos.ts —— 各组件外链的 GitHub 仓库（全站唯一一份）。
 //
-// 四个更新目标分处三个弹窗组件（harness 在 UpdateSection.vue、dsh 服务在
-// ServerVersionsDialog.vue、插件市场与增强插件共用 ManagedPluginDialog.vue），每个弹窗
-// 标题右侧都有一个指向对应仓库的裸图标外链（见 GithubIconLink.vue）。仓库地址以前只写在
-// UpdateSection.vue 里，拆出独立弹窗后另外几个就没有图标可挂 —— 因此集中到这里，
-// 新增目标时补一行即可。
+// 三个更新弹窗组件（dsh 服务在 ServerVersionsDialog.vue、插件市场与增强插件共用
+// ManagedPluginDialog.vue）标题右侧都有指向对应仓库的裸图标外链；概览页「关于」弹窗
+// 也用它指向本仓库（见 GithubIconLink.vue）。集中到这里，新增目标时补一行即可。
 //
-// 注意：这是**展示用**的常量，与后端更新链路用的仓库地址（update.go 的 updateRepoURL）
-// 无关，不要把它们互相替换。
+// 注意：这是**展示用**的常量，与后端更新链路里的仓库地址无关，不要互相替换。
 export const repoSlugs = {
-  // harness 控制台：本仓库（harness-* 与 dsh-* 两类发布资产都在这里）
+  // 本仓库（控制台与增强插件的源码；概览页「关于」弹窗用它）
   harness: 'shuangji66/dsh',
   // dsh 服务：上游 DeepSeek Harness 仓库
   dsh: 'deepseek-ai/deepseek-harness',

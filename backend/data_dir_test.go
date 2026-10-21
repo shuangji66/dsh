@@ -2,8 +2,8 @@ package main
 
 // data_dir_test.go —— 统一数据目录（HARNESS_DATA_DIR，默认 $TRIM_PKGVAR）的契约。
 //
-// 后端自己产生的文件（日志 / PID / 配置 / 会话密钥 / 终端会话镜像 / 更新备份与待安装
-// 包）全部由这一个目录派生；单独设置某个文件路径的环境变量已移除。这组测试把这两条
+// 后端自己产生的文件（日志 / PID / 配置 / 会话密钥 / 终端会话镜像 / dsh 数据备份）
+// 全部由这一个目录派生；单独设置某个文件路径的环境变量已移除。这组测试把这两条
 // 锁死：改回「各读各的环境变量」或让某条路径漂出数据目录都会红。
 
 import (
@@ -61,16 +61,13 @@ func TestRuntimeEnvDerivesPathsFromDataDir(t *testing.T) {
 		}
 	}
 
-	// 不走 RuntimeEnv 的三处解析（会话密钥、更新备份、待安装包）同样落在数据目录下。
+	// 不走 RuntimeEnv 的两处解析（会话密钥、备份目录）同样落在数据目录下。
 	if p := sessionKeyFileFn(); p != filepath.Join(dataDir, "session.key") {
 		t.Errorf("sessionKeyFileFn() = %q, want %q", p, filepath.Join(dataDir, "session.key"))
 	}
 	upd := &UpdateManager{renv: &renv}
 	if p := upd.backupDir(); p != filepath.Join(dataDir, "backup") {
 		t.Errorf("backupDir() = %q, want %q", p, filepath.Join(dataDir, "backup"))
-	}
-	if p := upd.pendingDir(); p != filepath.Join(dataDir, "backup", "pending") {
-		t.Errorf("pendingDir() = %q, want %q", p, filepath.Join(dataDir, "backup", "pending"))
 	}
 }
 

@@ -45,8 +45,8 @@
   保持纯文本，由控制台日志页按 `[LEVEL]` 着色。连续重复的同一行只记一次、序列结束时补
   汇总行（`flushLog` 在退出前补出）。dsh 子进程的 stdout/stderr 经 `dshLogWriter`
   **原样透传**（不加前缀、不做抑制），终端固定黄色。更新类日志按**目标分开打标签**：
-  `[harness]`（控制台）/ `[dsh]`（dsh 服务）/ `[market]`（插件市场）/ `[advanced]`
-  （增强插件 dsh-fnos-advanced），见 `updateLogTag` —— 新增加更新步骤时不要再用通用的
+  `[dsh]`（dsh 服务）/ `[market]`（插件市场）/ `[advanced]`（增强插件
+  dsh-fnos-advanced），见 `updateLogTag` —— 新增加更新步骤时不要再用通用的
   `[update]`，否则升级日志又会混在一起。
 - `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled/not-installed`）
   + `proxyState`。反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
@@ -86,21 +86,15 @@
   （单挂载点）**：`Session.attach` 换主并返回被顶掉的旧连接，handler 用 `kickDetached`
   通知旧端（`\x1b]detached\x07` + close 4001）；被顶掉端的输入 / 尺寸请求在服务端丢弃
   （`writeInput` / `resize` 走 `isOwner`，非操作端返回 `errNotOwner`，上层静默忽略）。
-- `update.go` — **harness 控制台自更新**（版本检测、下载、备份与替换）+ dsh 数据备份/
-  恢复；`harnessVersion` 由 `-ldflags -X` 注入。**自更新只允许同一 major.minor 线内的
-  小版本（1.4.3 → 1.4.9）**：跨主要/次要版本（1.4 → 1.5、1.x → 2.x）一律拒绝下载与安装，
-  改为提示需更新 fpk 安装包 —— `HasUpdate` 的语义就是「有可就地下载安装的
-  更新」，跨线走 `StoreUpdate`/`StoreVersion`，判定入口是 `harnessUpdateTarget` /
-  `sameMinorLine`，见规则 14。下载只有「发布资产」一种策略
-  （`downloadPlanFor`）：代理+直连各 2 次 + HTTP Range 断点续传 + 暂停/取消；
-  **是否「先从代理更新」由 `AppConfig.ProxyUpdate`（设置页「代理harness更新」）控制** ——
-  代理地址探测不通或代理通路失败回退直连；它与 `ProxyEnabled`（设置页「代理dsh」，
-  只管 dsh 进程自身的出网环境变量，见 `dsh.go` 的 `buildEnv`）**相互独立**，别混用。
-  **备份包留不留只看有没有回滚入口**：现在只有用户主动的 `dsh-data-*` 要留存，
-  harness 的备份包收尾即删（`removeUnusedBackup`）—— 新增更新分支时没有回滚入口就别把
-  包留在盘上。发布资产还要过 **sha256 校验**（`releaseChecksum` / `verifyFileSHA256`）：
-  校验文件是 Release 里与包同名的 `.sha256`，**静默校验**（不写更新状态、不记成功日志），
-  失败才进更新弹窗并删掉坏包；**缺失/取不到只记 WARN、不阻塞更新**。
+- `update.go` — **版本检测（dsh 服务 / 插件市场 / 增强插件）+ dsh 数据备份/恢复**。
+  **控制台自身没有自我更新**（见规则 14）：没有 GitHub tag 探测、没有发布资产下载、
+  没有 `.sha256` 校验、没有「下载 → 替换二进制 → exec」链路，也没有
+  `AppConfig.ProxyUpdate`（设置页「代理harness更新」）—— 相关 API
+  （`/api/update/download|install|discard|cancel|pause`）与前端更新弹窗已整体移除。
+  `harnessVersion` 仍由 `-ldflags -X` 注入，只用于官方账号登录的客户端元数据上报。
+  三条检测链路的版本号都来自 npm 镜像源（`server.go` / `market.go`），`UpdateStatus`
+  里只有 `hasUpdate`（没有 storeUpdate / 下载进度字段）；`updateLogTag` 仍有
+  `[dsh]` / `[market]` / `[advanced]` 三个标签。
   **dsh 数据备份是异步的**（`BackupDshData` + `dshBackup` 跟踪器）：接口只做校验后立刻
   返回，打包在 goroutine 里跑，进度走 `GET /api/dsh/backup/status`、取消走
   `POST /api/dsh/backup/cancel`（取消删除不完整的备份文件）—— **别把 handler 改回同步**，
@@ -169,7 +163,7 @@
      **完全同一套** —— 只取「要装的那一版」（镜像源上的最新版）的正文，按 tag
      `v<版本>` / `dsh-fnos-advanced-v<版本>`（`marketReleaseTag` / `advancedReleaseTag`）
      **单次请求**，写进 `UpdateStatus.ReleaseNotes` 随状态一起推送；**没有索引、没有单独的
-     接口、也没有「点版本号才显示」**（前端把它内联在更新弹窗里，和 harness 一样）。
+     接口、也没有「点版本号才显示」**（前端把它内联在更新弹窗里）。
      只在确实有更新时才拉（没更新时弹窗不显示日志块）。
   **`available=false` 与「空正文」是两回事**（仅 dsh 那条有 available 字段）：前者是**这次
   没取到**（断网/限流，前端让用户重试），后者是拉到了、但该版本确实没有 release 正文 ——
@@ -276,19 +270,18 @@
   **更新类弹窗的标题右侧要挂对应仓库的 GitHub 裸图标**（`components/GithubIconLink.vue`）：
   标题与图标同处一个 `flex items-center gap-2 pr-11` 的行里，标题用 `.g-dialog-title !pr-0`
   （把 `.g-dialog-title` 自带的 `pr-11` 让给外层容器，否则图标会被推到 X 底下），图标不套
-  `g-btn-*`。四个目标的仓库地址**只有一份**，在 `constants/repos.ts`（`repoSlugs` / `repoURL`）
-  —— 弹窗是三个独立组件（harness 在 `UpdateSection`、dsh 在 `ServerVersionsDialog`、插件市场
-  与增强插件共用 `ManagedPluginDialog`），地址别再各写一份。dsh 版本弹窗与受管插件弹窗是
-  后来拆出来的，曾整段漏掉图标，新增弹窗时记得一起挂上。
+  `g-btn-*`。各目标的外链仓库地址**只有一份**，在 `constants/repos.ts`
+  （`repoSlugs` / `repoURL`）—— dsh 在 `ServerVersionsDialog`、插件市场与增强插件共用
+  `ManagedPluginDialog`，概览页「关于」弹窗也用它，地址别再各写一份。新增弹窗时记得
+  一起挂上图标。
   **「更新日志」弹窗**（`components/ReleaseNotesDialog.vue`，**只有 dsh 版本列表在用**；
-  插件市场的日志和 harness 一样内联在更新弹窗里，不走这个组件）：把版本号做成**带下划线的
+  插件市场的日志内联在更新弹窗里，不走这个组件）：把版本号做成**带下划线的
   按钮**（悬停变品牌色 = 全站「可点」的统一提示，与概览页的版本行一致），点开一个只读弹窗
   —— 它**只有右上角的关闭按钮**、没有底部操作行（没有任何可执行动作），正文按纯文本展示
   （`whitespace-pre-wrap`，后端已把 release 里的 HTML 压平）。取数 / 缓存 / 「迟到的响应不
   覆盖当前内容」都在 `composables/useReleaseNotes.ts`，**成功才缓存**（限流/断网那次不记，
   否则用户重试也永远看不到内容）。空文案必须写明「只覆盖最近 10 个版本」（`release_notes_empty`）。
-  **更新内容的内联展示**（harness 在 `UpdateSection.vue`、受管插件在
-  `ManagedPluginDialog.vue`，结构刻意保持一致）：`v-if="hasUpdate && releaseNotes"` → 次要小标题
+  **更新内容的内联展示**（受管插件在 `ManagedPluginDialog.vue`）：`v-if="hasUpdate && releaseNotes"` → 次要小标题
   `update_release_notes` + `max-h-44 overflow-y-auto` 的盒子 + `MarkdownText`；正文用
   `text-sm` + `ink-soft` + `leading-relaxed`（见上面「正文只分两档」）。没有正文时整块不渲染。
   **弹窗打开时必须锁背景滚动**：`useBodyScrollLock(可见性)`（`composables/useBodyScrollLock.ts`，
@@ -355,8 +348,8 @@
    `HARNESS_*`）而非写死 `/var/apps/Harness`（除非是 `install.go`/`fnos.go` 等
    明确约定平台常量的位置）。
    - **后端自己产生的文件一律落在统一数据目录**（`HARNESS_DATA_DIR`，默认
-     `$TRIM_PKGVAR`）：日志、PID、`config.json`、`session.key`、终端会话镜像、
-     更新备份/待安装包都在 `RuntimeEnv` 里由它派生（`config.go` 的 `dataDirFromEnv` /
+     `$TRIM_PKGVAR`）：日志、PID、`config.json`、`session.key`、终端会话镜像与
+     dsh 数据备份都在 `RuntimeEnv` 里由它派生（`config.go` 的 `dataDirFromEnv` /
      `dataPath`）。**不要再新增「单独设置某个文件路径」的环境变量**（`HARNESS_LOG_FILE`、
      `HARNESS_SESSION_DIR` 等已全部移除），也不要另写一份路径拼接。pnpm 目录是唯一例外，
      仍由 `PNPM_HOME` 单独指定。
@@ -393,18 +386,17 @@
    宽度是 768/834/1024px，会被判成桌面而丢掉整条辅助键（触屏上再没有 ESC/Tab/Ctrl/Alt/
    方向键）。一律走 `composables/useMobileLayout.ts`（触屏 **或** 窄视口），**不要写回
    `md:hidden`**；「平板档（两页并排）」用同文件的 `useWideLayout()`（就是 md 断点，别另发明数值）。
-11. **发布资产的名字不能随便改，`.sha256` 必须与包同名（现在只对 harness 生效）** ——
-   harness 的自更新按「资产地址 + `.sha256`」拼校验文件地址（`backend/update.go` 的
-   `checksumURL`），`harness-build.yaml` 也按同一规则生成并上传。改资产命名（`assetURL`）
-   却漏改一侧，**不会报错**，只会让校验静默退化成「不校验」（缺文件按策略只记 WARN）。
-   新增发布资产时：①`assetURL` 的命名 ②workflow 的 `sha256sum` ③artifact/Release 的
-   上传清单，三处一起改。harness 的格式只有 `.tar.gz`。
-   - **dsh 服务与插件市场都没有发布资产了**：dsh 由控制台 `npm install` 官方 npm 包
-     （`server.go`），市场由 `dsh plugin add`（`market.go`）。旧版本的 `server-*` 压缩包与
-     `.tar.xz` 解码通路已整体删除（`extractTarXz` / `github.com/ulikunitz/xz` 都不在了，
-     设备上不再需要 `xz-utils`）；`server-build.yaml` 只是留着未动，**新版控制台不读它**。
+11. **控制台不再有任何「更新包」发布资产** —— 自我更新已整体移除，控制台不再从
+   GitHub Release 下载二进制、也不再校验 `.sha256`；`harness-build.yaml` 与
+   `assetURL` / `checksumURL` / `releaseChecksum` / `verifyFileSHA256` 一并删除，
+   **不要把它们加回来**（升级只走 fpk，见规则 14）。
+   - **dsh 服务、插件市场、增强插件都没有发布资产**：dsh 由控制台 `npm install` 官方
+     npm 包（`server.go`），受管插件由 `dsh plugin add`（`market.go`）。旧版本的
+     `server-*` 压缩包与 `.tar.xz` 解码通路已整体删除（`extractTarXz` /
+     `github.com/ulikunitz/xz` 都不在了，设备上不再需要 `xz-utils`）；
+     `server-build.yaml` 只是留着未动，**新版控制台不读它**。
    - **本地备份恒为 `.tar.gz`**（`tgzDir` / `tgzDirAs`），解压走 `extractTarGz`
-     （`extractArchive` 只是「下载包用哪个解压器」的唯一判定点）。不要把备份改成别的格式。
+     （`extractArchive` 只是唯一入口）。不要把备份改成别的格式。
 12. **dsh 版本安装 / 插件市场安装的三条硬约束（改这两条链路前必读）** ——
    - **只用设置页选中的那一个镜像源、不自动换源**：`npmMirrors` 只是候选表（阿里云 /
      腾讯云 / 华为云 / 官方源），实际取用一律经 `selectedNpmMirror()`（读
@@ -487,23 +479,18 @@
    - 反面教材（本次踩过）：前端用 `st.error.includes('用户取消')` 判断「用户取消了下载」——
      语言一换就失效；现在后端在取消时置 `Cancelled` 标记 + code，前端只看结构化字段。
 
-14. **控制台自更新只允许小版本，跨版本必须更新 fpk 安装包** —— harness 只能就地更新同一
-   `major.minor` 线内的补丁版（`1.4.3 → 1.4.9`）；跨主要/次要版本（`1.4 → 1.5`、`1.x → 2.x`）
-   一律**拒绝下载与安装**，改为提示用户更新 fpk 安装包。原因：平台侧的部署
-   脚本/依赖与 dsh 的配套版本都在 fpk 里，控制台自己解开一个跨线的包只会得到「二进制换了、
-   平台侧没换」的半升级状态 —— 因此**不要**给这条规则加任何「下载后自更新」的变体。
-   - 判定只有一处：`update.go` 的 `harnessUpdateTarget` / `sameMinorLine`（基准是
-     **仓库最新版**，不是「本线最高补丁版」—— 最新版一跨线，就地自更新整体停用，否则用户会
-     在被新线取代的旧线上继续升级且永远看不到「需要换包」的提示）。结论写进状态的两个新字段：
-     `StoreUpdate` / `StoreVersion`，与 `HasUpdate` **互斥**；`HasUpdate` 的语义因此被收紧为
-     「有可就地下载安装的更新」，别再往里塞别的含义。
-   - 三处闸门：`POST /api/update/download`（同步 400 + `err_update_store_required`，
-     **不下字节、不改状态**）、`downloadUpdate`、`installUpdate`。新增任何「下载/安装 harness
-     更新包」的入口，都要挂上同一判定。
-   - 前端（`UpdateSection.vue`）：红点在 `hasUpdate || storeUpdate` 时亮（只看 `hasUpdate`
-     会让跨线新版本完全静默）；弹窗给 `update_store_required` 文案、下载按钮整行隐藏、
-     **更新内容照常显示**；「检查更新」不再误报「暂无更新」。回归测试见
-     `backend/update_store_test.go`。
+14. **控制台没有自我更新，升级只走 fpk 安装包** —— 平台侧的部署脚本/依赖与 dsh 的配套
+   版本都在 fpk 里，让控制台自己替换二进制只会得到「二进制换了、平台侧没换」的半升级状态。
+   因此 `update.go` 里不再有 GitHub tag 探测、发布资产下载、备份替换与 `syscall.Exec`，
+   前端概览页也没有「控制台版本」行与更新弹窗；`AppConfig.ProxyUpdate`（「代理harness更新」）
+   与 `err_update_*` 系列界面文案一并删除。
+   - **不要再把任何变体加回来**：包括「只允许同 major.minor 小版本」那套闸门
+     （`harnessUpdateTarget` / `sameMinorLine` / `StoreUpdate` / `StoreVersion`）、
+     `POST /api/update/download|install|discard|cancel|pause`、待安装包目录
+     （`backup/pending/`）与代理更新开关。
+   - 更新检测（每小时 + 手动「检查更新」）只覆盖 dsh 服务、插件市场与增强插件，
+     全部走设置页选中的 npm 镜像源。
+   - `harnessVersion` 保留：随官方账号登录的客户端元数据上报，不参与更新判定。
 
 ---
 
@@ -610,8 +597,7 @@
      （不论市场面板发起还是控制台插件页发起）都在 dsh 进程内持有那把锁，停 dsh 会连带
      终止它的进程组，把持有者一起带走 —— 安装白做，还留下陈旧锁。
      - `replaceBusyGuard()` 是所有「停 dsh 之前」的统一前置检查（先挡、再停），当前的调用点：
-       **更新 harness 控制台**（`installHarness`）、**恢复 dsh 数据**（会删 `~/.dsh`，
-       经 `stopDshForReplacement`）、**切换 dsh 版本**（`ServerManager.Switch`）、
+       **恢复 dsh 数据**（会删 `~/.dsh`，经 `stopDshForReplacement`）、**切换 dsh 版本**（`ServerManager.Switch`）、
        **市场/增强插件安装卸载后重启 dsh**（`restartDshForPlugin`）。被拒绝时不产生任何停机、不改盘。
      - 守卫来源：市场 `/dsh-market/status` 的 busy + `DshManager.PluginCmdRunning()`；
        市场不回答视为不忙（恢复这类抢修不被挡）。**控制台自己发起的每一条插件命令都要

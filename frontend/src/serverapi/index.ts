@@ -68,12 +68,9 @@ export interface AppConfig {
   // 与 dshPort 不同：它由 harness 自己监听，保存后即时重绑生效，无需重启 dsh。
   proxyPort: number
   // 「代理dsh」：只影响 dsh 进程自身的出网（下发 http_proxy/https_proxy 等），默认关闭。
+  // 控制台自身的版本检测、dsh 版本安装与插件安装都不走这个代理。
   proxyEnabled: boolean
   proxyAddr: string
-  // 「代理harness更新」：只影响 harness 控制台自身的更新（版本探测 + 发布资产下载），
-  // 默认关闭；代理地址探测不通时照旧回退直连。与 proxyEnabled 相互独立。
-  // dsh 版本安装与插件安装不走代理，只连下面 npmRegistry 选中的镜像源。
-  proxyUpdate: boolean
   // 设置页「npm 镜像源」：dsh 服务与两个受管插件安装/更新/版本检测时使用的 registry。
   // 取值 aliyun / tencent / huawei / npmjs，默认 aliyun（阿里云）；只用所选源。
   npmRegistry: string
@@ -153,40 +150,20 @@ export interface SettingsPayload {
   status: DshStatus
 }
 
-// 更新检测结果（harness 控制台 / dsh 服务 / 插件市场 各一份）
+// 更新检测结果（dsh 服务 / 插件市场 / 增强插件 各一份）
 export interface UpdateStatus {
   kind: UpdateKind
   localVersion: string
   latestVersion: string
-  // hasUpdate 的唯一语义是「有可就地下载安装的更新」。harness 跨 major/minor 的版本
-  // （1.4 → 1.5、1.x → 2.x）不算，那种情况走 storeUpdate（见下）。
   hasUpdate: boolean
-  // 仅 harness：仓库最新版跨过了 major/minor 线，控制台不能就地自更新，只能更新
-  // fpk 安装包。为真时 hasUpdate 恒为 false，红点按两者之一亮。
-  storeUpdate?: boolean
-  // 需换上去的版本号（storeUpdate 为真时有值）。
-  storeVersion?: string
   checkedAt: string
   error?: string
-  // 最新 release 的更新内容（正文，不含标题；可能为空串。市场来自 npm，恒为空）
+  // 最新 release 的更新内容（正文，不含标题；可能为空串。插件来自 npm，恒为空）
   releaseNotes?: string
-  // 下载进度（更新包下载期间由后端 SSE 推送）
-  downloading?: boolean // 是否正在下载更新包
-  downloadPct?: number // 下载进度百分比（0-100；total 未知时为估算值）
-  downloadedBytes?: number // 已下载字节数
-  totalBytes?: number // 总字节数（未知为 0）
-  // 两阶段更新流程阶段：
-  // ''(空闲) / downloading(下载中) / paused(已暂停，可续传) / downloaded(已下载待安装) / installing(安装中)
+  // 流程阶段：''(空闲) / installing(安装中) / removing(卸载中)
   phase?: string
-  // 更新包已下载就绪，等待用户点击“安装”
-  readyToInstall?: boolean
-  // 最近一次更新是否被用户主动取消
+  // 最近一次操作是否被用户主动取消
   cancelled?: boolean
-  // 下载是否被用户暂停（phase=paused）：半成品已保留，可继续断点续传
-  paused?: boolean
-  // 后端给错误的结构化归类：目前只有 'network'（代理与直连各 2 次均失败），
-  // 前端据此显示本地化的“请检查网络或代理”提示。
-  errorHint?: string
   // 当前阶段的说明/实时尾行（仅受管插件：`dsh plugin …` 的输出尾行与「正在重启 dsh」等）。
   message?: string
   // error/message 的界面文案引用（code + 参数）：前端优先按它走 i18n，见 uiText()。
@@ -205,7 +182,7 @@ export interface UpdateStatus {
   seq?: number
 }
 
-export type UpdateKind = 'harness' | 'dsh' | 'market' | 'advanced'
+export type UpdateKind = 'dsh' | 'market' | 'advanced'
 
 // 由控制台管理的 profile 插件（同一套弹窗与动作流程，见 ManagedPluginDialog.vue）。
 export type ManagedPluginKind = 'market' | 'advanced'
@@ -282,19 +259,17 @@ export interface ReleaseNotesPayload {
   noteEn: string
 }
 
-// 自我更新 SSE 推送与 REST 接口的载荷（server 是 dsh 版本快照，见 server.go）
+// 更新检测 SSE 推送与 REST 接口的载荷（server 是 dsh 版本快照，见 server.go）
 export interface UpdatePayload {
-  harness: UpdateStatus
   dsh: UpdateStatus
   market: UpdateStatus
   advanced: UpdateStatus
   server?: ServerVersions
 }
 
-// /api/update/status 与 /api/update/check 的响应：多个 ok 字段 + 四份状态。
+// /api/update/status 与 /api/update/check 的响应：多个 ok 字段 + 三份状态。
 export interface UpdateStatusPayload {
   ok: boolean
-  harness: UpdateStatus
   dsh: UpdateStatus
   market: UpdateStatus
   advanced: UpdateStatus
@@ -544,7 +519,7 @@ export const api = {
     }>('/api/plugins/reset', {
       method: 'POST'
     }),
-  // 自我更新：版本检测状态 / 手动检查 / 下载更新（可取消） / 安装更新 / 取消下载 / SSE 推送
+  // 更新检测状态 / 手动检查 / SSE 推送（dsh 服务、插件市场、增强插件）
   updateStatus: () =>
     request<UpdateStatusPayload>('/api/update/status'),
   updateCheck: () =>
@@ -553,33 +528,6 @@ export const api = {
     }),
   // 市场诊断：当前生效的那份 dshmarket 在哪、由谁提供、能否由控制台更新
   marketInfo: () => request<MarketInfo>('/api/market/info'),
-  updateDownload: (kind: UpdateKind) =>
-    request<{ ok: boolean; started: boolean; kind: UpdateKind; msg?: string }>('/api/update/download', {
-      method: 'POST',
-      body: JSON.stringify({ kind })
-    }),
-  updateInstall: (kind: UpdateKind) =>
-    request<{ ok: boolean; started: boolean; kind: UpdateKind; msg?: string }>('/api/update/install', {
-      method: 'POST',
-      body: JSON.stringify({ kind })
-    }),
-  // 取消正在进行的更新下载（下载完成后的取消请求被忽略）。半成品会被删除；
-  // 想保留已下载字节下次续传请用 updatePause。
-  updateCancel: () =>
-    request<{ ok: boolean; cancelled: boolean }>('/api/update/cancel', {
-      method: 'POST'
-    }),
-  // 暂停下载：半成品保留，再次调 updateDownload 即从已下载字节断点续传
-  updatePause: () =>
-    request<{ ok: boolean; paused: boolean }>('/api/update/pause', {
-      method: 'POST'
-    }),
-  // 删除已下载待安装的更新包，重置为待更新状态
-  updateDiscard: (kind: UpdateKind) =>
-    request<{ ok: boolean; discarded: boolean }>('/api/update/discard', {
-      method: 'POST',
-      body: JSON.stringify({ kind })
-    }),
   // dsh 服务多版本：列表（refresh=1 强制联网刷新） / 下载安装 / 取消 / 删除 / 切换
   dshVersions: (refresh = false) =>
     request<{ ok: boolean; server: ServerVersions; refreshed: boolean }>(

@@ -351,8 +351,8 @@ func TestSwitchVersionRefusesWhenBusy(t *testing.T) {
 	}
 }
 
-// harness 自我更新与 dsh 数据恢复同样先过忙守卫，且被拒绝时不产生任何破坏。
-func TestHarnessUpdateAndDataRestoreRespectBusyGuard(t *testing.T) {
+// dsh 数据恢复同样先过忙守卫，且被拒绝时不产生任何破坏。
+func TestDataRestoreRespectsBusyGuard(t *testing.T) {
 	prevBusy := marketBusyFn
 	t.Cleanup(func() { marketBusyFn = prevBusy })
 	marketBusyFn = func(*UpdateManager) (bool, string) { return true, "dsh-free-search@0.4.32" }
@@ -373,14 +373,7 @@ func TestHarnessUpdateAndDataRestoreRespectBusyGuard(t *testing.T) {
 
 	m := &UpdateManager{renv: &RuntimeEnv{Home: home}, dsh: newTestDshManager(home, "")}
 
-	// 1) harness 自我更新：在替换自身二进制之前就被挡下（这里用一个不存在的解压目录，
-	//    若守卫失效会走到 applyHarness 并报「找不到 harness 可执行文件」，错误信息不同）。
-	err := m.installHarness(t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "插件市场") {
-		t.Fatalf("harness 更新应被忙守卫拒绝，实际: %v", err)
-	}
-
-	// 2) dsh 数据恢复：绝不能删掉 ~/.dsh
+	// dsh 数据恢复：绝不能删掉 ~/.dsh
 	if err := m.doRestoreDshData(filepath.Join(t.TempDir(), "dsh-data.tar.gz")); err == nil {
 		t.Fatal("数据恢复应被忙守卫拒绝")
 	}

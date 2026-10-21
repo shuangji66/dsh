@@ -526,7 +526,7 @@ func (m *ServerManager) npmCacheDir() string {
 
 // mirrorClient 构造访问 npm 镜像源的 HTTP 客户端：单次请求 5 秒上限。
 //
-// 刻意直连不管「代理更新」开关：那个开关只作用于 GitHub 发布资产（harness 自更新），
+// 刻意直连、不走「代理dsh」开关：那个开关只作用于 dsh 进程自身的出网，
 // 国内镜像源经代理反而更慢或不可达。
 func mirrorClient() *http.Client {
 	return &http.Client{Timeout: dshMirrorTimeout}

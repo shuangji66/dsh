@@ -162,7 +162,7 @@ const {
           <DialogCloseButton :label="t('dialog_close')" @close="emit('close')" />
 
           <!-- 标题 + 上游仓库（deepseek-ai/deepseek-harness）的 GitHub 裸图标外链，
-               紧靠标题；右侧留出 X 的位置。与 harness 弹窗、市场弹窗同一形态。 -->
+               紧靠标题；右侧留出 X 的位置。与市场弹窗同一形态。 -->
           <div class="flex items-center gap-2 pr-11 mb-2">
             <h3 class="g-dialog-title !pr-0">{{ t('dsh_ver_dialog_title') }}</h3>
             <GithubIconLink :href="repoURL(repoSlugs.dsh)" :label="repoSlugs.dsh" />

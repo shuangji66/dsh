@@ -15,7 +15,6 @@ export const useSettingsStore = defineStore('settings', () => {
     dshPort: 13080,
     proxyPort: 3079,
     proxyEnabled: false,
-    proxyUpdate: false,
     proxyAddr: 'http://127.0.0.1:7890',
     // npm 镜像源默认阿里云（与后端 config.go 的 npmRegistryDefault 一致）
     npmRegistry: 'aliyun',

@@ -448,7 +448,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- ② 三个版本：harness 控制台 / dsh 服务 / 插件市场 -->
+      <!-- ② 三个版本：dsh 服务 / 插件市场 / 增强插件（控制台自身只能走 fpk 升级） -->
       <UpdateSection />
 
       <!-- ③ 快捷访问 -->

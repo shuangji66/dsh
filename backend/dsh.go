@@ -944,8 +944,7 @@ func (m *DshManager) buildEnv() []string {
 	// scheme 的 127.0.0.1:7890、空白等）node 直接以 ERR_INVALID_URL 退出，dsh 随之完全起
 	// 不来；而 dsh 自身对这类值只是报告并跳过，继续直连。
 	// 注意：这里是「代理dsh」开关（ProxyEnabled），只影响 dsh 进程自身的出网；
-	// harness 自己的更新是否走代理由另一个开关（ProxyUpdate / 设置页「代理更新」）决定，
-	// 见 update.go 的 updateClients。
+	// 控制台自身不下载更新包，dsh 版本与插件安装也直连 npm 镜像源，与这里无关。
 	if cfg.ProxyEnabled && cfg.ProxyAddr != "" {
 		set("http_proxy=", cfg.ProxyAddr)
 		set("https_proxy=", cfg.ProxyAddr)

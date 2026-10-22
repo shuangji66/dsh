@@ -51,7 +51,7 @@ dsh plugin --profile web add dsh-fnos-advanced
 ### 本地开发安装
 
 ```bash
-# 在插件目录构建客户端 bundle
+# 在插件目录构建两端（宿主 tsc + 浏览器 esbuild）
 npm install
 npm run build
 
@@ -231,7 +231,7 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 
 ## 实现方式
 
-### 浏览器半侧（`src/client/index.js`）
+### 浏览器半侧（`src/client/`）
 
 - 用 `MutationObserver` 观察 DOM，通过 `role="dialog"`、标题中的 workspace/工作区、
   路径输入框或「编辑路径」按钮、以及底部 Open/Cancel 按钮来识别目录选择器。
@@ -270,9 +270,9 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
   再派发 `keydown/keypress/keyup` 的 Enter 事件；React 受控输入实测可用。
 - 通过 `ctx.effect` 注册清理逻辑；插件卸载时移除按钮、样式与监听器。
 
-### 宿主半侧（`lib/index.js`）
+### 宿主半侧（`src/host/` → `lib/index.js`）
 
-无任何 import，注册：
+只 import `node:*` 内建模块，不引入任何 `@deepseek-ai/*` 包；注册：
 
 | 路径 | 作用 |
 | --- | --- |
@@ -311,7 +311,7 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
   包页面而非组件行页面；slot 不存在时设置页自动缺席，不影响目录选择器。
 - 宿主行只使用稳定的 `ctx.inject(['webServer'], …)` + `ctx.webServer.register({ kind, path, handler })`。
 - 如果未来 dsh 改了目录选择器的 DOM 结构（标题、路径输入框、底部按钮），需要同步调整
-  `src/client/index.js` 中的识别与注入逻辑。
+  `src/client/workspace-picker.ts` 中的识别与注入逻辑。
 - 对话文件通道依赖两个已被 0.2.0-rc.2 / 0.2.1-rc.2 验证的稳定面：composer 的
   `data-conversation-region="composer"` + 隐藏 file input，以及
   `__DSH_HOST_PATHS__.pathFor(file)`。命令菜单锚点缺失时菜单项不出现；图片读取接口缺失
@@ -319,26 +319,41 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 
 ## 开发与构建
 
+要求 Node.js ≥ 22.18：测试直接用 `node --test` 跑 TypeScript（靠 Node 的类型擦除），
+所以源码里的相对 import 都带 `.ts` 扩展名，`tsc` 产出时再改写成 `.js`。
+`erasableSyntaxOnly` 保证不会写出类型擦除无法处理、又只有编译器能懂的语法（enum /
+namespace 等）。
+
 ```bash
 npm install
-npm run build      # 生成 lib/client.js（含 @trimjs/web-app）
-npm pack           # 查看发布内容
+npm run typecheck  # tsc：宿主 / 浏览器 / 测试三个 project
+npm test           # 先 build，再 node --test test/*.test.ts
+npm run build      # lib/index.js + lib/host/*（tsc，含 .d.ts）与 lib/client.js（esbuild）
+npm pack           # 查看发布内容（prepack 会自动构建）
 ```
 
-构建脚本会把 `@trimjs/web-app` 与客户端源码一起打成 dsh 需要的惰性 CJS factory；
-构建后会检查 bundle 中不再残留对 `@trimjs/web-app` 的运行时 `require`。
+- 宿主半侧是 Node ESM，`tsc -p tsconfig.json` 编译到 `lib/`；只 import `node:*`。
+- 浏览器半侧由 esbuild 打成 dsh 需要的惰性 CJS factory（`window.__ModuleLoader__.load`）：
+  `@trimjs/web-app` 内联，`react` 走 loader 模块表；JSX 用经典 transform
+  （`React.createElement`），不引入 `react/jsx-runtime`，旧宿主同样能加载。
+- 构建脚本会检查 bundle 只 `require("react")`、不残留 `@trimjs/web-app` 的运行时 require，
+  并把 `.d.ts` 里的 `.ts` import 改写成 `.js`（否则使用方没有
+  `allowImportingTsExtensions` 就解析不了类型）。
 
 目录结构：
 
 ```
 dsh-fnos-advanced/
-├── cordis.patch.yml       # 插入宿主行
-├── lib/
-│   ├── index.js           # 宿主：路由与回调页
-│   └── client.js          # 构建产物：浏览器 bundle
-├── src/client/index.js    # 浏览器源码
-├── scripts/build.mjs      # esbuild 构建脚本
-└── package.json
+├── cordis.patch.yml
+├── src/
+│   ├── index.ts            # 宿主入口（name / apply）
+│   ├── host/               # 宿主：路由、设置、工作区、图片令牌、回调页
+│   ├── shared/settings.ts  # 两端共用的设置类型与默认值
+│   ├── version.ts          # 版本号（与 package.json 同步，有测试守卫）
+│   └── client/             # 浏览器：DOM 扫描器、授权流程、composer、设置页（.tsx）
+├── lib/                    # 构建产物：index.js + host/* + client.js + .d.ts
+├── test/                   # node:test（TypeScript）
+└── scripts/build.mjs       # tsc + esbuild 构建脚本
 ```
 
 ## 发布（npm）

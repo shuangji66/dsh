@@ -1,11 +1,13 @@
 {
   "name": "dsh-fnos-advanced",
-  "version": "0.3.2",
+  "version": "0.5.0",
   "description": "飞牛文件与目录桥：选目录/选文件进对话、文件树操作、目录权限体检、诊断与中英文界面。fnOS picker, composer/file-tree bridge, workspace access checks, diagnostics, and i18n for DeepSeek Harness.",
   "type": "module",
   "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "exports": {
     ".": {
+      "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./client": {
@@ -15,8 +17,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js",
-    "lib/client.js",
+    "lib",
     "src",
     "scripts",
     "cordis.patch.yml",
@@ -40,6 +41,9 @@
     "url": "git+https://github.com/shuangji66/dsh.git",
     "directory": "dsh-fnos-advanced"
   },
+  "engines": {
+    "node": ">=22.18"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -52,14 +56,19 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "prepack": "npm run build",
-    "test": "node --test test/*.test.mjs"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "test": "npm run build && node --test test/*.test.ts",
+    "check": "npm run build && npm run typecheck && node --test test/*.test.ts",
+    "prepack": "npm run build"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
     "@trimjs/web-app": "^0.5.0",
-    "esbuild": "^0.25.0"
+    "@types/node": "^22.20.5",
+    "@types/react": "~18.3.12",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
   }
 }

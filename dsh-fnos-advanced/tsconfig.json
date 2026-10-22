@@ -1,0 +1,28 @@
+{
+  // Host half: Node ESM compiled to lib/ by `npm run build`.
+  //
+  // Relative imports carry the `.ts` extension so Node's type stripping can
+  // also run `src/` directly (tests and `node --test`); tsc rewrites them to
+  // `.js` on emit. `erasableSyntaxOnly` keeps that promise de facto: no enums,
+  // namespaces or parameter properties that a type stripper cannot handle.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "outDir": "lib",
+    "rootDir": "src",
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"],
+  "exclude": ["src/client"]
+}

@@ -61,11 +61,11 @@ jobs:
           echo "NAME=$NAME" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Install and test
+      - name: Install, typecheck and test
         working-directory: dsh-fnos-advanced
         run: |
           npm ci
-          npm test
+          npm run check
 
       - name: Verify npm identity
         working-directory: dsh-fnos-advanced
@@ -91,7 +91,7 @@ jobs:
       - name: Publish to npm
         working-directory: dsh-fnos-advanced
         run: |
-          # `prepack` rebuilds lib/client.js from src before the tarball is made.
+          # `prepack` rebuilds lib/ (host tsc + client esbuild) before the tarball is made.
           npm publish
           echo "Published: https://www.npmjs.com/package/$NAME/v/$VERSION"
           echo "Install:   dsh plugin --profile web add $NAME"

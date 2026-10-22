@@ -8,6 +8,7 @@
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
+"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -36,13 +37,854 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// src/client/index.js
+// src/client/index.ts
 var index_exports = {};
 __export(index_exports, {
-  apply: () => apply
+  apply: () => apply,
+  install: () => install
 });
 module.exports = __toCommonJS(index_exports);
-var React = __toESM(require("react"), 1);
+
+// src/client/cancel.ts
+var CANCEL_TEXTS = /* @__PURE__ */ new Set([
+  "operation failed",
+  "操作失败",
+  "cancel",
+  "canceled",
+  "cancelled",
+  "abort",
+  "aborted",
+  "取消",
+  "已取消",
+  "用户取消"
+]);
+function isCancellationText(text) {
+  const value = String(text ?? "").trim().toLowerCase();
+  if (!value) return false;
+  return CANCEL_TEXTS.has(value) || value.includes("取消");
+}
+function isPickerCancelled(result) {
+  if (!result) return true;
+  const data = Array.isArray(result.data) ? result.data : [];
+  if (data.length > 0) return false;
+  if (result.code === 0) return true;
+  const msg = String(result.msg || "").trim();
+  if (!msg) return result.code === 1;
+  return isCancellationText(msg);
+}
+
+// src/client/constants.ts
+var LOG_PREFIX = "[dsh-fnos-advanced]";
+var MSG_TYPE = "dsh-fnos-advanced:auth";
+var STORAGE_KEY = "dsh-fnos-advanced:auth-result";
+var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
+var SETTINGS_SLOT_KEY = "dsh-fnos-advanced";
+var BUTTON_ATTR = "data-dsh-fnos-advanced";
+var PICK_ITEM_ATTR = "data-dsh-fnos-pick-file";
+var FILE_ACTION_ATTR = "data-dsh-fnos-file-action";
+var OPEN_DIR_ATTR = "data-dsh-fnos-open-dir";
+var CHECK_DIR_ATTR = "data-dsh-fnos-check-dir";
+var REAUTH_DIR_ATTR = "data-dsh-fnos-reauth-dir";
+var STATUS_CLASS = "dsh-fnos-advanced-status";
+var STYLE_ID = "dsh-fnos-advanced-style";
+var POPUP_FEATURES = "popup=yes,width=760,height=680,resizable=yes,scrollbars=yes";
+var AUTH_TIMEOUT_MS = 5 * 60 * 1e3;
+var WORKSPACE_TITLE_RE = /workspace|工作区/i;
+var PATH_LABEL_RE = /(?:^|\b)(?:edit\s*path|path)(?:\b|$)|路径|编辑路径|修改路径/i;
+var OPEN_BUTTON_RE = /^(?:open|打开|确定|选择|select|choose)/i;
+var CANCEL_BUTTON_RE = /^(?:cancel|取消)/i;
+var FOLDER_OPEN_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M1.5 3.5C1.5 2.95 1.95 2.5 2.5 2.5H5.4C5.65 2.5 5.88 2.59 6.07 2.75L7.7 4.2C7.88 4.36 8.12 4.45 8.36 4.45H13.5C14.05 4.45 14.5 4.9 14.5 5.45V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3.5Z" stroke="currentColor"/></svg>';
+var PICK_FILE_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9.5 1.5H4.5C3.95 1.5 3.5 1.95 3.5 2.5V13.5C3.5 14.05 3.95 14.5 4.5 14.5H11.5C12.05 14.5 12.5 14.05 12.5 13.5V4.5L9.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/><path d="M6 8.5H10M8 6.5V10.5" stroke="currentColor" stroke-linecap="round"/></svg>';
+var FILE_ACTION_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="3.5" cy="8" r="1.15" fill="currentColor"/><circle cx="8" cy="8" r="1.15" fill="currentColor"/><circle cx="12.5" cy="8" r="1.15" fill="currentColor"/></svg>';
+
+// src/client/i18n.ts
+var PREFERENCE_KEY = "dsh-fnos-advanced:language";
+var EN = Object.freeze({
+  // Common
+  "取消": "Cancel",
+  "保存": "Save",
+  "保存中…": "Saving…",
+  "已保存": "Saved",
+  "读取设置…": "Loading settings…",
+  "未设置": "Not set",
+  "重试": "Retry",
+  // Picker
+  "选择飞牛目录": "Choose fnOS folder",
+  "通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）": "Choose a folder through fnOS (grants the current app access)",
+  "选择工作区目录": "Choose workspace folder",
+  "确认授权": "Authorize",
+  "选择文件": "Choose files",
+  "添加引用": "Add reference",
+  "飞牛授权": "fnOS authorization",
+  "正在打开飞牛授权页面…": "Opening the fnOS authorization page…",
+  "准备授权…": "Preparing…",
+  "等待选择…": "Waiting for selection…",
+  "等待授权…": "Waiting for authorization…",
+  "选择授权入口…": "Choosing authorization entry…",
+  "已取消选择": "Selection cancelled",
+  "已取消授权": "Authorization cancelled",
+  "已填入授权目录：{path}": "Folder authorized: {path}",
+  "已填入路径": "Path filled",
+  "该目录已添加为工作区": "This folder is already a workspace",
+  "打开选择器失败": "Could not open the picker",
+  "当前宿主未提供内嵌选择器，已改用网页授权。": "The native picker is unavailable; using web authorization.",
+  "浏览器拦截了授权窗口，请允许弹窗后重试。": "The browser blocked the authorization window. Allow popups and retry.",
+  "授权超时，请重试": "Authorization timed out. Retry.",
+  "授权窗口已关闭": "Authorization window closed",
+  "授权结果里没有路径": "Authorization returned no path",
+  "选择授权入口": "Choose authorization entry",
+  "通过反代地址": "Via reverse proxy",
+  "通过内网地址": "Via LAN",
+  "没有找到目录选择器的路径输入框": "Could not find the folder picker's path input",
+  "无法确定工作区": "Could not determine the workspace",
+  "无法获取工作区目录": "Could not read the workspace folder",
+  "打开目录失败，当前宿主可能不支持该操作。": "Could not open the folder; the host may not support it.",
+  "打开目录": "Open folder",
+  // Composer
+  "从飞牛选择": "Choose from fnOS",
+  "选择 NAS 上的文件，非图片作为路径引用": "Pick files on the NAS; non-images become path references",
+  "没有找到对话的文件输入框，当前 dsh 版本可能不支持。": "No composer file input found; this dsh version may be unsupported.",
+  "当前会话暂时不能添加附件。": "This session cannot accept attachments right now.",
+  "已添加 {count} 个文件": "Added {count} file(s)",
+  "已添加 {count} 个文件（{images} 张图片会上传）": "Added {count} file(s) ({images} image(s) will upload)",
+  "{count} 张图片未能读取，已改为路径引用": "{count} image(s) could not be read; added as path references",
+  "没有可添加的文件": "No files to add",
+  "宿主半侧未提供图片读取接口": "The host does not provide the image read route",
+  "读取图片失败（HTTP {status}）": "Could not read the image (HTTP {status})",
+  "已复制路径": "Path copied",
+  "复制失败，请手动复制": "Copy failed; copy manually",
+  // File tree
+  "飞牛操作": "fnOS actions",
+  "在飞牛中打开": "Open in fnOS",
+  "引用到对话": "Quote in chat",
+  "复制路径": "Copy path",
+  "在飞牛中打开失败，当前宿主可能不支持该操作。": "Could not open in fnOS; the host may not support it.",
+  "没有找到对话输入框，无法引用。": "No composer input to quote into.",
+  // Workspace health
+  "检查目录权限": "Check folder access",
+  "重新授权目录": "Re-authorize folder",
+  "正在检查目录权限…": "Checking folder access…",
+  "目录可读写": "Folder is readable and writable",
+  "目录不存在": "Folder does not exist",
+  "不是目录": "Not a folder",
+  "目录可读但不可写": "Folder is readable but not writable",
+  "目录不可读（{error}）": "Folder is not readable ({error})",
+  "检查失败：{error}": "Check failed: {error}",
+  "重新授权目录：{path}": "Re-authorize folder: {path}",
+  "已重新授权，请复查权限": "Re-authorized; check access again",
+  "重新授权失败：{error}": "Re-authorization failed: {error}",
+  "工作区目录权限": "Workspace folder access",
+  "检查 dsh 工作区目录的读写权限。飞牛 ACL 记录损坏或目录移动后，dsh 会读不到这些目录。": "Check read/write access to dsh workspace folders. Broken fnOS ACL records or moved folders make dsh unable to read them.",
+  "检查全部工作区": "Check all workspaces",
+  "检查中…": "Checking…",
+  "共 {count} 个": "{count} total",
+  "可读写": "Read/write",
+  "不存在": "Missing",
+  "只读": "Read-only",
+  "不可读": "No access",
+  "检查失败": "Check failed",
+  "重新授权": "Re-authorize",
+  "已重新授权": "Re-authorized",
+  "没有找到工作区": "No workspaces found",
+  "没有找到工作区权限接口": "The workspace access API is not available",
+  "权限体检": "Access check",
+  "工作区体检": "Workspace access check",
+  // Diagnostics
+  "诊断": "Diagnostics",
+  "检查 dsh 版本、DOM 锚点和飞牛地址连通性。": "Check dsh versions, DOM anchors, and fnOS address reachability.",
+  "版本": "Version",
+  "宿主": "Host",
+  "客户端": "Client",
+  "宿主接口": "Host API",
+  "正常": "OK",
+  "缺失（需重启 dsh）": "Missing (restart dsh)",
+  "读取失败": "Error",
+  "运行环境": "Runtime",
+  "飞牛桌面 / App": "fnOS desktop / app",
+  "飞牛网关": "fnOS gateway",
+  "普通浏览器": "Browser",
+  "DOM 锚点": "DOM anchors",
+  "对话输入框": "Composer input",
+  "文件树": "File tree",
+  "工作区菜单": "Workspace menu",
+  "目录选择器": "Folder picker",
+  "可用": "Present",
+  "不可用": "Missing",
+  "未检测": "Not detected",
+  "测试反代地址": "Test proxy",
+  "测试内网地址": "Test LAN",
+  "测试中…": "Testing…",
+  "可连接（{ms}ms）": "Reachable ({ms}ms)",
+  "无法连接": "Unreachable",
+  "连接超时": "Timed out",
+  "复制诊断信息": "Copy diagnostics",
+  "重新检测": "Re-check",
+  "诊断信息已复制": "Diagnostics copied",
+  "复制失败": "Copy failed",
+  "图片读取": "Image read",
+  "开": "On",
+  "关": "Off",
+  // Settings
+  "飞牛目录授权": "fnOS access",
+  "配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。": "Configure the fnOS authorization entry used outside the gateway. Settings are stored in the dsh data directory.",
+  "反代飞牛地址": "fnOS reverse-proxy address",
+  "填协议 + 域名[:端口]，不要带路径；留空表示未配置。": "Protocol + host[:port], no path; leave empty if unused.",
+  "飞牛内网地址 / 端口": "fnOS LAN address / port",
+  "只填端口时使用当前访问主机的地址；默认 5666。": "A bare port uses the current host; default 5666.",
+  "非网关访问时的授权入口": "Authorization entry outside the gateway",
+  "每次询问（推荐）": "Ask every time (recommended)",
+  "优先使用反代地址": "Prefer reverse proxy",
+  "优先使用内网地址": "Prefer LAN",
+  "从飞牛选择图片时读取图片内容": "Read image content when picking from fnOS",
+  "图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。": "Images need bytes to be visible to the model. When off, images become path references. Only PNG/JPEG/WebP/GIF are read, and only for files you picked.",
+  "连接与授权": "Connection and authorization",
+  "配置反代/内网授权入口、界面语言和图片读取。": "Configure proxy/LAN authorization, interface language, and image reading.",
+  "清除结果": "Clear results",
+  "展开": "Expand",
+  "收起": "Collapse",
+  "界面语言": "Interface language",
+  "跟随浏览器": "Follow browser",
+  "中文": "Chinese",
+  "English": "English",
+  "宿主半侧版本 {host}，客户端 {client}。请重启 dsh 后再保存设置。": "Host {host}, client {client}. Restart dsh before saving.",
+  "宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。": "The host half does not expose the settings API (usually after an upgrade without restarting dsh). Restart dsh and try again.",
+  "无法读取宿主设置接口，请确认 dsh 运行正常。": "Could not read the host settings API. Check that dsh is running.",
+  "保存失败（HTTP {status}）": "Save failed (HTTP {status})",
+  "当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。": "Running inside fnOS desktop/app: the native picker is used; no web authorization popup.",
+  "当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。": "Accessed through the fnOS gateway: the same origin is used for authorization; no entry chooser.",
+  "当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。": "Not accessed through the fnOS gateway: with both proxy and LAN configured, choosing a folder asks which entry to use.",
+  "反代 {proxy} · 内网 {lan}": "Proxy {proxy} · LAN {lan}",
+  // Host errors (surface through settings / pickers)
+  "反代地址不是有效 URL": "The proxy address is not a valid URL",
+  "反代地址只支持 http/https": "The proxy address must be http or https",
+  "内网端口必须在 1-65535 之间": "The LAN port must be between 1 and 65535",
+  "内网地址格式无效": "The LAN address is invalid",
+  "内网地址只支持 http/https": "The LAN address must be http or https",
+  "图片路径无效": "Invalid image path",
+  "图片路径必须是绝对路径": "The image path must be absolute",
+  "不允许读取隐藏路径": "Hidden paths cannot be read",
+  "图片不存在": "The image does not exist",
+  "不允许读取 dsh 数据目录": "The dsh data directory cannot be read",
+  "只支持 PNG/JPEG/WebP/GIF 图片": "Only PNG/JPEG/WebP/GIF images are supported",
+  "不是普通文件": "Not a regular file",
+  "图片内容为空": "The image is empty",
+  "图片超过 20 MB": "The image exceeds 20 MB",
+  "插件设置已关闭图片读取": "Image reading is disabled in the plugin settings",
+  "设置格式无效": "Invalid settings format"
+});
+var preferences = ["auto", "zh", "en"];
+var preference = "auto";
+var loaded = false;
+function isPreference(value) {
+  return typeof value === "string" && preferences.includes(value);
+}
+function getLanguagePreference() {
+  if (loaded) return preference;
+  loaded = true;
+  try {
+    const stored = window.localStorage.getItem(PREFERENCE_KEY);
+    if (isPreference(stored)) preference = stored;
+  } catch {
+  }
+  return preference;
+}
+function setLanguagePreference(value) {
+  preference = isPreference(value) ? value : "auto";
+  loaded = true;
+  try {
+    window.localStorage.setItem(PREFERENCE_KEY, preference);
+  } catch {
+  }
+  return preference;
+}
+function currentLanguage() {
+  getLanguagePreference();
+  if (preference === "zh" || preference === "en") return preference;
+  const html = typeof document !== "undefined" ? document.documentElement.lang : "";
+  const navigatorLanguage = typeof navigator !== "undefined" ? navigator.language : "";
+  return /^zh/i.test(html || navigatorLanguage) ? "zh" : "en";
+}
+function interpolate(text, params) {
+  if (!params) return text;
+  return text.replace(/\{(\w+)\}/g, (match, key) => Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : match);
+}
+function lookup(source) {
+  if (currentLanguage() !== "en") return source;
+  const dictionary = EN;
+  return dictionary[source] || source;
+}
+function t(source, params) {
+  return interpolate(lookup(source), params);
+}
+function translateError(error) {
+  const text = error == null ? "" : String(error);
+  return text ? lookup(text) : text;
+}
+
+// src/client/dom.ts
+function isVisible(element) {
+  if (!element) return false;
+  const node = element;
+  return Boolean(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+}
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+function randomId() {
+  try {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+  } catch {
+  }
+  return `fnos-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = typeof document.execCommand === "function" && document.execCommand("copy");
+    area.remove();
+    return Boolean(ok);
+  } catch {
+    return false;
+  }
+}
+var toastTimers = /* @__PURE__ */ new WeakMap();
+function showToast(text) {
+  let toast = document.querySelector(".dsh-fnos-advanced-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "dsh-fnos-advanced-toast";
+    toast.setAttribute("role", "status");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.style.display = "block";
+  const previous = toastTimers.get(toast);
+  if (previous) window.clearTimeout(previous);
+  toastTimers.set(toast, window.setTimeout(() => {
+    toast.style.display = "none";
+  }, 5e3));
+}
+function fillAndEnter(input, path) {
+  input.focus();
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  if (setter) setter.call(input, path);
+  else input.value = path;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  window.setTimeout(() => {
+    input.focus();
+    const options = {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      charCode: 13,
+      bubbles: true,
+      cancelable: true
+    };
+    input.dispatchEvent(new KeyboardEvent("keydown", options));
+    input.dispatchEvent(new KeyboardEvent("keypress", options));
+    input.dispatchEvent(new KeyboardEvent("keyup", options));
+  }, 0);
+}
+function dismissTriggerMenu() {
+  try {
+    const event = typeof PointerEvent === "function" ? new PointerEvent("pointerdown", { bubbles: true, cancelable: true }) : new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    (document.body || document.documentElement).dispatchEvent(event);
+  } catch {
+  }
+}
+function closePopup(popup) {
+  if (!popup) return;
+  try {
+    popup.close();
+  } catch {
+  }
+}
+function writePopupLoading(popup) {
+  try {
+    popup.document.title = t("飞牛授权");
+    popup.document.body.innerHTML = `<p style="font:14px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;padding:24px;color:#555">${t("正在打开飞牛授权页面…")}</p>`;
+  } catch {
+  }
+}
+
+// src/client/files.ts
+var IMAGE_MIME_BY_EXTENSION = Object.freeze({
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif"
+});
+function fileExtension(value) {
+  const text = String(value ?? "");
+  const base = text.slice(Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\")) + 1);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "";
+  return base.slice(dot).toLowerCase();
+}
+function imageMimeForPath(value) {
+  return IMAGE_MIME_BY_EXTENSION[fileExtension(value)] || "";
+}
+function fileNameForPath(value) {
+  const text = String(value ?? "").replace(/[\\/]+$/, "");
+  const base = text.slice(Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\")) + 1);
+  return base || "file";
+}
+
+// src/client/host-paths.ts
+var pluginPaths = /* @__PURE__ */ new WeakMap();
+var activeStore = pluginPaths;
+function setHostPath(file, path) {
+  activeStore.set(file, path);
+}
+function ensureHostPathBridge() {
+  const existing = globalThis.__DSH_HOST_PATHS__;
+  if (existing && existing.__dshFnosAdvanced) {
+    activeStore = existing.__dshFnosFiles || activeStore;
+    return existing;
+  }
+  if (existing && typeof existing === "object") {
+    const original = typeof existing.pathFor === "function" ? existing.pathFor : null;
+    const store = existing.__dshFnosFiles || /* @__PURE__ */ new WeakMap();
+    try {
+      existing.pathFor = function pathFor(file) {
+        const own = store.get(file);
+        if (own) return own;
+        try {
+          return original ? original.call(existing, file) : "";
+        } catch {
+          return "";
+        }
+      };
+      existing.__dshFnosFiles = store;
+      existing.__dshFnosAdvanced = true;
+      activeStore = store;
+      return existing;
+    } catch {
+    }
+  }
+  const bridge = {
+    __dshFnosAdvanced: true,
+    __dshFnosFiles: pluginPaths,
+    pathFor(file) {
+      const own = pluginPaths.get(file);
+      if (own) return own;
+      try {
+        return existing && typeof existing.pathFor === "function" ? existing.pathFor(file) : "";
+      } catch {
+        return "";
+      }
+    }
+  };
+  try {
+    globalThis.__DSH_HOST_PATHS__ = bridge;
+  } catch {
+  }
+  activeStore = pluginPaths;
+  return bridge;
+}
+function dispatchComposerFiles(input, files) {
+  const transfer = new DataTransfer();
+  for (const file of files) transfer.items.add(file);
+  input.files = transfer.files;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// src/shared/settings.ts
+var DEFAULT_SETTINGS = Object.freeze({
+  proxyBase: "",
+  lanTarget: "5666",
+  authMode: "ask",
+  imageRead: true
+});
+var AUTH_MODES = Object.freeze(["ask", "proxy", "lan"]);
+function isAuthMode(value) {
+  return typeof value === "string" && AUTH_MODES.includes(value);
+}
+function normalizeBase(value) {
+  return String(value ?? "").replace(/\/+$/, "");
+}
+
+// src/client/plugin-api.ts
+function pluginURL(relative) {
+  const base = document.baseURI.endsWith("/") ? document.baseURI : `${document.baseURI}/`;
+  return new URL(relative, base).href;
+}
+var configPromise = null;
+function loadConfig() {
+  if (!configPromise) {
+    configPromise = (async () => {
+      try {
+        const response = await fetch(pluginURL("fnos-advanced/config"), {
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { Accept: "application/json" }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data && typeof data === "object") return data;
+        }
+      } catch {
+      }
+      return { appName: "Harness", authBase: "" };
+    })();
+  }
+  return configPromise;
+}
+var settingsCache = null;
+var settingsCachedAt = 0;
+var settingsPromise = null;
+var hostState = "unknown";
+function getSettingsHostState() {
+  return hostState;
+}
+function normalizeClientSettings(input) {
+  const record = typeof input === "object" && input !== null ? input : {};
+  return {
+    proxyBase: normalizeBase(typeof record.proxyBase === "string" ? record.proxyBase : ""),
+    lanTarget: typeof record.lanTarget === "string" && record.lanTarget.trim() ? record.lanTarget.trim() : DEFAULT_SETTINGS.lanTarget,
+    authMode: isAuthMode(record.authMode) ? record.authMode : DEFAULT_SETTINGS.authMode,
+    imageRead: record.imageRead !== false
+  };
+}
+async function loadSettings(force = false) {
+  if (!force && settingsCache && Date.now() - settingsCachedAt < 5e3) return settingsCache;
+  if (!force && settingsPromise) return settingsPromise;
+  const request = (async () => {
+    try {
+      const response = await fetch(pluginURL("fnos-advanced/settings"), {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.ok && data.settings) {
+          settingsCache = normalizeClientSettings(data.settings);
+          settingsCachedAt = Date.now();
+          hostState = "ok";
+          return settingsCache;
+        }
+        hostState = "error";
+      } else if (response.status === 404 || response.status === 405) {
+        hostState = "missing";
+      } else {
+        hostState = "error";
+      }
+    } catch {
+      hostState = "error";
+    }
+    return settingsCache || { ...DEFAULT_SETTINGS };
+  })();
+  settingsPromise = request;
+  try {
+    return await request;
+  } finally {
+    if (settingsPromise === request) settingsPromise = null;
+  }
+}
+async function saveSettings(input) {
+  const proxyBase = validateProxyBase(input.proxyBase);
+  const response = await fetch(pluginURL("fnos-advanced/settings"), {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      proxyBase,
+      lanTarget: String(input.lanTarget || "").trim() || DEFAULT_SETTINGS.lanTarget,
+      authMode: input.authMode,
+      imageRead: input.imageRead !== false
+    })
+  });
+  if (response.status === 404 || response.status === 405) {
+    throw new Error(t("宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。"));
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    throw new Error(translateError(data.error) || t("保存失败（HTTP {status}）", { status: response.status }));
+  }
+  const saved = normalizeClientSettings(data.settings);
+  settingsCache = saved;
+  settingsCachedAt = Date.now();
+  return saved;
+}
+async function fetchPluginHealth() {
+  try {
+    const response = await fetch(pluginURL("fnos-advanced/health"), {
+      credentials: "same-origin",
+      cache: "no-store"
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+var workspacePaths = /* @__PURE__ */ new Map();
+function setWorkspacePaths(entries) {
+  workspacePaths = new Map(entries);
+}
+async function knownWorkspacePaths() {
+  if (workspacePaths.size === 0) {
+    try {
+      const response = await fetch(pluginURL("fnos-advanced/workspaces"), {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const items = data && Array.isArray(data.workspaces) ? data.workspaces : [];
+        for (const workspace of items) {
+          if (workspace && workspace.id && typeof workspace.path === "string") {
+            workspacePaths.set(String(workspace.id), workspace.path);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  return [...new Set([...workspacePaths.values()].filter(Boolean))];
+}
+async function resolveWorkspacePath(id) {
+  const cached = workspacePaths.get(id);
+  if (cached) return cached;
+  try {
+    const response = await fetch(
+      `${pluginURL("fnos-advanced/workspace-path")}?id=${encodeURIComponent(id)}`,
+      { credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } }
+    );
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data.ok && typeof data.path === "string" && data.path) {
+        workspacePaths.set(id, data.path);
+        return data.path;
+      }
+    }
+  } catch {
+  }
+  return "";
+}
+async function checkWorkspaceHealth(ids) {
+  const response = await fetch(pluginURL("fnos-advanced/workspace-health"), {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ ids: Array.isArray(ids) ? ids : [] })
+  });
+  if (response.status === 404 || response.status === 405) {
+    throw new Error(t("没有找到工作区权限接口"));
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    throw new Error(translateError(data.error) || t("检查失败：{error}", { error: `HTTP ${response.status}` }));
+  }
+  return Array.isArray(data.results) ? data.results : [];
+}
+function workspaceHealthText(result) {
+  if (!result || !result.exists) return t("目录不存在");
+  if (result.directory === false) return t("不是目录");
+  if (!result.readable) return t("目录不可读（{error}）", { error: result.error || "EACCES" });
+  if (!result.writable) return t("目录可读但不可写");
+  return t("目录可读写");
+}
+async function readImageFile(path, mime) {
+  const tokenResponse = await fetch(pluginURL("fnos-advanced/file-token"), {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ path })
+  });
+  if (tokenResponse.status === 404 || tokenResponse.status === 405) {
+    throw new Error(t("宿主半侧未提供图片读取接口"));
+  }
+  const info = await tokenResponse.json().catch(() => ({}));
+  if (!tokenResponse.ok || !info.ok || !info.token) {
+    throw new Error(translateError(info.error) || t("读取图片失败（HTTP {status}）", { status: tokenResponse.status }));
+  }
+  const response = await fetch(
+    pluginURL(`fnos-advanced/file-bytes?token=${encodeURIComponent(info.token)}`),
+    { credentials: "same-origin", cache: "no-store" }
+  );
+  if (!response.ok) throw new Error(t("读取图片失败（HTTP {status}）", { status: response.status }));
+  const blob = await response.blob();
+  return new File([blob], info.name || fileNameForPath(path), {
+    type: info.mime || mime || blob.type || "application/octet-stream"
+  });
+}
+async function isGatewayAccess(appName) {
+  if (/^\/app(?:\/|$)/.test(window.location.pathname)) return true;
+  return authRouteExists(appName);
+}
+async function authRouteExists(appName) {
+  try {
+    const response = await fetch(
+      `${window.location.origin}/app-auth/pick-user-file?appName=${encodeURIComponent(appName || "Harness")}&directory=true`,
+      {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        redirect: "manual"
+      }
+    );
+    if (response.type === "opaqueredirect") return true;
+    return response.status !== 404 && response.status !== 502 && response.status !== 400;
+  } catch {
+    return false;
+  }
+}
+function lanBaseFromSettings(settings) {
+  const target = String(settings.lanTarget || "").trim() || DEFAULT_SETTINGS.lanTarget;
+  if (/^\d+$/.test(target)) {
+    const port = Number(target);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return "";
+    return `http://${window.location.hostname}:${port}`;
+  }
+  try {
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(target) ? target : `http://${target}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return normalizeBase(url.origin);
+  } catch {
+    return "";
+  }
+}
+async function resolveAuthTargets(config, settings) {
+  const appName = config.appName || "Harness";
+  if (await isGatewayAccess(appName)) {
+    return { mode: "gateway", base: window.location.origin, via: "gateway" };
+  }
+  const proxy = normalizeBase(settings.proxyBase || "");
+  const lan = lanBaseFromSettings(settings);
+  const choices = [];
+  if (proxy) {
+    choices.push({ id: "proxy", label: t("通过反代地址"), detail: proxy, base: proxy });
+  }
+  if (lan && !choices.some((choice) => choice.base === lan)) {
+    choices.push({ id: "lan", label: t("通过内网地址"), detail: lan, base: lan });
+  }
+  if (settings.authMode === "proxy" && proxy) {
+    return { mode: "single", base: proxy, via: "proxy" };
+  }
+  if (settings.authMode === "lan" && lan) {
+    return { mode: "single", base: lan, via: "lan" };
+  }
+  if (choices.length > 1) return { mode: "choose", choices };
+  const [only] = choices;
+  if (only) return { mode: "single", base: only.base, via: only.id };
+  return { mode: "single", base: resolveAuthBase(), via: "auto" };
+}
+function readStoredAuthBase() {
+  try {
+    return localStorage.getItem(AUTH_BASE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+function resolveAuthBase() {
+  const stored = readStoredAuthBase();
+  if (stored) return normalizeBase(stored);
+  const { origin, pathname, protocol, hostname, port } = window.location;
+  if (/^\/app(?:\/|$)/.test(pathname)) return origin;
+  if (protocol === "https:" && (port === "" || port === "443")) return origin;
+  if (protocol === "http:" || protocol === "https:") {
+    return `${protocol}//${hostname}:5666`;
+  }
+  return origin;
+}
+function validateProxyBase(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const url = new URL(text);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(t("反代地址只支持 http/https"));
+  }
+  return url.origin;
+}
+function getCachedSettings() {
+  return settingsCache ?? { ...DEFAULT_SETTINGS };
+}
+
+// src/client/composer.ts
+function findComposerFileInput(region) {
+  const inputs = Array.from(region.querySelectorAll('input[type="file"]'));
+  return inputs.find((input) => input.multiple && !input.disabled) || null;
+}
+function findActiveComposerInput() {
+  for (const region of document.querySelectorAll('[data-conversation-region="composer"]')) {
+    if (!isVisible(region)) continue;
+    const input = findComposerFileInput(region);
+    if (input) return { input, region };
+  }
+  return null;
+}
+async function addPathsToComposer(paths, input) {
+  const settings = await loadSettings();
+  ensureHostPathBridge();
+  const files = [];
+  let images = 0;
+  let unreadable = 0;
+  for (const raw of paths) {
+    const path = String(raw);
+    const mime = imageMimeForPath(path);
+    if (mime && settings.imageRead !== false) {
+      try {
+        const file2 = await readImageFile(path, mime);
+        setHostPath(file2, path);
+        files.push(file2);
+        images += 1;
+        continue;
+      } catch (error) {
+        console.warn(LOG_PREFIX, "image bytes unavailable; adding a path reference instead", error);
+        unreadable += 1;
+      }
+    }
+    const file = new File([], fileNameForPath(path), { type: "application/octet-stream" });
+    setHostPath(file, path);
+    files.push(file);
+  }
+  if (!files.length) throw new Error(t("没有可添加的文件"));
+  dispatchComposerFiles(input, files);
+  if (unreadable > 0) {
+    showToast(t("{count} 张图片未能读取，已改为路径引用", { count: unreadable }));
+  } else if (images > 0) {
+    showToast(t("已添加 {count} 个文件（{images} 张图片会上传）", { count: files.length, images }));
+  }
+}
+async function quotePathToComposer(path) {
+  const active = findActiveComposerInput();
+  if (!active) {
+    showToast(t("没有找到对话输入框，无法引用。"));
+    return;
+  }
+  await addPathsToComposer([path], active.input);
+}
+
+// src/client/menu.ts
+function looksLikeComposerCommandMenu(labels) {
+  const text = labels.map((value) => String(value ?? "").toLowerCase());
+  if (text.length < 3) return false;
+  return text.some((item) => /\bfile\b/.test(item)) && text.some((item) => /\bgoal\b/.test(item)) && text.some((item) => /\bplan\b/.test(item));
+}
 
 // node_modules/@trimjs/web-app/dist/index.js
 function e(t3) {
@@ -52,7 +894,7 @@ function e(t3) {
     return e2 && "function" == typeof Symbol && e2.constructor === Symbol && e2 !== Symbol.prototype ? "symbol" : typeof e2;
   }, e(t3);
 }
-function t(t3) {
+function t2(t3) {
   var r2 = (function(t4, r3) {
     if ("object" != e(t4) || !t4) return t4;
     var n2 = t4[Symbol.toPrimitive];
@@ -66,7 +908,7 @@ function t(t3) {
   return "symbol" == e(r2) ? r2 : r2 + "";
 }
 function r(e2, r2, n2) {
-  return (r2 = t(r2)) in e2 ? Object.defineProperty(e2, r2, { value: n2, enumerable: true, configurable: true, writable: true }) : e2[r2] = n2, e2;
+  return (r2 = t2(r2)) in e2 ? Object.defineProperty(e2, r2, { value: n2, enumerable: true, configurable: true, writable: true }) : e2[r2] = n2, e2;
 }
 var n = new class {
   constructor() {
@@ -1478,76 +2320,192 @@ var Ue = class {
   }
 };
 
-// src/client/cancel.js
-var CANCEL_TEXTS = /* @__PURE__ */ new Set([
-  "operation failed",
-  "操作失败",
-  "cancel",
-  "canceled",
-  "cancelled",
-  "abort",
-  "aborted",
-  "取消",
-  "已取消",
-  "用户取消"
-]);
-function isCancellationText(text) {
-  const value = String(text == null ? "" : text).trim().toLowerCase();
-  if (!value) return false;
-  return CANCEL_TEXTS.has(value) || value.includes("取消");
+// src/client/sdk.ts
+var sdkInstance = null;
+function getSdk() {
+  if (!sdkInstance) sdkInstance = new Ue();
+  return sdkInstance;
 }
-function isPickerCancelled(result) {
-  if (!result) return true;
-  const data = Array.isArray(result.data) ? result.data : [];
-  if (data.length > 0) return false;
-  if (result.code === 0) return true;
-  const msg = String(result.msg || "").trim();
-  if (!msg) return result.code === 1;
-  return isCancellationText(msg);
+function isFnosHost() {
+  const sdk = getSdk();
+  if (sdk.isWeb && sdk.isStandaloneWeb) return false;
+  return window.parent !== window || sdk.isWeb === false;
+}
+function isHostLikeWindow() {
+  const sdk = getSdk();
+  return window.parent !== window || sdk.isWeb === false;
 }
 
-// src/client/files.js
-var IMAGE_MIME_BY_EXTENSION = Object.freeze({
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".webp": "image/webp",
-  ".gif": "image/gif"
-});
-function fileExtension(value) {
-  const text = String(value == null ? "" : value);
-  const base = text.slice(Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\")) + 1);
-  const dot = base.lastIndexOf(".");
-  if (dot <= 0 || dot === base.length - 1) return "";
-  return base.slice(dot).toLowerCase();
+// src/client/auth.ts
+async function buildAuthUrl(base, state, method, params, appName) {
+  const sdk = getSdk();
+  const previousBase = sdk.getAppAuthBaseUrl;
+  sdk.getAppAuthBaseUrl = async () => base;
+  try {
+    const payload = {
+      appName,
+      ...params,
+      redirectUri: pluginURL("fnos-advanced/auth-callback.html"),
+      state
+    };
+    const build = sdk.buildAppAuthUrl;
+    const url = await build.call(sdk, method, payload);
+    const target = new URL(url);
+    if (payload.creatable) target.searchParams.set("creatable", "true");
+    return target.toString();
+  } finally {
+    sdk.getAppAuthBaseUrl = previousBase;
+  }
 }
-function imageMimeForPath(value) {
-  return IMAGE_MIME_BY_EXTENSION[fileExtension(value)] || "";
+function openAuthPopup() {
+  const popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+  if (popup) writePopupLoading(popup);
+  return popup;
 }
-function fileNameForPath(value) {
-  const text = String(value == null ? "" : value).replace(/[\\/]+$/, "");
-  const base = text.slice(Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\")) + 1);
-  return base || "file";
+function readStoredResult() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function acceptStoredResult(expectedState, accept) {
+  const stored = readStoredResult();
+  if (!stored) return;
+  if (expectedState && stored.state && stored.state !== expectedState) return;
+  accept(stored);
+}
+function parseAuthPayload(payload) {
+  if (!payload) return null;
+  if (typeof payload.search === "string" && payload.search) {
+    try {
+      const parsed = getSdk().parseAppAuthCallback(payload.search);
+      if (parsed && (parsed.status || parsed.error || parsed.path && parsed.path.length)) {
+        return parsed;
+      }
+    } catch {
+    }
+  }
+  return payload.result || null;
+}
+function requestAuth({ popup, state, buildUrl }) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let closeTimer = 0;
+    let pollTimer = 0;
+    let resultPollTimer = 0;
+    let resultPolling = false;
+    let timeoutTimer = 0;
+    const lookupStored = () => acceptStoredResult(state, accept);
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", lookupStored);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearInterval(pollTimer);
+      window.clearInterval(resultPollTimer);
+      window.clearTimeout(closeTimer);
+      window.clearTimeout(timeoutTimer);
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+      }
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    function accept(payload) {
+      if (!payload || settled) return;
+      const payloadState = payload.state || payload.result && payload.result.state || "";
+      if (state && payloadState && payloadState !== state) return;
+      const result = parseAuthPayload(payload);
+      if (result) finish(result);
+    }
+    function onMessage(event) {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data;
+      if (!data || data.type !== MSG_TYPE) return;
+      accept(data);
+    }
+    function onStorage(event) {
+      if (event.key !== STORAGE_KEY || !event.newValue) return;
+      try {
+        accept(JSON.parse(event.newValue));
+      } catch {
+      }
+    }
+    function onVisibility() {
+      if (document.visibilityState === "visible") lookupStored();
+    }
+    async function readServerResult() {
+      try {
+        const response = await fetch(
+          `${pluginURL("fnos-advanced/auth-result")}?state=${encodeURIComponent(state)}`,
+          { credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } }
+        );
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data && data.ok && typeof data.search === "string") {
+          accept({ state: data.state || state, search: data.search });
+        }
+      } catch {
+      }
+    }
+    async function pollServerResult() {
+      if (settled || resultPolling) return;
+      resultPolling = true;
+      try {
+        await readServerResult();
+      } finally {
+        resultPolling = false;
+      }
+    }
+    window.addEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", lookupStored);
+    document.addEventListener("visibilitychange", onVisibility);
+    acceptStoredResult(state, accept);
+    resultPollTimer = window.setInterval(pollServerResult, 900);
+    pollTimer = window.setInterval(() => {
+      if (!popup.closed) return;
+      window.clearInterval(pollTimer);
+      closeTimer = window.setTimeout(async () => {
+        const stored = readStoredResult();
+        if (stored) {
+          accept(stored);
+          return;
+        }
+        await readServerResult();
+        if (!settled) finish({ status: "cancelled", error: t("授权窗口已关闭") });
+      }, 450);
+    }, 500);
+    timeoutTimer = window.setTimeout(() => {
+      fail(new Error(t("授权超时，请重试")));
+    }, AUTH_TIMEOUT_MS);
+    void (async () => {
+      try {
+        const url = await buildUrl();
+        if (settled) return;
+        popup.location.replace(url);
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+  });
 }
 
-// src/client/menu.js
-function looksLikeComposerCommandMenu(labels) {
-  const text = labels.map((value) => String(value == null ? "" : value).toLowerCase());
-  if (text.length < 3) return false;
-  return text.some((item) => /\bfile\b/.test(item)) && text.some((item) => /\bgoal\b/.test(item)) && text.some((item) => /\bplan\b/.test(item));
-}
-
-// src/client/file-actions.js
-function fileRowActions(entryType, host) {
-  if (entryType !== "file" && entryType !== "directory") return [];
-  const actions = [];
-  if (host) actions.push("open");
-  if (entryType === "file") actions.push("quote");
-  actions.push("copy");
-  return actions;
-}
-
-// src/client/picker.js
+// src/client/picker.ts
 var SIDEBAR_GROUPS = Object.freeze([
   "myFiles",
   "otherShare",
@@ -1567,7 +2525,7 @@ function pickerParams(flow) {
   return params;
 }
 function normalizeWorkspacePath(value) {
-  const text = String(value == null ? "" : value);
+  const text = String(value ?? "");
   if (!text) return "";
   return text.replace(/\/+/g, "/").replace(/\/+$/, "") || "/";
 }
@@ -1577,348 +2535,192 @@ function isDuplicateWorkspacePath(candidate, workspacePaths2) {
   return workspacePaths2.some((path) => normalizeWorkspacePath(path) === target);
 }
 
-// src/client/i18n.js
-var PREFERENCE_KEY = "dsh-fnos-advanced:language";
-var EN = Object.freeze({
-  // Common
-  "取消": "Cancel",
-  "保存": "Save",
-  "保存中…": "Saving…",
-  "已保存": "Saved",
-  "读取设置…": "Loading settings…",
-  "未设置": "Not set",
-  "重试": "Retry",
-  // Picker
-  "选择飞牛目录": "Choose fnOS folder",
-  "通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）": "Choose a folder through fnOS (grants the current app access)",
-  "选择工作区目录": "Choose workspace folder",
-  "确认授权": "Authorize",
-  "选择文件": "Choose files",
-  "添加引用": "Add reference",
-  "飞牛授权": "fnOS authorization",
-  "正在打开飞牛授权页面…": "Opening the fnOS authorization page…",
-  "准备授权…": "Preparing…",
-  "等待选择…": "Waiting for selection…",
-  "等待授权…": "Waiting for authorization…",
-  "选择授权入口…": "Choosing authorization entry…",
-  "已取消选择": "Selection cancelled",
-  "已取消授权": "Authorization cancelled",
-  "已填入授权目录：{path}": "Folder authorized: {path}",
-  "已填入路径": "Path filled",
-  "该目录已添加为工作区": "This folder is already a workspace",
-  "打开选择器失败": "Could not open the picker",
-  "当前宿主未提供内嵌选择器，已改用网页授权。": "The native picker is unavailable; using web authorization.",
-  "浏览器拦截了授权窗口，请允许弹窗后重试。": "The browser blocked the authorization window. Allow popups and retry.",
-  "授权超时，请重试": "Authorization timed out. Retry.",
-  "授权窗口已关闭": "Authorization window closed",
-  "授权结果里没有路径": "Authorization returned no path",
-  "选择授权入口": "Choose authorization entry",
-  "通过反代地址": "Via reverse proxy",
-  "通过内网地址": "Via LAN",
-  "没有找到目录选择器的路径输入框": "Could not find the folder picker's path input",
-  "无法确定工作区": "Could not determine the workspace",
-  "无法获取工作区目录": "Could not read the workspace folder",
-  "打开目录失败，当前宿主可能不支持该操作。": "Could not open the folder; the host may not support it.",
-  "打开目录": "Open folder",
-  // Composer
-  "从飞牛选择": "Choose from fnOS",
-  "选择 NAS 上的文件，非图片作为路径引用": "Pick files on the NAS; non-images become path references",
-  "没有找到对话的文件输入框，当前 dsh 版本可能不支持。": "No composer file input found; this dsh version may be unsupported.",
-  "当前会话暂时不能添加附件。": "This session cannot accept attachments right now.",
-  "已添加 {count} 个文件": "Added {count} file(s)",
-  "已添加 {count} 个文件（{images} 张图片会上传）": "Added {count} file(s) ({images} image(s) will upload)",
-  "{count} 张图片未能读取，已改为路径引用": "{count} image(s) could not be read; added as path references",
-  "没有可添加的文件": "No files to add",
-  "宿主半侧未提供图片读取接口": "The host does not provide the image read route",
-  "读取图片失败（HTTP {status}）": "Could not read the image (HTTP {status})",
-  "已复制路径": "Path copied",
-  "复制失败，请手动复制": "Copy failed; copy manually",
-  // File tree
-  "飞牛操作": "fnOS actions",
-  "在飞牛中打开": "Open in fnOS",
-  "引用到对话": "Quote in chat",
-  "复制路径": "Copy path",
-  "在飞牛中打开失败，当前宿主可能不支持该操作。": "Could not open in fnOS; the host may not support it.",
-  "没有找到对话输入框，无法引用。": "No composer input to quote into.",
-  // Workspace health
-  "检查目录权限": "Check folder access",
-  "重新授权目录": "Re-authorize folder",
-  "正在检查目录权限…": "Checking folder access…",
-  "目录可读写": "Folder is readable and writable",
-  "目录不存在": "Folder does not exist",
-  "不是目录": "Not a folder",
-  "目录可读但不可写": "Folder is readable but not writable",
-  "目录不可读（{error}）": "Folder is not readable ({error})",
-  "检查失败：{error}": "Check failed: {error}",
-  "重新授权目录：{path}": "Re-authorize folder: {path}",
-  "已重新授权，请复查权限": "Re-authorized; check access again",
-  "重新授权失败：{error}": "Re-authorization failed: {error}",
-  "工作区目录权限": "Workspace folder access",
-  "检查 dsh 工作区目录的读写权限。飞牛 ACL 记录损坏或目录移动后，dsh 会读不到这些目录。": "Check read/write access to dsh workspace folders. Broken fnOS ACL records or moved folders make dsh unable to read them.",
-  "检查全部工作区": "Check all workspaces",
-  "检查中…": "Checking…",
-  "共 {count} 个": "{count} total",
-  "可读写": "Read/write",
-  "不存在": "Missing",
-  "只读": "Read-only",
-  "不可读": "No access",
-  "检查失败": "Check failed",
-  "重新授权": "Re-authorize",
-  "已重新授权": "Re-authorized",
-  "没有找到工作区": "No workspaces found",
-  "没有找到工作区权限接口": "The workspace access API is not available",
-  "权限体检": "Access check",
-  "工作区体检": "Workspace access check",
-  // Diagnostics
-  "诊断": "Diagnostics",
-  "检查 dsh 版本、DOM 锚点和飞牛地址连通性。": "Check dsh versions, DOM anchors, and fnOS address reachability.",
-  "版本": "Version",
-  "宿主": "Host",
-  "客户端": "Client",
-  "宿主接口": "Host API",
-  "正常": "OK",
-  "缺失（需重启 dsh）": "Missing (restart dsh)",
-  "读取失败": "Error",
-  "运行环境": "Runtime",
-  "飞牛桌面 / App": "fnOS desktop / app",
-  "飞牛网关": "fnOS gateway",
-  "普通浏览器": "Browser",
-  "DOM 锚点": "DOM anchors",
-  "对话输入框": "Composer input",
-  "文件树": "File tree",
-  "工作区菜单": "Workspace menu",
-  "目录选择器": "Folder picker",
-  "可用": "Present",
-  "不可用": "Missing",
-  "未检测": "Not detected",
-  "测试反代地址": "Test proxy",
-  "测试内网地址": "Test LAN",
-  "测试中…": "Testing…",
-  "可连接（{ms}ms）": "Reachable ({ms}ms)",
-  "无法连接": "Unreachable",
-  "连接超时": "Timed out",
-  "复制诊断信息": "Copy diagnostics",
-  "重新检测": "Re-check",
-  "诊断信息已复制": "Diagnostics copied",
-  "复制失败": "Copy failed",
-  "图片读取": "Image read",
-  "开": "On",
-  "关": "Off",
-  // Settings
-  "飞牛目录授权": "fnOS access",
-  "配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。": "Configure the fnOS authorization entry used outside the gateway. Settings are stored in the dsh data directory.",
-  "反代飞牛地址": "fnOS reverse-proxy address",
-  "填协议 + 域名[:端口]，不要带路径；留空表示未配置。": "Protocol + host[:port], no path; leave empty if unused.",
-  "飞牛内网地址 / 端口": "fnOS LAN address / port",
-  "只填端口时使用当前访问主机的地址；默认 5666。": "A bare port uses the current host; default 5666.",
-  "非网关访问时的授权入口": "Authorization entry outside the gateway",
-  "每次询问（推荐）": "Ask every time (recommended)",
-  "优先使用反代地址": "Prefer reverse proxy",
-  "优先使用内网地址": "Prefer LAN",
-  "从飞牛选择图片时读取图片内容": "Read image content when picking from fnOS",
-  "图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。": "Images need bytes to be visible to the model. When off, images become path references. Only PNG/JPEG/WebP/GIF are read, and only for files you picked.",
-  "连接与授权": "Connection and authorization",
-  "配置反代/内网授权入口、界面语言和图片读取。": "Configure proxy/LAN authorization, interface language, and image reading.",
-  "清除结果": "Clear results",
-  "展开": "Expand",
-  "收起": "Collapse",
-  "界面语言": "Interface language",
-  "跟随浏览器": "Follow browser",
-  "中文": "Chinese",
-  "English": "English",
-  "宿主半侧版本 {host}，客户端 {client}。请重启 dsh 后再保存设置。": "Host {host}, client {client}. Restart dsh before saving.",
-  "宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。": "The host half does not expose the settings API (usually after an upgrade without restarting dsh). Restart dsh and try again.",
-  "无法读取宿主设置接口，请确认 dsh 运行正常。": "Could not read the host settings API. Check that dsh is running.",
-  "保存失败（HTTP {status}）": "Save failed (HTTP {status})",
-  "当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。": "Running inside fnOS desktop/app: the native picker is used; no web authorization popup.",
-  "当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。": "Accessed through the fnOS gateway: the same origin is used for authorization; no entry chooser.",
-  "当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。": "Not accessed through the fnOS gateway: with both proxy and LAN configured, choosing a folder asks which entry to use.",
-  "反代 {proxy} · 内网 {lan}": "Proxy {proxy} · LAN {lan}",
-  // Host errors (surface through settings / pickers)
-  "反代地址不是有效 URL": "The proxy address is not a valid URL",
-  "反代地址只支持 http/https": "The proxy address must be http or https",
-  "内网端口必须在 1-65535 之间": "The LAN port must be between 1 and 65535",
-  "内网地址格式无效": "The LAN address is invalid",
-  "内网地址只支持 http/https": "The LAN address must be http or https",
-  "图片路径无效": "Invalid image path",
-  "图片路径必须是绝对路径": "The image path must be absolute",
-  "不允许读取隐藏路径": "Hidden paths cannot be read",
-  "图片不存在": "The image does not exist",
-  "不允许读取 dsh 数据目录": "The dsh data directory cannot be read",
-  "只支持 PNG/JPEG/WebP/GIF 图片": "Only PNG/JPEG/WebP/GIF images are supported",
-  "不是普通文件": "Not a regular file",
-  "图片内容为空": "The image is empty",
-  "图片超过 20 MB": "The image exceeds 20 MB",
-  "插件设置已关闭图片读取": "Image reading is disabled in the plugin settings",
-  "设置格式无效": "Invalid settings format"
-});
-var preferences = ["auto", "zh", "en"];
-var preference = "auto";
-var loaded = false;
-function getLanguagePreference() {
-  if (loaded) return preference;
-  loaded = true;
+// src/client/picker-flow.ts
+async function runPickFlow(button, flow) {
+  if (button.dataset.busy === "1") return;
+  markBusy(button, flow);
+  let popup = null;
+  if (!isHostLikeWindow()) {
+    popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+    if (popup) writePopupLoading(popup);
+  }
   try {
-    const stored = window.localStorage.getItem(PREFERENCE_KEY);
-    if (preferences.includes(stored)) preference = stored;
-  } catch {
+    const direct = await pickPathsDirect(flow);
+    if (direct.handled) {
+      closePopup(popup);
+      if (direct.paths && direct.paths.length) {
+        await finishPick(flow, direct.paths);
+      } else if (direct.cancelled) {
+        flow.status(t("已取消选择"), false);
+        flow.restore();
+      } else {
+        flow.status(translateError(direct.error) || t("打开选择器失败"), true);
+        flow.restore();
+      }
+      return;
+    }
+    const config = await loadConfig();
+    const appName = config.appName || "Harness";
+    const settings = await loadSettings();
+    const target = await resolveAuthTargets(config, settings);
+    if (target.mode === "choose") {
+      closePopup(popup);
+      showAuthChooser(flow, appName, target.choices);
+      return;
+    }
+    if (!popup || popup.closed) {
+      popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+    }
+    if (!popup) throw new Error(t("浏览器拦截了授权窗口，请允许弹窗后重试。"));
+    await startAuthFlow(flow, appName, target.base, popup);
+  } catch (error) {
+    closePopup(popup);
+    handlePickError(flow, error);
   }
-  return preference;
 }
-function setLanguagePreference(value) {
-  preference = preferences.includes(value) ? value : "auto";
-  loaded = true;
+function markBusy(button, flow) {
+  button.dataset.busy = "1";
+  button.disabled = true;
+  flow.setLabel(t("准备授权…"));
+}
+async function finishPick(flow, paths) {
+  if (flow.isDuplicate && await flow.isDuplicate(paths)) {
+    flow.status(t("该目录已添加为工作区"), false);
+    flow.restore();
+    return;
+  }
+  await flow.onPaths(paths);
+  flow.status(flow.doneText(paths), false);
+  const label = flow.doneLabel();
+  if (label) flow.button.textContent = label;
+  window.setTimeout(() => flow.restore(), 1600);
+}
+async function pickPathsDirect(flow) {
+  const sdk = getSdk();
   try {
-    window.localStorage.setItem(PREFERENCE_KEY, preference);
+    await sdk.ready();
   } catch {
+    return { handled: false };
   }
-  return preference;
-}
-function currentLanguage() {
-  getLanguagePreference();
-  if (preference === "zh" || preference === "en") return preference;
-  const html = typeof document !== "undefined" ? document.documentElement.lang : "";
-  const navigatorLanguage = typeof navigator !== "undefined" ? navigator.language : "";
-  return /^zh/i.test(html || navigatorLanguage) ? "zh" : "en";
-}
-function interpolate(text, params) {
-  if (!params) return text;
-  return text.replace(/\{(\w+)\}/g, (match, key) => Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : match);
-}
-function t2(source, params) {
-  const text = currentLanguage() === "en" ? EN[source] || source : source;
-  return interpolate(text, params);
-}
-function translateError(error) {
-  const text = error == null ? "" : String(error);
-  return text ? t2(text) : text;
-}
-
-// src/client/index.js
-var LOG_PREFIX = "[dsh-fnos-advanced]";
-var VERSION = "0.3.2";
-var MSG_TYPE = "dsh-fnos-advanced:auth";
-var STORAGE_KEY = "dsh-fnos-advanced:auth-result";
-var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
-var SETTINGS_SLOT_KEY = "dsh-fnos-advanced";
-var DEFAULT_SETTINGS = Object.freeze({ proxyBase: "", lanTarget: "5666", authMode: "ask", imageRead: true });
-var BUTTON_ATTR = "data-dsh-fnos-advanced";
-var PICK_ITEM_ATTR = "data-dsh-fnos-pick-file";
-var FILE_ACTION_ATTR = "data-dsh-fnos-file-action";
-var STATUS_CLASS = "dsh-fnos-advanced-status";
-var STYLE_ID = "dsh-fnos-advanced-style";
-var WORKSPACE_TITLE_RE = /workspace|工作区/i;
-var PATH_LABEL_RE = /(?:^|\b)(?:edit\s*path|path)(?:\b|$)|路径|编辑路径|修改路径/i;
-var OPEN_BUTTON_RE = /^(?:open|打开|确定|选择|select|choose)/i;
-var CANCEL_BUTTON_RE = /^(?:cancel|取消)/i;
-var POPUP_FEATURES = "popup=yes,width=760,height=680,resizable=yes,scrollbars=yes";
-var AUTH_TIMEOUT_MS = 5 * 60 * 1e3;
-var FOLDER_OPEN_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M1.5 3.5C1.5 2.95 1.95 2.5 2.5 2.5H5.4C5.65 2.5 5.88 2.59 6.07 2.75L7.7 4.2C7.88 4.36 8.12 4.45 8.36 4.45H13.5C14.05 4.45 14.5 4.9 14.5 5.45V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3.5Z" stroke="currentColor"/></svg>';
-var PICK_FILE_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9.5 1.5H4.5C3.95 1.5 3.5 1.95 3.5 2.5V13.5C3.5 14.05 3.95 14.5 4.5 14.5H11.5C12.05 14.5 12.5 14.05 12.5 13.5V4.5L9.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/><path d="M6 8.5H10M8 6.5V10.5" stroke="currentColor" stroke-linecap="round"/></svg>';
-var FILE_ACTION_SVG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="3.5" cy="8" r="1.15" fill="currentColor"/><circle cx="8" cy="8" r="1.15" fill="currentColor"/><circle cx="12.5" cy="8" r="1.15" fill="currentColor"/></svg>';
-var installedDispose = null;
-var sdkInstance = null;
-var configPromise = null;
-var settingsCache = null;
-var settingsCachedAt = 0;
-var settingsPromise = null;
-var settingsHostState = "unknown";
-var workspacePaths = /* @__PURE__ */ new Map();
-var lastWorkspaceMenu = null;
-var hostPathByFile = /* @__PURE__ */ new WeakMap();
-var hostPathStore = hostPathByFile;
-function apply(ctx) {
-  if (typeof window === "undefined" || typeof document === "undefined") return;
-  const dispose = install();
-  if (ctx && typeof ctx.effect === "function") {
-    ctx.effect(() => dispose, "dsh-fnos-advanced: workspace directory picker");
+  if (sdk.isWeb && sdk.isStandaloneWeb) return { handled: false };
+  if (sdk.isWeb && window.parent === window) return { handled: false };
+  const picker = sdk[flow.method];
+  if (typeof picker !== "function") return { handled: false };
+  flow.setLabel(t("等待选择…"));
+  let result;
+  try {
+    result = await picker.call(sdk, pickerParams(flow));
+  } catch (error) {
+    console.warn(LOG_PREFIX, "in-host picker unavailable; falling back to URL auth", error);
+    flow.status(t("当前宿主未提供内嵌选择器，已改用网页授权。"), false);
+    return { handled: false };
   }
-  registerSettingsSlot(ctx);
-  registerWorkspacePaths(ctx);
-}
-function install() {
-  if (installedDispose) return installedDispose;
-  injectStyle();
-  ensureHostPathBridge();
-  const cleanups = [];
-  let scanTimer = 0;
-  const scheduleScan = () => {
-    if (scanTimer) return;
-    scanTimer = window.setTimeout(() => {
-      scanTimer = 0;
-      scan();
-    }, 80);
+  const paths = result && result.code === 0 && Array.isArray(result.data) ? result.data.filter((item) => typeof item === "string" && item) : [];
+  if (paths.length) return { handled: true, paths };
+  return {
+    handled: true,
+    cancelled: isPickerCancelled(result),
+    error: result && result.msg ? result.msg : t("打开选择器失败")
   };
-  const observer = new MutationObserver(scheduleScan);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  cleanups.push(() => observer.disconnect());
-  const onClick = (event) => {
-    const target = event.target instanceof Element ? event.target.closest(`[${BUTTON_ATTR}]`) : null;
-    if (!target) return;
+}
+async function startAuthFlow(flow, appName, base, existingPopup) {
+  flow.setLabel(t("等待授权…"));
+  const state = randomId();
+  let popup = existingPopup;
+  if (!popup || popup.closed) {
+    popup = window.open("", `dsh-fnos-advanced-auth-${state}`, POPUP_FEATURES);
+  }
+  if (!popup) throw new Error(t("浏览器拦截了授权窗口，请允许弹窗后重试。"));
+  writePopupLoading(popup);
+  try {
+    const auth = await requestAuth({
+      popup,
+      state,
+      buildUrl: () => buildAuthUrl(base, state, flow.method, { ...pickerParams(flow) }, appName)
+    });
+    if (!auth || auth.status !== "success") {
+      if (auth && (auth.status === "cancelled" || isCancellationText(auth.error))) {
+        if (auth.status !== "cancelled") {
+          console.info(LOG_PREFIX, "authorization result treated as cancellation", auth);
+        }
+        flow.status(t("已取消选择"), false);
+        flow.restore();
+        return;
+      }
+      throw new Error(auth && auth.error ? translateError(auth.error) : t("打开选择器失败"));
+    }
+    const paths = Array.isArray(auth.path) ? auth.path.filter((item) => typeof item === "string" && item) : [];
+    if (!paths.length) throw new Error(t("授权结果里没有路径"));
+    await finishPick(flow, paths);
+  } catch (error) {
+    closePopup(popup);
+    throw error;
+  }
+}
+function handlePickError(flow, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(LOG_PREFIX, message, error);
+  flow.status(translateError(message), true);
+  flow.restore();
+}
+function showAuthChooser(flow, appName, choices) {
+  const anchor = flow.anchor;
+  if (!anchor) {
+    flow.restore();
+    return;
+  }
+  removeChooser(anchor);
+  const host = anchor;
+  if (getComputedStyle(host).position === "static") host.style.position = "relative";
+  flow.setLabel(t("选择授权入口…"));
+  const panel = document.createElement("div");
+  panel.className = "dsh-fnos-advanced-chooser";
+  panel.setAttribute("role", "menu");
+  panel.setAttribute("aria-label", t("选择授权入口"));
+  const title = document.createElement("div");
+  title.className = "dsh-fnos-advanced-chooser-title";
+  title.textContent = t("选择授权入口");
+  panel.appendChild(title);
+  for (const choice of choices) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "dsh-fnos-advanced-chooser-option";
+    option.setAttribute("role", "menuitem");
+    const label = document.createElement("span");
+    label.className = "dsh-fnos-advanced-chooser-label";
+    label.textContent = choice.label;
+    const detail = document.createElement("span");
+    detail.className = "dsh-fnos-advanced-chooser-detail";
+    detail.textContent = choice.detail;
+    option.append(label, detail);
+    option.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeChooser(anchor);
+      startAuthFlow(flow, appName, choice.base, null).catch((error) => {
+        handlePickError(flow, error);
+      });
+    });
+    panel.appendChild(option);
+  }
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "dsh-fnos-advanced-chooser-cancel";
+  cancel.textContent = t("取消");
+  cancel.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    void handlePick(target);
-  };
-  document.addEventListener("click", onClick, true);
-  cleanups.push(() => document.removeEventListener("click", onClick, true));
-  const onWorkspaceRowClick = (event) => {
-    const row = event.target instanceof Element ? event.target.closest('[data-row-key^="workspace:"]') : null;
-    if (!row) return;
-    const key = row.getAttribute("data-row-key") || "";
-    const id = key.slice("workspace:".length);
-    if (id) {
-      lastWorkspaceMenu = { id, at: Date.now() };
-      scheduleScan();
-    }
-  };
-  document.addEventListener("click", onWorkspaceRowClick, true);
-  cleanups.push(() => document.removeEventListener("click", onWorkspaceRowClick, true));
-  getSdk().ready().then(scheduleScan).catch(() => {
+    removeChooser(anchor);
+    flow.restore();
   });
-  const dispose = () => {
-    if (scanTimer) {
-      window.clearTimeout(scanTimer);
-      scanTimer = 0;
-    }
-    for (const cleanup of cleanups.splice(0)) {
-      try {
-        cleanup();
-      } catch {
-      }
-    }
-    closeFileMenu();
-    for (const node of document.querySelectorAll(`[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir]`)) {
-      node.remove();
-    }
-    for (const row of document.querySelectorAll(".dsh-fnos-file-row")) {
-      row.classList.remove("dsh-fnos-file-row");
-      if (row.dataset.dshFnosPosition === "1") {
-        row.style.position = "";
-        delete row.dataset.dshFnosPosition;
-      }
-    }
-    for (const node of document.querySelectorAll(`[${FILE_ACTION_ATTR}]`)) node.remove();
-    const style = document.getElementById(STYLE_ID);
-    if (style) style.remove();
-    installedDispose = null;
-  };
-  installedDispose = dispose;
-  scan();
-  return dispose;
+  panel.appendChild(cancel);
+  anchor.appendChild(panel);
 }
-function scan() {
-  for (const dialog of document.querySelectorAll('[role="dialog"]')) {
-    if (!isWorkspacePicker(dialog)) {
-      dialog.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}`).forEach((node) => node.remove());
-      continue;
-    }
-    if (dialog.querySelector(`[${BUTTON_ATTR}]`)) continue;
-    injectButton(dialog);
-  }
-  scanCommandMenu();
-  scanFileTree();
-  scanWorkspaceMenus();
+function removeChooser(anchor) {
+  anchor.querySelectorAll(".dsh-fnos-advanced-chooser").forEach((node) => node.remove());
 }
+
+// src/client/composer-menu.ts
 function scanCommandMenu() {
   for (const menu of document.querySelectorAll("[data-trigger-menu]")) {
     if (!isVisible(menu)) continue;
@@ -1953,16 +2755,16 @@ function injectPickItem(menu) {
     const template = options.map((option) => {
       const optionAlias = Array.from(option.querySelectorAll("span")).find((span) => (span.textContent || "").trim().toLowerCase() === "goal");
       return optionAlias ? optionAlias.nextElementSibling : null;
-    }).find((node) => node && node.tagName === "SPAN");
+    }).find((node) => node instanceof HTMLElement && node.tagName === "SPAN");
     if (template) {
       description = template.cloneNode(false);
       item.appendChild(description);
     }
   }
   if (icon) icon.innerHTML = PICK_FILE_SVG;
-  if (name) name.textContent = t2("从飞牛选择");
+  if (name) name.textContent = t("从飞牛选择");
   if (alias) alias.textContent = "fnos";
-  if (description) description.textContent = t2("选择 NAS 上的文件，非图片作为路径引用");
+  if (description) description.textContent = t("选择 NAS 上的文件，非图片作为路径引用");
   item.addEventListener("mousedown", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1975,26 +2777,64 @@ function injectPickItem(menu) {
   });
   fileOption.after(item);
 }
-function dismissTriggerMenu() {
-  try {
-    const event = typeof PointerEvent === "function" ? new PointerEvent("pointerdown", { bubbles: true, cancelable: true }) : new MouseEvent("mousedown", { bubbles: true, cancelable: true });
-    (document.body || document.documentElement).dispatchEvent(event);
-  } catch {
+async function handlePickFiles(button) {
+  const active = findActiveComposerInput();
+  if (!active) {
+    showToast(t("没有找到对话的文件输入框，当前 dsh 版本可能不支持。"));
+    return;
   }
-}
-function findActiveComposerInput() {
-  for (const region of document.querySelectorAll('[data-conversation-region="composer"]')) {
-    if (!isVisible(region)) continue;
-    const input = findComposerFileInput(region);
-    if (input) return { input, region };
+  const { input, region } = active;
+  if (input.disabled) {
+    showToast(t("当前会话暂时不能添加附件。"));
+    return;
   }
-  return null;
+  const editor = region.querySelector("[data-composer-input]");
+  if (editor && editor.getAttribute("contenteditable") === "false") {
+    showToast(t("当前会话暂时不能添加附件。"));
+    return;
+  }
+  await runPickFlow(button, composerFlow(input, button));
 }
-function findComposerFileInput(region) {
-  return Array.from(region.querySelectorAll('input[type="file"]')).find((input) => input.multiple && !input.disabled) || null;
+function composerFlow(input, button) {
+  return {
+    button,
+    method: "pickUserFile",
+    directory: false,
+    title: t("选择文件"),
+    okText: t("添加引用"),
+    anchor: input.closest("[data-composer-card]") || input.parentElement,
+    status: (text) => showToast(text),
+    onPaths: (paths) => addPathsToComposer(paths, input),
+    doneText: (paths) => t("已添加 {count} 个文件", { count: paths.length }),
+    setLabel: () => {
+    },
+    doneLabel: () => "",
+    restore: () => {
+      button.disabled = false;
+      delete button.dataset.busy;
+    }
+  };
 }
+
+// src/client/file-actions.ts
+function fileRowActions(entryType, host) {
+  if (entryType !== "file" && entryType !== "directory") return [];
+  const actions = [];
+  if (host) actions.push("open");
+  if (entryType === "file") actions.push("quote");
+  actions.push("copy");
+  return actions;
+}
+
+// src/client/file-tree.ts
 var fileMenu = null;
+var fileMenuRow = null;
 var fileMenuCleanup = null;
+var FILE_ACTION_TEXT = {
+  open: "在飞牛中打开",
+  quote: "引用到对话",
+  copy: "复制路径"
+};
 function scanFileTree() {
   for (const row of document.querySelectorAll("[data-files-entry][data-files-path]")) {
     const entry = row.getAttribute("data-files-entry") || "";
@@ -2030,8 +2870,8 @@ function injectFileAction(row) {
   action.setAttribute(FILE_ACTION_ATTR, "1");
   action.className = "dsh-fnos-file-action";
   action.innerHTML = FILE_ACTION_SVG;
-  action.title = t2("飞牛操作");
-  action.setAttribute("aria-label", t2("飞牛操作"));
+  action.title = t("飞牛操作");
+  action.setAttribute("aria-label", t("飞牛操作"));
   action.style.height = `${rowButton.offsetHeight || 28}px`;
   action.addEventListener("mousedown", (event) => {
     event.preventDefault();
@@ -2040,7 +2880,7 @@ function injectFileAction(row) {
   action.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    if (fileMenu && fileMenu.__dshFnosRow === row) {
+    if (fileMenu && fileMenuRow === row) {
       closeFileMenu();
       return;
     }
@@ -2048,11 +2888,6 @@ function injectFileAction(row) {
   });
   row.appendChild(action);
 }
-var FILE_ACTION_TEXT = Object.freeze({
-  open: "在飞牛中打开",
-  quote: "引用到对话",
-  copy: "复制路径"
-});
 function openFileMenu(anchor, row) {
   closeFileMenu();
   const path = row.getAttribute("data-files-path") || "";
@@ -2062,7 +2897,6 @@ function openFileMenu(anchor, row) {
   const menu = document.createElement("div");
   menu.className = "dsh-fnos-file-menu";
   menu.setAttribute("role", "menu");
-  menu.__dshFnosRow = row;
   const title = document.createElement("div");
   title.className = "dsh-fnos-file-menu-title";
   title.textContent = path.split("/").filter(Boolean).pop() || path;
@@ -2075,7 +2909,7 @@ function openFileMenu(anchor, row) {
     item.setAttribute("role", "menuitem");
     const text = document.createElement("span");
     text.className = "dsh-fnos-file-menu-label";
-    text.textContent = t2(FILE_ACTION_TEXT[action]);
+    text.textContent = t(FILE_ACTION_TEXT[action]);
     item.append(text);
     item.addEventListener("click", (event) => {
       event.preventDefault();
@@ -2088,6 +2922,7 @@ function openFileMenu(anchor, row) {
   document.body.appendChild(menu);
   positionFileMenu(menu, anchor);
   fileMenu = menu;
+  fileMenuRow = row;
   const onPointerDown = (event) => {
     if (!(event.target instanceof Node)) return;
     if (menu.contains(event.target) || anchor.contains(event.target)) return;
@@ -2129,6 +2964,7 @@ function closeFileMenu() {
     fileMenu.remove();
     fileMenu = null;
   }
+  fileMenuRow = null;
 }
 async function runFileAction(action, path, entry) {
   const isDirectory = entry === "directory";
@@ -2141,9 +2977,9 @@ async function runFileAction(action, path, entry) {
       await copyPathToClipboard(path);
     }
   } catch (error) {
-    const message = error && error.message ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
     console.warn(LOG_PREFIX, "file-tree action failed", action, message, error);
-    showToast(action === "open" ? t2("在飞牛中打开失败，当前宿主可能不支持该操作。") : translateError(message));
+    showToast(action === "open" ? t("在飞牛中打开失败，当前宿主可能不支持该操作。") : translateError(message));
   }
 }
 async function openPathInFnos(path, isDirectory) {
@@ -2164,77 +3000,30 @@ async function openPathInFnos(path, isDirectory) {
     await sdk.openFileManager(path);
   }
 }
-async function quotePathToComposer(path) {
-  const active = findActiveComposerInput();
-  if (!active) {
-    showToast(t2("没有找到对话输入框，无法引用。"));
-    return;
-  }
-  await addPathsToComposer([path], active.input);
-}
 async function copyPathToClipboard(path) {
   const ok = await copyText(path);
-  showToast(ok ? t2("已复制路径") : t2("复制失败，请手动复制"));
+  showToast(ok ? t("已复制路径") : t("复制失败，请手动复制"));
 }
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-  }
-  try {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.top = "-1000px";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    const ok = typeof document.execCommand === "function" && document.execCommand("copy");
-    area.remove();
-    return Boolean(ok);
-  } catch {
-    return false;
-  }
-}
-function registerWorkspacePaths(ctx) {
-  if (!ctx || typeof ctx.inject !== "function") return;
-  ctx.inject(["workspaces"], (scope) => {
-    const workspaces = scope.workspaces;
-    const list = workspaces && workspaces.list;
-    if (!list || typeof list.getSnapshot !== "function") return;
-    const update = () => {
-      try {
-        const snapshot = list.getSnapshot();
-        const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
-        workspacePaths = new Map(
-          items.filter((item) => item && item.workspaceId && typeof item.path === "string").map((item) => [String(item.workspaceId), item.path])
-        );
-      } catch {
-      }
-    };
-    update();
-    if (typeof list.subscribe === "function" && typeof scope.effect === "function") {
-      try {
-        scope.effect(() => list.subscribe(update), "dsh-fnos-advanced: workspace paths");
-      } catch {
-      }
-    }
-  });
-}
-function isFnosHost() {
-  const sdk = getSdk();
-  if (sdk.isWeb && sdk.isStandaloneWeb) return false;
-  return window.parent !== window || sdk.isWeb === false;
+
+// src/client/settings-page.tsx
+var React = __toESM(require("react"), 1);
+
+// src/version.ts
+var VERSION = "0.5.0";
+
+// src/client/workspace-menu.ts
+var lastWorkspaceMenu = null;
+var MENU_TTL_MS = 5 * 60 * 1e3;
+function noteWorkspaceRowClick(row) {
+  const key = row.getAttribute("data-row-key") || "";
+  const id = key.startsWith("workspace:") ? key.slice("workspace:".length) : "";
+  if (id) lastWorkspaceMenu = { id, at: Date.now() };
 }
 function scanWorkspaceMenus() {
-  if (!lastWorkspaceMenu || Date.now() - lastWorkspaceMenu.at > 5 * 60 * 1e3) return;
+  if (!lastWorkspaceMenu || Date.now() - lastWorkspaceMenu.at > MENU_TTL_MS) return;
   for (const menu of document.querySelectorAll('[role="menu"]')) {
     if (!isVisible(menu)) continue;
-    if (menu.querySelector("[data-dsh-fnos-check-dir]")) continue;
+    if (menu.querySelector(`[${CHECK_DIR_ATTR}]`)) continue;
     if (!isWorkspaceActionsMenu(menu)) continue;
     injectOpenDirItem(menu);
   }
@@ -2264,25 +3053,22 @@ function injectOpenDirItem(menu) {
       const context = lastWorkspaceMenu;
       closeMenu(menu);
       if (!context) {
-        showToast(t2("无法确定工作区"));
+        showToast(t("无法确定工作区"));
         return;
       }
       onClick(context.id);
     });
     return item;
   };
-  const open = isFnosHost() ? make("data-dsh-fnos-open-dir", t2("打开目录"), FOLDER_OPEN_SVG, (id) => {
+  const open = isFnosHost() ? make(OPEN_DIR_ATTR, t("打开目录"), FOLDER_OPEN_SVG, (id) => {
     void openWorkspaceDirectory(id);
   }) : null;
-  const check = make("data-dsh-fnos-check-dir", t2("检查目录权限"), FOLDER_OPEN_SVG, (id) => {
+  const check = make(CHECK_DIR_ATTR, t("检查目录权限"), FOLDER_OPEN_SVG, (id) => {
     void checkWorkspaceFromMenu(id);
   });
-  const reauth = make("data-dsh-fnos-reauth-dir", t2("重新授权目录"), FOLDER_OPEN_SVG, (id) => {
+  const reauth = make(REAUTH_DIR_ATTR, t("重新授权目录"), FOLDER_OPEN_SVG, (id) => {
     let popup = null;
-    if (!isFnosHost()) {
-      popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
-      if (popup) writePopupLoading(popup);
-    }
+    if (!isFnosHost()) popup = openAuthPopup();
     void reauthWorkspaceFromMenu(id, popup);
   });
   if (reauth) viewport.insertBefore(reauth, viewport.firstChild);
@@ -2291,7 +3077,13 @@ function injectOpenDirItem(menu) {
 }
 function closeMenu(menu) {
   try {
-    const options = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true };
+    const options = {
+      key: "Escape",
+      code: "Escape",
+      keyCode: 27,
+      which: 27,
+      bubbles: true
+    };
     document.dispatchEvent(new KeyboardEvent("keydown", options));
     window.dispatchEvent(new KeyboardEvent("keydown", options));
   } catch {
@@ -2300,50 +3092,10 @@ function closeMenu(menu) {
     if (menu.isConnected) menu.remove();
   }, 0);
 }
-async function knownWorkspacePaths() {
-  if (workspacePaths.size === 0) {
-    try {
-      const response = await fetch(pluginURL("fnos-advanced/workspaces"), {
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: { Accept: "application/json" }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        for (const workspace of data && Array.isArray(data.workspaces) ? data.workspaces : []) {
-          if (workspace && workspace.id && typeof workspace.path === "string") {
-            workspacePaths.set(String(workspace.id), workspace.path);
-          }
-        }
-      }
-    } catch {
-    }
-  }
-  return [...new Set([...workspacePaths.values()].filter(Boolean))];
-}
-async function resolveWorkspacePath(id) {
-  const cached = workspacePaths.get(id);
-  if (cached) return cached;
-  try {
-    const response = await fetch(
-      `${pluginURL("fnos-advanced/workspace-path")}?id=${encodeURIComponent(id)}`,
-      { credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } }
-    );
-    if (response.ok) {
-      const data = await response.json();
-      if (data && data.ok && typeof data.path === "string" && data.path) {
-        workspacePaths.set(id, data.path);
-        return data.path;
-      }
-    }
-  } catch {
-  }
-  return "";
-}
 async function openWorkspaceDirectory(id) {
   const path = await resolveWorkspacePath(id);
   if (!path) {
-    showToast(t2("无法获取工作区目录"));
+    showToast(t("无法获取工作区目录"));
     return;
   }
   const sdk = getSdk();
@@ -2355,56 +3107,36 @@ async function openWorkspaceDirectory(id) {
     await sdk.openFileManager(path);
   } catch (error) {
     console.warn(LOG_PREFIX, "openFileManager failed", error);
-    showToast(t2("打开目录失败，当前宿主可能不支持该操作。"));
+    showToast(t("打开目录失败，当前宿主可能不支持该操作。"));
   }
-}
-async function checkWorkspaceHealth(ids) {
-  const response = await fetch(pluginURL("fnos-advanced/workspace-health"), {
-    method: "POST",
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ ids: Array.isArray(ids) ? ids : [] })
-  });
-  if (response.status === 404 || response.status === 405) {
-    throw new Error(t2("没有找到工作区权限接口"));
-  }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.ok) {
-    throw new Error(translateError(data.error) || t2("检查失败：{error}", { error: `HTTP ${response.status}` }));
-  }
-  return Array.isArray(data.results) ? data.results : [];
-}
-function workspaceHealthText(result) {
-  if (!result || !result.exists) return t2("目录不存在");
-  if (result.directory === false) return t2("不是目录");
-  if (!result.readable) return t2("目录不可读（{error}）", { error: result.error || "EACCES" });
-  if (!result.writable) return t2("目录可读但不可写");
-  return t2("目录可读写");
 }
 async function checkWorkspaceFromMenu(id) {
-  showToast(t2("正在检查目录权限…"));
+  showToast(t("正在检查目录权限…"));
   try {
     const [result] = await checkWorkspaceHealth([id]);
     showToast(workspaceHealthText(result));
   } catch (error) {
-    showToast(t2("检查失败：{error}", { error: translateError(error && error.message) }));
+    showToast(t("检查失败：{error}", {
+      error: translateError(error instanceof Error ? error.message : error)
+    }));
   }
 }
 async function reauthWorkspaceFromMenu(id, popup) {
   const path = await resolveWorkspacePath(id);
   if (!path) {
     closePopup(popup);
-    showToast(t2("无法获取工作区目录"));
+    showToast(t("无法获取工作区目录"));
     return;
   }
   try {
     await authorizeWorkspacePath(path, popup);
     const [result] = await checkWorkspaceHealth([id]);
-    showToast(`${t2("已重新授权")} · ${workspaceHealthText(result)}`);
+    showToast(`${t("已重新授权")} · ${workspaceHealthText(result)}`);
   } catch (error) {
     closePopup(popup);
-    showToast(t2("重新授权失败：{error}", { error: translateError(error && error.message) }));
+    showToast(t("重新授权失败：{error}", {
+      error: translateError(error instanceof Error ? error.message : error)
+    }));
   }
 }
 async function authorizeWorkspacePath(path, popup) {
@@ -2416,48 +3148,784 @@ async function authorizeWorkspacePath(path, popup) {
     }
     const result = await sdk.authorizeUserFile(path);
     if (result && result.code === 0) return true;
-    throw new Error(result && result.msg ? translateError(result.msg) : t2("重新授权失败：{error}", { error: "EACCES" }));
+    throw new Error(result && result.msg ? translateError(result.msg) : t("重新授权失败：{error}", { error: "EACCES" }));
   }
   const config = await loadConfig();
   const settings = await loadSettings();
   const target = await resolveAuthTargets(config, settings);
-  let base = target.base;
+  let base;
   if (target.mode === "choose") {
     const preferred = target.choices.find((choice) => choice.id === settings.authMode) || target.choices[0];
-    base = preferred.base;
+    base = preferred ? preferred.base : resolveAuthBase();
+  } else {
+    base = target.base;
   }
   let windowRef = popup;
-  if (!windowRef || windowRef.closed) {
-    windowRef = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
-  }
-  if (!windowRef) throw new Error(t2("浏览器拦截了授权窗口，请允许弹窗后重试。"));
-  writePopupLoading(windowRef);
+  if (!windowRef || windowRef.closed) windowRef = openAuthPopup();
+  if (!windowRef) throw new Error(t("浏览器拦截了授权窗口，请允许弹窗后重试。"));
   try {
-    const auth = await requestAuth(windowRef, randomId(), config.appName || "Harness", base, "authorizeUserFile", { path });
+    const state = randomId();
+    const auth = await requestAuth({
+      popup: windowRef,
+      state,
+      buildUrl: () => buildAuthUrl(base, state, "authorizeUserFile", { path }, config.appName || "Harness")
+    });
     if (auth && auth.status === "success") return true;
     if (auth && (auth.status === "cancelled" || isCancellationText(auth.error))) {
-      throw new Error(t2("已取消授权"));
+      throw new Error(t("已取消授权"));
     }
-    throw new Error(auth && auth.error ? translateError(auth.error) : t2("打开选择器失败"));
+    throw new Error(auth && auth.error ? translateError(auth.error) : t("打开选择器失败"));
   } catch (error) {
     closePopup(windowRef);
     throw error;
   }
 }
-function showToast(text) {
-  let toast = document.querySelector(".dsh-fnos-advanced-toast");
-  if (!toast) {
-    toast = document.createElement("div");
-    toast.className = "dsh-fnos-advanced-toast";
-    toast.setAttribute("role", "status");
-    document.body.appendChild(toast);
+
+// src/client/settings-page.tsx
+var hintStyle = {
+  margin: 0,
+  fontSize: 12,
+  lineHeight: "18px",
+  color: "var(--dsw-alias-label-tertiary, #888)"
+};
+var errorHintStyle = {
+  ...hintStyle,
+  color: "var(--dsw-alias-state-error-primary, #d93025)"
+};
+var inputStyle = {
+  boxSizing: "border-box",
+  width: "100%",
+  height: 36,
+  padding: "0 10px",
+  borderRadius: 8,
+  border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.32))",
+  background: "transparent",
+  color: "var(--dsw-alias-label-primary, inherit)",
+  font: "inherit",
+  fontSize: 14,
+  outline: "none"
+};
+var labelStyle = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  fontSize: 13,
+  color: "var(--dsw-alias-label-secondary, #666)"
+};
+var smallButtonStyle = {
+  boxSizing: "border-box",
+  height: 32,
+  padding: "0 12px",
+  borderRadius: 8,
+  border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))",
+  background: "transparent",
+  color: "var(--dsw-alias-label-primary, inherit)",
+  font: "inherit",
+  fontSize: 13,
+  cursor: "pointer"
+};
+function SettingsSlot(props) {
+  if (props && props.view === "summary") return settingsSummary();
+  return /* @__PURE__ */ React.createElement(SettingsPage, null);
+}
+function settingsSummary() {
+  const settings = getCachedSettings();
+  const proxy = settings.proxyBase || t("未设置");
+  return t("反代 {proxy} · 内网 {lan}", { proxy, lan: settings.lanTarget });
+}
+function CollapsibleSection({ title, description, defaultOpen, children }) {
+  const [open, setOpen] = React.useState(defaultOpen !== false);
+  return /* @__PURE__ */ React.createElement("section", { style: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    paddingTop: 10,
+    borderTop: "1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.22))"
+  } }, /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      "aria-expanded": open,
+      "aria-label": `${title} · ${open ? t("收起") : t("展开")}`,
+      onClick: () => setOpen((value) => !value),
+      style: {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 12,
+        width: "100%",
+        padding: "2px 0",
+        border: "none",
+        background: "transparent",
+        color: "inherit",
+        font: "inherit",
+        textAlign: "left",
+        cursor: "pointer"
+      }
+    },
+    /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 600 } }, title),
+    /* @__PURE__ */ React.createElement("span", { "aria-hidden": true, style: {
+      color: "var(--dsw-alias-label-tertiary, #888)",
+      fontSize: 14,
+      transform: open ? "rotate(90deg)" : "none",
+      transition: "transform .12s ease"
+    } }, "›")
+  ), description ? /* @__PURE__ */ React.createElement("p", { style: { ...hintStyle, display: open ? "block" : "none" } }, description) : null, /* @__PURE__ */ React.createElement("div", { style: { display: open ? "block" : "none" } }, children));
+}
+function SettingsPage() {
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [settings, setSettings] = React.useState(() => ({ ...DEFAULT_SETTINGS }));
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [embedded, setEmbedded] = React.useState(false);
+  const [gatewayAccess, setGatewayAccess] = React.useState(/^\/app(?:\/|$)/.test(window.location.pathname));
+  const [hostState2, setHostState] = React.useState("unknown");
+  const [hostVersion, setHostVersion] = React.useState("");
+  const [language, setLanguage] = React.useState(getLanguagePreference());
+  React.useEffect(() => {
+    let alive = true;
+    loadSettings(true).then((loaded2) => {
+      if (!alive) return;
+      setSettings(loaded2);
+      setHostState(getSettingsHostState());
+      setLoading(false);
+    }).catch(() => {
+      if (alive) setLoading(false);
+    });
+    loadConfig().then((config) => {
+      if (alive) setHostVersion(config.version || "");
+    }).catch(() => {
+    });
+    const sdk = getSdk();
+    sdk.ready().then(() => {
+      if (alive) setEmbedded(!sdk.isStandaloneWeb);
+    }).catch(() => {
+    });
+    if (!/^\/app(?:\/|$)/.test(window.location.pathname)) {
+      loadConfig().then((config) => authRouteExists(config.appName || "Harness")).then((ok) => {
+        if (alive) setGatewayAccess(ok);
+      }).catch(() => {
+      });
+    }
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const update = (key) => (event) => {
+    const value = event.target.value;
+    setSettings((current) => ({
+      ...current,
+      [key]: key === "authMode" ? value : value
+    }));
+    setMessage("");
+    setError("");
+  };
+  const save = async () => {
+    setSaving(true);
+    setMessage("");
+    setError("");
+    try {
+      const saved = await saveSettings(settings);
+      setSettings(normalizeClientSettings(saved));
+      setMessage(t("已保存"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const hostOutdated = Boolean(hostVersion && hostVersion !== VERSION);
+  const hostReady = hostState2 === "ok" && !hostOutdated;
+  const hostWarning = hostReady ? "" : hostOutdated ? t("宿主半侧版本 {host}，客户端 {client}。请重启 dsh 后再保存设置。", { host: hostVersion, client: VERSION }) : hostState2 === "missing" ? t("宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。") : hostState2 === "error" ? t("无法读取宿主设置接口，请确认 dsh 运行正常。") : "";
+  const disabled = loading || saving || !hostReady;
+  const buttonStyle = {
+    boxSizing: "border-box",
+    height: 36,
+    padding: "0 16px",
+    borderRadius: 8,
+    border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))",
+    background: "transparent",
+    color: "var(--dsw-alias-label-primary, inherit)",
+    font: "inherit",
+    fontSize: 14,
+    fontWeight: 500,
+    cursor: disabled ? "default" : "pointer",
+    opacity: disabled ? 0.6 : 1
+  };
+  const accessNote = embedded ? t("当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。") : gatewayAccess ? t("当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。") : t("当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。");
+  return /* @__PURE__ */ React.createElement("div", { style: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+    padding: "4px 0 10px",
+    maxWidth: 640,
+    color: "var(--dsw-alias-label-primary, inherit)",
+    fontSize: 14
+  } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, fontWeight: 600 } }, t("飞牛目录授权")), /* @__PURE__ */ React.createElement("p", { style: hintStyle }, t("配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。"))), /* @__PURE__ */ React.createElement(
+    CollapsibleSection,
+    {
+      title: t("连接与授权"),
+      description: t("配置反代/内网授权入口、界面语言和图片读取。"),
+      defaultOpen: true
+    },
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("反代飞牛地址")), /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "text",
+        value: settings.proxyBase,
+        onChange: update("proxyBase"),
+        placeholder: "https://fnos.example.com",
+        autoComplete: "off",
+        spellCheck: false,
+        disabled,
+        style: inputStyle
+      }
+    ), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("填协议 + 域名[:端口]，不要带路径；留空表示未配置。"))),
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("飞牛内网地址 / 端口")), /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "text",
+        value: settings.lanTarget,
+        onChange: update("lanTarget"),
+        placeholder: "5666 或 http://192.168.1.10:5666",
+        autoComplete: "off",
+        spellCheck: false,
+        disabled,
+        style: inputStyle
+      }
+    ), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("只填端口时使用当前访问主机的地址；默认 5666。"))),
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("非网关访问时的授权入口")), /* @__PURE__ */ React.createElement("select", { value: settings.authMode, onChange: update("authMode"), disabled, style: inputStyle }, /* @__PURE__ */ React.createElement("option", { value: "ask" }, t("每次询问（推荐）")), /* @__PURE__ */ React.createElement("option", { value: "proxy" }, t("优先使用反代地址")), /* @__PURE__ */ React.createElement("option", { value: "lan" }, t("优先使用内网地址")))),
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("界面语言")), /* @__PURE__ */ React.createElement(
+      "select",
+      {
+        value: language,
+        onChange: (event) => {
+          const next = setLanguagePreference(event.target.value);
+          setLanguage(next);
+          setMessage("");
+          setError("");
+        },
+        disabled,
+        style: inputStyle
+      },
+      /* @__PURE__ */ React.createElement("option", { value: "auto" }, t("跟随浏览器")),
+      /* @__PURE__ */ React.createElement("option", { value: "zh" }, t("中文")),
+      /* @__PURE__ */ React.createElement("option", { value: "en" }, "English")
+    )),
+    /* @__PURE__ */ React.createElement("label", { style: { ...labelStyle, flexDirection: "row", alignItems: "flex-start", gap: 8 } }, /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "checkbox",
+        checked: settings.imageRead !== false,
+        onChange: (event) => {
+          const checked = event.target.checked;
+          setSettings((current) => ({ ...current, imageRead: checked }));
+          setMessage("");
+          setError("");
+        },
+        disabled,
+        style: { marginTop: 3 }
+      }
+    ), /* @__PURE__ */ React.createElement("span", { style: { display: "flex", flexDirection: "column", gap: 4 } }, /* @__PURE__ */ React.createElement("span", null, t("从飞牛选择图片时读取图片内容")), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。")))),
+    /* @__PURE__ */ React.createElement("p", { style: hintStyle }, accessNote),
+    hostWarning ? /* @__PURE__ */ React.createElement("p", { style: errorHintStyle }, hostWarning) : null,
+    /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: save, disabled, style: buttonStyle }, saving ? t("保存中…") : t("保存")), loading ? /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("读取设置…")) : null, message ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-state-success-primary, #188038)" } }, message) : null, error ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #d93025)" } }, error) : null)
+  ), /* @__PURE__ */ React.createElement(
+    CollapsibleSection,
+    {
+      title: t("工作区目录权限"),
+      description: t("检查 dsh 工作区目录的读写权限。飞牛 ACL 记录损坏或目录移动后，dsh 会读不到这些目录。"),
+      defaultOpen: true
+    },
+    /* @__PURE__ */ React.createElement(WorkspaceHealthSection, { disabled })
+  ), /* @__PURE__ */ React.createElement(
+    CollapsibleSection,
+    {
+      title: t("诊断"),
+      description: t("检查 dsh 版本、DOM 锚点和飞牛地址连通性。"),
+      defaultOpen: false
+    },
+    /* @__PURE__ */ React.createElement(
+      DiagnosticsSection,
+      {
+        settings,
+        hostVersion,
+        hostState: hostState2,
+        embedded,
+        gatewayAccess
+      }
+    )
+  ));
+}
+function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embedded, gatewayAccess }) {
+  const [proxyStatus, setProxyStatus] = React.useState(null);
+  const [lanStatus, setLanStatus] = React.useState(null);
+  const [copyMessage, setCopyMessage] = React.useState(null);
+  const [health, setHealth] = React.useState(null);
+  const [tick, setTick] = React.useState(0);
+  const [appName, setAppName] = React.useState("Harness");
+  const loadHealth = React.useCallback(() => {
+    fetchPluginHealth().then((data) => setHealth(data)).catch(() => setHealth(null));
+  }, []);
+  React.useEffect(() => {
+    let alive = true;
+    loadConfig().then((config) => {
+      if (alive && config.appName) setAppName(config.appName);
+    }).catch(() => {
+    });
+    loadHealth();
+    return () => {
+      alive = false;
+    };
+  }, [loadHealth]);
+  const statusStyle = (status) => ({
+    fontSize: 12,
+    color: status && status.ok === true ? "var(--dsw-alias-state-success-primary, #188038)" : status && status.ok === false ? "var(--dsw-alias-state-error-primary, #d93025)" : "var(--dsw-alias-label-tertiary, #888)"
+  });
+  const statusText = (status) => {
+    if (!status) return "";
+    if (status.reason === "notSet") return t("未设置");
+    if (status.reason === "timeout") return t("连接超时");
+    if (status.reason === "unreachable") return t("无法连接");
+    return t("可连接（{ms}ms）", { ms: status.ms ?? 0 });
+  };
+  const composerRegion = document.querySelector('[data-conversation-region="composer"]');
+  const composerAnchor = composerRegion ? Boolean(composerRegion.querySelector('input[type="file"][multiple]')) : null;
+  const treeRoot = document.querySelector("[data-files-root]");
+  const fileTreeAnchor = treeRoot ? Boolean(treeRoot.querySelector("[data-files-entry][data-files-path]")) : null;
+  const anchorText = (value) => value === true ? t("可用") : value === false ? t("不可用") : t("未检测");
+  const testAddress = async (kind) => {
+    const setStatus = kind === "proxy" ? setProxyStatus : setLanStatus;
+    const base = kind === "proxy" ? normalizeBase(settings.proxyBase || "") : lanBaseFromSettings(settings);
+    if (!base) {
+      setStatus({ reason: "notSet" });
+      return;
+    }
+    setStatus({ pending: true });
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? window.setTimeout(() => controller.abort(), 4e3) : 0;
+    const started = Date.now();
+    try {
+      await fetch(
+        `${base}/app-auth/pick-user-file?appName=${encodeURIComponent(appName)}&directory=true`,
+        {
+          mode: "no-cors",
+          cache: "no-store",
+          credentials: "omit",
+          signal: controller ? controller.signal : void 0
+        }
+      );
+      setStatus({ ok: true, ms: Date.now() - started });
+    } catch (error) {
+      setStatus({
+        ok: false,
+        reason: error instanceof Error && error.name === "AbortError" ? "timeout" : "unreachable"
+      });
+    } finally {
+      if (timer) window.clearTimeout(timer);
+    }
+  };
+  const runtime = embedded ? t("飞牛桌面 / App") : gatewayAccess ? t("飞牛网关") : t("普通浏览器");
+  const hostStateText = hostState2 === "ok" ? t("正常") : hostState2 === "missing" ? t("缺失（需重启 dsh）") : hostState2 === "error" ? t("读取失败") : t("未检测");
+  const imageReadText = health && health.features ? health.features.imageRead ? t("开") : t("关") : t("未检测");
+  const workspaceHealthTextValue = health && health.features ? health.features.workspaceHealth ? t("可用") : t("不可用") : t("未检测");
+  const copyDiagnostics = async () => {
+    const lines = [
+      `dsh-fnos-advanced ${VERSION}`,
+      `${t("客户端")}: ${VERSION}`,
+      `${t("宿主")}: ${hostVersion || "?"} (${hostStateText})`,
+      `${t("运行环境")}: ${runtime}`,
+      `${t("界面语言")}: ${currentLanguage()}`,
+      `${t("对话输入框")}: ${anchorText(composerAnchor)}`,
+      `${t("文件树")}: ${anchorText(fileTreeAnchor)}`,
+      `${t("图片读取")}: ${imageReadText}`,
+      `${t("工作区体检")}: ${workspaceHealthTextValue}`,
+      `${t("反代飞牛地址")}: ${settings.proxyBase || t("未设置")}`,
+      `${t("飞牛内网地址 / 端口")}: ${settings.lanTarget}`,
+      `${t("测试反代地址")}: ${statusText(proxyStatus) || t("未检测")}`,
+      `${t("测试内网地址")}: ${statusText(lanStatus) || t("未检测")}`
+    ];
+    const ok = await copyText(lines.join("\n"));
+    setCopyMessage(Boolean(ok));
+  };
+  return /* @__PURE__ */ React.createElement("div", { key: `diagnostics-${tick}`, style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 12 } }, /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("宿主")), /* @__PURE__ */ React.createElement("span", null, `${hostVersion || "?"} · ${hostStateText}`), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("客户端")), /* @__PURE__ */ React.createElement("span", null, VERSION), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("运行环境")), /* @__PURE__ */ React.createElement("span", null, runtime), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("图片读取")), /* @__PURE__ */ React.createElement("span", null, imageReadText), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("对话输入框")), /* @__PURE__ */ React.createElement("span", null, anchorText(composerAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("文件树")), /* @__PURE__ */ React.createElement("span", null, anchorText(fileTreeAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("工作区体检")), /* @__PURE__ */ React.createElement("span", null, workspaceHealthTextValue)), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
+    void testAddress("proxy");
+  }, style: smallButtonStyle }, t("测试反代地址")), proxyStatus ? /* @__PURE__ */ React.createElement("span", { style: statusStyle(proxyStatus) }, proxyStatus.pending ? t("测试中…") : statusText(proxyStatus)) : null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
+    void testAddress("lan");
+  }, style: smallButtonStyle }, t("测试内网地址")), lanStatus ? /* @__PURE__ */ React.createElement("span", { style: statusStyle(lanStatus) }, lanStatus.pending ? t("测试中…") : statusText(lanStatus)) : null), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
+    void copyDiagnostics();
+  }, style: smallButtonStyle }, t("复制诊断信息")), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      onClick: () => {
+        setProxyStatus(null);
+        setLanStatus(null);
+        setCopyMessage(null);
+        loadHealth();
+        setTick((value) => value + 1);
+      },
+      style: smallButtonStyle
+    },
+    t("重新检测")
+  ), copyMessage !== null ? /* @__PURE__ */ React.createElement("span", { style: hintStyle }, copyMessage ? t("诊断信息已复制") : t("复制失败")) : null));
+}
+function WorkspaceHealthSection({ disabled }) {
+  const [results, setResults] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const check = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setResults(await checkWorkspaceHealth([]));
+    } catch (err) {
+      setError(translateError(err instanceof Error ? err.message : err));
+    } finally {
+      setLoading(false);
+    }
+  };
+  const reauth = async (result) => {
+    let popup = null;
+    if (!isFnosHost()) popup = openAuthPopup();
+    try {
+      await authorizeWorkspacePath(result.path, popup);
+      const [next] = await checkWorkspaceHealth([result.id]);
+      if (next) {
+        setResults((current) => current.map((item) => item.id === next.id ? next : item));
+      }
+      showToast(t("已重新授权"));
+    } catch (err) {
+      closePopup(popup);
+      showToast(t("重新授权失败：{error}", {
+        error: translateError(err instanceof Error ? err.message : err)
+      }));
+    }
+  };
+  const buttonStyle = {
+    ...smallButtonStyle,
+    cursor: disabled || loading ? "default" : "pointer",
+    opacity: disabled || loading ? 0.6 : 1
+  };
+  const rowStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "8px 0",
+    borderTop: "1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.2))"
+  };
+  return /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      onClick: () => {
+        void check();
+      },
+      disabled: disabled || loading,
+      style: buttonStyle
+    },
+    loading ? t("检查中…") : t("检查全部工作区")
+  ), results.length ? /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("共 {count} 个", { count: results.length })) : null, error ? /* @__PURE__ */ React.createElement("span", { style: errorHintStyle }, error) : null, results.length || error ? /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      onClick: () => {
+        setResults([]);
+        setError("");
+      },
+      disabled: loading,
+      style: buttonStyle
+    },
+    t("清除结果")
+  ) : null), results.length ? /* @__PURE__ */ React.createElement("div", null, results.map((result) => {
+    const healthy = result.exists && result.readable && result.writable;
+    return /* @__PURE__ */ React.createElement("div", { key: result.id, style: rowStyle }, /* @__PURE__ */ React.createElement("div", { style: { minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: 2 } }, /* @__PURE__ */ React.createElement("span", { style: {
+      fontSize: 13,
+      fontWeight: 500,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    } }, result.title || result.id), /* @__PURE__ */ React.createElement("span", { style: {
+      ...hintStyle,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }, title: result.path }, result.path)), /* @__PURE__ */ React.createElement("span", { style: {
+      flex: "none",
+      fontSize: 12,
+      color: healthy ? "var(--dsw-alias-state-success-primary, #188038)" : "var(--dsw-alias-state-error-primary, #d93025)"
+    } }, workspaceHealthText(result)), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => {
+          void reauth(result);
+        },
+        disabled,
+        style: buttonStyle
+      },
+      t("重新授权")
+    ));
+  })) : null);
+}
+
+// src/client/settings-slot.ts
+function registerSettingsSlot(ctx) {
+  const inject = ctx?.inject;
+  if (typeof inject !== "function") return;
+  inject(["slots"], (scope) => {
+    const slots = scope.slots;
+    if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
+    const install2 = () => {
+      slots.inject("plugins.bundle.config", () => slots.register({ name: "plugins.bundle.config", key: SETTINGS_SLOT_KEY }, SettingsSlot));
+    };
+    if (typeof scope.effect === "function") {
+      scope.effect(install2, "dsh-fnos-advanced: settings page");
+    } else {
+      install2();
+    }
+  });
+}
+
+// src/client/style.ts
+var STYLE_TEXT = `
+  .dsh-fnos-advanced-button {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 36px;
+    padding: 0 14px;
+    border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .35));
+    border-radius: var(--dsw-radius-md, 8px);
+    background: transparent;
+    color: var(--dsw-alias-label-primary, inherit);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color .15s ease, border-color .15s ease;
   }
-  toast.textContent = text;
-  toast.style.display = "block";
-  if (toast.__dshFnosTimer) window.clearTimeout(toast.__dshFnosTimer);
-  toast.__dshFnosTimer = window.setTimeout(() => {
-    toast.style.display = "none";
-  }, 5e3);
+  .dsh-fnos-advanced-button:hover:not(:disabled) {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+    border-color: var(--dsw-alias-border-l1, rgba(127, 127, 127, .5));
+  }
+  .dsh-fnos-advanced-button:focus-visible {
+    outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
+    outline-offset: 1px;
+  }
+  .dsh-fnos-advanced-button:disabled {
+    opacity: .62;
+    cursor: default;
+  }
+  .dsh-fnos-file-row > button {
+    padding-right: 34px;
+  }
+  .dsh-fnos-file-action {
+    position: absolute;
+    top: 0;
+    right: 6px;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 28px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--dsw-alias-label-tertiary, #888);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .12s ease, background-color .12s ease;
+  }
+  .dsh-fnos-file-row:hover > .dsh-fnos-file-action,
+  .dsh-fnos-file-row:focus-within > .dsh-fnos-file-action,
+  .dsh-fnos-file-row > .dsh-fnos-file-action:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .dsh-fnos-file-action:hover {
+    background: transparent;
+    color: var(--dsw-alias-label-primary, inherit);
+  }
+  .dsh-fnos-file-action:focus-visible {
+    outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
+    outline-offset: 1px;
+  }
+  @media (hover: none) {
+    .dsh-fnos-file-row > .dsh-fnos-file-action {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+  .dsh-fnos-file-menu {
+    position: fixed;
+    z-index: 10000;
+    box-sizing: border-box;
+    width: 200px;
+    padding: 6px;
+    border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
+    border-radius: 10px;
+    background: var(--dsw-alias-bg-layer-1, #fff);
+    color: var(--dsw-alias-label-primary, inherit);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
+  }
+  .dsh-fnos-file-menu-title {
+    margin-bottom: 4px;
+    padding: 2px 8px 6px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 18px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dsh-fnos-file-menu-item {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 7px 8px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .dsh-fnos-file-menu-item:hover {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+  }
+  .dsh-fnos-file-menu-label {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 18px;
+  }
+  .dsh-fnos-advanced-status {
+    position: absolute;
+    left: 24px;
+    right: 24px;
+    bottom: 70px;
+    z-index: 10;
+    display: none;
+    box-sizing: border-box;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, .12));
+    color: var(--dsw-alias-label-secondary, inherit);
+    font-size: 12px;
+    line-height: 18px;
+    overflow-wrap: anywhere;
+    pointer-events: none;
+  }
+  .dsh-fnos-advanced-status[data-error="1"] {
+    color: var(--dsw-alias-state-error-primary, #d93025);
+  }
+  .dsh-fnos-advanced-chooser {
+    position: absolute;
+    left: 24px;
+    right: 24px;
+    bottom: 70px;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+    padding: 12px;
+    border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
+    border-radius: 12px;
+    background: var(--dsw-alias-bg-layer-1, #fff);
+    color: var(--dsw-alias-label-primary, inherit);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
+  }
+  .dsh-fnos-advanced-chooser-title {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 18px;
+  }
+  .dsh-fnos-advanced-chooser-option,
+  .dsh-fnos-advanced-chooser-cancel {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .dsh-fnos-advanced-chooser-option:hover,
+  .dsh-fnos-advanced-chooser-cancel:hover {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+  }
+  .dsh-fnos-advanced-chooser-label {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 18px;
+  }
+  .dsh-fnos-advanced-chooser-detail {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    color: var(--dsw-alias-label-tertiary, #888);
+    font-size: 11px;
+    line-height: 16px;
+  }
+  .dsh-fnos-advanced-chooser-cancel {
+    align-items: center;
+    color: var(--dsw-alias-label-secondary, #666);
+    font-size: 12px;
+  }
+  .dsh-fnos-advanced-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 32px;
+    z-index: 10000;
+    display: none;
+    box-sizing: border-box;
+    max-width: min(480px, calc(100vw - 32px));
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: rgba(24, 24, 28, .92);
+    color: #fff;
+    font-size: 13px;
+    line-height: 18px;
+    overflow-wrap: anywhere;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .24);
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+`;
+function injectStyle() {
+  if (document.getElementById(STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent = STYLE_TEXT;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+// src/client/workspace-picker.ts
+var statusTimers = /* @__PURE__ */ new WeakMap();
+function scanWorkspacePickers() {
+  for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+    if (!isWorkspacePicker(dialog)) {
+      dialog.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}`).forEach((node) => node.remove());
+      continue;
+    }
+    if (dialog.querySelector(`[${BUTTON_ATTR}]`)) continue;
+    injectButton(dialog);
+  }
 }
 function isWorkspacePicker(dialog) {
   if (!isVisible(dialog)) return false;
@@ -2472,17 +3940,13 @@ function isWorkspacePicker(dialog) {
 function injectButton(dialog) {
   const footer = findFooter(dialog);
   if (!footer) return;
-  const make = (pick, label, title) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.setAttribute(BUTTON_ATTR, "1");
-    button.dataset.pick = pick;
-    button.className = "dsh-fnos-advanced-button";
-    button.textContent = label;
-    button.title = title;
-    return button;
-  };
-  const primary = make("directory", t2("选择飞牛目录"), t2("通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）"));
+  const primary = document.createElement("button");
+  primary.type = "button";
+  primary.setAttribute(BUTTON_ATTR, "1");
+  primary.dataset.pick = "directory";
+  primary.className = "dsh-fnos-advanced-button";
+  primary.textContent = t("选择飞牛目录");
+  primary.title = t("通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）");
   footer.insertBefore(primary, footer.firstChild);
 }
 function findPathInput(dialog) {
@@ -2554,90 +4018,28 @@ async function handlePick(button) {
   if (!dialog) return;
   await runPickFlow(button, directoryFlow(dialog, button));
 }
-async function handlePickFiles(button) {
-  const active = findActiveComposerInput();
-  if (!active) {
-    showToast(t2("没有找到对话的文件输入框，当前 dsh 版本可能不支持。"));
-    return;
-  }
-  const { input, region } = active;
-  if (input.disabled) {
-    showToast(t2("当前会话暂时不能添加附件。"));
-    return;
-  }
-  const editor = region.querySelector("[data-composer-input]");
-  if (editor && editor.getAttribute("contenteditable") === "false") {
-    showToast(t2("当前会话暂时不能添加附件。"));
-    return;
-  }
-  await runPickFlow(button, composerFlow(input, button));
-}
-async function runPickFlow(button, flow) {
-  if (button.dataset.busy === "1") return;
-  markBusy(button, flow);
-  const initialSdk = getSdk();
-  const hostLike = window.parent !== window || initialSdk.isWeb === false;
-  let popup = null;
-  if (!hostLike) {
-    popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
-    if (popup) writePopupLoading(popup);
-  }
-  try {
-    const direct = await pickPathsDirect(flow, button);
-    if (direct.handled) {
-      closePopup(popup);
-      if (direct.paths && direct.paths.length) {
-        await finishPick(button, flow, direct.paths);
-      } else if (direct.cancelled) {
-        flow.status(t2("已取消选择"), false);
-        flow.restore();
-      } else {
-        flow.status(translateError(direct.error) || t2("打开选择器失败"), true);
-        flow.restore();
-      }
-      return;
-    }
-    const config = await loadConfig();
-    const appName = config.appName || "Harness";
-    const settings = await loadSettings();
-    const target = await resolveAuthTargets(config, settings);
-    if (target.mode === "choose") {
-      closePopup(popup);
-      showAuthChooser(flow, appName, target.choices);
-      return;
-    }
-    if (!popup || popup.closed) {
-      popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
-    }
-    if (!popup) throw new Error(t2("浏览器拦截了授权窗口，请允许弹窗后重试。"));
-    await startAuthFlow(button, appName, target.base, popup, flow);
-  } catch (error) {
-    closePopup(popup);
-    handlePickError(button, flow, error);
-  }
-}
 function directoryFlow(dialog, button) {
-  const initialText = button.textContent || t2("选择飞牛目录");
+  const initialText = button.textContent || t("选择飞牛目录");
   return {
     button,
     method: "pickUserFile",
     directory: true,
     creatable: true,
-    title: t2("选择工作区目录"),
-    okText: t2("确认授权"),
+    title: t("选择工作区目录"),
+    okText: t("确认授权"),
     anchor: dialog,
-    status: (text, isError) => showStatus(dialog, text, isError),
+    status: (text, isError) => showStatus(dialog, text, isError === true),
     isDuplicate: async (paths) => isDuplicateWorkspacePath(paths[0], await knownWorkspacePaths()),
     onPaths: async (paths) => {
       const input = await ensurePathInput(dialog);
-      if (!input) throw new Error(t2("没有找到目录选择器的路径输入框"));
+      if (!input) throw new Error(t("没有找到目录选择器的路径输入框"));
       fillAndEnter(input, paths[0]);
     },
-    doneText: (paths) => t2("已填入授权目录：{path}", { path: paths[0] }),
+    doneText: (paths) => t("已填入授权目录：{path}", { path: paths[0] }),
     setLabel: (text) => {
       button.textContent = text;
     },
-    doneLabel: () => t2("已填入路径"),
+    doneLabel: () => t("已填入路径"),
     restore: () => {
       button.textContent = initialText;
       button.disabled = false;
@@ -2645,634 +4047,9 @@ function directoryFlow(dialog, button) {
     }
   };
 }
-function composerFlow(input, button) {
-  return {
-    button,
-    method: "pickUserFile",
-    directory: false,
-    title: t2("选择文件"),
-    okText: t2("添加引用"),
-    anchor: input.closest("[data-composer-card]") || input.parentElement,
-    status: (text) => showToast(text),
-    onPaths: (paths) => addPathsToComposer(paths, input),
-    doneText: (paths) => t2("已添加 {count} 个文件", { count: paths.length }),
-    setLabel: () => {
-    },
-    doneLabel: () => "",
-    restore: () => {
-      button.disabled = false;
-      delete button.dataset.busy;
-    }
-  };
-}
-function markBusy(button, flow) {
-  button.dataset.busy = "1";
-  button.disabled = true;
-  flow.setLabel(t2("准备授权…"));
-}
-async function finishPick(button, flow, paths) {
-  if (typeof flow.isDuplicate === "function" && await flow.isDuplicate(paths)) {
-    flow.status(t2("该目录已添加为工作区"), false);
-    flow.restore();
-    return;
-  }
-  await flow.onPaths(paths);
-  flow.status(flow.doneText(paths), false);
-  const label = flow.doneLabel();
-  if (label) button.textContent = label;
-  window.setTimeout(() => flow.restore(), 1600);
-}
-async function pickPathsDirect(flow, button) {
-  const sdk = getSdk();
-  try {
-    await sdk.ready();
-  } catch {
-    return { handled: false };
-  }
-  if (sdk.isWeb && sdk.isStandaloneWeb) return { handled: false };
-  if (sdk.isWeb && window.parent === window) return { handled: false };
-  const method = flow.method || "pickUserFile";
-  const picker = sdk[method];
-  if (typeof picker !== "function") return { handled: false };
-  button.dataset.direct = "1";
-  flow.setLabel(t2("等待选择…"));
-  const params = pickerParams(flow);
-  let result;
-  try {
-    result = await picker.call(sdk, params);
-  } catch (error) {
-    console.warn(LOG_PREFIX, "in-host picker unavailable; falling back to URL auth", error);
-    flow.status(t2("当前宿主未提供内嵌选择器，已改用网页授权。"), false);
-    return { handled: false };
-  } finally {
-    delete button.dataset.direct;
-  }
-  const paths = result && result.code === 0 && Array.isArray(result.data) ? result.data.filter((item) => typeof item === "string" && item) : [];
-  if (paths.length) return { handled: true, paths };
-  return {
-    handled: true,
-    cancelled: isPickerCancelled(result),
-    error: result && result.msg ? result.msg : t2("打开选择器失败")
-  };
-}
-async function startAuthFlow(button, appName, base, existingPopup, flow) {
-  flow.setLabel(t2("等待授权…"));
-  const state = randomId();
-  let popup = existingPopup;
-  if (!popup || popup.closed) {
-    popup = window.open("", `dsh-fnos-advanced-auth-${state}`, POPUP_FEATURES);
-  }
-  if (!popup) throw new Error(t2("浏览器拦截了授权窗口，请允许弹窗后重试。"));
-  writePopupLoading(popup);
-  try {
-    const auth = await requestAuth(
-      popup,
-      state,
-      appName,
-      base,
-      flow.method || "pickUserFile",
-      pickerParams(flow)
-    );
-    if (!auth || auth.status !== "success") {
-      if (auth && (auth.status === "cancelled" || isCancellationText(auth.error))) {
-        if (auth.status !== "cancelled") {
-          console.info(LOG_PREFIX, "authorization result treated as cancellation", auth);
-        }
-        flow.status(t2("已取消选择"), false);
-        flow.restore();
-        return;
-      }
-      throw new Error(auth && auth.error ? translateError(auth.error) : t2("打开选择器失败"));
-    }
-    const paths = Array.isArray(auth.path) ? auth.path.filter((item) => typeof item === "string" && item) : [];
-    if (!paths.length) throw new Error(t2("授权结果里没有路径"));
-    await finishPick(button, flow, paths);
-  } catch (error) {
-    closePopup(popup);
-    throw error;
-  }
-}
-function handlePickError(button, flow, error) {
-  const message = error && error.message ? error.message : String(error);
-  console.warn(LOG_PREFIX, message, error);
-  flow.status(translateError(message), true);
-  flow.restore();
-}
-function closePopup(popup) {
-  if (!popup) return;
-  try {
-    popup.close();
-  } catch {
-  }
-}
-async function addPathsToComposer(paths, input) {
-  const settings = await loadSettings();
-  ensureHostPathBridge();
-  const files = [];
-  let images = 0;
-  let unreadable = 0;
-  for (const raw of paths) {
-    const path = String(raw);
-    const mime = imageMimeForPath(path);
-    if (mime && settings.imageRead !== false) {
-      try {
-        const file2 = await readImageFile(path, mime);
-        hostPathStore.set(file2, path);
-        files.push(file2);
-        images += 1;
-        continue;
-      } catch (error) {
-        console.warn(LOG_PREFIX, "image bytes unavailable; adding a path reference instead", error);
-        unreadable += 1;
-      }
-    }
-    const file = new File([], fileNameForPath(path), { type: "application/octet-stream" });
-    hostPathStore.set(file, path);
-    files.push(file);
-  }
-  if (!files.length) throw new Error(t2("没有可添加的文件"));
-  dispatchComposerFiles(input, files);
-  if (unreadable > 0) {
-    showToast(t2("{count} 张图片未能读取，已改为路径引用", { count: unreadable }));
-  } else if (images > 0) {
-    showToast(t2("已添加 {count} 个文件（{images} 张图片会上传）", { count: files.length, images }));
-  }
-}
-async function readImageFile(path, mime) {
-  const tokenResponse = await fetch(pluginURL("fnos-advanced/file-token"), {
-    method: "POST",
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ path })
-  });
-  if (tokenResponse.status === 404 || tokenResponse.status === 405) {
-    throw new Error(t2("宿主半侧未提供图片读取接口"));
-  }
-  const info = await tokenResponse.json().catch(() => ({}));
-  if (!tokenResponse.ok || !info.ok || !info.token) {
-    throw new Error(translateError(info.error) || t2("读取图片失败（HTTP {status}）", { status: tokenResponse.status }));
-  }
-  const response = await fetch(
-    pluginURL(`fnos-advanced/file-bytes?token=${encodeURIComponent(info.token)}`),
-    { credentials: "same-origin", cache: "no-store" }
-  );
-  if (!response.ok) throw new Error(t2("读取图片失败（HTTP {status}）", { status: response.status }));
-  const blob = await response.blob();
-  return new File([blob], info.name || fileNameForPath(path), {
-    type: info.mime || mime || blob.type || "application/octet-stream"
-  });
-}
-function ensureHostPathBridge() {
-  const existing = globalThis.__DSH_HOST_PATHS__;
-  if (existing && existing.__dshFnosAdvanced) {
-    hostPathStore = existing.__dshFnosFiles || hostPathStore;
-    return existing;
-  }
-  if (existing && typeof existing === "object") {
-    const original = typeof existing.pathFor === "function" ? existing.pathFor : null;
-    const store2 = existing.__dshFnosFiles || /* @__PURE__ */ new WeakMap();
-    try {
-      existing.pathFor = function pathFor(file) {
-        const own = store2.get(file);
-        if (own) return own;
-        try {
-          return original ? original.call(existing, file) : "";
-        } catch {
-          return "";
-        }
-      };
-      existing.__dshFnosFiles = store2;
-      existing.__dshFnosAdvanced = true;
-      hostPathStore = store2;
-      return existing;
-    } catch {
-    }
-  }
-  const store = hostPathByFile;
-  const bridge = {
-    __dshFnosAdvanced: true,
-    __dshFnosFiles: store,
-    pathFor(file) {
-      const own = store.get(file);
-      if (own) return own;
-      try {
-        return existing && typeof existing.pathFor === "function" ? existing.pathFor(file) : "";
-      } catch {
-        return "";
-      }
-    }
-  };
-  try {
-    globalThis.__DSH_HOST_PATHS__ = bridge;
-  } catch {
-  }
-  hostPathStore = store;
-  return bridge;
-}
-function dispatchComposerFiles(input, files) {
-  const transfer = new DataTransfer();
-  for (const file of files) transfer.items.add(file);
-  input.files = transfer.files;
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-}
-function writePopupLoading(popup) {
-  try {
-    popup.document.title = t2("飞牛授权");
-    popup.document.body.innerHTML = `<p style="font:14px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;padding:24px;color:#555">${t2("正在打开飞牛授权页面…")}</p>`;
-  } catch {
-  }
-}
-function requestAuth(popup, state, appName, base, method, params) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let closeTimer = 0;
-    let pollTimer = 0;
-    let resultPollTimer = 0;
-    let resultPolling = false;
-    let timeoutTimer = 0;
-    const lookupStored = () => acceptStoredResult(state, accept);
-    const cleanup = () => {
-      window.removeEventListener("message", onMessage);
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", lookupStored);
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.clearInterval(pollTimer);
-      window.clearInterval(resultPollTimer);
-      window.clearTimeout(closeTimer);
-      window.clearTimeout(timeoutTimer);
-      try {
-        localStorage.removeItem(STORAGE_KEY);
-      } catch {
-      }
-    };
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(result);
-    };
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-    const accept = (payload) => {
-      if (!payload || settled) return;
-      const payloadState = payload.state || payload.result && payload.result.state || "";
-      if (state && payloadState && payloadState !== state) return;
-      const result = parseAuthPayload(payload);
-      if (!result) return;
-      finish(result);
-    };
-    function onMessage(event) {
-      if (event.origin !== window.location.origin) return;
-      const data = event.data;
-      if (!data || data.type !== MSG_TYPE) return;
-      accept(data);
-    }
-    function onStorage(event) {
-      if (event.key !== STORAGE_KEY || !event.newValue) return;
-      try {
-        accept(JSON.parse(event.newValue));
-      } catch {
-      }
-    }
-    function onVisibility() {
-      if (document.visibilityState === "visible") lookupStored();
-    }
-    async function readServerResult() {
-      try {
-        const response = await fetch(
-          `${pluginURL("fnos-advanced/auth-result")}?state=${encodeURIComponent(state)}`,
-          { credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" } }
-        );
-        if (!response.ok) return;
-        const data = await response.json();
-        if (data && data.ok && typeof data.search === "string") {
-          accept({ state: data.state || state, search: data.search });
-        }
-      } catch {
-      }
-    }
-    async function pollServerResult() {
-      if (settled || resultPolling) return;
-      resultPolling = true;
-      try {
-        await readServerResult();
-      } finally {
-        resultPolling = false;
-      }
-    }
-    window.addEventListener("message", onMessage);
-    window.addEventListener("storage", onStorage);
-    window.addEventListener("focus", lookupStored);
-    document.addEventListener("visibilitychange", onVisibility);
-    acceptStoredResult(state, accept);
-    resultPollTimer = window.setInterval(pollServerResult, 900);
-    pollTimer = window.setInterval(() => {
-      if (!popup.closed) return;
-      window.clearInterval(pollTimer);
-      closeTimer = window.setTimeout(async () => {
-        const stored = readStoredResult();
-        if (stored) {
-          accept(stored);
-          return;
-        }
-        await readServerResult();
-        if (!settled) finish({ status: "cancelled", error: t2("授权窗口已关闭") });
-      }, 450);
-    }, 500);
-    timeoutTimer = window.setTimeout(() => {
-      fail(new Error(t2("授权超时，请重试")));
-    }, AUTH_TIMEOUT_MS);
-    (async () => {
-      try {
-        const sdk = getSdk();
-        const previousBase = sdk.getAppAuthBaseUrl;
-        sdk.getAppAuthBaseUrl = async () => base;
-        let url;
-        try {
-          url = await sdk.buildAppAuthUrl(method, {
-            appName,
-            ...params,
-            redirectUri: pluginURL("fnos-advanced/auth-callback.html"),
-            state
-          });
-        } finally {
-          sdk.getAppAuthBaseUrl = previousBase;
-        }
-        const targetUrl = new URL(url);
-        if (params.creatable) targetUrl.searchParams.set("creatable", "true");
-        if (settled) return;
-        popup.location.replace(targetUrl.toString());
-      } catch (error) {
-        fail(error instanceof Error ? error : new Error(String(error)));
-      }
-    })();
-  });
-}
-function showAuthChooser(flow, appName, choices) {
-  const anchor = flow.anchor;
-  if (!anchor) {
-    flow.restore();
-    return;
-  }
-  removeChooser(anchor);
-  if (getComputedStyle(anchor).position === "static") anchor.style.position = "relative";
-  flow.setLabel(t2("选择授权入口…"));
-  const panel = document.createElement("div");
-  panel.className = "dsh-fnos-advanced-chooser";
-  panel.setAttribute("role", "menu");
-  panel.setAttribute("aria-label", t2("选择授权入口"));
-  const title = document.createElement("div");
-  title.className = "dsh-fnos-advanced-chooser-title";
-  title.textContent = t2("选择授权入口");
-  panel.appendChild(title);
-  for (const choice of choices) {
-    const option = document.createElement("button");
-    option.type = "button";
-    option.className = "dsh-fnos-advanced-chooser-option";
-    option.setAttribute("role", "menuitem");
-    const label = document.createElement("span");
-    label.className = "dsh-fnos-advanced-chooser-label";
-    label.textContent = choice.label;
-    const detail = document.createElement("span");
-    detail.className = "dsh-fnos-advanced-chooser-detail";
-    detail.textContent = choice.detail;
-    option.append(label, detail);
-    option.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      removeChooser(anchor);
-      startAuthFlow(flow.button, appName, choice.base, null, flow).catch((error) => {
-        handlePickError(flow.button, flow, error);
-      });
-    });
-    panel.appendChild(option);
-  }
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.className = "dsh-fnos-advanced-chooser-cancel";
-  cancel.textContent = t2("取消");
-  cancel.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    removeChooser(anchor);
-    flow.restore();
-  });
-  panel.appendChild(cancel);
-  anchor.appendChild(panel);
-}
-function removeChooser(anchor) {
-  anchor.querySelectorAll(".dsh-fnos-advanced-chooser").forEach((node) => node.remove());
-}
-function parseAuthPayload(payload) {
-  if (!payload) return null;
-  if (typeof payload.search === "string" && payload.search) {
-    try {
-      const parsed = getSdk().parseAppAuthCallback(payload.search);
-      if (parsed && (parsed.status || parsed.error || parsed.path && parsed.path.length)) {
-        return parsed;
-      }
-    } catch {
-    }
-  }
-  return payload.result || null;
-}
-function getSdk() {
-  if (!sdkInstance) sdkInstance = new Ue();
-  return sdkInstance;
-}
-function acceptStoredResult(expectedState, accept) {
-  const stored = readStoredResult();
-  if (!stored) return;
-  if (expectedState && stored.state && stored.state !== expectedState) return;
-  if (typeof accept === "function") accept(stored);
-}
-function readStoredResult() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-function loadConfig() {
-  if (configPromise) return configPromise;
-  configPromise = (async () => {
-    try {
-      const response = await fetch(pluginURL("fnos-advanced/config"), {
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: { Accept: "application/json" }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data && typeof data === "object") return data;
-      }
-    } catch {
-    }
-    return { appName: "Harness", authBase: "" };
-  })();
-  return configPromise;
-}
-function pluginURL(relative) {
-  const base = document.baseURI.endsWith("/") ? document.baseURI : `${document.baseURI}/`;
-  return new URL(relative, base).href;
-}
-async function resolveAuthTargets(config, settings) {
-  const appName = config.appName || "Harness";
-  if (await isGatewayAccess(appName)) {
-    return { mode: "gateway", base: window.location.origin, via: "gateway" };
-  }
-  const proxy = normalizeBase(settings.proxyBase || "");
-  const lan = lanBaseFromSettings(settings);
-  const choices = [];
-  if (proxy) {
-    choices.push({ id: "proxy", label: t2("通过反代地址"), detail: proxy, base: proxy });
-  }
-  if (lan && !choices.some((choice) => choice.base === lan)) {
-    choices.push({ id: "lan", label: t2("通过内网地址"), detail: lan, base: lan });
-  }
-  if (settings.authMode === "proxy" && proxy) {
-    return { mode: "single", base: proxy, via: "proxy" };
-  }
-  if (settings.authMode === "lan" && lan) {
-    return { mode: "single", base: lan, via: "lan" };
-  }
-  if (choices.length > 1) return { mode: "choose", choices };
-  if (choices.length === 1) return { mode: "single", base: choices[0].base, via: choices[0].id };
-  return { mode: "single", base: resolveAuthBase(), via: "auto" };
-}
-async function isGatewayAccess(appName) {
-  if (/^\/app(?:\/|$)/.test(window.location.pathname)) return true;
-  return authRouteExists(appName);
-}
-function lanBaseFromSettings(settings) {
-  const target = String(settings.lanTarget || "").trim() || DEFAULT_SETTINGS.lanTarget;
-  if (/^\d+$/.test(target)) {
-    const port = Number(target);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return "";
-    return `http://${window.location.hostname}:${port}`;
-  }
-  try {
-    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(target) ? target : `http://${target}`);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
-    return normalizeBase(url.origin);
-  } catch {
-    return "";
-  }
-}
-async function loadSettings(force = false) {
-  if (!force && settingsCache && Date.now() - settingsCachedAt < 5e3) return settingsCache;
-  if (!force && settingsPromise) return settingsPromise;
-  const request = (async () => {
-    try {
-      const response = await fetch(pluginURL("fnos-advanced/settings"), {
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: { Accept: "application/json" }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data && data.ok && data.settings) {
-          settingsCache = normalizeClientSettings(data.settings);
-          settingsCachedAt = Date.now();
-          settingsHostState = "ok";
-          return settingsCache;
-        }
-        settingsHostState = "error";
-      } else if (response.status === 404 || response.status === 405) {
-        settingsHostState = "missing";
-      } else {
-        settingsHostState = "error";
-      }
-    } catch {
-      settingsHostState = "error";
-    }
-    return settingsCache || { ...DEFAULT_SETTINGS };
-  })();
-  settingsPromise = request;
-  try {
-    return await request;
-  } finally {
-    if (settingsPromise === request) settingsPromise = null;
-  }
-}
-function normalizeClientSettings(settings) {
-  return {
-    proxyBase: normalizeBase(typeof settings?.proxyBase === "string" ? settings.proxyBase : ""),
-    lanTarget: typeof settings?.lanTarget === "string" && settings.lanTarget.trim() ? settings.lanTarget.trim() : DEFAULT_SETTINGS.lanTarget,
-    authMode: ["ask", "proxy", "lan"].includes(settings?.authMode) ? settings.authMode : DEFAULT_SETTINGS.authMode,
-    imageRead: settings?.imageRead !== false
-  };
-}
-async function authRouteExists(appName) {
-  try {
-    const response = await fetch(
-      `${window.location.origin}/app-auth/pick-user-file?appName=${encodeURIComponent(appName || "Harness")}&directory=true`,
-      {
-        method: "GET",
-        credentials: "include",
-        cache: "no-store",
-        redirect: "manual"
-      }
-    );
-    if (response.type === "opaqueredirect") return true;
-    return response.status !== 404 && response.status !== 502 && response.status !== 400;
-  } catch {
-    return false;
-  }
-}
-function resolveAuthBase() {
-  const stored = readStoredAuthBase();
-  if (stored) return normalizeBase(stored);
-  const { origin, pathname, protocol, hostname, port } = window.location;
-  if (/^\/app(?:\/|$)/.test(pathname)) return origin;
-  if (protocol === "https:" && (port === "" || port === "443")) return origin;
-  if (protocol === "http:" || protocol === "https:") {
-    return `${protocol}//${hostname}:5666`;
-  }
-  return origin;
-}
-function readStoredAuthBase() {
-  try {
-    return localStorage.getItem(AUTH_BASE_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-function normalizeBase(value) {
-  return String(value || "").replace(/\/+$/, "");
-}
-function fillAndEnter(input, path) {
-  input.focus();
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-  if (setter) setter.call(input, path);
-  else input.value = path;
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-  window.setTimeout(() => {
-    input.focus();
-    const options = {
-      key: "Enter",
-      code: "Enter",
-      keyCode: 13,
-      which: 13,
-      charCode: 13,
-      bubbles: true,
-      cancelable: true
-    };
-    input.dispatchEvent(new KeyboardEvent("keydown", options));
-    input.dispatchEvent(new KeyboardEvent("keypress", options));
-    input.dispatchEvent(new KeyboardEvent("keyup", options));
-  }, 0);
-}
 function showStatus(dialog, text, isError) {
-  if (getComputedStyle(dialog).position === "static") dialog.style.position = "relative";
+  const host = dialog;
+  if (getComputedStyle(host).position === "static") host.style.position = "relative";
   let status = dialog.querySelector(`.${STATUS_CLASS}`);
   if (!status) {
     status = document.createElement("div");
@@ -3283,860 +4060,119 @@ function showStatus(dialog, text, isError) {
   status.textContent = text;
   status.dataset.error = isError ? "1" : "0";
   status.style.display = "block";
-  if (status.__dshFnosTimer) window.clearTimeout(status.__dshFnosTimer);
-  status.__dshFnosTimer = window.setTimeout(() => {
+  const previous = statusTimers.get(status);
+  if (previous) window.clearTimeout(previous);
+  statusTimers.set(status, window.setTimeout(() => {
     status.style.display = "none";
-  }, isError ? 1e4 : 6e3);
+  }, isError ? 1e4 : 6e3));
 }
-function registerSettingsSlot(ctx) {
-  if (!ctx || typeof ctx.inject !== "function") return;
-  ctx.inject(["slots"], (scope) => {
-    const slots = scope.slots;
-    if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
-    const install2 = () => slots.inject("plugins.bundle.config", () => slots.register({ name: "plugins.bundle.config", key: SETTINGS_SLOT_KEY }, SettingsSlot));
-    if (typeof scope.effect === "function") {
-      scope.effect(install2, "dsh-fnos-advanced: settings page");
-    } else {
-      install2();
+
+// src/client/index.ts
+var installedDispose = null;
+function apply(ctx) {
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const dispose = install();
+  ctx?.effect?.(() => dispose, "dsh-fnos-advanced: workspace directory picker");
+  registerSettingsSlot(ctx);
+  registerWorkspacePaths(ctx);
+}
+function install() {
+  if (installedDispose) return installedDispose;
+  injectStyle();
+  ensureHostPathBridge();
+  const cleanups = [];
+  let scanTimer = 0;
+  const scheduleScan = () => {
+    if (scanTimer) return;
+    scanTimer = window.setTimeout(() => {
+      scanTimer = 0;
+      scan();
+    }, 80);
+  };
+  const observer = new MutationObserver(scheduleScan);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  cleanups.push(() => observer.disconnect());
+  const onClick = (event) => {
+    const target = event.target instanceof Element ? event.target.closest(`[${BUTTON_ATTR}]`) : null;
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void handlePick(target);
+  };
+  document.addEventListener("click", onClick, true);
+  cleanups.push(() => document.removeEventListener("click", onClick, true));
+  const onWorkspaceRowClick = (event) => {
+    const row = event.target instanceof Element ? event.target.closest('[data-row-key^="workspace:"]') : null;
+    if (!row) return;
+    noteWorkspaceRowClick(row);
+    scheduleScan();
+  };
+  document.addEventListener("click", onWorkspaceRowClick, true);
+  cleanups.push(() => document.removeEventListener("click", onWorkspaceRowClick, true));
+  getSdk().ready().then(scheduleScan).catch(() => {
+  });
+  const dispose = () => {
+    if (scanTimer) {
+      window.clearTimeout(scanTimer);
+      scanTimer = 0;
+    }
+    for (const cleanup of cleanups.splice(0)) {
+      try {
+        cleanup();
+      } catch {
+      }
+    }
+    closeFileMenu();
+    for (const node of document.querySelectorAll(
+      `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`
+    )) {
+      node.remove();
+    }
+    for (const row of document.querySelectorAll(".dsh-fnos-file-row")) {
+      row.classList.remove("dsh-fnos-file-row");
+      if (row.dataset.dshFnosPosition === "1") {
+        row.style.position = "";
+        delete row.dataset.dshFnosPosition;
+      }
+    }
+    for (const node of document.querySelectorAll(`[${FILE_ACTION_ATTR}]`)) node.remove();
+    const style = document.getElementById(STYLE_ID);
+    if (style) style.remove();
+    installedDispose = null;
+  };
+  installedDispose = dispose;
+  scan();
+  return dispose;
+}
+function scan() {
+  scanWorkspacePickers();
+  scanCommandMenu();
+  scanFileTree();
+  scanWorkspaceMenus();
+}
+function registerWorkspacePaths(ctx) {
+  const inject = ctx?.inject;
+  if (typeof inject !== "function") return;
+  inject(["workspaces"], (scope) => {
+    const list = scope.workspaces?.list;
+    if (!list || typeof list.getSnapshot !== "function") return;
+    const update = () => {
+      try {
+        const snapshot = list.getSnapshot?.();
+        const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+        const entries = items.filter((item) => Boolean(item) && item.workspaceId !== null && item.workspaceId !== void 0 && typeof item.path === "string").map((item) => [String(item.workspaceId), item.path]);
+        setWorkspacePaths(entries);
+      } catch {
+      }
+    };
+    update();
+    if (typeof list.subscribe === "function" && typeof scope.effect === "function") {
+      try {
+        scope.effect(() => list.subscribe?.(update), "dsh-fnos-advanced: workspace paths");
+      } catch {
+      }
     }
   });
-}
-function SettingsSlot(props) {
-  if (props && props.view === "summary") return settingsSummary();
-  return React.createElement(SettingsPage, props || {});
-}
-function settingsSummary() {
-  const settings = settingsCache || DEFAULT_SETTINGS;
-  const proxy = settings.proxyBase || t2("未设置");
-  return t2("反代 {proxy} · 内网 {lan}", { proxy, lan: settings.lanTarget });
-}
-function CollapsibleSection({ title, description, defaultOpen, children }) {
-  const [open, setOpen] = React.useState(defaultOpen !== false);
-  const hintStyle = {
-    margin: 0,
-    fontSize: 12,
-    lineHeight: "18px",
-    color: "var(--dsw-alias-label-tertiary, #888)"
-  };
-  return React.createElement("section", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 8,
-      paddingTop: 10,
-      borderTop: "1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.22))"
-    }
-  }, [
-    React.createElement("button", {
-      key: "toggle",
-      type: "button",
-      "aria-expanded": open,
-      "aria-label": `${title} · ${open ? t2("收起") : t2("展开")}`,
-      onClick: () => setOpen((value) => !value),
-      style: {
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-        width: "100%",
-        padding: "2px 0",
-        border: "none",
-        background: "transparent",
-        color: "inherit",
-        font: "inherit",
-        textAlign: "left",
-        cursor: "pointer"
-      }
-    }, [
-      React.createElement("span", { key: "title", style: { fontSize: 14, fontWeight: 600 } }, title),
-      React.createElement("span", {
-        key: "chevron",
-        "aria-hidden": true,
-        style: {
-          color: "var(--dsw-alias-label-tertiary, #888)",
-          fontSize: 14,
-          transform: open ? "rotate(90deg)" : "none",
-          transition: "transform .12s ease"
-        }
-      }, "›")
-    ]),
-    description ? React.createElement("p", { key: "desc", style: { ...hintStyle, display: open ? "block" : "none" } }, description) : null,
-    React.createElement("div", {
-      key: "body",
-      style: { display: open ? "block" : "none" }
-    }, children)
-  ]);
-}
-function SettingsPage() {
-  const [loading, setLoading] = React.useState(true);
-  const [saving, setSaving] = React.useState(false);
-  const [settings, setSettings] = React.useState({ ...DEFAULT_SETTINGS });
-  const [message, setMessage] = React.useState("");
-  const [error, setError] = React.useState("");
-  const [embedded, setEmbedded] = React.useState(false);
-  const [gatewayAccess, setGatewayAccess] = React.useState(/^\/app(?:\/|$)/.test(window.location.pathname));
-  const [hostState, setHostState] = React.useState("unknown");
-  const [hostVersion, setHostVersion] = React.useState("");
-  const [language, setLanguage] = React.useState(getLanguagePreference());
-  React.useEffect(() => {
-    let alive = true;
-    loadSettings(true).then((loaded2) => {
-      if (!alive) return;
-      setSettings(loaded2);
-      setHostState(settingsHostState);
-      setLoading(false);
-    }).catch(() => {
-      if (alive) setLoading(false);
-    });
-    loadConfig().then((config) => {
-      if (alive) setHostVersion(config.version || "");
-    }).catch(() => {
-    });
-    const sdk = getSdk();
-    sdk.ready().then(() => {
-      if (alive) setEmbedded(!sdk.isStandaloneWeb);
-    }).catch(() => {
-    });
-    if (!/^\/app(?:\/|$)/.test(window.location.pathname)) {
-      loadConfig().then((config) => authRouteExists(config.appName || "Harness")).then((ok) => {
-        if (alive) setGatewayAccess(ok);
-      }).catch(() => {
-      });
-    }
-    return () => {
-      alive = false;
-    };
-  }, []);
-  const update = (key) => (event) => {
-    const value = event.target.value;
-    setSettings((current) => ({ ...current, [key]: value }));
-    setMessage("");
-    setError("");
-  };
-  const save = async () => {
-    setSaving(true);
-    setMessage("");
-    setError("");
-    try {
-      const proxyBase = validateProxyBase(settings.proxyBase);
-      const response = await fetch(pluginURL("fnos-advanced/settings"), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({
-          proxyBase,
-          lanTarget: String(settings.lanTarget || "").trim() || DEFAULT_SETTINGS.lanTarget,
-          authMode: settings.authMode,
-          imageRead: settings.imageRead !== false
-        })
-      });
-      if (response.status === 404 || response.status === 405) {
-        throw new Error(t2("宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。"));
-      }
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.ok) throw new Error(translateError(data.error) || t2("保存失败（HTTP {status}）", { status: response.status }));
-      const saved = normalizeClientSettings(data.settings);
-      settingsCache = saved;
-      settingsCachedAt = Date.now();
-      setSettings(saved);
-      setMessage(t2("已保存"));
-    } catch (err) {
-      setError(err && err.message ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-  const hostOutdated = Boolean(hostVersion && hostVersion !== VERSION);
-  const hostReady = hostState === "ok" && !hostOutdated;
-  const hostWarning = hostReady ? "" : hostOutdated ? t2("宿主半侧版本 {host}，客户端 {client}。请重启 dsh 后再保存设置。", { host: hostVersion, client: VERSION }) : hostState === "missing" ? t2("宿主半侧未提供设置接口，通常是插件升级后没有重启 dsh。请重启 dsh 后再保存设置。") : hostState === "error" ? t2("无法读取宿主设置接口，请确认 dsh 运行正常。") : "";
-  const disabled = loading || saving || !hostReady;
-  const inputStyle = {
-    boxSizing: "border-box",
-    width: "100%",
-    height: 36,
-    padding: "0 10px",
-    borderRadius: 8,
-    border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.32))",
-    background: "transparent",
-    color: "var(--dsw-alias-label-primary, inherit)",
-    font: "inherit",
-    fontSize: 14,
-    outline: "none"
-  };
-  const labelStyle = {
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-    fontSize: 13,
-    color: "var(--dsw-alias-label-secondary, #666)"
-  };
-  const hintStyle = {
-    margin: 0,
-    fontSize: 12,
-    lineHeight: "18px",
-    color: "var(--dsw-alias-label-tertiary, #888)"
-  };
-  const buttonStyle = {
-    boxSizing: "border-box",
-    height: 36,
-    padding: "0 16px",
-    borderRadius: 8,
-    border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))",
-    background: "transparent",
-    color: "var(--dsw-alias-label-primary, inherit)",
-    font: "inherit",
-    fontSize: 14,
-    fontWeight: 500,
-    cursor: disabled ? "default" : "pointer",
-    opacity: disabled ? 0.6 : 1
-  };
-  const accessNote = embedded ? t2("当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。") : gatewayAccess ? t2("当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。") : t2("当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。");
-  return React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14,
-      padding: "4px 0 10px",
-      maxWidth: 640,
-      color: "var(--dsw-alias-label-primary, inherit)",
-      fontSize: 14
-    }
-  }, [
-    React.createElement("div", { key: "heading", style: { display: "flex", flexDirection: "column", gap: 4 } }, [
-      React.createElement("div", { key: "title", style: { fontSize: 15, fontWeight: 600 } }, t2("飞牛目录授权")),
-      React.createElement("p", { key: "desc", style: hintStyle }, t2("配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。"))
-    ]),
-    React.createElement(CollapsibleSection, {
-      key: "auth",
-      title: t2("连接与授权"),
-      description: t2("配置反代/内网授权入口、界面语言和图片读取。"),
-      defaultOpen: true
-    }, [
-      React.createElement("label", { key: "proxy", style: labelStyle }, [
-        React.createElement("span", { key: "label" }, t2("反代飞牛地址")),
-        React.createElement("input", {
-          key: "input",
-          type: "text",
-          value: settings.proxyBase,
-          onChange: update("proxyBase"),
-          placeholder: "https://fnos.example.com",
-          autoComplete: "off",
-          spellCheck: false,
-          disabled,
-          style: inputStyle
-        }),
-        React.createElement("span", { key: "hint", style: hintStyle }, t2("填协议 + 域名[:端口]，不要带路径；留空表示未配置。"))
-      ]),
-      React.createElement("label", { key: "lan", style: labelStyle }, [
-        React.createElement("span", { key: "label" }, t2("飞牛内网地址 / 端口")),
-        React.createElement("input", {
-          key: "input",
-          type: "text",
-          value: settings.lanTarget,
-          onChange: update("lanTarget"),
-          placeholder: "5666 或 http://192.168.1.10:5666",
-          autoComplete: "off",
-          spellCheck: false,
-          disabled,
-          style: inputStyle
-        }),
-        React.createElement("span", { key: "hint", style: hintStyle }, t2("只填端口时使用当前访问主机的地址；默认 5666。"))
-      ]),
-      React.createElement("label", { key: "mode", style: labelStyle }, [
-        React.createElement("span", { key: "label" }, t2("非网关访问时的授权入口")),
-        React.createElement("select", {
-          key: "select",
-          value: settings.authMode,
-          onChange: update("authMode"),
-          disabled,
-          style: inputStyle
-        }, [
-          React.createElement("option", { key: "ask", value: "ask" }, t2("每次询问（推荐）")),
-          React.createElement("option", { key: "proxy", value: "proxy" }, t2("优先使用反代地址")),
-          React.createElement("option", { key: "lan", value: "lan" }, t2("优先使用内网地址"))
-        ])
-      ]),
-      React.createElement("label", { key: "language", style: labelStyle }, [
-        React.createElement("span", { key: "label" }, t2("界面语言")),
-        React.createElement("select", {
-          key: "select",
-          value: language,
-          onChange: (event) => {
-            const next = setLanguagePreference(event.target.value);
-            setLanguage(next);
-            setMessage("");
-            setError("");
-          },
-          disabled,
-          style: inputStyle
-        }, [
-          React.createElement("option", { key: "auto", value: "auto" }, t2("跟随浏览器")),
-          React.createElement("option", { key: "zh", value: "zh" }, t2("中文")),
-          React.createElement("option", { key: "en", value: "en" }, "English")
-        ])
-      ]),
-      React.createElement("label", { key: "image-read", style: { ...labelStyle, flexDirection: "row", alignItems: "flex-start", gap: 8 } }, [
-        React.createElement("input", {
-          key: "checkbox",
-          type: "checkbox",
-          checked: settings.imageRead !== false,
-          onChange: (event) => {
-            const checked = event.target.checked;
-            setSettings((current) => ({ ...current, imageRead: checked }));
-            setMessage("");
-            setError("");
-          },
-          disabled,
-          style: { marginTop: 3 }
-        }),
-        React.createElement("span", { key: "text", style: { display: "flex", flexDirection: "column", gap: 4 } }, [
-          React.createElement("span", { key: "label" }, t2("从飞牛选择图片时读取图片内容")),
-          React.createElement("span", { key: "hint", style: hintStyle }, t2("图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。"))
-        ])
-      ]),
-      React.createElement("p", { key: "access", style: hintStyle }, accessNote),
-      hostWarning ? React.createElement("p", {
-        key: "host-warning",
-        style: { ...hintStyle, color: "var(--dsw-alias-state-error-primary, #d93025)" }
-      }, hostWarning) : null,
-      React.createElement("div", { key: "actions", style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } }, [
-        React.createElement("button", {
-          key: "save",
-          type: "button",
-          onClick: save,
-          disabled,
-          style: buttonStyle
-        }, saving ? t2("保存中…") : t2("保存")),
-        loading ? React.createElement("span", { key: "loading", style: hintStyle }, t2("读取设置…")) : null,
-        message ? React.createElement("span", { key: "ok", style: { fontSize: 12, color: "var(--dsw-alias-state-success-primary, #188038)" } }, message) : null,
-        error ? React.createElement("span", { key: "err", style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #d93025)" } }, error) : null
-      ])
-    ]),
-    React.createElement(CollapsibleSection, {
-      key: "health",
-      title: t2("工作区目录权限"),
-      description: t2("检查 dsh 工作区目录的读写权限。飞牛 ACL 记录损坏或目录移动后，dsh 会读不到这些目录。"),
-      defaultOpen: true
-    }, React.createElement(WorkspaceHealthSection, { disabled })),
-    React.createElement(CollapsibleSection, {
-      key: "diagnostics",
-      title: t2("诊断"),
-      description: t2("检查 dsh 版本、DOM 锚点和飞牛地址连通性。"),
-      defaultOpen: false
-    }, React.createElement(DiagnosticsSection, {
-      settings,
-      hostVersion,
-      hostState,
-      embedded,
-      gatewayAccess
-    }))
-  ]);
-}
-function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewayAccess }) {
-  const [proxyStatus, setProxyStatus] = React.useState(null);
-  const [lanStatus, setLanStatus] = React.useState(null);
-  const [copyMessage, setCopyMessage] = React.useState(null);
-  const [health, setHealth] = React.useState(null);
-  const [tick, setTick] = React.useState(0);
-  const [appName, setAppName] = React.useState("Harness");
-  const loadHealth = React.useCallback(() => {
-    fetch(pluginURL("fnos-advanced/health"), { credentials: "same-origin", cache: "no-store" }).then((response) => response.ok ? response.json() : null).then((data) => setHealth(data)).catch(() => setHealth(null));
-  }, []);
-  React.useEffect(() => {
-    let alive = true;
-    loadConfig().then((config) => {
-      if (alive && config.appName) setAppName(config.appName);
-    }).catch(() => {
-    });
-    loadHealth();
-    return () => {
-      alive = false;
-    };
-  }, [loadHealth]);
-  const hintStyle = {
-    margin: 0,
-    fontSize: 12,
-    lineHeight: "18px",
-    color: "var(--dsw-alias-label-tertiary, #888)"
-  };
-  const buttonStyle = {
-    boxSizing: "border-box",
-    height: 32,
-    padding: "0 12px",
-    borderRadius: 8,
-    border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))",
-    background: "transparent",
-    color: "var(--dsw-alias-label-primary, inherit)",
-    font: "inherit",
-    fontSize: 13,
-    cursor: "pointer"
-  };
-  const statusStyle = (status) => ({
-    fontSize: 12,
-    color: status && status.ok === true ? "var(--dsw-alias-state-success-primary, #188038)" : status && status.ok === false ? "var(--dsw-alias-state-error-primary, #d93025)" : "var(--dsw-alias-label-tertiary, #888)"
-  });
-  const statusText = (status) => {
-    if (!status) return "";
-    if (status.reason === "notSet") return t2("未设置");
-    if (status.reason === "timeout") return t2("连接超时");
-    if (status.reason === "unreachable") return t2("无法连接");
-    return t2("可连接（{ms}ms）", { ms: status.ms });
-  };
-  const composerRegion = document.querySelector('[data-conversation-region="composer"]');
-  const composerAnchor = composerRegion ? Boolean(composerRegion.querySelector('input[type="file"][multiple]')) : null;
-  const treeRoot = document.querySelector("[data-files-root]");
-  const fileTreeAnchor = treeRoot ? Boolean(treeRoot.querySelector("[data-files-entry][data-files-path]")) : null;
-  const anchorText = (value) => value === true ? t2("可用") : value === false ? t2("不可用") : t2("未检测");
-  const testAddress = async (kind) => {
-    const setStatus = kind === "proxy" ? setProxyStatus : setLanStatus;
-    const base = kind === "proxy" ? normalizeBase(settings.proxyBase || "") : lanBaseFromSettings(settings);
-    if (!base) {
-      setStatus({ reason: "notSet" });
-      return;
-    }
-    setStatus({ pending: true });
-    const controller = typeof AbortController === "function" ? new AbortController() : null;
-    const timer = controller ? window.setTimeout(() => controller.abort(), 4e3) : 0;
-    const started = Date.now();
-    try {
-      await fetch(
-        `${base}/app-auth/pick-user-file?appName=${encodeURIComponent(appName)}&directory=true`,
-        {
-          mode: "no-cors",
-          cache: "no-store",
-          credentials: "omit",
-          signal: controller ? controller.signal : void 0
-        }
-      );
-      setStatus({ ok: true, ms: Date.now() - started });
-    } catch (error) {
-      setStatus({ ok: false, reason: error && error.name === "AbortError" ? "timeout" : "unreachable" });
-    } finally {
-      if (timer) window.clearTimeout(timer);
-    }
-  };
-  const runtime = embedded ? t2("飞牛桌面 / App") : gatewayAccess ? t2("飞牛网关") : t2("普通浏览器");
-  const hostStateText = hostState === "ok" ? t2("正常") : hostState === "missing" ? t2("缺失（需重启 dsh）") : hostState === "error" ? t2("读取失败") : t2("未检测");
-  const copyDiagnostics = async () => {
-    const lines = [
-      `dsh-fnos-advanced ${VERSION}`,
-      `${t2("客户端")}: ${VERSION}`,
-      `${t2("宿主")}: ${hostVersion || "?"} (${hostStateText})`,
-      `${t2("运行环境")}: ${runtime}`,
-      `${t2("界面语言")}: ${currentLanguage()}`,
-      `${t2("对话输入框")}: ${anchorText(composerAnchor)}`,
-      `${t2("文件树")}: ${anchorText(fileTreeAnchor)}`,
-      `${t2("图片读取")}: ${health && health.features ? health.features.imageRead ? t2("开") : t2("关") : t2("未检测")}`,
-      `${t2("工作区体检")}: ${health && health.features ? health.features.workspaceHealth ? t2("可用") : t2("不可用") : t2("未检测")}`,
-      `${t2("反代飞牛地址")}: ${settings.proxyBase || t2("未设置")}`,
-      `${t2("飞牛内网地址 / 端口")}: ${settings.lanTarget}`,
-      `${t2("测试反代地址")}: ${statusText(proxyStatus) || t2("未检测")}`,
-      `${t2("测试内网地址")}: ${statusText(lanStatus) || t2("未检测")}`
-    ];
-    const ok = await copyText(lines.join("\n"));
-    setCopyMessage(Boolean(ok));
-  };
-  return React.createElement("div", {
-    key: `diagnostics-${tick}`,
-    style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 }
-  }, [
-    React.createElement("div", { key: "versions", style: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 12 } }, [
-      React.createElement("span", { key: "h1", style: hintStyle }, t2("宿主")),
-      React.createElement("span", { key: "v1" }, `${hostVersion || "?"} · ${hostStateText}`),
-      React.createElement("span", { key: "h2", style: hintStyle }, t2("客户端")),
-      React.createElement("span", { key: "v2" }, VERSION),
-      React.createElement("span", { key: "h3", style: hintStyle }, t2("运行环境")),
-      React.createElement("span", { key: "v3" }, runtime),
-      React.createElement("span", { key: "h4", style: hintStyle }, t2("图片读取")),
-      React.createElement("span", { key: "v4" }, health && health.features ? health.features.imageRead ? t2("开") : t2("关") : t2("未检测")),
-      React.createElement("span", { key: "h5", style: hintStyle }, t2("对话输入框")),
-      React.createElement("span", { key: "v5" }, anchorText(composerAnchor)),
-      React.createElement("span", { key: "h6", style: hintStyle }, t2("文件树")),
-      React.createElement("span", { key: "v6" }, anchorText(fileTreeAnchor)),
-      React.createElement("span", { key: "h7", style: hintStyle }, t2("工作区体检")),
-      React.createElement("span", { key: "v7" }, health && health.features ? health.features.workspaceHealth ? t2("可用") : t2("不可用") : t2("未检测"))
-    ]),
-    React.createElement("div", { key: "addresses", style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, [
-      React.createElement("button", { key: "proxy", type: "button", onClick: () => testAddress("proxy"), style: buttonStyle }, t2("测试反代地址")),
-      proxyStatus ? React.createElement("span", { key: "proxy-status", style: statusStyle(proxyStatus) }, proxyStatus.pending ? t2("测试中…") : statusText(proxyStatus)) : null,
-      React.createElement("button", { key: "lan", type: "button", onClick: () => testAddress("lan"), style: buttonStyle }, t2("测试内网地址")),
-      lanStatus ? React.createElement("span", { key: "lan-status", style: statusStyle(lanStatus) }, lanStatus.pending ? t2("测试中…") : statusText(lanStatus)) : null
-    ]),
-    React.createElement("div", { key: "actions", style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, [
-      React.createElement("button", { key: "copy", type: "button", onClick: copyDiagnostics, style: buttonStyle }, t2("复制诊断信息")),
-      React.createElement("button", {
-        key: "refresh",
-        type: "button",
-        onClick: () => {
-          setProxyStatus(null);
-          setLanStatus(null);
-          setCopyMessage(null);
-          loadHealth();
-          setTick((value) => value + 1);
-        },
-        style: buttonStyle
-      }, t2("重新检测")),
-      copyMessage !== null ? React.createElement("span", { key: "copy-msg", style: hintStyle }, copyMessage ? t2("诊断信息已复制") : t2("复制失败")) : null
-    ])
-  ]);
-}
-function WorkspaceHealthSection({ disabled }) {
-  const [results, setResults] = React.useState([]);
-  const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState("");
-  const check = async () => {
-    setLoading(true);
-    setError("");
-    try {
-      setResults(await checkWorkspaceHealth([]));
-    } catch (err) {
-      setError(translateError(err && err.message));
-    } finally {
-      setLoading(false);
-    }
-  };
-  const reauth = async (result) => {
-    let popup = null;
-    if (!isFnosHost()) {
-      popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
-      if (popup) writePopupLoading(popup);
-    }
-    try {
-      await authorizeWorkspacePath(result.path, popup);
-      const [next] = await checkWorkspaceHealth([result.id]);
-      if (next) {
-        setResults((current) => current.map((item) => item.id === next.id ? next : item));
-      }
-      showToast(t2("已重新授权"));
-    } catch (err) {
-      closePopup(popup);
-      showToast(t2("重新授权失败：{error}", { error: translateError(err && err.message) }));
-    }
-  };
-  const buttonStyle = {
-    boxSizing: "border-box",
-    height: 32,
-    padding: "0 12px",
-    borderRadius: 8,
-    border: "1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35))",
-    background: "transparent",
-    color: "var(--dsw-alias-label-primary, inherit)",
-    font: "inherit",
-    fontSize: 13,
-    cursor: disabled || loading ? "default" : "pointer",
-    opacity: disabled || loading ? 0.6 : 1
-  };
-  const hintStyle = {
-    margin: 0,
-    fontSize: 12,
-    lineHeight: "18px",
-    color: "var(--dsw-alias-label-tertiary, #888)"
-  };
-  const rowStyle = {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    padding: "8px 0",
-    borderTop: "1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.2))"
-  };
-  return React.createElement("div", {
-    style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 }
-  }, [
-    React.createElement("div", { key: "actions", style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, [
-      React.createElement("button", {
-        key: "check",
-        type: "button",
-        onClick: check,
-        disabled: disabled || loading,
-        style: buttonStyle
-      }, loading ? t2("检查中…") : t2("检查全部工作区")),
-      results.length ? React.createElement("span", { key: "count", style: hintStyle }, t2("共 {count} 个", { count: results.length })) : null,
-      error ? React.createElement("span", { key: "error", style: { ...hintStyle, color: "var(--dsw-alias-state-error-primary, #d93025)" } }, error) : null,
-      results.length || error ? React.createElement("button", {
-        key: "clear",
-        type: "button",
-        onClick: () => {
-          setResults([]);
-          setError("");
-        },
-        disabled: loading,
-        style: buttonStyle
-      }, t2("清除结果")) : null
-    ]),
-    results.length ? React.createElement("div", { key: "list" }, results.map((result) => {
-      const healthy = result.exists && result.readable && result.writable;
-      const status = workspaceHealthText(result);
-      return React.createElement("div", { key: result.id, style: rowStyle }, [
-        React.createElement("div", { key: "info", style: { minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: 2 } }, [
-          React.createElement("span", { key: "name", style: { fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, result.title || result.id),
-          React.createElement("span", { key: "path", style: { ...hintStyle, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: result.path }, result.path)
-        ]),
-        React.createElement("span", {
-          key: "status",
-          style: {
-            flex: "none",
-            fontSize: 12,
-            color: healthy ? "var(--dsw-alias-state-success-primary, #188038)" : "var(--dsw-alias-state-error-primary, #d93025)"
-          }
-        }, status),
-        React.createElement("button", {
-          key: "reauth",
-          type: "button",
-          onClick: () => reauth(result),
-          disabled,
-          style: buttonStyle
-        }, t2("重新授权"))
-      ]);
-    })) : null
-  ]);
-}
-function validateProxyBase(value) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  const url = new URL(text);
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(t2("反代地址只支持 http/https"));
-  }
-  return url.origin;
-}
-function injectStyle() {
-  if (document.getElementById(STYLE_ID)) return;
-  const style = document.createElement("style");
-  style.id = STYLE_ID;
-  style.textContent = `
-    .dsh-fnos-advanced-button {
-      box-sizing: border-box;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      height: 36px;
-      padding: 0 14px;
-      border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .35));
-      border-radius: var(--dsw-radius-md, 8px);
-      background: transparent;
-      color: var(--dsw-alias-label-primary, inherit);
-      font: inherit;
-      font-size: 14px;
-      font-weight: 500;
-      line-height: 1;
-      white-space: nowrap;
-      cursor: pointer;
-      transition: background-color .15s ease, border-color .15s ease;
-    }
-    .dsh-fnos-advanced-button:hover:not(:disabled) {
-      background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
-      border-color: var(--dsw-alias-border-l1, rgba(127, 127, 127, .5));
-    }
-    .dsh-fnos-advanced-button:focus-visible {
-      outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
-      outline-offset: 1px;
-    }
-    .dsh-fnos-advanced-button:disabled {
-      opacity: .62;
-      cursor: default;
-    }
-    .dsh-fnos-file-row > button {
-      padding-right: 34px;
-    }
-    .dsh-fnos-file-action {
-      position: absolute;
-      top: 0;
-      right: 6px;
-      box-sizing: border-box;
-      display: grid;
-      place-items: center;
-      width: 24px;
-      height: 28px;
-      padding: 0;
-      border: none;
-      border-radius: 6px;
-      background: transparent;
-      color: var(--dsw-alias-label-tertiary, #888);
-      cursor: pointer;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity .12s ease, background-color .12s ease;
-    }
-    .dsh-fnos-file-row:hover > .dsh-fnos-file-action,
-    .dsh-fnos-file-row:focus-within > .dsh-fnos-file-action,
-    .dsh-fnos-file-row > .dsh-fnos-file-action:focus-visible {
-      opacity: 1;
-      pointer-events: auto;
-    }
-    .dsh-fnos-file-action:hover {
-      background: transparent;
-      color: var(--dsw-alias-label-primary, inherit);
-    }
-    .dsh-fnos-file-action:focus-visible {
-      outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
-      outline-offset: 1px;
-    }
-    @media (hover: none) {
-      .dsh-fnos-file-row > .dsh-fnos-file-action {
-        opacity: 1;
-        pointer-events: auto;
-      }
-    }
-    .dsh-fnos-file-menu {
-      position: fixed;
-      z-index: 10000;
-      box-sizing: border-box;
-      width: 200px;
-      padding: 6px;
-      border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
-      border-radius: 10px;
-      background: var(--dsw-alias-bg-layer-1, #fff);
-      color: var(--dsw-alias-label-primary, inherit);
-      box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
-    }
-    .dsh-fnos-file-menu-title {
-      margin-bottom: 4px;
-      padding: 2px 8px 6px;
-      font-size: 13px;
-      font-weight: 600;
-      line-height: 18px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .dsh-fnos-file-menu-item {
-      box-sizing: border-box;
-      display: flex;
-      align-items: center;
-      width: 100%;
-      padding: 7px 8px;
-      border: none;
-      border-radius: 7px;
-      background: transparent;
-      color: inherit;
-      font: inherit;
-      text-align: left;
-      cursor: pointer;
-    }
-    .dsh-fnos-file-menu-item:hover {
-      background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
-    }
-    .dsh-fnos-file-menu-label {
-      font-size: 13px;
-      font-weight: 500;
-      line-height: 18px;
-    }
-    .dsh-fnos-advanced-status {
-      position: absolute;
-      left: 24px;
-      right: 24px;
-      bottom: 70px;
-      z-index: 10;
-      display: none;
-      box-sizing: border-box;
-      padding: 8px 12px;
-      border-radius: 8px;
-      background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, .12));
-      color: var(--dsw-alias-label-secondary, inherit);
-      font-size: 12px;
-      line-height: 18px;
-      overflow-wrap: anywhere;
-      pointer-events: none;
-    }
-    .dsh-fnos-advanced-status[data-error="1"] {
-      color: var(--dsw-alias-state-error-primary, #d93025);
-    }
-    .dsh-fnos-advanced-chooser {
-      position: absolute;
-      left: 24px;
-      right: 24px;
-      bottom: 70px;
-      z-index: 30;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      box-sizing: border-box;
-      padding: 12px;
-      border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
-      border-radius: 12px;
-      background: var(--dsw-alias-bg-layer-1, #fff);
-      color: var(--dsw-alias-label-primary, inherit);
-      box-shadow: 0 12px 40px rgba(0, 0, 0, .18);
-    }
-    .dsh-fnos-advanced-chooser-title {
-      font-size: 13px;
-      font-weight: 600;
-      line-height: 18px;
-    }
-    .dsh-fnos-advanced-chooser-option,
-    .dsh-fnos-advanced-chooser-cancel {
-      box-sizing: border-box;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 2px;
-      width: 100%;
-      padding: 8px 10px;
-      border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
-      border-radius: 8px;
-      background: transparent;
-      color: inherit;
-      font: inherit;
-      text-align: left;
-      cursor: pointer;
-    }
-    .dsh-fnos-advanced-chooser-option:hover,
-    .dsh-fnos-advanced-chooser-cancel:hover {
-      background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
-    }
-    .dsh-fnos-advanced-chooser-label {
-      font-size: 13px;
-      font-weight: 500;
-      line-height: 18px;
-    }
-    .dsh-fnos-advanced-chooser-detail {
-      max-width: 100%;
-      overflow-wrap: anywhere;
-      color: var(--dsw-alias-label-tertiary, #888);
-      font-size: 11px;
-      line-height: 16px;
-    }
-    .dsh-fnos-advanced-chooser-cancel {
-      align-items: center;
-      color: var(--dsw-alias-label-secondary, #666);
-      font-size: 12px;
-    }
-    .dsh-fnos-advanced-toast {
-      position: fixed;
-      left: 50%;
-      bottom: 32px;
-      z-index: 10000;
-      display: none;
-      box-sizing: border-box;
-      max-width: min(480px, calc(100vw - 32px));
-      padding: 10px 14px;
-      border-radius: 10px;
-      background: rgba(24, 24, 28, .92);
-      color: #fff;
-      font-size: 13px;
-      line-height: 18px;
-      overflow-wrap: anywhere;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, .24);
-      transform: translateX(-50%);
-      pointer-events: none;
-    }
-  `;
-  (document.head || document.documentElement).appendChild(style);
-}
-function randomId() {
-  try {
-    if (window.crypto && typeof window.crypto.randomUUID === "function") {
-      return window.crypto.randomUUID();
-    }
-  } catch {
-  }
-  return `fnos-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-function sleep(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-function isVisible(element) {
-  return Boolean(element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
 }
 if (typeof window !== "undefined") {
   try {

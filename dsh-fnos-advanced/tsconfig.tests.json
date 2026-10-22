@@ -1,0 +1,15 @@
+{
+  // Tests run through Node's type stripping (`node --test test/*.test.ts`), so
+  // this project only typechecks them. It spans both halves: host tests import
+  // src/index.ts, pure client helpers are tested directly.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react",
+    "types": ["node"]
+  },
+  "include": ["test", "src"],
+  "exclude": ["lib"]
+}

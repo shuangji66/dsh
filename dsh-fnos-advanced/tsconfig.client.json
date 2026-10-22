@@ -1,0 +1,23 @@
+{
+  // Browser half: typechecked only. scripts/build.mjs bundles src/client/index.ts
+  // into lib/client.js with esbuild (classic JSX transform, `react` external).
+  //
+  // The classic transform (`jsx: "react"`) is deliberate: the bundle only knows
+  // the loader module table entry `react`. The automatic runtime would add a
+  // `react/jsx-runtime` require that older dsh builds do not provide.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "types": [],
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/client", "src/shared"]
+}

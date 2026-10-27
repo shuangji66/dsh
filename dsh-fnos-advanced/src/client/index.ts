@@ -10,6 +10,10 @@
  *   - the file tree (one "⋯" action per file / directory row);
  *   - the workspace context menu (open / check / re-authorize).
  *
+ * Where dsh publishes an official file-action slot (delivery cards, the change
+ * review tab and the document preview), the "⋯" entry is registered there
+ * instead of being injected into the DOM; see `slot-actions.tsx`.
+ *
  * Clicking a control asks fnOS for a user-directory authorization through the
  * official `@trimjs/web-app` SDK. In a fnOS host the native picker is used; in a
  * browser the authorization page opens in a popup and its callback page (served
@@ -27,13 +31,22 @@ import { scanCommandMenu } from './composer-menu.ts';
 import { BUTTON_ATTR, FILE_ACTION_ATTR, PICK_ITEM_ATTR, STATUS_CLASS, STYLE_ID } from './constants.ts';
 import type { ClientContext } from './context.ts';
 import { fillAndEnter } from './dom.ts';
-import { closeFileMenu, scanFileTree } from './file-tree.ts';
+import { scanFileTree } from './file-tree.ts';
 import { ensureHostPathBridge } from './host-paths.ts';
+import {
+  getLanguagePreference,
+  onLanguageChange,
+  resolveHostLanguage,
+  setHostLanguageResolver,
+} from './i18n.ts';
 import { isDuplicateWorkspacePath } from './picker.ts';
 import { pickPathsDirect } from './picker-flow.ts';
+import { closePathMenu } from './path-menu.ts';
+import { scanReferenceMenu } from './reference-menu.ts';
 import { loadSettings, resolveAuthBase, resolveAuthTargets, setWorkspacePaths } from './plugin-api.ts';
 import { getSdk } from './sdk.ts';
 import { registerSettingsSlot } from './settings-slot.ts';
+import { registerPathActionSlots, registerSessionCwd } from './slot-actions.tsx';
 import { injectStyle } from './style.ts';
 import { VERSION } from '../version.ts';
 import {
@@ -56,11 +69,17 @@ let installedDispose: (() => void) | null = null;
  */
 export function apply(ctx: ClientContext): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  // The fnOS platform language is only read when the user picked "follow host".
+  setHostLanguageResolver(() => getSdk().getPlatformConfig());
+  if (getLanguagePreference() === 'system') void resolveHostLanguage();
+
   const dispose = install();
 
   ctx?.effect?.(() => dispose, 'dsh-fnos-advanced: workspace directory picker');
 
   registerSettingsSlot(ctx);
+  registerPathActionSlots(ctx);
+  registerSessionCwd(ctx);
   registerWorkspacePaths(ctx);
 }
 
@@ -87,6 +106,10 @@ export function install(): () => void {
   const observer = new MutationObserver(scheduleScan);
   observer.observe(document.documentElement, { childList: true, subtree: true });
   cleanups.push(() => observer.disconnect());
+
+  // Re-label injected controls (and re-render slot entries) when the effective
+  // language changes: a late host-language resolution or a settings change.
+  cleanups.push(onLanguageChange(() => { scan(); }));
 
   const onClick = (event: MouseEvent): void => {
     const target = event.target instanceof Element
@@ -123,9 +146,9 @@ export function install(): () => void {
     for (const cleanup of cleanups.splice(0)) {
       try { cleanup(); } catch { /* ignore */ }
     }
-    closeFileMenu();
+    closePathMenu();
     for (const node of document.querySelectorAll(
-      `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`,
+      `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, .dsh-fnos-recent, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`,
     )) {
       node.remove();
     }
@@ -150,6 +173,7 @@ export function install(): () => void {
 function scan(): void {
   scanWorkspacePickers();
   scanCommandMenu();
+  scanReferenceMenu();
   scanFileTree();
   scanWorkspaceMenus();
 }

@@ -11,6 +11,8 @@ export interface PickFlow {
   method: 'pickUserFile';
   directory?: boolean;
   creatable?: boolean;
+  /** Whether the picker may return several files (composer intake). */
+  multiple?: boolean;
   title: string;
   okText: string;
   /** Element the authorization-entry chooser anchors to. */

@@ -53,8 +53,26 @@ test('the client bundle stays in the dsh loader contract', async () => {
   assert.match(bundle, /data-conversation-region/);
   assert.match(bundle, /data-trigger-menu/);
   assert.match(bundle, /data-dsh-fnos-pick-file/);
+  assert.match(bundle, /data-dsh-fnos-ref-pick/);
+  assert.match(bundle, /dsh-slash-option-reference-/);
+  assert.match(bundle, /dsh-fnos-recent/);
   assert.match(bundle, /data-files-entry/);
   assert.match(bundle, /data-dsh-fnos-file-action/);
+  // File actions on the slot-rendered surfaces must stay registered by slot id
+  // (list slots) and keep reading the owning surface's own path anchors.
+  for (const slot of [
+    'deliverables.file.actions',
+    'deliverables.review.file.actions',
+    'sidebar.right.tab.document.actions',
+    'sidebar.right.tab.document.unpreviewable',
+  ]) {
+    assert.match(bundle, new RegExp(slot.replace(/\./g, '\\.')), slot);
+  }
+  assert.match(bundle, /slots\.register\(\{ name, id: SLOT_ID \}/);
+  assert.match(bundle, /data-presented-file/);
+  assert.match(bundle, /data-review-file/);
+  assert.match(bundle, /data-sidebar-right-session/);
+  assert.match(bundle, /dsh-fnos-slot-action/);
   assert.match(bundle, /fnos-advanced\/file-token/);
   assert.match(bundle, /fnos-advanced\/file-bytes/);
 });

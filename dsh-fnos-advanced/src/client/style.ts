@@ -40,6 +40,60 @@ const STYLE_TEXT = `
     opacity: .62;
     cursor: default;
   }
+  .dsh-fnos-recent {
+    box-sizing: border-box;
+    display: flex;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
+    min-width: 0;
+    margin-bottom: 6px;
+  }
+  .dsh-fnos-recent-label {
+    flex: none;
+    color: var(--dsw-alias-label-tertiary, #888);
+    font-size: 11px;
+    line-height: 16px;
+  }
+  .dsh-fnos-recent-chip,
+  .dsh-fnos-recent-clear {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    max-width: 160px;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
+    border-radius: 999px;
+    background: transparent;
+    color: var(--dsw-alias-label-secondary, inherit);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  .dsh-fnos-recent-chip:hover,
+  .dsh-fnos-recent-clear:hover {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+    color: var(--dsw-alias-label-primary, inherit);
+  }
+  .dsh-fnos-recent-chip:focus-visible,
+  .dsh-fnos-recent-clear:focus-visible {
+    outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
+    outline-offset: 1px;
+  }
+  .dsh-fnos-recent-clear {
+    max-width: none;
+    width: 26px;
+    padding: 0;
+    color: var(--dsw-alias-label-tertiary, #888);
+  }
   .dsh-fnos-file-row > button {
     padding-right: 34px;
   }
@@ -81,6 +135,29 @@ const STYLE_TEXT = `
       opacity: 1;
       pointer-events: auto;
     }
+  }
+  .dsh-fnos-slot-action {
+    box-sizing: border-box;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--dsw-alias-label-tertiary, #888);
+    cursor: pointer;
+  }
+  .dsh-fnos-slot-action:hover {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+    color: var(--dsw-alias-label-primary, inherit);
+  }
+  .dsh-fnos-slot-action:focus-visible {
+    outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
+    outline-offset: 1px;
   }
   .dsh-fnos-file-menu {
     position: fixed;

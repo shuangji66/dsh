@@ -20,11 +20,13 @@ import {
   WORKSPACE_TITLE_RE,
 } from './constants.ts';
 import { fillAndEnter, isVisible, sleep } from './dom.ts';
+import { fileNameForPath } from './files.ts';
 import type { PickFlow } from './flow.ts';
-import { t } from './i18n.ts';
+import { currentLanguage, t } from './i18n.ts';
 import { isDuplicateWorkspacePath } from './picker.ts';
 import { runPickFlow } from './picker-flow.ts';
 import { knownWorkspacePaths } from './plugin-api.ts';
+import { clearRecentPaths, loadRecentPaths, recordRecentPath } from './recent-dirs.ts';
 
 const statusTimers = new WeakMap<HTMLElement, number>();
 
@@ -32,11 +34,17 @@ const statusTimers = new WeakMap<HTMLElement, number>();
 export function scanWorkspacePickers(): void {
   for (const dialog of document.querySelectorAll('[role="dialog"]')) {
     if (!isWorkspacePicker(dialog)) {
-      dialog.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}`).forEach((node) => node.remove());
+      dialog.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}, .dsh-fnos-recent`).forEach((node) => node.remove());
       continue;
     }
-    if (dialog.querySelector(`[${BUTTON_ATTR}]`)) continue;
-    injectButton(dialog);
+    const footer = findFooter(dialog);
+    if (!footer) continue;
+
+    const button = dialog.querySelector<HTMLButtonElement>(`[${BUTTON_ATTR}]`);
+    if (button) refreshButtonLabels(button);
+    else injectButton(dialog, footer);
+
+    renderRecentChips(dialog, footer);
   }
 }
 
@@ -56,10 +64,7 @@ export function isWorkspacePicker(dialog: Element): boolean {
   return Boolean(findFooter(dialog));
 }
 
-function injectButton(dialog: Element): void {
-  const footer = findFooter(dialog);
-  if (!footer) return;
-
+function injectButton(dialog: Element, footer: Element): void {
   const primary = document.createElement('button');
   primary.type = 'button';
   primary.setAttribute(BUTTON_ATTR, '1');
@@ -71,6 +76,105 @@ function injectButton(dialog: Element): void {
   // Keep it before the leading footer action (New folder / 新建文件夹), so it
   // does not sit between Cancel and Open.
   footer.insertBefore(primary, footer.firstChild);
+}
+
+/** Keep a button that is already mounted in the current interface language. */
+function refreshButtonLabels(button: HTMLButtonElement): void {
+  if (button.dataset.busy === '1') return;
+  const label = t('选择飞牛目录');
+  const hint = t('通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）');
+  if (button.textContent !== label) button.textContent = label;
+  if (button.title !== hint) button.title = hint;
+}
+
+/**
+ * One compact row of recently authorized folders inside the picker footer.
+ * Chips only pre-fill the path input; they never re-authorize, so a stale
+ * folder surfaces as an empty listing instead of an unexpected permission
+ * prompt. The row is rebuilt only when the list or the interface language
+ * changes (a MutationObserver scans often).
+ */
+function renderRecentChips(dialog: Element, footer: Element): void {
+  const paths = loadRecentPaths();
+  let container = dialog.querySelector<HTMLElement>('.dsh-fnos-recent');
+  if (!paths.length) {
+    container?.remove();
+    repositionStatus(dialog);
+    return;
+  }
+
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'dsh-fnos-recent';
+  }
+  if (footer.firstElementChild !== container) footer.insertBefore(container, footer.firstChild);
+
+  const signature = `${currentLanguage()}\n${paths.join('\n')}`;
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
+  container.replaceChildren();
+
+  const label = document.createElement('span');
+  label.className = 'dsh-fnos-recent-label';
+  label.textContent = t('最近使用');
+  container.append(label);
+
+  for (const path of paths) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'dsh-fnos-recent-chip';
+    chip.textContent = fileNameForPath(path);
+    chip.title = path;
+    chip.setAttribute('aria-label', t('填入最近使用的目录：{path}', { path }));
+    chip.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    chip.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void useRecentPath(dialog, path);
+    });
+    container.append(chip);
+  }
+
+  const clear = document.createElement('button');
+  clear.type = 'button';
+  clear.className = 'dsh-fnos-recent-clear';
+  clear.textContent = '×';
+  clear.title = t('清除最近记录');
+  clear.setAttribute('aria-label', t('清除最近记录'));
+  clear.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    clearRecentPaths();
+    renderRecentChips(dialog, footer);
+  });
+  container.append(clear);
+  repositionStatus(dialog);
+}
+
+/**
+ * Keep the transient status line above the footer. The footer grows when the
+ * recent-folder row is present, so the old fixed `bottom: 70px` covered it.
+ */
+function repositionStatus(dialog: Element): void {
+  const status = dialog.querySelector<HTMLElement>(`.${STATUS_CLASS}`);
+  if (!status || status.style.display !== 'block') return;
+  const footer = findFooter(dialog);
+  status.style.bottom = `${(footer instanceof HTMLElement ? footer.offsetHeight : 56) + 12}px`;
+}
+
+/** Navigate the picker to one remembered folder. */
+async function useRecentPath(dialog: Element, path: string): Promise<void> {
+  const input = await ensurePathInput(dialog);
+  if (!input) {
+    showStatus(dialog, t('没有找到目录选择器的路径输入框'), true);
+    return;
+  }
+  fillAndEnter(input, path);
+  recordRecentPath(path);
+  showStatus(dialog, t('已填入路径'), false);
 }
 
 export function findPathInput(dialog: Element): HTMLInputElement | null {
@@ -175,6 +279,9 @@ function directoryFlow(dialog: Element, button: HTMLButtonElement): PickFlow {
       const input = await ensurePathInput(dialog);
       if (!input) throw new Error(t('没有找到目录选择器的路径输入框'));
       fillAndEnter(input, paths[0]);
+      recordRecentPath(paths[0]);
+      const footer = findFooter(dialog);
+      if (footer) renderRecentChips(dialog, footer);
     },
     doneText: (paths) => t('已填入授权目录：{path}', { path: paths[0] }),
     setLabel: (text) => { button.textContent = text; },
@@ -201,6 +308,7 @@ function showStatus(dialog: Element, text: string, isError: boolean): void {
   status.textContent = text;
   status.dataset.error = isError ? '1' : '0';
   status.style.display = 'block';
+  repositionStatus(dialog);
 
   const previous = statusTimers.get(status);
   if (previous) window.clearTimeout(previous);

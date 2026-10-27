@@ -12,7 +12,7 @@ import { DEFAULT_SETTINGS, normalizeBase, type AuthMode } from '../shared/settin
 import { VERSION } from '../version.ts';
 import { openAuthPopup } from './auth.ts';
 import { closePopup, copyText, showToast } from './dom.ts';
-import { currentLanguage, getLanguagePreference, setLanguagePreference, t, translateError, type LanguagePreference } from './i18n.ts';
+import { currentLanguage, getLanguagePreference, onLanguageChange, resolveHostLanguage, setLanguagePreference, t, translateError, type LanguagePreference } from './i18n.ts';
 import {
   authRouteExists,
   checkWorkspaceHealth,
@@ -155,6 +155,14 @@ function SettingsPage(): React.ReactElement {
   const [hostState, setHostState] = React.useState<SettingsHostState>('unknown');
   const [hostVersion, setHostVersion] = React.useState('');
   const [language, setLanguage] = React.useState<LanguagePreference>(getLanguagePreference());
+  const [, setLanguageVersion] = React.useState(0);
+
+  // "Follow fnOS" resolves asynchronously; re-render once the host answers.
+  React.useEffect(() => {
+    const unsubscribe = onLanguageChange(() => setLanguageVersion((value) => value + 1));
+    if (getLanguagePreference() === 'system') void resolveHostLanguage();
+    return unsubscribe;
+  }, []);
 
   React.useEffect(() => {
     let alive = true;
@@ -312,13 +320,14 @@ function SettingsPage(): React.ReactElement {
             onChange={(event) => {
               const next = setLanguagePreference(event.target.value);
               setLanguage(next);
+              if (next === 'system') void resolveHostLanguage(true);
               setMessage('');
               setError('');
             }}
             disabled={disabled}
             style={inputStyle}
           >
-            <option value="auto">{t('跟随浏览器')}</option>
+            <option value="system">{t('跟随系统')}</option>
             <option value="zh">{t('中文')}</option>
             <option value="en">English</option>
           </select>

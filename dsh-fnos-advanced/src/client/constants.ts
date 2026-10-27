@@ -22,8 +22,12 @@ export const SETTINGS_SLOT_KEY = 'dsh-fnos-advanced';
 export const BUTTON_ATTR = 'data-dsh-fnos-advanced';
 /** Marker on the injected composer command row. */
 export const PICK_ITEM_ATTR = 'data-dsh-fnos-pick-file';
+/** Marker on the injected file row in dsh's "@" completion menu. */
+export const REF_PICK_ITEM_ATTR = 'data-dsh-fnos-ref-pick';
 /** Marker on the per-row file-tree action button. */
 export const FILE_ACTION_ATTR = 'data-dsh-fnos-file-action';
+/** Marker on an action button rendered through a dsh slot (React owns that node). */
+export const SLOT_ACTION_ATTR = 'data-dsh-fnos-slot-action';
 /** Marker on the injected workspace-menu rows. */
 export const OPEN_DIR_ATTR = 'data-dsh-fnos-open-dir';
 export const CHECK_DIR_ATTR = 'data-dsh-fnos-check-dir';

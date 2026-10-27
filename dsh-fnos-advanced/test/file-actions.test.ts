@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileRowActions } from '../src/client/file-actions.ts';
 
-test('file rows offer open/quote/copy in a fnOS host', () => {
-  assert.deepEqual(fileRowActions('file', true), ['open', 'quote', 'copy']);
+test('file rows offer open/details/quote/copy in a fnOS host', () => {
+  assert.deepEqual(fileRowActions('file', true), ['open', 'details', 'quote', 'copy']);
 });
 
 test('directories cannot be quoted through the composer file input', () => {
-  assert.deepEqual(fileRowActions('directory', true), ['open', 'copy']);
+  assert.deepEqual(fileRowActions('directory', true), ['open', 'details', 'copy']);
 });
 
 test('a plain browser keeps client-side actions only', () => {

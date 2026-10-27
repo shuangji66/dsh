@@ -3,7 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { EN, setLanguagePreference, t, translateError } from '../src/client/i18n.ts';
+import { EN, normalizeHostLanguage, resolveHostLanguage, setHostLanguageResolver, setLanguagePreference, t, translateError } from '../src/client/i18n.ts';
 
 const clientDir = fileURLToPath(new URL('../src/client', import.meta.url));
 
@@ -23,7 +23,7 @@ for (const file of await clientSources()) {
   }
 }
 // Keys reached through a map instead of a literal call site.
-for (const key of ['在飞牛中打开', '引用到对话', '复制路径']) keys.add(key);
+for (const key of ['在飞牛中打开', '文件详情', '引用到对话', '复制路径']) keys.add(key);
 
 test('every t() source string has an English translation', () => {
   const missing = [...keys].filter((key) => !(key in EN));
@@ -42,5 +42,30 @@ test('language preference switches translations and falls back to Chinese', () =
   assert.equal(t('取消'), '取消');
   assert.equal(translateError('反代地址不是有效 URL'), '反代地址不是有效 URL');
 
-  setLanguagePreference('auto');
+  setLanguagePreference('system');
+});
+
+test('normalizes fnOS platform languages', () => {
+  assert.equal(normalizeHostLanguage('zh-CN'), 'zh');
+  assert.equal(normalizeHostLanguage('zh_TW'), 'zh');
+  assert.equal(normalizeHostLanguage('en-US'), 'en');
+  assert.equal(normalizeHostLanguage('en'), 'en');
+  assert.equal(normalizeHostLanguage('ja-JP'), null);
+  assert.equal(normalizeHostLanguage(undefined), null);
+});
+
+test('retired language values fold into system', () => {
+  assert.equal(setLanguagePreference('auto'), 'system');
+  assert.equal(setLanguagePreference('host'), 'system');
+  setLanguagePreference('system');
+});
+
+test('follow-fnOS uses the platform language once resolved', async () => {
+  setHostLanguageResolver(async () => ({ language: 'en-US' }));
+  setLanguagePreference('system');
+  await resolveHostLanguage(true);
+  assert.equal(t('取消'), 'Cancel');
+
+  setLanguagePreference('system');
+  setHostLanguageResolver(null);
 });

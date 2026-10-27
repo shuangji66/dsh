@@ -8,7 +8,7 @@
  */
 import { LOG_PREFIX } from './constants.ts';
 import { isVisible, showToast } from './dom.ts';
-import { fileNameForPath, imageMimeForPath } from './files.ts';
+import { fileNameForPath, imageMimeForPath, unsupportedImageFormat } from './files.ts';
 import { dispatchComposerFiles, ensureHostPathBridge, setHostPath } from './host-paths.ts';
 import { t } from './i18n.ts';
 import { loadSettings, readImageFile } from './plugin-api.ts';
@@ -42,6 +42,8 @@ export async function addPathsToComposer(paths: readonly unknown[], input: HTMLI
   const files: File[] = [];
   let images = 0;
   let unreadable = 0;
+  let unsupported = 0;
+  let disabled = 0;
 
   for (const raw of paths) {
     const path = String(raw);
@@ -57,6 +59,12 @@ export async function addPathsToComposer(paths: readonly unknown[], input: HTMLI
         console.warn(LOG_PREFIX, 'image bytes unavailable; adding a path reference instead', error);
         unreadable += 1;
       }
+    } else if (mime) {
+      disabled += 1;
+    } else if (unsupportedImageFormat(path)) {
+      // HEIC/HEIF/RAW…: the model cannot see these, so say so instead of
+      // silently handing it a path reference that looks like a normal file.
+      unsupported += 1;
     }
     const file = new File([], fileNameForPath(path), { type: 'application/octet-stream' });
     setHostPath(file, path);
@@ -66,8 +74,19 @@ export async function addPathsToComposer(paths: readonly unknown[], input: HTMLI
   if (!files.length) throw new Error(t('没有可添加的文件'));
   dispatchComposerFiles(input, files);
 
+  const notices: string[] = [];
   if (unreadable > 0) {
-    showToast(t('{count} 张图片未能读取，已改为路径引用', { count: unreadable }));
+    notices.push(t('{count} 张图片读取失败（可能超过 8 MB），已改为路径引用', { count: unreadable }));
+  }
+  if (unsupported > 0) {
+    notices.push(t('{count} 张图片格式不支持视觉（如 HEIC），已改为路径引用', { count: unsupported }));
+  }
+  if (disabled > 0) {
+    notices.push(t('{count} 张图片未读取（设置已关闭图片读取），已改为路径引用', { count: disabled }));
+  }
+
+  if (notices.length) {
+    showToast(notices.join(' · '));
   } else if (images > 0) {
     showToast(t('已添加 {count} 个文件（{images} 张图片会上传）', { count: files.length, images }));
   }

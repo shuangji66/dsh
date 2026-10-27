@@ -24,6 +24,7 @@ export const SIDEBAR_GROUPS: readonly string[] = Object.freeze([
 export interface PickerFlowParams {
   directory?: boolean;
   creatable?: boolean;
+  multiple?: boolean;
   title: string;
   okText: string;
 }
@@ -35,6 +36,7 @@ export interface PickerParams {
   sidebarGroup: string[];
   directory?: boolean;
   creatable?: boolean;
+  multiple?: boolean;
 }
 
 export function pickerParams(flow: PickerFlowParams): PickerParams {
@@ -45,6 +47,7 @@ export function pickerParams(flow: PickerFlowParams): PickerParams {
   };
   if (flow.directory !== undefined) params.directory = flow.directory === true;
   if (flow.creatable) params.creatable = true;
+  if (flow.multiple !== undefined) params.multiple = flow.multiple === true;
   return params;
 }
 

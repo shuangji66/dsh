@@ -16,13 +16,31 @@ import { t } from './i18n.ts';
 import { looksLikeComposerCommandMenu } from './menu.ts';
 import { runPickFlow } from './picker-flow.ts';
 
-/** Add the row to the open composer command menu, if that is what we found. */
+interface PickItemOptions {
+  attr: string;
+  label: string;
+  alias: string;
+  description: string;
+}
+
+/** Add the rows to the open composer command menu, if that is what we found. */
 export function scanCommandMenu(): void {
   for (const menu of document.querySelectorAll('[data-trigger-menu]')) {
     if (!isVisible(menu)) continue;
-    if (menu.querySelector(`[${PICK_ITEM_ATTR}]`)) continue;
     if (!isComposerCommandMenu(menu)) continue;
-    injectPickItem(menu);
+
+    const options = Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="option"]'));
+    const fileOption = options.find((option) => /\bfile\b/i.test(option.textContent || ''));
+    if (!fileOption || !fileOption.parentElement) continue;
+
+    if (menu.querySelector(`[${PICK_ITEM_ATTR}]`)) continue;
+    const row = buildPickItem(options, fileOption, {
+      attr: PICK_ITEM_ATTR,
+      label: t('从飞牛选择'),
+      alias: 'fnos',
+      description: t('选择 NAS 上的文件，非图片作为路径引用'),
+    });
+    if (row) fileOption.after(row);
   }
 }
 
@@ -31,16 +49,17 @@ function isComposerCommandMenu(menu: Element): boolean {
   return looksLikeComposerCommandMenu(options.map((option) => option.textContent || ''));
 }
 
-function injectPickItem(menu: Element): void {
-  const options = Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="option"]'));
-  const fileOption = options.find((option) => /\bfile\b/i.test(option.textContent || ''));
-  if (!fileOption || !fileOption.parentElement) return;
-
+/** Clone one command row and turn it into one of our entries. */
+function buildPickItem(
+  options: readonly HTMLButtonElement[],
+  fileOption: HTMLButtonElement,
+  entry: PickItemOptions,
+): HTMLButtonElement | null {
   const item = fileOption.cloneNode(true) as HTMLButtonElement;
   item.removeAttribute('id');
   item.removeAttribute('aria-selected');
   item.removeAttribute('aria-label');
-  item.setAttribute(PICK_ITEM_ATTR, '1');
+  item.setAttribute(entry.attr, '1');
   // The source row may be the highlighted one; keep only one active row.
   if (item.className) {
     item.className = item.className.split(/\s+/).filter((name) => name && !/active/i.test(name)).join(' ');
@@ -78,9 +97,9 @@ function injectPickItem(menu: Element): void {
   }
 
   if (icon) icon.innerHTML = PICK_FILE_SVG;
-  if (name) name.textContent = t('从飞牛选择');
-  if (alias) alias.textContent = 'fnos';
-  if (description) description.textContent = t('选择 NAS 上的文件，非图片作为路径引用');
+  if (name) name.textContent = entry.label;
+  if (alias) alias.textContent = entry.alias;
+  if (description) description.textContent = entry.description;
 
   item.addEventListener('mousedown', (event) => {
     event.preventDefault();
@@ -93,10 +112,10 @@ function injectPickItem(menu: Element): void {
     void handlePickFiles(item);
   });
 
-  fileOption.after(item);
+  return item;
 }
 
-/** Click handler for the injected command row. */
+/** Click handler for the injected command rows. */
 export async function handlePickFiles(button: HTMLButtonElement): Promise<void> {
   const active = findActiveComposerInput();
   if (!active) {
@@ -121,6 +140,7 @@ function composerFlow(input: HTMLInputElement, button: HTMLButtonElement): PickF
     button,
     method: 'pickUserFile',
     directory: false,
+    multiple: true,
     title: t('选择文件'),
     okText: t('添加引用'),
     anchor: input.closest('[data-composer-card]') || input.parentElement,

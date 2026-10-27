@@ -81,7 +81,9 @@ var AUTH_BASE_KEY = "dsh-fnos-advanced:auth-base";
 var SETTINGS_SLOT_KEY = "dsh-fnos-advanced";
 var BUTTON_ATTR = "data-dsh-fnos-advanced";
 var PICK_ITEM_ATTR = "data-dsh-fnos-pick-file";
+var REF_PICK_ITEM_ATTR = "data-dsh-fnos-ref-pick";
 var FILE_ACTION_ATTR = "data-dsh-fnos-file-action";
+var SLOT_ACTION_ATTR = "data-dsh-fnos-slot-action";
 var OPEN_DIR_ATTR = "data-dsh-fnos-open-dir";
 var CHECK_DIR_ATTR = "data-dsh-fnos-check-dir";
 var REAUTH_DIR_ATTR = "data-dsh-fnos-reauth-dir";
@@ -125,6 +127,9 @@ var EN = Object.freeze({
   "已取消授权": "Authorization cancelled",
   "已填入授权目录：{path}": "Folder authorized: {path}",
   "已填入路径": "Path filled",
+  "最近使用": "Recent",
+  "填入最近使用的目录：{path}": "Fill the recently used folder: {path}",
+  "清除最近记录": "Clear recent folders",
   "该目录已添加为工作区": "This folder is already a workspace",
   "打开选择器失败": "Could not open the picker",
   "当前宿主未提供内嵌选择器，已改用网页授权。": "The native picker is unavailable; using web authorization.",
@@ -143,22 +148,29 @@ var EN = Object.freeze({
   // Composer
   "从飞牛选择": "Choose from fnOS",
   "选择 NAS 上的文件，非图片作为路径引用": "Pick files on the NAS; non-images become path references",
+  "NAS 文件": "NAS file",
   "没有找到对话的文件输入框，当前 dsh 版本可能不支持。": "No composer file input found; this dsh version may be unsupported.",
   "当前会话暂时不能添加附件。": "This session cannot accept attachments right now.",
   "已添加 {count} 个文件": "Added {count} file(s)",
   "已添加 {count} 个文件（{images} 张图片会上传）": "Added {count} file(s) ({images} image(s) will upload)",
   "{count} 张图片未能读取，已改为路径引用": "{count} image(s) could not be read; added as path references",
+  "{count} 张图片读取失败（可能超过 8 MB），已改为路径引用": "{count} image(s) could not be read (possibly over 8 MB); added as path references",
+  "{count} 张图片格式不支持视觉（如 HEIC），已改为路径引用": "{count} image(s) use a format vision does not support (such as HEIC); added as path references",
+  "{count} 张图片未读取（设置已关闭图片读取），已改为路径引用": "{count} image(s) were not read because image reading is off; added as path references",
   "没有可添加的文件": "No files to add",
   "宿主半侧未提供图片读取接口": "The host does not provide the image read route",
   "读取图片失败（HTTP {status}）": "Could not read the image (HTTP {status})",
   "已复制路径": "Path copied",
   "复制失败，请手动复制": "Copy failed; copy manually",
-  // File tree
+  // File actions
   "飞牛操作": "fnOS actions",
   "在飞牛中打开": "Open in fnOS",
+  "文件详情": "File details",
   "引用到对话": "Quote in chat",
   "复制路径": "Copy path",
   "在飞牛中打开失败，当前宿主可能不支持该操作。": "Could not open in fnOS; the host may not support it.",
+  "无法显示文件详情，当前宿主可能不支持该操作。": "Could not show file details; the host may not support it.",
+  "无法确定文件路径": "Could not determine the file path",
   "没有找到对话输入框，无法引用。": "No composer input to quote into.",
   // Workspace health
   "检查目录权限": "Check folder access",
@@ -243,7 +255,7 @@ var EN = Object.freeze({
   "展开": "Expand",
   "收起": "Collapse",
   "界面语言": "Interface language",
-  "跟随浏览器": "Follow browser",
+  "跟随系统": "Follow system",
   "中文": "Chinese",
   "English": "English",
   "宿主半侧版本 {host}，客户端 {client}。请重启 dsh 后再保存设置。": "Host {host}, client {client}. Restart dsh before saving.",
@@ -268,38 +280,92 @@ var EN = Object.freeze({
   "只支持 PNG/JPEG/WebP/GIF 图片": "Only PNG/JPEG/WebP/GIF images are supported",
   "不是普通文件": "Not a regular file",
   "图片内容为空": "The image is empty",
-  "图片超过 20 MB": "The image exceeds 20 MB",
+  "图片超过 8 MB": "The image exceeds 8 MB",
   "插件设置已关闭图片读取": "Image reading is disabled in the plugin settings",
   "设置格式无效": "Invalid settings format"
 });
-var preferences = ["auto", "zh", "en"];
-var preference = "auto";
+var preferences = ["system", "zh", "en"];
+var preference = "system";
 var loaded = false;
+var hostLanguage = null;
+var hostLanguageResolver = null;
+var hostLanguageResolving = null;
+var languageListeners = /* @__PURE__ */ new Set();
 function isPreference(value) {
   return typeof value === "string" && preferences.includes(value);
+}
+function normalizePreference(value) {
+  if (isPreference(value)) return value;
+  if (value === "auto" || value === "host") return "system";
+  return null;
+}
+function normalizeHostLanguage(value) {
+  const text = typeof value === "string" ? value : "";
+  if (/^zh/i.test(text)) return "zh";
+  if (/^en/i.test(text)) return "en";
+  return null;
+}
+function setHostLanguageResolver(resolver) {
+  hostLanguageResolver = resolver;
+}
+function notifyLanguageChange() {
+  for (const listener of [...languageListeners]) {
+    try {
+      listener();
+    } catch {
+    }
+  }
+}
+function onLanguageChange(listener) {
+  languageListeners.add(listener);
+  return () => {
+    languageListeners.delete(listener);
+  };
+}
+function resolveHostLanguage(force = false) {
+  if (!force && hostLanguage) return Promise.resolve(hostLanguage);
+  if (!force && hostLanguageResolving) return hostLanguageResolving;
+  if (!hostLanguageResolver) return Promise.resolve(hostLanguage);
+  const before = currentLanguage();
+  hostLanguageResolving = (async () => {
+    try {
+      const config = await hostLanguageResolver?.();
+      const next = normalizeHostLanguage(config?.language);
+      if (next) hostLanguage = next;
+    } catch {
+    }
+    hostLanguageResolving = null;
+    if (currentLanguage() !== before) notifyLanguageChange();
+    return hostLanguage;
+  })();
+  return hostLanguageResolving;
 }
 function getLanguagePreference() {
   if (loaded) return preference;
   loaded = true;
   try {
-    const stored = window.localStorage.getItem(PREFERENCE_KEY);
-    if (isPreference(stored)) preference = stored;
+    const stored = normalizePreference(window.localStorage.getItem(PREFERENCE_KEY));
+    if (stored) preference = stored;
   } catch {
   }
   return preference;
 }
 function setLanguagePreference(value) {
-  preference = isPreference(value) ? value : "auto";
+  const before = currentLanguage();
+  preference = normalizePreference(value) || "system";
   loaded = true;
   try {
     window.localStorage.setItem(PREFERENCE_KEY, preference);
   } catch {
   }
+  if (preference === "system") void resolveHostLanguage();
+  if (currentLanguage() !== before) notifyLanguageChange();
   return preference;
 }
 function currentLanguage() {
   getLanguagePreference();
   if (preference === "zh" || preference === "en") return preference;
+  if (hostLanguage) return hostLanguage;
   const html = typeof document !== "undefined" ? document.documentElement.lang : "";
   const navigatorLanguage = typeof navigator !== "undefined" ? navigator.language : "";
   return /^zh/i.test(html || navigatorLanguage) ? "zh" : "en";
@@ -442,6 +508,33 @@ function fileExtension(value) {
 }
 function imageMimeForPath(value) {
   return IMAGE_MIME_BY_EXTENSION[fileExtension(value)] || "";
+}
+var UNSUPPORTED_IMAGE_FORMATS = Object.freeze({
+  ".heic": "HEIC",
+  ".heif": "HEIF",
+  ".avif": "AVIF",
+  ".tif": "TIFF",
+  ".tiff": "TIFF",
+  ".bmp": "BMP",
+  ".svg": "SVG",
+  ".raw": "RAW",
+  ".dng": "DNG",
+  ".cr2": "CR2",
+  ".nef": "NEF",
+  ".arw": "ARW"
+});
+function unsupportedImageFormat(value) {
+  return UNSUPPORTED_IMAGE_FORMATS[fileExtension(value)] || "";
+}
+function resolveAbsolutePath(cwd, value) {
+  const text = String(value ?? "");
+  if (!text) return "";
+  if (text.startsWith("/")) return text;
+  const root = String(cwd ?? "");
+  if (root === "/") return `/${text.replace(/^\.\//, "")}`;
+  const base = root.replace(/\/+$/, "");
+  if (!base.startsWith("/")) return "";
+  return `${base}/${text.replace(/^\.\//, "")}`;
 }
 function fileNameForPath(value) {
   const text = String(value ?? "").replace(/[\\/]+$/, "");
@@ -843,6 +936,8 @@ async function addPathsToComposer(paths, input) {
   const files = [];
   let images = 0;
   let unreadable = 0;
+  let unsupported = 0;
+  let disabled = 0;
   for (const raw of paths) {
     const path = String(raw);
     const mime = imageMimeForPath(path);
@@ -857,6 +952,10 @@ async function addPathsToComposer(paths, input) {
         console.warn(LOG_PREFIX, "image bytes unavailable; adding a path reference instead", error);
         unreadable += 1;
       }
+    } else if (mime) {
+      disabled += 1;
+    } else if (unsupportedImageFormat(path)) {
+      unsupported += 1;
     }
     const file = new File([], fileNameForPath(path), { type: "application/octet-stream" });
     setHostPath(file, path);
@@ -864,8 +963,18 @@ async function addPathsToComposer(paths, input) {
   }
   if (!files.length) throw new Error(t("没有可添加的文件"));
   dispatchComposerFiles(input, files);
+  const notices = [];
   if (unreadable > 0) {
-    showToast(t("{count} 张图片未能读取，已改为路径引用", { count: unreadable }));
+    notices.push(t("{count} 张图片读取失败（可能超过 8 MB），已改为路径引用", { count: unreadable }));
+  }
+  if (unsupported > 0) {
+    notices.push(t("{count} 张图片格式不支持视觉（如 HEIC），已改为路径引用", { count: unsupported }));
+  }
+  if (disabled > 0) {
+    notices.push(t("{count} 张图片未读取（设置已关闭图片读取），已改为路径引用", { count: disabled }));
+  }
+  if (notices.length) {
+    showToast(notices.join(" · "));
   } else if (images > 0) {
     showToast(t("已添加 {count} 个文件（{images} 张图片会上传）", { count: files.length, images }));
   }
@@ -2522,6 +2631,7 @@ function pickerParams(flow) {
   };
   if (flow.directory !== void 0) params.directory = flow.directory === true;
   if (flow.creatable) params.creatable = true;
+  if (flow.multiple !== void 0) params.multiple = flow.multiple === true;
   return params;
 }
 function normalizeWorkspacePath(value) {
@@ -2724,24 +2834,30 @@ function removeChooser(anchor) {
 function scanCommandMenu() {
   for (const menu of document.querySelectorAll("[data-trigger-menu]")) {
     if (!isVisible(menu)) continue;
-    if (menu.querySelector(`[${PICK_ITEM_ATTR}]`)) continue;
     if (!isComposerCommandMenu(menu)) continue;
-    injectPickItem(menu);
+    const options = Array.from(menu.querySelectorAll('button[role="option"]'));
+    const fileOption = options.find((option) => /\bfile\b/i.test(option.textContent || ""));
+    if (!fileOption || !fileOption.parentElement) continue;
+    if (menu.querySelector(`[${PICK_ITEM_ATTR}]`)) continue;
+    const row = buildPickItem(options, fileOption, {
+      attr: PICK_ITEM_ATTR,
+      label: t("从飞牛选择"),
+      alias: "fnos",
+      description: t("选择 NAS 上的文件，非图片作为路径引用")
+    });
+    if (row) fileOption.after(row);
   }
 }
 function isComposerCommandMenu(menu) {
   const options = Array.from(menu.querySelectorAll('button[role="option"]'));
   return looksLikeComposerCommandMenu(options.map((option) => option.textContent || ""));
 }
-function injectPickItem(menu) {
-  const options = Array.from(menu.querySelectorAll('button[role="option"]'));
-  const fileOption = options.find((option) => /\bfile\b/i.test(option.textContent || ""));
-  if (!fileOption || !fileOption.parentElement) return;
+function buildPickItem(options, fileOption, entry) {
   const item = fileOption.cloneNode(true);
   item.removeAttribute("id");
   item.removeAttribute("aria-selected");
   item.removeAttribute("aria-label");
-  item.setAttribute(PICK_ITEM_ATTR, "1");
+  item.setAttribute(entry.attr, "1");
   if (item.className) {
     item.className = item.className.split(/\s+/).filter((name2) => name2 && !/active/i.test(name2)).join(" ");
   }
@@ -2762,9 +2878,9 @@ function injectPickItem(menu) {
     }
   }
   if (icon) icon.innerHTML = PICK_FILE_SVG;
-  if (name) name.textContent = t("从飞牛选择");
-  if (alias) alias.textContent = "fnos";
-  if (description) description.textContent = t("选择 NAS 上的文件，非图片作为路径引用");
+  if (name) name.textContent = entry.label;
+  if (alias) alias.textContent = entry.alias;
+  if (description) description.textContent = entry.description;
   item.addEventListener("mousedown", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -2775,7 +2891,7 @@ function injectPickItem(menu) {
     dismissTriggerMenu();
     void handlePickFiles(item);
   });
-  fileOption.after(item);
+  return item;
 }
 async function handlePickFiles(button) {
   const active = findActiveComposerInput();
@@ -2800,6 +2916,7 @@ function composerFlow(input, button) {
     button,
     method: "pickUserFile",
     directory: false,
+    multiple: true,
     title: t("选择文件"),
     okText: t("添加引用"),
     anchor: input.closest("[data-composer-card]") || input.parentElement,
@@ -2820,21 +2937,168 @@ function composerFlow(input, button) {
 function fileRowActions(entryType, host) {
   if (entryType !== "file" && entryType !== "directory") return [];
   const actions = [];
-  if (host) actions.push("open");
+  if (host) actions.push("open", "details");
   if (entryType === "file") actions.push("quote");
   actions.push("copy");
   return actions;
 }
 
-// src/client/file-tree.ts
-var fileMenu = null;
-var fileMenuRow = null;
-var fileMenuCleanup = null;
+// src/client/path-menu.ts
+var pathMenu = null;
+var pathMenuAnchor = null;
+var pathMenuCleanup = null;
 var FILE_ACTION_TEXT = {
   open: "在飞牛中打开",
+  details: "文件详情",
   quote: "引用到对话",
   copy: "复制路径"
 };
+function togglePathMenu(anchor, target) {
+  if (pathMenu && pathMenuAnchor === anchor) {
+    closePathMenu();
+    return;
+  }
+  openPathMenu(anchor, target);
+}
+function openPathMenu(anchor, target) {
+  closePathMenu();
+  const { path, entry } = target;
+  const actions = fileRowActions(entry, isFnosHost());
+  if (!path || !actions.length) return;
+  const menu = document.createElement("div");
+  menu.className = "dsh-fnos-file-menu";
+  menu.setAttribute("role", "menu");
+  const title = document.createElement("div");
+  title.className = "dsh-fnos-file-menu-title";
+  title.textContent = path.split("/").filter(Boolean).pop() || path;
+  title.title = path;
+  menu.append(title);
+  for (const action of actions) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "dsh-fnos-file-menu-item";
+    item.setAttribute("role", "menuitem");
+    const text = document.createElement("span");
+    text.className = "dsh-fnos-file-menu-label";
+    text.textContent = t(FILE_ACTION_TEXT[action]);
+    item.append(text);
+    item.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closePathMenu();
+      void runPathAction(action, path, entry);
+    });
+    menu.appendChild(item);
+  }
+  document.body.appendChild(menu);
+  positionMenu(menu, anchor);
+  pathMenu = menu;
+  pathMenuAnchor = anchor;
+  const onPointerDown = (event) => {
+    if (!(event.target instanceof Node)) return;
+    if (menu.contains(event.target) || anchor.contains(event.target)) return;
+    closePathMenu();
+  };
+  const onKeyDown = (event) => {
+    if (event.key === "Escape") closePathMenu();
+  };
+  document.addEventListener("pointerdown", onPointerDown, true);
+  document.addEventListener("keydown", onKeyDown, true);
+  window.addEventListener("scroll", closePathMenu, true);
+  window.addEventListener("resize", closePathMenu);
+  pathMenuCleanup = () => {
+    document.removeEventListener("pointerdown", onPointerDown, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("scroll", closePathMenu, true);
+    window.removeEventListener("resize", closePathMenu);
+  };
+}
+function positionMenu(menu, anchor) {
+  const margin = 8;
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth || 200;
+  const height = menu.offsetHeight || 100;
+  menu.style.left = `${Math.min(Math.max(margin, rect.right - width), window.innerWidth - width - margin)}px`;
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - margin) top = Math.max(margin, rect.top - height - 6);
+  menu.style.top = `${top}px`;
+}
+function closePathMenu() {
+  if (pathMenuCleanup) {
+    try {
+      pathMenuCleanup();
+    } catch {
+    }
+    pathMenuCleanup = null;
+  }
+  if (pathMenu) {
+    pathMenu.remove();
+    pathMenu = null;
+  }
+  pathMenuAnchor = null;
+}
+async function runPathAction(action, path, entry) {
+  const isDirectory = entry === "directory";
+  try {
+    if (action === "open") {
+      await openPathInFnos(path, isDirectory);
+    } else if (action === "details") {
+      await showPathDetails(path);
+    } else if (action === "quote") {
+      await quotePathToComposer(path);
+    } else if (action === "copy") {
+      await copyPathToClipboard(path);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(LOG_PREFIX, "path action failed", action, message, error);
+    if (action === "open") {
+      showToast(t("在飞牛中打开失败，当前宿主可能不支持该操作。"));
+    } else if (action === "details") {
+      showToast(t("无法显示文件详情，当前宿主可能不支持该操作。"));
+    } else {
+      showToast(translateError(message));
+    }
+  }
+}
+async function openPathInFnos(path, isDirectory) {
+  const sdk = getSdk();
+  try {
+    await sdk.ready();
+  } catch {
+  }
+  if (isDirectory || typeof sdk.openFile !== "function") {
+    await sdk.openFileManager(path);
+    return;
+  }
+  try {
+    const opened = await sdk.openFile(path);
+    if (opened === false) throw new Error("openFile is not supported by this host");
+  } catch (error) {
+    console.warn(LOG_PREFIX, "openFile failed; falling back to the file manager", error);
+    await sdk.openFileManager(path);
+  }
+}
+async function showPathDetails(path) {
+  const sdk = getSdk();
+  try {
+    await sdk.ready();
+  } catch {
+  }
+  if (typeof sdk.showFileDetails !== "function") {
+    throw new Error("showFileDetails is not supported by this host");
+  }
+  const result = await sdk.showFileDetails([path]);
+  if (result === null || result === false) {
+    throw new Error("showFileDetails is not supported by this host");
+  }
+}
+async function copyPathToClipboard(path) {
+  const ok = await copyText(path);
+  showToast(ok ? t("已复制路径") : t("复制失败，请手动复制"));
+}
+
+// src/client/file-tree.ts
 function scanFileTree() {
   for (const row of document.querySelectorAll("[data-files-entry][data-files-path]")) {
     const entry = row.getAttribute("data-files-entry") || "";
@@ -2852,6 +3116,9 @@ function scanFileTree() {
       const rowButton = row.querySelector(":scope > button");
       const height = rowButton ? rowButton.offsetHeight : 0;
       if (height && action.style.height !== `${height}px`) action.style.height = `${height}px`;
+      const label = t("飞牛操作");
+      if (action.title !== label) action.title = label;
+      if (action.getAttribute("aria-label") !== label) action.setAttribute("aria-label", label);
       continue;
     }
     injectFileAction(row);
@@ -2880,136 +3147,60 @@ function injectFileAction(row) {
   action.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    if (fileMenu && fileMenuRow === row) {
-      closeFileMenu();
-      return;
-    }
-    openFileMenu(action, row);
+    togglePathMenu(action, {
+      path: row.getAttribute("data-files-path") || "",
+      entry: row.getAttribute("data-files-entry") || ""
+    });
   });
   row.appendChild(action);
 }
-function openFileMenu(anchor, row) {
-  closeFileMenu();
-  const path = row.getAttribute("data-files-path") || "";
-  const entry = row.getAttribute("data-files-entry") || "";
-  const actions = fileRowActions(entry, isFnosHost());
-  if (!path || !actions.length) return;
-  const menu = document.createElement("div");
-  menu.className = "dsh-fnos-file-menu";
-  menu.setAttribute("role", "menu");
-  const title = document.createElement("div");
-  title.className = "dsh-fnos-file-menu-title";
-  title.textContent = path.split("/").filter(Boolean).pop() || path;
-  title.title = path;
-  menu.append(title);
-  for (const action of actions) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "dsh-fnos-file-menu-item";
-    item.setAttribute("role", "menuitem");
-    const text = document.createElement("span");
-    text.className = "dsh-fnos-file-menu-label";
-    text.textContent = t(FILE_ACTION_TEXT[action]);
-    item.append(text);
-    item.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeFileMenu();
-      void runFileAction(action, path, entry);
-    });
-    menu.appendChild(item);
-  }
-  document.body.appendChild(menu);
-  positionFileMenu(menu, anchor);
-  fileMenu = menu;
-  fileMenuRow = row;
-  const onPointerDown = (event) => {
-    if (!(event.target instanceof Node)) return;
-    if (menu.contains(event.target) || anchor.contains(event.target)) return;
-    closeFileMenu();
-  };
-  const onKeyDown = (event) => {
-    if (event.key === "Escape") closeFileMenu();
-  };
-  document.addEventListener("pointerdown", onPointerDown, true);
-  document.addEventListener("keydown", onKeyDown, true);
-  window.addEventListener("scroll", closeFileMenu, true);
-  window.addEventListener("resize", closeFileMenu);
-  fileMenuCleanup = () => {
-    document.removeEventListener("pointerdown", onPointerDown, true);
-    document.removeEventListener("keydown", onKeyDown, true);
-    window.removeEventListener("scroll", closeFileMenu, true);
-    window.removeEventListener("resize", closeFileMenu);
-  };
-}
-function positionFileMenu(menu, anchor) {
-  const margin = 8;
-  const rect = anchor.getBoundingClientRect();
-  const width = menu.offsetWidth || 200;
-  const height = menu.offsetHeight || 100;
-  menu.style.left = `${Math.min(Math.max(margin, rect.right - width), window.innerWidth - width - margin)}px`;
-  let top = rect.bottom + 6;
-  if (top + height > window.innerHeight - margin) top = Math.max(margin, rect.top - height - 6);
-  menu.style.top = `${top}px`;
-}
-function closeFileMenu() {
-  if (fileMenuCleanup) {
-    try {
-      fileMenuCleanup();
-    } catch {
-    }
-    fileMenuCleanup = null;
-  }
-  if (fileMenu) {
-    fileMenu.remove();
-    fileMenu = null;
-  }
-  fileMenuRow = null;
-}
-async function runFileAction(action, path, entry) {
-  const isDirectory = entry === "directory";
-  try {
-    if (action === "open") {
-      await openPathInFnos(path, isDirectory);
-    } else if (action === "quote") {
-      await quotePathToComposer(path);
-    } else if (action === "copy") {
-      await copyPathToClipboard(path);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(LOG_PREFIX, "file-tree action failed", action, message, error);
-    showToast(action === "open" ? t("在飞牛中打开失败，当前宿主可能不支持该操作。") : translateError(message));
+
+// src/client/reference-menu.ts
+var REFERENCE_OPTION_ID_RE = /^dsh-slash-option-reference-/;
+function scanReferenceMenu() {
+  for (const menu of document.querySelectorAll("[data-trigger-menu]")) {
+    if (!isVisible(menu)) continue;
+    if (menu.querySelector(`[${REF_PICK_ITEM_ATTR}]`)) continue;
+    const options = Array.from(menu.querySelectorAll('button[role="option"]'));
+    const first = options.find((option) => REFERENCE_OPTION_ID_RE.test(option.id));
+    if (!first) continue;
+    injectPickItem(first);
   }
 }
-async function openPathInFnos(path, isDirectory) {
-  const sdk = getSdk();
-  try {
-    await sdk.ready();
-  } catch {
+function injectPickItem(template) {
+  const item = template.cloneNode(true);
+  item.removeAttribute("id");
+  item.removeAttribute("aria-selected");
+  item.removeAttribute("aria-label");
+  item.setAttribute(REF_PICK_ITEM_ATTR, "1");
+  if (item.className) {
+    item.className = item.className.split(/\s+/).filter((name2) => name2 && !/active/i.test(name2)).join(" ");
   }
-  if (isDirectory || typeof sdk.openFile !== "function") {
-    await sdk.openFileManager(path);
-    return;
-  }
-  try {
-    const opened = await sdk.openFile(path);
-    if (opened === false) throw new Error("openFile is not supported by this host");
-  } catch (error) {
-    console.warn(LOG_PREFIX, "openFile failed; falling back to the file manager", error);
-    await sdk.openFileManager(path);
-  }
-}
-async function copyPathToClipboard(path) {
-  const ok = await copyText(path);
-  showToast(ok ? t("已复制路径") : t("复制失败，请手动复制"));
+  const spans = Array.from(item.querySelectorAll("span"));
+  const icon = spans.find((span) => span.querySelector("svg")) || spans[0];
+  const name = icon ? icon.nextElementSibling : spans[1];
+  const detail = name ? name.nextElementSibling : null;
+  if (icon) icon.innerHTML = PICK_FILE_SVG;
+  if (name) name.textContent = t("从飞牛选择");
+  if (detail) detail.textContent = t("NAS 文件");
+  item.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  item.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissTriggerMenu();
+    void handlePickFiles(item);
+  });
+  template.before(item);
 }
 
 // src/client/settings-page.tsx
 var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.5.0";
+var VERSION = "0.6.0";
 
 // src/client/workspace-menu.ts
 var lastWorkspaceMenu = null;
@@ -3283,6 +3474,12 @@ function SettingsPage() {
   const [hostState2, setHostState] = React.useState("unknown");
   const [hostVersion, setHostVersion] = React.useState("");
   const [language, setLanguage] = React.useState(getLanguagePreference());
+  const [, setLanguageVersion] = React.useState(0);
+  React.useEffect(() => {
+    const unsubscribe = onLanguageChange(() => setLanguageVersion((value) => value + 1));
+    if (getLanguagePreference() === "system") void resolveHostLanguage();
+    return unsubscribe;
+  }, []);
   React.useEffect(() => {
     let alive = true;
     loadSettings(true).then((loaded2) => {
@@ -3403,13 +3600,14 @@ function SettingsPage() {
         onChange: (event) => {
           const next = setLanguagePreference(event.target.value);
           setLanguage(next);
+          if (next === "system") void resolveHostLanguage(true);
           setMessage("");
           setError("");
         },
         disabled,
         style: inputStyle
       },
-      /* @__PURE__ */ React.createElement("option", { value: "auto" }, t("跟随浏览器")),
+      /* @__PURE__ */ React.createElement("option", { value: "system" }, t("跟随系统")),
       /* @__PURE__ */ React.createElement("option", { value: "zh" }, t("中文")),
       /* @__PURE__ */ React.createElement("option", { value: "en" }, "English")
     )),
@@ -3688,6 +3886,102 @@ function registerSettingsSlot(ctx) {
   });
 }
 
+// src/client/slot-actions.tsx
+var React2 = __toESM(require("react"), 1);
+var SLOT_ID = "dsh-fnos-advanced";
+var SLOT_NAMES = [
+  "deliverables.file.actions",
+  "deliverables.review.file.actions",
+  "sidebar.right.tab.document.actions",
+  "sidebar.right.tab.document.unpreviewable"
+];
+var sessionCwd = () => "";
+function sessionIdOf(props, root) {
+  if (typeof props.sessionId === "string" && props.sessionId) return props.sessionId;
+  return root?.closest("[data-sidebar-right-session]")?.getAttribute("data-sidebar-right-session") || "";
+}
+function resolveSlotPath(root, props) {
+  if (typeof props.absolutePath === "string" && props.absolutePath.startsWith("/")) {
+    return props.absolutePath;
+  }
+  const card = root?.closest("[data-presented-file]");
+  const cardPath = card?.querySelector(":scope > button[title]")?.getAttribute("title") || "";
+  if (cardPath) return resolveAbsolutePath(sessionCwd(sessionIdOf(props, root)), cardPath);
+  const review = root?.closest("[data-changes-review]");
+  if (review) {
+    const relative = review.querySelector("[data-review-file]")?.getAttribute("data-review-file") || "";
+    return resolveAbsolutePath(sessionCwd(sessionIdOf(props, review)), relative);
+  }
+  return "";
+}
+function FnosPathAction(props) {
+  const anchorRef = React2.useRef(null);
+  const label = t("飞牛操作");
+  const [, forceLanguage] = React2.useReducer((value) => value + 1, 0);
+  React2.useEffect(() => () => closePathMenu(), []);
+  React2.useEffect(() => onLanguageChange(forceLanguage), [forceLanguage]);
+  const onClick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const anchor = anchorRef.current;
+    if (!anchor) return;
+    const path = resolveSlotPath(anchor, props);
+    if (!path) {
+      showToast(t("无法确定文件路径"));
+      return;
+    }
+    togglePathMenu(anchor, { path, entry: "file" });
+  };
+  return /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      ref: anchorRef,
+      type: "button",
+      className: "dsh-fnos-slot-action",
+      ...{ [SLOT_ACTION_ATTR]: "1" },
+      title: label,
+      "aria-label": label,
+      onMouseDown: (event) => {
+        event.stopPropagation();
+      },
+      onClick,
+      dangerouslySetInnerHTML: { __html: FILE_ACTION_SVG }
+    }
+  );
+}
+function registerPathActionSlots(ctx) {
+  const inject = ctx?.inject;
+  if (typeof inject !== "function") return;
+  inject(["slots"], (scope) => {
+    const slots = scope.slots;
+    if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
+    const install2 = () => {
+      for (const name of SLOT_NAMES) {
+        slots.inject(name, () => slots.register({ name, id: SLOT_ID }, FnosPathAction));
+      }
+    };
+    if (typeof scope.effect === "function") scope.effect(install2, "dsh-fnos-advanced: file actions");
+    else install2();
+  });
+}
+function registerSessionCwd(ctx) {
+  const inject = ctx?.inject;
+  if (typeof inject !== "function") return;
+  inject(["sessions"], (scope) => {
+    const list = scope.sessions?.list;
+    if (!list || typeof list.getSnapshot !== "function") return;
+    sessionCwd = (sessionId) => {
+      if (!sessionId) return "";
+      try {
+        const cwd = list.getSnapshot?.()?.byId?.[sessionId]?.cwd;
+        return typeof cwd === "string" ? cwd : "";
+      } catch {
+        return "";
+      }
+    };
+  });
+}
+
 // src/client/style.ts
 var STYLE_TEXT = `
   .dsh-fnos-advanced-button {
@@ -3720,6 +4014,60 @@ var STYLE_TEXT = `
   .dsh-fnos-advanced-button:disabled {
     opacity: .62;
     cursor: default;
+  }
+  .dsh-fnos-recent {
+    box-sizing: border-box;
+    display: flex;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
+    min-width: 0;
+    margin-bottom: 6px;
+  }
+  .dsh-fnos-recent-label {
+    flex: none;
+    color: var(--dsw-alias-label-tertiary, #888);
+    font-size: 11px;
+    line-height: 16px;
+  }
+  .dsh-fnos-recent-chip,
+  .dsh-fnos-recent-clear {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    max-width: 160px;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, .32));
+    border-radius: 999px;
+    background: transparent;
+    color: var(--dsw-alias-label-secondary, inherit);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  .dsh-fnos-recent-chip:hover,
+  .dsh-fnos-recent-clear:hover {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+    color: var(--dsw-alias-label-primary, inherit);
+  }
+  .dsh-fnos-recent-chip:focus-visible,
+  .dsh-fnos-recent-clear:focus-visible {
+    outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
+    outline-offset: 1px;
+  }
+  .dsh-fnos-recent-clear {
+    max-width: none;
+    width: 26px;
+    padding: 0;
+    color: var(--dsw-alias-label-tertiary, #888);
   }
   .dsh-fnos-file-row > button {
     padding-right: 34px;
@@ -3762,6 +4110,29 @@ var STYLE_TEXT = `
       opacity: 1;
       pointer-events: auto;
     }
+  }
+  .dsh-fnos-slot-action {
+    box-sizing: border-box;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--dsw-alias-label-tertiary, #888);
+    cursor: pointer;
+  }
+  .dsh-fnos-slot-action:hover {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, .1));
+    color: var(--dsw-alias-label-primary, inherit);
+  }
+  .dsh-fnos-slot-action:focus-visible {
+    outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-alias-state-business-primary, #4f7cff);
+    outline-offset: 1px;
   }
   .dsh-fnos-file-menu {
     position: fixed;
@@ -3915,16 +4286,72 @@ function injectStyle() {
   (document.head || document.documentElement).appendChild(style);
 }
 
+// src/client/recent-dirs.ts
+var STORAGE_KEY2 = "dsh-fnos-advanced:recent-dirs";
+var MAX_RECENT_DIRS = 8;
+function normalizePath(value) {
+  const text = String(value ?? "");
+  if (!text.startsWith("/")) return "";
+  const trimmed = text.replace(/\/+$/, "");
+  return trimmed || "/";
+}
+function pushRecentPath(list, path, max = MAX_RECENT_DIRS) {
+  const value = normalizePath(path);
+  if (!value || max <= 0) return list.slice(0, Math.max(0, max));
+  const seen = /* @__PURE__ */ new Set([value]);
+  const next = [value];
+  for (const item of list) {
+    const normalized = normalizePath(item);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    next.push(normalized);
+    if (next.length >= max) break;
+  }
+  return next;
+}
+function loadRecentPaths() {
+  try {
+    if (typeof window === "undefined") return [];
+    const raw = window.localStorage.getItem(STORAGE_KEY2);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(normalizePath).filter(Boolean).slice(0, MAX_RECENT_DIRS);
+  } catch {
+    return [];
+  }
+}
+function recordRecentPath(path) {
+  const next = pushRecentPath(loadRecentPaths(), path);
+  try {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(STORAGE_KEY2, JSON.stringify(next));
+    }
+  } catch {
+  }
+  return next;
+}
+function clearRecentPaths() {
+  try {
+    if (typeof window !== "undefined") window.localStorage.removeItem(STORAGE_KEY2);
+  } catch {
+  }
+}
+
 // src/client/workspace-picker.ts
 var statusTimers = /* @__PURE__ */ new WeakMap();
 function scanWorkspacePickers() {
   for (const dialog of document.querySelectorAll('[role="dialog"]')) {
     if (!isWorkspacePicker(dialog)) {
-      dialog.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}`).forEach((node) => node.remove());
+      dialog.querySelectorAll(`[${BUTTON_ATTR}], .${STATUS_CLASS}, .dsh-fnos-recent`).forEach((node) => node.remove());
       continue;
     }
-    if (dialog.querySelector(`[${BUTTON_ATTR}]`)) continue;
-    injectButton(dialog);
+    const footer = findFooter(dialog);
+    if (!footer) continue;
+    const button = dialog.querySelector(`[${BUTTON_ATTR}]`);
+    if (button) refreshButtonLabels(button);
+    else injectButton(dialog, footer);
+    renderRecentChips(dialog, footer);
   }
 }
 function isWorkspacePicker(dialog) {
@@ -3937,9 +4364,7 @@ function isWorkspacePicker(dialog) {
   if (!findPathInput(dialog) && !findEditButton(dialog)) return false;
   return Boolean(findFooter(dialog));
 }
-function injectButton(dialog) {
-  const footer = findFooter(dialog);
-  if (!footer) return;
+function injectButton(dialog, footer) {
   const primary = document.createElement("button");
   primary.type = "button";
   primary.setAttribute(BUTTON_ATTR, "1");
@@ -3948,6 +4373,84 @@ function injectButton(dialog) {
   primary.textContent = t("选择飞牛目录");
   primary.title = t("通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）");
   footer.insertBefore(primary, footer.firstChild);
+}
+function refreshButtonLabels(button) {
+  if (button.dataset.busy === "1") return;
+  const label = t("选择飞牛目录");
+  const hint = t("通过飞牛授权选择一个目录（会授予当前飞牛应用访问权限）");
+  if (button.textContent !== label) button.textContent = label;
+  if (button.title !== hint) button.title = hint;
+}
+function renderRecentChips(dialog, footer) {
+  const paths = loadRecentPaths();
+  let container = dialog.querySelector(".dsh-fnos-recent");
+  if (!paths.length) {
+    container?.remove();
+    repositionStatus(dialog);
+    return;
+  }
+  if (!container) {
+    container = document.createElement("div");
+    container.className = "dsh-fnos-recent";
+  }
+  if (footer.firstElementChild !== container) footer.insertBefore(container, footer.firstChild);
+  const signature = `${currentLanguage()}
+${paths.join("\n")}`;
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
+  container.replaceChildren();
+  const label = document.createElement("span");
+  label.className = "dsh-fnos-recent-label";
+  label.textContent = t("最近使用");
+  container.append(label);
+  for (const path of paths) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "dsh-fnos-recent-chip";
+    chip.textContent = fileNameForPath(path);
+    chip.title = path;
+    chip.setAttribute("aria-label", t("填入最近使用的目录：{path}", { path }));
+    chip.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    chip.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void useRecentPath(dialog, path);
+    });
+    container.append(chip);
+  }
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "dsh-fnos-recent-clear";
+  clear.textContent = "×";
+  clear.title = t("清除最近记录");
+  clear.setAttribute("aria-label", t("清除最近记录"));
+  clear.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    clearRecentPaths();
+    renderRecentChips(dialog, footer);
+  });
+  container.append(clear);
+  repositionStatus(dialog);
+}
+function repositionStatus(dialog) {
+  const status = dialog.querySelector(`.${STATUS_CLASS}`);
+  if (!status || status.style.display !== "block") return;
+  const footer = findFooter(dialog);
+  status.style.bottom = `${(footer instanceof HTMLElement ? footer.offsetHeight : 56) + 12}px`;
+}
+async function useRecentPath(dialog, path) {
+  const input = await ensurePathInput(dialog);
+  if (!input) {
+    showStatus(dialog, t("没有找到目录选择器的路径输入框"), true);
+    return;
+  }
+  fillAndEnter(input, path);
+  recordRecentPath(path);
+  showStatus(dialog, t("已填入路径"), false);
 }
 function findPathInput(dialog) {
   for (const input of dialog.querySelectorAll("input")) {
@@ -4034,6 +4537,9 @@ function directoryFlow(dialog, button) {
       const input = await ensurePathInput(dialog);
       if (!input) throw new Error(t("没有找到目录选择器的路径输入框"));
       fillAndEnter(input, paths[0]);
+      recordRecentPath(paths[0]);
+      const footer = findFooter(dialog);
+      if (footer) renderRecentChips(dialog, footer);
     },
     doneText: (paths) => t("已填入授权目录：{path}", { path: paths[0] }),
     setLabel: (text) => {
@@ -4060,6 +4566,7 @@ function showStatus(dialog, text, isError) {
   status.textContent = text;
   status.dataset.error = isError ? "1" : "0";
   status.style.display = "block";
+  repositionStatus(dialog);
   const previous = statusTimers.get(status);
   if (previous) window.clearTimeout(previous);
   statusTimers.set(status, window.setTimeout(() => {
@@ -4071,9 +4578,13 @@ function showStatus(dialog, text, isError) {
 var installedDispose = null;
 function apply(ctx) {
   if (typeof window === "undefined" || typeof document === "undefined") return;
+  setHostLanguageResolver(() => getSdk().getPlatformConfig());
+  if (getLanguagePreference() === "system") void resolveHostLanguage();
   const dispose = install();
   ctx?.effect?.(() => dispose, "dsh-fnos-advanced: workspace directory picker");
   registerSettingsSlot(ctx);
+  registerPathActionSlots(ctx);
+  registerSessionCwd(ctx);
   registerWorkspacePaths(ctx);
 }
 function install() {
@@ -4092,6 +4603,9 @@ function install() {
   const observer = new MutationObserver(scheduleScan);
   observer.observe(document.documentElement, { childList: true, subtree: true });
   cleanups.push(() => observer.disconnect());
+  cleanups.push(onLanguageChange(() => {
+    scan();
+  }));
   const onClick = (event) => {
     const target = event.target instanceof Element ? event.target.closest(`[${BUTTON_ATTR}]`) : null;
     if (!target) return;
@@ -4122,9 +4636,9 @@ function install() {
       } catch {
       }
     }
-    closeFileMenu();
+    closePathMenu();
     for (const node of document.querySelectorAll(
-      `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`
+      `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, .dsh-fnos-recent, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`
     )) {
       node.remove();
     }
@@ -4147,6 +4661,7 @@ function install() {
 function scan() {
   scanWorkspacePickers();
   scanCommandMenu();
+  scanReferenceMenu();
   scanFileTree();
   scanWorkspaceMenus();
 }

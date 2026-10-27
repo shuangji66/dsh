@@ -5,12 +5,19 @@
 - 工作区目录选择器多一个 **「选择飞牛目录」** 按钮：授权后自动把路径填回 dsh 并进入该目录；
 - 对话输入框的 **「+」命令菜单**（文件 / 目标 / 计划 …）多一项
   **「从飞牛选择」**：选中的文件直接进入对话草稿；**非图片是零拷贝的 `@路径` 引用**
-  （不复制、不经过浏览器上传），图片按需读取字节以支持视觉；
+  （不复制、不经过浏览器上传），图片按需读取字节以支持视觉；对话的 **`@` 引用菜单**
+  顶部也提供「从飞牛选择」；
 - 右侧文件树的每一行（文件 / 目录）右侧多一个 **「⋯」操作菜单**：
-  **在飞牛中打开**（仅飞牛桌面 / App）、**引用到对话**（仅文件）、**复制路径**；
+  **在飞牛中打开**（仅飞牛桌面 / App）、**文件详情**（仅飞牛桌面 / App）、
+  **引用到对话**（仅文件）、**复制路径**；
+- **交付卡片**（最终回复里的文件卡片）、**变更审查页**和**文档预览头**也有同一个
+  **「⋯」**：模型产出的报告、表格、图片可以直接在飞牛里打开或用默认应用查看，
+  不必先下载到浏览器再传回 NAS；
 - 工作区「更多」菜单与设置页提供 **目录权限体检 / 重新授权**，诊断飞牛 ACL 损坏或目录移动；
-- 目录选择器支持 **新建文件夹**、**重复添加拦截**（只拦完全相同的目录，子目录仍可添加）；
-- 设置页提供 **诊断**（版本、DOM 锚点、地址连通性）和 **界面语言**（跟随浏览器 / 中文 / English）；
+- 目录选择器支持 **新建文件夹**、**重复添加拦截**（只拦完全相同的目录，子目录仍可添加），
+  并在底部记住 **最近使用的 8 个目录**（可一键清空）；
+- 设置页提供 **诊断**（版本、DOM 锚点、地址连通性）和 **界面语言**
+  （跟随系统 / 中文 / English）；
 
 - **在飞牛桌面 / 飞牛 App 内**：直接调用飞牛宿主的原生选择器，不打开网页授权；
   工作区的「更多」菜单还会多出 **「打开目录」**，调用飞牛文件管理器打开该工作区目录。
@@ -20,8 +27,9 @@
   以及是否允许读取图片内容。
 
 - 不导入任何 `@deepseek-ai/*` 客户端/宿主插件包：目录选择器只依赖 dsh 的客户端
-  bundle 装载约定与 `ctx.webServer.register` 服务；设置页使用 `plugins.bundle.config`
-  slot 与共享 `react` 平台模块，slot 不存在时自动降级。
+  bundle 装载约定与 `ctx.webServer.register` 服务；文件操作入口注册在 dsh 的文件动作
+  slot 上；设置页使用 `plugins.bundle.config` slot 与共享 `react` 平台模块，
+  slot 不存在时自动降级。
 - 使用飞牛官方前端 SDK [`@trimjs/web-app`](https://www.npmjs.com/package/@trimjs/web-app)
   构造授权 URL、解析授权回调；SDK 已打进 `lib/client.js`，安装后无运行时依赖。
 - 宿主侧只提供同源小路由：配置、授权回调、一次性结果暂存和设置；不保存任何凭据。
@@ -85,30 +93,50 @@ dsh plugin --profile web add /absolute/path/to/dsh-fnos-advanced
 
 ### 从飞牛选择文件进对话
 
-1. 点对话输入框左侧的 **「+」** 打开命令菜单，点 **「从飞牛选择」**（在「文件」下面）。
+1. 点对话输入框左侧的 **「+」** 打开命令菜单，点 **「从飞牛选择」**（在「文件」下面）；
+   也可以输入 `@`，在引用菜单顶部点 **「从飞牛选择」**。图片就在同一个选择器里选，
+   不额外提供「只选图片」的入口。
 2. 和目录一样：飞牛宿主内直接弹原生选择器；普通浏览器走网页授权。
 3. 选中后：
    - **非图片**（文档、压缩包、视频、代码……）：dsh 里出现一个 `@/vol1/...` 引用芯片。
      文件不会被复制，也不会走浏览器上传；模型需要时按该路径读取原文件。
    - **图片**（PNG/JPEG/WebP/GIF）：插件通过宿主的一次性令牌接口读取字节，再交给 dsh
      的正常图片上传流程（视觉需要真实字节）；读取失败时自动降级为路径引用并提示。
+   - **HEIC/HEIF/AVIF/RAW 等图片**：dsh 的视觉只接受上面四种格式。插件不会尝试转换，
+     而是明确提示「格式不支持视觉，已改为路径引用」——iPhone 原图需要先在飞牛里转成
+     JPEG 才能被模型看到。超过 8 MB 的图片同样会提示后降级。
 4. 引用和普通附件一样随消息发送；移除芯片不会删除原文件。
 
-### 文件树行操作
+### 文件操作菜单（文件树 / 交付卡片 / 变更审查 / 文档预览）
 
-右侧文件树（Files）里，把鼠标移到文件或目录行上，行尾会出现 **「⋯」**：
+右侧文件树（Files）里，把鼠标移到文件或目录行上，行尾会出现 **「⋯」**；同样的菜单也出现在
+最终回复的交付卡片、变更审查页的工具行和文档预览头：
 
 | 动作 | 行为 |
 | --- | --- |
 | 在飞牛中打开 | 文件调用 `openFile` 用默认应用打开，目录调用 `openFileManager`；只在飞牛桌面 / App 内显示 |
+| 文件详情 | 调用飞牛的 `showFileDetails` 详情面板（大小、权限、位置）；只在飞牛桌面 / App 内显示 |
 | 引用到对话 | 把该文件作为 `@路径` 芯片插入当前对话草稿（图片会按设置读取字节上传；目录不提供此项） |
 | 复制路径 | 复制绝对路径；HTTP 反代等无 Clipboard API 的环境用 `execCommand` 兜底 |
 
 「引用到对话」复用「从飞牛选择」的同一条 composer 文件通道；菜单挂在 `body` 的覆盖层里，
 不会被侧栏裁切，行高与层级结构不变，只给行尾按钮留出 34px 内边距。
 
+交付卡片、变更审查和文档预览的入口**注册在 dsh 的官方 slot** 上
+（`deliverables.file.actions` / `deliverables.review.file.actions` /
+`sidebar.right.tab.document.actions` / `.unpreviewable`），而不是往这几个界面里塞 DOM。
+两个细节：
+
+- 文档预览 slot 直接给 `absolutePath`；
+- 交付卡片与变更审查 slot 只给事件坐标（`actionUrl`），路径仍从各自渲染面读取：
+  卡片取预览按钮的 `title`，审查页取 `data-review-file`；审查页给的是**相对工作区**的
+  路径，用 `sessions` 客户端服务里的会话 `cwd` 补成绝对路径。
+
 ### 目录选择器增强
 
+- **最近使用的目录**：每成功选过一次目录，选择器底部就会出现一行目录 chip（最多 8 个，
+  按 basename 显示、悬停看完整路径）。点一下即把路径填回选择器，不必再走一遍授权；
+  右侧 `×` 清空记录。记录只存在当前浏览器的 `localStorage` 里，不写后端、也不保存授权结果。
 - **新建文件夹**：原生飞牛选择器和网页授权都会带上 `creatable`；
 - **重复添加拦截**：选中的路径与已有工作区**完全相等**时，提示「该目录已添加为工作区」，
   不填入选择器；比较前会去掉结尾 `/` 和重复斜杠。
@@ -144,9 +172,13 @@ dsh plugin --profile web add /absolute/path/to/dsh-fnos-advanced
 
 ### 界面语言
 
-设置页可选择 **跟随浏览器 / 中文 / English**，偏好保存在浏览器
-`localStorage['dsh-fnos-advanced:language']`。客户端文案、toast、菜单、选择器标题和设置页
-都会切换；飞牛授权回调页跟随浏览器语言。宿主返回的已知错误文案也会翻译，未知文案原样显示。
+设置页可选择 **跟随系统 / 中文 / English**，偏好保存在浏览器
+`localStorage['dsh-fnos-advanced:language']`。「跟随系统」先通过 SDK 的
+`getPlatformConfig().language` 读取飞牛宿主语言（`zh-CN` / `en-US` 等），拿不到时退回
+浏览器语言；解析是异步的，宿主回答后注入的按钮、toast、菜单、设置页与 slot 里的「⋯」
+会一起切换。旧版存下的 `auto` / `host` 会自动折算成「跟随系统」。客户端文案、toast、
+菜单、选择器标题和设置页都会切换；飞牛授权回调页跟随浏览器语言。宿主返回的已知错误文案
+也会翻译，未知文案原样显示。
 
 ### 打开工作区目录（飞牛桌面 / App）
 
@@ -171,7 +203,7 @@ dsh plugin --profile web add /absolute/path/to/dsh-fnos-advanced
 | 反代飞牛地址 | 非常规反代下的飞牛外部地址，只填 `协议://域名[:端口]`，不要带路径；留空表示未配置 |
 | 飞牛内网地址 / 端口 | 只填端口（默认 `5666`）时使用当前访问主机的地址；也可填完整地址，如 `http://192.168.1.10:5666` |
 | 非网关访问时的授权入口 | `每次询问`（默认）、`优先使用反代地址`、`优先使用内网地址` |
-| 从飞牛选择图片时读取图片内容 | 默认开启。关闭后图片也只生成路径引用（模型无法直接「看到」图片）；仅支持 PNG/JPEG/WebP/GIF，单个不超过 20 MB |
+| 从飞牛选择图片时读取图片内容 | 默认开启。关闭后图片也只生成路径引用（模型无法直接「看到」图片）；仅支持 PNG/JPEG/WebP/GIF，单个不超过 8 MB |
 
 设置保存在 `$DSH_HOME/fnos-advanced/settings.json`（`DSH_HOME` 默认 `~/.dsh`），
 文件权限 `0600`。设置页使用 dsh 的 `plugins.bundle.config` slot，注册 key 为包名
@@ -240,7 +272,10 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
   的 `pickUserFile({ directory: true })`，直接使用宿主原生选择器；宿主桥不可用时
   自动回退到网页授权。
 - 在底部按钮栏插入「选择飞牛目录」；如果找不到已知语言的按钮文案，
-  会退化为「最后一个按钮的父节点」。
+  会退化为「最后一个按钮的父节点」。同一行的最前面还会渲染 **最近使用的目录** chip
+  （`localStorage['dsh-fnos-advanced:recent-dirs']`，最多 8 个）：只预填路径、不重新授权，
+  记录与渲染都在 `recent-dirs.ts` 里做去重和截断。chip 行用 `flex: 1 0 100%` 独占一行，
+  窄屏时按钮自动落到下一行。
 - 点击时同步 `window.open('', ...)` 预开授权窗口（避免异步后弹窗被浏览器拦截），再用
   官方 SDK 的 `buildAppAuthUrl('pickUserFile', …)` 构造授权地址并导航。
 - 网页授权时，回调通过 `postMessage`、`localStorage` 与宿主侧
@@ -255,7 +290,15 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 - 「从飞牛选择」作为**命令菜单项**注入，而不是额外的工具栏按钮：菜单由
   `[data-trigger-menu]` + `role="listbox"` + `button[role="option"]` 组成，靠命令别名
   （`file` / `goal` / `plan`）识别，不依赖语言或 CSS Module 类名；识别后在「文件」项后面
-  克隆一个同款菜单项（去掉复制过来的 active 态），描述样式借用邻近菜单项。
+  克隆一个同款菜单项（去掉复制过来的 active 态），描述样式借用邻近菜单项；入口显式
+  `multiple: true`，图片和普通文件共用同一个选择器。
+- **`@` 引用菜单**也插一行「从飞牛选择」：它和「+」菜单是同一个 `[data-trigger-menu]`，
+  用候选行的 `id="dsh-slash-option-reference-<n>"`（`+` 菜单是 `command`）识别，克隆第一行
+  的样式后插到列表最前面，点击走同一条 composer 文件通道。
+- 界面语言：`i18n.ts` 只保存「跟随系统 / 中文 / English」和宿主语言的解析结果，平台语言
+  的读取通过 `setHostLanguageResolver` 注入（避免测试/无宿主环境被迫加载 SDK）；
+  「跟随系统」先宿主、后浏览器，语言变化用一组监听器通知已注入的按钮、设置页和
+  slot 组件重新取文案。
 - 文件仍送进 `[data-conversation-region="composer"]` 的隐藏 `input[type=file][multiple]`；
   菜单是 portal，点击后从「当前可见的 composer」重新找 input，不依赖事件 target 的祖先链。
   找不到锚点时菜单项不出现，不影响原功能。
@@ -263,6 +306,13 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
   0.2.1-rc.2 都有）：`li` 里已有 `button` 行，操作按钮作为 `li` 的**兄弟节点**绝对定位
   在行尾，点击不会触发行本身的开/关；行按钮只加 `padding-right` 给按钮让位。
   菜单本身挂在 `body` 上（`position: fixed`），不会被侧栏的 `overflow` 裁切。
+- 交付卡片 / 变更审查 / 文档预览的入口经 `ctx.slots.inject(name, () =>
+  ctx.slots.register({ name, id }, Component))` 注册（与 dsh 自带 `open-in-app` 同一形状），
+  用共享 `react` 渲染一个 24px 的「⋯」按钮，点击后复用文件树的同一个菜单
+  （`src/client/path-menu.ts`），因此没有第二套动作执行逻辑。
+  交付卡片与审查页的 slot 只给坐标不给路径，组件在自己的 React 节点上取
+  `closest('[data-presented-file]')` / `closest('[data-changes-review]')` 再读路径；
+  审查页的相对路径用注入的 `sessions` 服务补全 cwd。slot 不存在时这些入口自动缺席。
 - 非图片引用依赖 dsh 的 `globalThis.__DSH_HOST_PATHS__` 桥：插件在**模块加载时**安装
   `pathFor(file)`（dsh 是在挂载 composer 时一次性读取这个全局对象，等到点击时再装就晚了），
   用 `WeakMap` 把 `File` 映射到真实路径；图片则先 `POST file-token` 再取字节。
@@ -286,7 +336,7 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 | `GET /fnos-advanced/settings` | 读取插件中心设置 |
 | `POST /fnos-advanced/settings` | 校验并保存设置到 `$DSH_HOME/fnos-advanced/settings.json` |
 | `POST /fnos-advanced/file-token` | 校验图片路径并发放一次性读取令牌（60 秒、单次使用） |
-| `GET /fnos-advanced/file-bytes?token=…` | 按令牌返回图片字节（仅图片白名单、≤20 MB、禁止 dsh 数据目录） |
+| `GET /fnos-advanced/file-bytes?token=…` | 按令牌返回图片字节（仅图片白名单、≤8 MB、禁止 dsh 数据目录） |
 | `GET /fnos-advanced/health` | 健康检查，含 `features.imageRead` |
 
 宿主侧不接触飞牛登录 token。它只负责把授权结果转交给同源的 dsh 页面，以及为**用户刚选中的图片**
@@ -294,7 +344,7 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
 
 - 只接受绝对路径 + 图片扩展名白名单（`.png/.jpg/.jpeg/.webp/.gif`）；
 - 拒绝隐藏路径（任一段以 `.` 开头）与 `DSH_HOME` 内的文件；
-- 普通文件、空文件、非图片、超过 20 MB 一律拒绝；
+- 普通文件、空文件、非图片、超过 8 MB 一律拒绝；
 - 令牌 60 秒过期、单次使用；发放前按真实路径（`realpath`）校验，读取时用已打开的文件描述符；
 - 仅接受同源请求（`Origin`/`Referer` 与 `Host`/`X-Forwarded-Host` 匹配），跨站请求直接 403；
 - 设置页可整体关闭（`imageRead: false`）。
@@ -316,6 +366,14 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
   `data-conversation-region="composer"` + 隐藏 file input，以及
   `__DSH_HOST_PATHS__.pathFor(file)`。命令菜单锚点缺失时菜单项不出现；图片读取接口缺失
   （旧宿主）时图片降级为路径引用；两种情况都不会影响 dsh 原有的附件上传按钮。
+- 文件操作入口优先用官方 slot（`deliverables.file.actions` /
+  `deliverables.review.file.actions` / `sidebar.right.tab.document.actions` /
+  `.unpreviewable`；0.2.1-rc.4 提供，dsh 自带的 `open-in-app` 也注册在这四个 slot 上）。
+  旧版 dsh 没有这些 slot 时入口自动缺席，文件树、目录选择器与 composer 通道不受影响。
+- `@` 菜单的注入依赖候选行的 `id="dsh-slash-option-reference-<n>"`（0.2.1-rc.4 的
+  `MenuView` 按 `source` 生成）；dsh 若改掉这个 id，`@` 菜单只剩「+」菜单入口，
+  其余功能不受影响。`multiple` 只在宿主/授权页支持时生效，不支持时按原有行为
+  返回单个文件或全部类型。
 
 ## 开发与构建
 
@@ -397,12 +455,22 @@ npm view dsh-fnos-advanced version
 
 ## 已知限制
 
-- 界面语言目前只影响插件自己的 UI；dsh 本体语言由 dsh 设置决定。
+- 界面语言目前只影响插件自己的 UI；dsh 本体语言由 dsh 设置决定。「跟随系统」先看
+  飞牛宿主语言，拿不到（旧宿主 / SDK 不可用 / 语言不是中英）时退回浏览器判定。
 - 宿主返回的未知错误文案不翻译（保留原文，便于排查）。
 - 「从飞牛选择」是鼠标/触摸可点的菜单项；dsh 的上下键高亮由它自己的 React 列表维护，
-  不会把注入项算进键盘导航。
+  不会把注入项算进键盘导航（`@` 菜单里那一条同样只能用鼠标/触摸）。
+- 插件不会转换 HEIC/HEIF/AVIF/RAW 等格式；这些图片只会得到「格式不支持视觉」的提示和
+  一个路径引用。需要模型看图时请先在飞牛里转成 PNG/JPEG/WebP/GIF。
+- 最近目录只存在当前浏览器的 `localStorage`，换设备/清缓存后为空；它只负责预填路径，
+  目录是否仍可读取决于飞牛的 ACL 授权。
 - 文件树行尾的「⋯」在桌面端悬停显示，触屏设备常显；目录不提供「引用到对话」
-  （dsh 的 composer 文件 input 无法表达目录引用）。「在飞牛中打开」只在飞牛宿主内出现。
+  （dsh 的 composer 文件 input 无法表达目录引用）。「在飞牛中打开」与「文件详情」
+  只在飞牛宿主内出现。
+- 交付卡片 / 变更审查 / 文档预览的「⋯」依赖 dsh 0.2.1-rc.4 的文件动作 slot 与
+  `data-presented-file` / `data-review-file` 锚点；旧版 dsh 或 dsh 改版后入口可能不出现，
+  文件树与选择器不受影响。变更审查页若拿不到会话 cwd（`sessions` 服务不可用），
+  点击会提示「无法确定文件路径」而不是猜一个路径。
 - 「从飞牛选择」一次能选几个文件由飞牛宿主的选择器决定（插件接受返回的全部路径）。
 - 图片以外的文件**不会**被插件读取内容，只生成路径引用；如果模型的文件工具无权访问该路径，
   需要先在工作区/权限里授权（飞牛选择器已经为你选中的路径授权）。

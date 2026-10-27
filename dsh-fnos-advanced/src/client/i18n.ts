@@ -40,6 +40,9 @@ export const EN = Object.freeze({
   '已取消授权': 'Authorization cancelled',
   '已填入授权目录：{path}': 'Folder authorized: {path}',
   '已填入路径': 'Path filled',
+  '最近使用': 'Recent',
+  '填入最近使用的目录：{path}': 'Fill the recently used folder: {path}',
+  '清除最近记录': 'Clear recent folders',
   '该目录已添加为工作区': 'This folder is already a workspace',
   '打开选择器失败': 'Could not open the picker',
   '当前宿主未提供内嵌选择器，已改用网页授权。': 'The native picker is unavailable; using web authorization.',
@@ -59,23 +62,30 @@ export const EN = Object.freeze({
   // Composer
   '从飞牛选择': 'Choose from fnOS',
   '选择 NAS 上的文件，非图片作为路径引用': 'Pick files on the NAS; non-images become path references',
+  'NAS 文件': 'NAS file',
   '没有找到对话的文件输入框，当前 dsh 版本可能不支持。': 'No composer file input found; this dsh version may be unsupported.',
   '当前会话暂时不能添加附件。': 'This session cannot accept attachments right now.',
   '已添加 {count} 个文件': 'Added {count} file(s)',
   '已添加 {count} 个文件（{images} 张图片会上传）': 'Added {count} file(s) ({images} image(s) will upload)',
   '{count} 张图片未能读取，已改为路径引用': '{count} image(s) could not be read; added as path references',
+  '{count} 张图片读取失败（可能超过 8 MB），已改为路径引用': '{count} image(s) could not be read (possibly over 8 MB); added as path references',
+  '{count} 张图片格式不支持视觉（如 HEIC），已改为路径引用': '{count} image(s) use a format vision does not support (such as HEIC); added as path references',
+  '{count} 张图片未读取（设置已关闭图片读取），已改为路径引用': '{count} image(s) were not read because image reading is off; added as path references',
   '没有可添加的文件': 'No files to add',
   '宿主半侧未提供图片读取接口': 'The host does not provide the image read route',
   '读取图片失败（HTTP {status}）': 'Could not read the image (HTTP {status})',
   '已复制路径': 'Path copied',
   '复制失败，请手动复制': 'Copy failed; copy manually',
 
-  // File tree
+  // File actions
   '飞牛操作': 'fnOS actions',
   '在飞牛中打开': 'Open in fnOS',
+  '文件详情': 'File details',
   '引用到对话': 'Quote in chat',
   '复制路径': 'Copy path',
   '在飞牛中打开失败，当前宿主可能不支持该操作。': 'Could not open in fnOS; the host may not support it.',
+  '无法显示文件详情，当前宿主可能不支持该操作。': 'Could not show file details; the host may not support it.',
+  '无法确定文件路径': 'Could not determine the file path',
   '没有找到对话输入框，无法引用。': 'No composer input to quote into.',
 
   // Workspace health
@@ -163,7 +173,7 @@ export const EN = Object.freeze({
   '展开': 'Expand',
   '收起': 'Collapse',
   '界面语言': 'Interface language',
-  '跟随浏览器': 'Follow browser',
+  '跟随系统': 'Follow system',
   '中文': 'Chinese',
   'English': 'English',
   '宿主半侧版本 {host}，客户端 {client}。请重启 dsh 后再保存设置。': 'Host {host}, client {client}. Restart dsh before saving.',
@@ -189,7 +199,7 @@ export const EN = Object.freeze({
   '只支持 PNG/JPEG/WebP/GIF 图片': 'Only PNG/JPEG/WebP/GIF images are supported',
   '不是普通文件': 'Not a regular file',
   '图片内容为空': 'The image is empty',
-  '图片超过 20 MB': 'The image exceeds 20 MB',
+  '图片超过 8 MB': 'The image exceeds 8 MB',
   '插件设置已关闭图片读取': 'Image reading is disabled in the plugin settings',
   '设置格式无效': 'Invalid settings format',
 });
@@ -200,15 +210,76 @@ export type UiKey = keyof typeof EN;
 /** Placeholder values substituted into `{name}` slots. */
 export type UiParams = Record<string, string | number>;
 
-export type LanguagePreference = 'auto' | 'zh' | 'en';
+export type LanguagePreference = 'system' | 'zh' | 'en';
 
-const preferences: readonly LanguagePreference[] = ['auto', 'zh', 'en'];
+const preferences: readonly LanguagePreference[] = ['system', 'zh', 'en'];
 
-let preference: LanguagePreference = 'auto';
+let preference: LanguagePreference = 'system';
 let loaded = false;
+/** Language reported by the fnOS host, once a resolver provided it. */
+let hostLanguage: 'zh' | 'en' | null = null;
+let hostLanguageResolver: (() => Promise<unknown>) | null = null;
+let hostLanguageResolving: Promise<'zh' | 'en' | null> | null = null;
+const languageListeners = new Set<() => void>();
 
 function isPreference(value: unknown): value is LanguagePreference {
   return typeof value === 'string' && (preferences as readonly string[]).includes(value);
+}
+
+/**
+ * Read a stored value, folding the retired `auto` / `host` split into one
+ * `system` preference (fnOS language first, then the browser).
+ */
+function normalizePreference(value: unknown): LanguagePreference | null {
+  if (isPreference(value)) return value;
+  if (value === 'auto' || value === 'host') return 'system';
+  return null;
+}
+
+/** Normalize an fnOS platform language (`zh-CN`, `en_US`, …). */
+export function normalizeHostLanguage(value: unknown): 'zh' | 'en' | null {
+  const text = typeof value === 'string' ? value : '';
+  if (/^zh/i.test(text)) return 'zh';
+  if (/^en/i.test(text)) return 'en';
+  return null;
+}
+
+/** Install the platform-language reader (kept out of this module so tests and
+ * the host-free build do not import the fnOS SDK). */
+export function setHostLanguageResolver(resolver: (() => Promise<unknown>) | null): void {
+  hostLanguageResolver = resolver;
+}
+
+function notifyLanguageChange(): void {
+  for (const listener of [...languageListeners]) {
+    try { listener(); } catch { /* a broken renderer must not stop the rest */ }
+  }
+}
+
+/** Subscribe to effective-language changes; returns the unsubscribe function. */
+export function onLanguageChange(listener: () => void): () => void {
+  languageListeners.add(listener);
+  return () => { languageListeners.delete(listener); };
+}
+
+/** Ask the host for its language (cached until `force`). */
+export function resolveHostLanguage(force = false): Promise<'zh' | 'en' | null> {
+  if (!force && hostLanguage) return Promise.resolve(hostLanguage);
+  if (!force && hostLanguageResolving) return hostLanguageResolving;
+  if (!hostLanguageResolver) return Promise.resolve(hostLanguage);
+
+  const before = currentLanguage();
+  hostLanguageResolving = (async () => {
+    try {
+      const config = await hostLanguageResolver?.() as { language?: unknown } | undefined;
+      const next = normalizeHostLanguage(config?.language);
+      if (next) hostLanguage = next;
+    } catch { /* no host bridge: keep the browser fallback */ }
+    hostLanguageResolving = null;
+    if (currentLanguage() !== before) notifyLanguageChange();
+    return hostLanguage;
+  })();
+  return hostLanguageResolving;
 }
 
 /** Read the stored language preference (cached after the first read). */
@@ -216,24 +287,28 @@ export function getLanguagePreference(): LanguagePreference {
   if (loaded) return preference;
   loaded = true;
   try {
-    const stored = window.localStorage.getItem(PREFERENCE_KEY);
-    if (isPreference(stored)) preference = stored;
+    const stored = normalizePreference(window.localStorage.getItem(PREFERENCE_KEY));
+    if (stored) preference = stored;
   } catch { /* private mode */ }
   return preference;
 }
 
-/** Store and apply a language preference (`auto` / `zh` / `en`). */
+/** Store and apply a language preference (`system` / `zh` / `en`). */
 export function setLanguagePreference(value: unknown): LanguagePreference {
-  preference = isPreference(value) ? value : 'auto';
+  const before = currentLanguage();
+  preference = normalizePreference(value) || 'system';
   loaded = true;
   try { window.localStorage.setItem(PREFERENCE_KEY, preference); } catch { /* ignore */ }
+  if (preference === 'system') void resolveHostLanguage();
+  if (currentLanguage() !== before) notifyLanguageChange();
   return preference;
 }
 
-/** The language currently used for rendering. */
+/** The language currently used for rendering: explicit pick, then fnOS, then browser. */
 export function currentLanguage(): 'zh' | 'en' {
   getLanguagePreference();
   if (preference === 'zh' || preference === 'en') return preference;
+  if (hostLanguage) return hostLanguage;
   const html = typeof document !== 'undefined' ? document.documentElement.lang : '';
   const navigatorLanguage = typeof navigator !== 'undefined' ? navigator.language : '';
   return /^zh/i.test(html || navigatorLanguage) ? 'zh' : 'en';

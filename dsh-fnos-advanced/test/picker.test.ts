@@ -27,8 +27,10 @@ test('flows that omit directory keep it out of the params', () => {
 });
 
 test('composer pickers are file pickers', () => {
-  const params = pickerParams({ directory: false, title: 'Files', okText: 'Add' });
+  const params = pickerParams({ directory: false, multiple: true, title: 'Files', okText: 'Add' });
   assert.equal(params.directory, false);
+  assert.equal(params.multiple, true);
+  assert.equal('accept' in params, false);
 });
 
 test('normalizes trailing and duplicate separators', () => {

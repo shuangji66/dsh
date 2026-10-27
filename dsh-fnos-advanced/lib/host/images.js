@@ -24,7 +24,7 @@ const IMAGE_MIME_BY_EXTENSION = Object.freeze({
     '.webp': 'image/webp',
     '.gif': 'image/gif',
 });
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_PATH_LENGTH = 4096;
 const FILE_TOKEN_TTL_MS = 60 * 1000;
 const MAX_PENDING_FILES = 200;

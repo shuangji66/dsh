@@ -6,12 +6,10 @@ package main
 // 字段，见 dshmarket/src/restart.ts 的 #782/#678）——前端拿到 false 就把「立即重启」
 // 按钮藏起来。判据是「回环对端 + 无转发标记头 + Host 是回环 authority」。
 //
-// 反代本来就会把重启请求伪装成同源回环直连（否则 POST 一律 403），但只对
-// /dsh-market/restart 做了伪装、给其它路径追加 x-forwarded-* —— 于是出现自相矛盾的
-// 状态：POST /dsh-market/restart 能成功，前端却因为状态轮询被藏了按钮。
-//
-// 这里断言两条路径都伪装成「浏览器在回环上直连 dsh」，并保留反例：普通业务路径必须
-// 照旧带转发标记头（伪装是按路径开的，不是全局关掉）。
+// 反代现在对**所有** dsh 流量都不再追加转发标记头（见 proxy.go 的
+// forwardingTraceHeaders）：dsh 只监听 127.0.0.1、控制台又是唯一入口且已鉴权，
+// 逐路径伪装只会让新插件持续踩同一个 403。这里断言市场的重启/状态两条路确实像
+// 「浏览器在回环上直连 dsh」，并顺手钉住普通业务路径也满足同一判据。
 //
 // 全部测试用真实监听端口模拟 dsh（httptest），不启动任何 dsh 进程。
 
@@ -24,6 +22,9 @@ import (
 	"strings"
 	"testing"
 )
+
+// marketStatusPath 是 dshmarket 的状态轮询路由（restartReachable 字段的来源）。
+const marketStatusPath = "/dsh-market/status"
 
 // upstreamSeen 是上游（模拟 dsh）实际收到的请求现场。
 type upstreamSeen struct {
@@ -117,9 +118,9 @@ func marketTrustedRestart(seen *upstreamSeen) bool {
 	return rest == seen.host
 }
 
-// --- 回环栅栏路径：伪装成同源回环直连 ---
+// --- 市场的回环栅栏：反代转发后看起来像同源回环直连 ---
 
-func TestMarketFencedRoutesLookLikeDirectLoopback(t *testing.T) {
+func TestMarketRestartAndStatusLookLikeDirectLoopback(t *testing.T) {
 	cases := []struct {
 		name    string
 		method  string
@@ -129,7 +130,12 @@ func TestMarketFencedRoutesLookLikeDirectLoopback(t *testing.T) {
 		{
 			name:   "status 轮询（GET，浏览器不发 Origin）",
 			method: http.MethodGet,
-			target: proxyMountTestBase + marketStatusRoute,
+			target: proxyMountTestBase + marketStatusPath,
+			// 上一跳/CDN 塞进来的转发标记头也必须被清掉。
+			headers: map[string]string{
+				"X-Forwarded-For":  "203.0.113.9",
+				"Cf-Connecting-Ip": "203.0.113.9",
+			},
 		},
 		{
 			name:   "restart（POST，带浏览器 Origin）",
@@ -166,7 +172,7 @@ func TestMarketFencedRoutesLookLikeDirectLoopback(t *testing.T) {
 				t.Fatalf("上游看到的对端 = %q，应为回环（栅栏要求 remoteAddress 是回环）", seen.remoteAddr)
 			}
 			// 任何一个转发标记头都会让 restartReachable 变 false / 重启 POST 吃 403。
-			for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip"} {
+			for _, name := range forwardingTraceHeaders {
 				if hasHeader(seen.header, name) {
 					t.Fatalf("回环栅栏路径不应携带 %s（实际 %q）", name, seen.header.Get(name))
 				}
@@ -191,39 +197,53 @@ func TestMarketFencedRoutesLookLikeDirectLoopback(t *testing.T) {
 	}
 }
 
-// --- 反例：普通业务路径照旧带转发标记头 ---
-
-func TestNormalRouteStillCarriesForwardingTrace(t *testing.T) {
+// 全局策略：普通业务路径也满足「回环直连」判据 —— 转发头在 forward 里被整份删掉，
+// 入站带来的那几份也一并清掉。这条曾经是反例（只有栅栏路径才伪装），改成全局后
+// 它就是回归守卫：谁把 x-forwarded-* 加回来，插件栅栏就会重新 403。
+func TestNormalRouteAlsoLooksLikeDirectLoopback(t *testing.T) {
 	upstream, seen := recordUpstream(t)
 	f := newMountedFixture(t, portOfURL(t, upstream.URL), proxyMountTestBase)
 	f.boot.set(phaseReady, "")
 
-	rec := proxyGet(t, f.proxy, proxyMountTestBase+"/api/rpc", sessionCookieHeader())
+	req := httptest.NewRequest(http.MethodGet, proxyMountTestBase+"/api/rpc", nil)
+	req.Header.Set("Cookie", sessionCookieHeader())
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.Header.Set("X-Real-Ip", "203.0.113.9")
+	req.Header.Set("Forwarded", "for=203.0.113.9")
+	req.Header.Set("Cf-Connecting-Ip", "203.0.113.9")
+	rec := httptest.NewRecorder()
+	f.proxy.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("应被转发到 dsh 上游: code=%d body=%q", rec.Code, rec.Body.String())
 	}
-	if !hasHeader(seen.header, "X-Forwarded-For") || !hasHeader(seen.header, "X-Forwarded-Host") {
-		t.Fatalf("普通路径应保留转发标记头，实际 %v", seen.header)
+	for _, name := range forwardingTraceHeaders {
+		if hasHeader(seen.header, name) {
+			t.Fatalf("普通路径也不应携带 %s（实际 %q）", name, seen.header.Get(name))
+		}
 	}
-	// 其余市场路径没有被伪装：只有重启栅栏那两条。
-	if marketForwardingTrace(seen) {
-		t.Fatal("普通路径不应被误判成回环直连")
-	}
-	if isLoopbackFencedRoute("/dsh-market/installed") || isLoopbackFencedRoute("/api/rpc") {
-		t.Fatal("伪装范围只应是 /dsh-market/restart 与 /dsh-market/status")
+	if !marketForwardingTrace(seen) {
+		t.Fatalf("普通路径也该被判定成回环直连: host=%q headers=%v", seen.host, seen.header)
 	}
 }
 
-// 路径集合本身钉住：别在整理代码时把 status 从伪装名单里拿掉。
-func TestIsLoopbackFencedRouteCoversBothMarketPaths(t *testing.T) {
-	for _, path := range []string{marketRestartRoute, marketStatusRoute} {
-		if !isLoopbackFencedRoute(path) {
-			t.Fatalf("%s 必须走回环栅栏伪装", path)
-		}
+// 删除清单本身钉住：两个已知栅栏的并集一个都不能少（少一个就是那族插件 403）。
+func TestForwardingTraceHeadersCoverKnownFences(t *testing.T) {
+	want := []string{
+		"Forwarded",         // dshmarket directLoopbackRequest
+		"X-Forwarded-For",   // dshmarket + skill-explorer isProxiedRequest
+		"X-Real-Ip",         // dshmarket directLoopbackRequest
+		"Cf-Connecting-Ip",  // skill-explorer isProxiedRequest
+		"X-Forwarded-Host",  // 反代自己以前追加的那两个
+		"X-Forwarded-Proto", // （同上）
 	}
-	for _, path := range []string{"/dsh-market/installed", "/dsh-market/update", "/api/rpc", "/"} {
-		if isLoopbackFencedRoute(path) {
-			t.Fatalf("%s 不该被伪装成回环直连", path)
+	got := make(map[string]bool, len(forwardingTraceHeaders))
+	for _, name := range forwardingTraceHeaders {
+		got[http.CanonicalHeaderKey(name)] = true
+	}
+	for _, name := range want {
+		if !got[http.CanonicalHeaderKey(name)] {
+			t.Fatalf("forwardingTraceHeaders 少了 %s", name)
 		}
 	}
 }

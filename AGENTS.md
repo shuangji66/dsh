@@ -534,15 +534,31 @@
   2. **不要为了“更快看到界面”放宽门禁**（例如只留 `checker.quick()`）：端口通了但凭据
      没换到就放行，只会把用户送进 dsh 的未授权响应；而把 `deps` 阶段的放行提前，会让
      流水线收尾重启 dsh 时界面随即失效。
-- **dsh 市场的「回环栅栏」要在反代上成对伪装，`isLoopbackFencedRoute` 里的两条路径
-  缺一不可** —— dshmarket 既拦重启请求（`trustedRestartRequest`，POST `/dsh-market/restart`
-  见转发标记头直接 403），又用状态轮询回答「从当前页面发起的重启能不能过栅栏」
-  （`restartReachableFrom` → `GET /dsh-market/status` 的 `restartReachable` 字段，
-  #782/#678），前端拿到 false 就**把「立即重启」按钮藏起来**。判据是「回环对端 +
-  无 `Forwarded` / `x-forwarded-*` / `x-real-ip` + Host 是回环 authority」，所以反代
-  `forward()` 对这两条路径都要删转发头、把 Host/Origin 改写成 dsh 上游。只伪装 restart
-  会得到自相矛盾的状态（POST 能成功、按钮却不见）；只伪装 status 则 POST 吃 403。
-  回归测试见 `backend/proxy_market_restart_test.go`。
+- **反代不向 dsh 暴露「中间有代理」的痕迹，这是全局策略、不是逐插件白名单** ——
+  `forward()` 对**所有** dsh 流量都删掉 `forwardingTraceHeaders`（`Forwarded` /
+  `x-forwarded-*` / `x-real-ip` / `cf-connecting-ip`）并且不再追加自己的
+  `x-forwarded-for/host/proto`，同时把 Host 改写成 dsh 上游、Origin 改写成同源。
+  理由是部署形态本身：dsh 只监听 `127.0.0.1`，反代是唯一入口，请求到这里之前已经过
+  控制台登录或飞牛网关鉴权，而控制台还有完整终端（root 等价）—— 插件那层
+  `loopback-only` 栅栏在控制台内部不构成额外安全边界，只会把「经网关/端口访问」变成
+  403。控制台自己的访客 IP 记录读的是**进站**请求头（`auth.go` 的 `realIP`），不受影响。
+  已知的两族栅栏（都是「回环对端 + 无转发标记头 + Host 是回环 authority」）：
+  1. **dsh 市场**：既拦重启请求（`trustedRestartRequest`，POST `/dsh-market/restart`
+     见转发标记头直接 403），又用状态轮询回答「从当前页面发起的重启能不能过栅栏」
+     （`restartReachableFrom` → `GET /dsh-market/status` 的 `restartReachable` 字段，
+     #782/#678），前端拿到 false 就**把「立即重启」按钮藏起来**。两半共用同一判据，
+     伪装对两者必须同时成立，否则就是「按钮点不到、接口却能通」。
+  2. **技能中心**（`@linxin666/dsh-client-ui-skill-explorer`）：九条
+     `/api/dsh-skill-explorer/*` 路由（list/read/set-enabled/set-provider-enabled/
+     create/update/delete/import/health）共用同一个 guard —— loopback 直连，或
+     `remoteWebUiPairing` 的配对设备 cookie；本部署没有配对服务，之前经网关或端口
+     进来的请求全被 403 `forbidden: loopback-only`（正是逐路径白名单漏掉的那一族）。
+  **别再改回按路径开白名单**（`isLoopbackFencedRoute` 已删除）：那份名单只会持续欠账，
+  新装插件/插件新增接口都会复现同一个 403。新增插件时只需读一眼它的栅栏实现，
+  确认判据确实是「回环 + 无转发痕迹」；若它检查的是别的东西（配对 cookie、
+  `desktop` 标记、自定义头），那才是需要单独处理的例外。回归测试见
+  `backend/proxy_market_restart_test.go`（含转发头清单守卫）与
+  `backend/proxy_skill_explorer_fence_test.go`（九条路由 × 两种挂载）。
 - **反代有「根挂载」与「子路径挂载」两种形态，自留路径一律经 `proxyMount`** ——
   子路径挂载来自平台网关把 `<prefix>/…` 整段转发到 `HARNESS_PROXY_SOCK`，反代在
   `stripMount` 里剥掉前缀（此后 `r.URL` 是挂载内路径），因此：

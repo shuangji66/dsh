@@ -1106,36 +1106,20 @@ func (p *reverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.forward(w, r, checker)
 }
 
-// dsh 市场（dshmarket）里跑「回环栅栏」的两条路径，见 dshmarket/src/restart.ts。
-const (
-	// marketRestartRoute 执行重启：trustedRestartRequest 直接以 403 拒绝任何带
-	// 转发标记头的请求。
-	marketRestartRoute = "/dsh-market/restart"
-	// marketStatusRoute 状态轮询：用 restartReachableFrom 回答「从当前这个页面
-	// 发起的重启能不能过栅栏」，前端据此决定显不显示「立即重启」按钮（#782）。
-	// 它与上面那条栅栏共用 directLoopbackRequest，判据是「回环对端 + 无转发标记头
-	// + Host 是回环 authority」（#678）。
-	marketStatusRoute = "/dsh-market/status"
-)
+// marketRestartRoute 是 dsh 市场的一键重启接口（POST）。反代只在这条路径成功后
+// 通知 DshManager 作废缓存（见 forward 末尾），与栅栏伪装无关。
+const marketRestartRoute = "/dsh-market/restart"
 
-// isLoopbackFencedRoute reports whether the proxied path answers to dshmarket's
-// loopback fence (dshmarket/src/restart.ts): it only accepts requests that look
-// like they came directly from a browser on loopback and REJECTS any forwarding
-// trace (Forwarded / x-forwarded-* / x-real-ip). When the proxy forwards such a
-// request it must therefore NOT append proxy headers (which the normal forward
-// path does) and must rewrite Host/Origin to the dsh upstream so it reads as a
-// same-origin loopback call.
-//
-// 两条路径都要伪装，缺一不可：
-//   - restart 伪装后重启请求才不会吃到 403；
-//   - status 伪装后前端才认为重启可达。否则按钮被藏起来，而同一路径的 POST 明明
-//     能过栅栏 —— 出现「按钮点不到、接口却能通」的自相矛盾（#782）。
-func isLoopbackFencedRoute(path string) bool {
-	switch path {
-	case marketRestartRoute, marketStatusRoute:
-		return true
-	}
-	return false
+// forwardingTraceHeaders 是「中间有代理」的痕迹头：dshmarket 的
+// directLoopbackRequest 认 Forwarded / x-forwarded-for / x-real-ip，技能中心的
+// isProxiedRequest 认 cf-connecting-ip / x-forwarded-for。反代转发给 dsh 前整份删掉。
+var forwardingTraceHeaders = []string{
+	"Forwarded",
+	"X-Forwarded-For",
+	"X-Forwarded-Host",
+	"X-Forwarded-Proto",
+	"X-Real-Ip",
+	"Cf-Connecting-Ip",
 }
 
 // handleUpgrade proxies a WebSocket upgrade by hijacking the client connection
@@ -1212,6 +1196,11 @@ func (p *reverseProxy) handleUpgrade(w http.ResponseWriter, r *http.Request, via
 	}
 	for _, h := range []string{"Origin", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Connection", "Upgrade"} {
 		headers.Del(h)
+	}
+	// 与 HTTP 分支同一策略：不向 dsh 暴露「中间有代理」的痕迹（见 forward），
+	// 否则带回环栅栏的插件会拒掉经网关/端口来的 WebSocket 升级。
+	for _, name := range forwardingTraceHeaders {
+		headers.Del(name)
 	}
 	headers.Set("Host", upstream)
 	headers.Set("Connection", "Upgrade")
@@ -1300,26 +1289,16 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 		outReq.Header.Set("sec-fetch-site", "same-origin")
 	}
 	outReq.Host = checker.hostPort()
-	// 回环栅栏路径（/dsh-market/restart 与 /dsh-market/status）在 dsh 侧有严格
-	// 安全栅栏：要求请求看起来像“来自同源回环浏览器的直接请求”，且不允许携带任何
-	// 转发标记头（Forwarded / x-forwarded-* / x-real-ip）。因此反代转发这两条路径
-	// 时不能附加转发头，并把 Host/Origin 统一改写为 dsh 上游同源 —— 重启请求靠它
-	// 才不被 403，状态轮询靠它才让 dsh 报告 restartReachable=true（前端据此显示按钮）。
-	if isLoopbackFencedRoute(r.URL.Path) {
-		outReq.Header.Del("Forwarded")
-		outReq.Header.Del("X-Forwarded-For")
-		outReq.Header.Del("X-Forwarded-Host")
-		outReq.Header.Del("X-Forwarded-Proto")
-		outReq.Header.Del("X-Real-Ip")
-		upstreamOrigin := "http://" + checker.hostPort()
-		outReq.Header.Set("Origin", upstreamOrigin)
-		outReq.Header.Set("Referer", upstreamOrigin+"/")
-		outReq.Header.Set("Sec-Fetch-Site", "same-origin")
-		outReq.Header.Set("Sec-Fetch-Mode", "same-origin")
-	} else {
-		outReq.Header.Set("x-forwarded-for", ip(r))
-		outReq.Header.Set("x-forwarded-host", r.Host)
-		outReq.Header.Set("x-forwarded-proto", "http")
+	// 反代是 dsh 的唯一入口（dsh 只监听 127.0.0.1），且请求到这里之前已经过控制台
+	// 登录鉴权或飞牛网关身份；因此不向 dsh 及其插件暴露「中间有代理」的痕迹。
+	// 插件的回环栅栏（dshmarket 的 restart/status、技能中心的
+	// /api/dsh-skill-explorer/*）都靠「回环对端 + 无转发标记头 + Host 是回环
+	// authority」判断是不是本机直连 —— 只要反代追加 x-forwarded-*，就会得到
+	// 403 `forbidden: loopback-only`，而逐个插件补路径白名单只会持续欠账
+	// （技能中心就是漏网的那一次）。控制台自己的访客 IP 记录读的是**进站**请求头
+	// （auth.go 的 realIP），不依赖这里发出去的那份。
+	for _, name := range forwardingTraceHeaders {
+		outReq.Header.Del(name)
 	}
 	if outReq.Header.Get("origin") != "" {
 		outReq.Header.Set("origin", "http://"+checker.hostPort())

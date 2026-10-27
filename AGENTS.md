@@ -24,6 +24,14 @@
 - `Makefile` 与 `build.sh` 等价；两者都先把前端 `dist` 拷入 `backend/embed`，再
   `go clean -cache` 后构建 Go 二进制。**Go 缓存默认放项目本地**（`.gocache` / `.gopath`，
   可用环境变量覆盖）。
+- **终端功能可在编译期整体剔除**：`TERMINAL=0 make`（或 `make noterminal`）/
+  `TERMINAL=0 ./build.sh`。两半必须一起关：Go 侧 `-tags noterminal`（`terminal.go` /
+  `terminal_routes.go` / `quickcmds.go` 带 `//go:build !noterminal`，无终端构建由
+  `terminal_disabled.go` 提供空实现），前端侧 `VITE_TERMINAL=0`（`vite.config.ts` 用
+  alias 把 `TerminalView.vue` 换成 `TerminalViewDisabled.vue`，并把 `__TERMINAL_ENABLED__`
+  置 false 以收起侧边栏入口与旧路径）。**新增终端相关接口请加在 `terminal_routes.go` 的
+  `terminalRoute` 里**（不要塞回 `admin.go` 的主 switch），否则无终端构建会漏掉它。
+  只关一半的后果是「终端页在、接口 404」或反过来，别当成能用。
 - 每次前端改动后若需生效，必须**重新构建**（`make` / `./build.sh`）并验证实际 URL，
   仅改源码不重新构建不会让已嵌入的二进制更新。
 - `build.sh` 里的 `ROOT/.../dsh/backend` 是**平台部署脚本的遗留路径习惯**，开发时

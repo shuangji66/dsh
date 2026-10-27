@@ -1,3 +1,7 @@
+//go:build !noterminal
+
+// 快捷指令属于终端功能：终端被编译剔除时，它一并消失（见 terminal_disabled.go）。
+
 package main
 
 import (
@@ -108,14 +112,6 @@ const maxQuickCmdsBody = 1 << 20 // 1MB
 // maxQuickCmdIDLen 是指令 id 的长度上限。id 会进密文的 AAD（见 quickCmdAADField），
 // 也当前端的列表 key 用，长到几百字节没有意义。
 const maxQuickCmdIDLen = 64
-
-// quickCmdAADField 是命令内容密文的 AAD 字段名：把**指令 id** 绑进去。
-//
-// secret.go 的 AAD 形态是 `harness:v1:<field>:<scope>`：field 这一格放指令 id，scope 那一格
-// 放表的作用域（本项目只有全局表 = quickCmdScopeGlobal）。于是「同一张表里两条指令的密文互换
-// 位置」会在解密时直接失败，而不是悄悄把 A 的命令接到 B 的按钮上（按钮上写的是 B 的名字，
-// 点下去跑的是 A 的内容）。
-func quickCmdAADField(id string) string { return "quickcmd:" + id }
 
 // validQuickCmdID 校验指令 id：只允许 [0-9a-zA-Z_-]，长度 1..maxQuickCmdIDLen。
 //

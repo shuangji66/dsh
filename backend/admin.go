@@ -127,62 +127,6 @@ func writeErrBody(w http.ResponseWriter, status int, msg string, ref uiMsg) {
 	json.NewEncoder(w).Encode(body)
 }
 
-// sessionInfo is the JSON summary of a live terminal session.
-type sessionInfo struct {
-	ID      string `json:"id"`
-	Created string `json:"created"`
-	Size    int64  `json:"size"`
-	Exited  bool   `json:"exited"`
-}
-
-// handleSessions 返回活动终端会话列表（供前端启动时恢复会话）。
-func (m *AdminMux) handleSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]interface{}{"ok": true, "sessions": m.sessions.list()})
-}
-
-// handleSessionHistory 读取指定会话的历史镜像内容。
-func (m *AdminMux) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
-		return
-	}
-	data, err := m.sessions.history(id)
-	if err != nil {
-		writeErr(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	writeJSON(w, map[string]interface{}{"ok": true, "id": id, "size": len(data), "content": string(data)})
-}
-
-// handleCloseSession 关闭指定会话（终止进程 + 删除历史文件）。
-func (m *AdminMux) handleCloseSession(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
-		return
-	}
-	if err := m.sessions.closeByID(id); err != nil {
-		writeErr(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	writeJSON(w, map[string]interface{}{"ok": true, "id": id})
-}
-
-// handleClearSession 清空指定会话的历史镜像文件（前端「清屏」同步）。
-func (m *AdminMux) handleClearSession(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		writeErrU(w, http.StatusBadRequest, "err_need_id", "缺少 id")
-		return
-	}
-	if err := m.sessions.clearHistory(id); err != nil {
-		writeErr(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	writeJSON(w, map[string]interface{}{"ok": true, "id": id})
-}
-
 // inSet reports whether s is one of the allowed values.
 func inSet(s string, allowed ...string) bool {
 	for _, a := range allowed {
@@ -1201,7 +1145,6 @@ func getUIDFromRequest(r *http.Request) int {
 // --- AdminMux builder and socket serving (from adminmux.go) ---
 func (m *AdminMux) buildHandler() http.Handler {
 	base := strings.TrimRight(m.renv.AdminBaseURL, "/")
-	term := &terminalHandler{mgr: m.sessions}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1231,8 +1174,9 @@ func (m *AdminMux) buildHandler() http.Handler {
 		}
 		r.URL.Path = p
 
-		if p == "/terminal" && isWebSocket(r) {
-			term.ServeHTTP(w, r)
+		// 终端相关入口（/terminal WebSocket、会话管理、快捷指令）单独分发：
+		// 它们可以在编译期整体剔除（-tags noterminal），见 terminal_routes.go。
+		if m.terminalRoute(w, r, p) {
 			return
 		}
 
@@ -1353,18 +1297,6 @@ func (m *AdminMux) buildHandler() http.Handler {
 		// OAuth 回调：浏览器/本地转发把 ?code=&state= 送到这里（自留路径，不转发给 dsh）
 		case p == accountCallbackPath && r.Method == http.MethodGet:
 			m.handleAccountCallback(w, r)
-		case p == "/api/quickcmds" && r.Method == http.MethodGet:
-			m.handleGetQuickCmds(w, r)
-		case p == "/api/quickcmds" && r.Method == http.MethodPost:
-			m.handleSaveQuickCmds(w, r)
-		case p == "/api/sessions" && r.Method == http.MethodGet:
-			m.handleSessions(w, r)
-		case p == "/api/session/history" && r.Method == http.MethodGet:
-			m.handleSessionHistory(w, r)
-		case p == "/api/session" && r.Method == http.MethodDelete:
-			m.handleCloseSession(w, r)
-		case p == "/api/session/clear" && r.Method == http.MethodPost:
-			m.handleClearSession(w, r)
 		case strings.HasPrefix(p, "/api/fnos/"):
 			m.handleFnos(w, r)
 		default:
@@ -1382,14 +1314,6 @@ func spaPath(p string) string {
 		return "/index.html"
 	}
 	return p
-}
-
-func isWebSocket(r *http.Request) bool {
-	if r.Method != http.MethodGet {
-		return false
-	}
-	up := strings.ToLower(r.Header.Get("Upgrade"))
-	return up == "websocket"
 }
 
 func serveAdminSocket(m *AdminMux) error {

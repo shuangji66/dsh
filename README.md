@@ -157,6 +157,20 @@ make clean
 ./build.sh release 1.0.1 # release + 指定版本
 ```
 
+### 不含终端功能的构建
+
+终端页、PTY 会话与快捷指令可以在编译期整体剔除：产物里不会留下终端接口与 PTY 逻辑，
+前端连 xterm 都不会打包（侧边栏入口、旧 `/terminal` 路径一并收起）。
+
+```bash
+TERMINAL=0 make                  # 等价于 make noterminal
+TERMINAL=0 make release V=1.0.1
+TERMINAL=0 ./build.sh            # build.sh 同样认这个开关
+```
+
+两半是同一个开关：Go 侧 `-tags noterminal`，前端侧 `VITE_TERMINAL=0`。直接调
+`go build` / `vite build` 时需要自己给这两个参数。
+
 GitHub Actions（`.github/workflows/`）提供 CI 构建：
 
 - `build.yml` — 手动触发，交叉编译 `amd64` / `arm64` 的 harness 二进制。

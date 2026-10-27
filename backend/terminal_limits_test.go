@@ -1,3 +1,7 @@
+//go:build !noterminal
+
+// 终端连接的资源上限（见 terminal.go）。终端被编译剔除时本文件一并跳过。
+
 package main
 
 // terminal_limits_test.go —— 终端连接的两条资源上限（审查第 8 条）：

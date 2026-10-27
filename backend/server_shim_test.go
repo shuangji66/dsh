@@ -10,7 +10,6 @@ package main
 
 import (
 	"os"
-	"strings"
 	"testing"
 )
 
@@ -72,24 +71,5 @@ func TestShimDirIsNotListedAsInstalledVersion(t *testing.T) {
 	installed := srv.installedVersions()
 	if len(installed) != 1 || installed[0] != "0.2.0-rc.2" {
 		t.Fatalf("installed versions = %v, want only 0.2.0-rc.2 (shim dir must be ignored)", installed)
-	}
-}
-
-func TestTerminalEnvPrependsStableDshShimDir(t *testing.T) {
-	renv := &RuntimeEnv{DataDir: t.TempDir(), Path: "/usr/bin:/bin"}
-	env := terminalEnv(renv, "")
-
-	pathVal := ""
-	for _, e := range env {
-		if strings.HasPrefix(e, "PATH=") {
-			pathVal = strings.TrimPrefix(e, "PATH=")
-		}
-	}
-	want := serverShimDirFor(renv)
-	if !strings.HasPrefix(pathVal, want+":") {
-		t.Fatalf("PATH = %q, want prefix %q", pathVal, want+":")
-	}
-	if !strings.HasSuffix(pathVal, ":/usr/bin:/bin") {
-		t.Fatalf("PATH = %q, want original platform PATH preserved", pathVal)
 	}
 }

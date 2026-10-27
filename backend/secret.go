@@ -46,6 +46,17 @@ const (
 	quickCmdScopeGlobal = "global"
 )
 
+// quickCmdAADField 是命令内容密文的 AAD 字段名：把**指令 id** 绑进去。
+//
+// AAD 形态是 `harness:v1:<field>:<scope>`：field 这一格放指令 id，scope 那一格放表的
+// 作用域（本项目只有全局表 = quickCmdScopeGlobal）。于是「同一张表里两条指令的密文互换
+// 位置」会在解密时直接失败，而不是悄悄把 A 的命令接到 B 的按钮上（按钮上写的是 B 的名字，
+// 点下去跑的是 A 的内容）。
+//
+// 它放在 secret.go（而不是 quickcmds.go）是因为无终端构建会把快捷指令整体剔除，而账号库
+// 加密测试仍要用同一形态的 AAD。
+func quickCmdAADField(id string) string { return "quickcmd:" + id }
+
 // secretEnvelope 是密文在磁盘上的形态：`{"v":1,"ct":"<base64(nonce||ciphertext)>"}`。
 type secretEnvelope struct {
 	V  int    `json:"v"`

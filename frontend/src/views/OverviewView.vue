@@ -174,7 +174,8 @@ const aboutFeatureGroups = [
     title: 'about_group_tools',
     features: [
       'about_feature_plugins',
-      'about_feature_terminal',
+      // 终端功能可在编译期整体剔除（TERMINAL=0）：介绍里也不再列它。
+      ...(__TERMINAL_ENABLED__ ? ['about_feature_terminal'] : []),
       'about_feature_logs',
       'about_feature_console',
     ],

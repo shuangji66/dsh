@@ -1,3 +1,8 @@
+//go:build !noterminal
+
+// 终端功能可在编译期整体剔除（`-tags noterminal`，见 Makefile / build.sh 的 TERMINAL=0）。
+// 无终端构建由 terminal_disabled.go 提供跨文件引用的空实现。
+
 package main
 
 import (

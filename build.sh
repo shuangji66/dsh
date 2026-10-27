@@ -4,6 +4,7 @@
 #
 #   ./build.sh            # dev (default, non-stripped)
 #   ./build.sh release    # release build (strip + -ldflags)
+#   TERMINAL=0 ./build.sh # build without the terminal feature (no terminal page / PTY / xterm)
 #
 # The backend serves these embedded assets over its unix socket under the
 # configured baseurl (e.g. /app/Harness) fronted by nginx.
@@ -20,10 +21,21 @@ export PATH=/var/apps/nodejs_v24/target/bin:$PATH
 export GOFLAGS="-buildvcs=false"
 mkdir -p "$GOCACHE" "$GOPATH"
 
-echo "==> Building frontend..."
+# 终端功能开关：TERMINAL=0 时整体剔除 —— Go 传 -tags noterminal，前端传 VITE_TERMINAL=0。
+# 产物里没有终端页、PTY 会话、快捷指令接口，xterm 也不进前端包（与 Makefile 同一开关）。
+TERMINAL="${TERMINAL:-1}"
+if [ "$TERMINAL" = "0" ]; then
+  GO_TAGS="noterminal"
+  export VITE_TERMINAL=0
+else
+  GO_TAGS=""
+  export VITE_TERMINAL=1
+fi
+
+echo "==> Building frontend (TERMINAL=${TERMINAL})..."
 # The baseurl is handled at runtime by the backend (not baked into the binary),
 # so build with vite's default relative base (./assets/...).
-( cd "$FRONTEND_DIR" && npm install --no-audit --no-fund && npm run build )
+( cd "$FRONTEND_DIR" && npm install --no-audit --no-fund && VITE_TERMINAL="$VITE_TERMINAL" npm run build )
 
 echo "==> Copying frontend dist into embed dir..."
 rm -rf "$EMBED_DIR"
@@ -40,7 +52,7 @@ if [ "${1:-}" = "release" ]; then
 fi
 # Clean the Go build cache so code and embedded-asset changes always compile in.
 go clean -cache
-( cd "$BACKEND_DIR" && go build -trimpath -ldflags "$LDFLAGS" -o "$OUT" . )
+( cd "$BACKEND_DIR" && go build -trimpath -tags "$GO_TAGS" -ldflags "$LDFLAGS" -o "$OUT" . )
 
 echo "==> Cleaning embed dir..."
 rm -rf "$EMBED_DIR"

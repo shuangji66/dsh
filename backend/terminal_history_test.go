@@ -1,3 +1,7 @@
+//go:build !noterminal
+
+// 终端会话历史文件的上限（见 terminal.go）。终端被编译剔除时本文件一并跳过。
+
 package main
 
 // terminal_history_test.go —— 会话历史文件的**写入侧上限**（审查 C7）。
@@ -21,6 +25,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -121,5 +126,37 @@ func TestHistoryAppendAfterClear(t *testing.T) {
 	}
 	if st, err := os.Stat(path); err != nil || st.Size() != int64(len("after-clear\n")) {
 		t.Fatalf("文件长度不符: %v %v", st, err)
+	}
+}
+
+// 终端会话镜像目录的默认解析：空 RuntimeEnv（部分单测直接构造字面量）必须落回统一
+// 数据目录下的 terminal-sessions，不能各自拼路径。
+//
+// 这条断言原本在 data_dir_test.go：无终端构建（-tags noterminal）里 SessionManager
+// 只是空壳，该文件要能在两种构建下编译，因此把终端专属的断言挪到这里。
+func TestSessionDirFallsBackToDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("HARNESS_DATA_DIR", dataDir)
+	if p := (&SessionManager{}).sessionDir(); p != filepath.Join(dataDir, "terminal-sessions") {
+		t.Errorf("sessionDir(空 renv) = %q", p)
+	}
+}
+
+func TestTerminalEnvPrependsStableDshShimDir(t *testing.T) {
+	renv := &RuntimeEnv{DataDir: t.TempDir(), Path: "/usr/bin:/bin"}
+	env := terminalEnv(renv, "")
+
+	pathVal := ""
+	for _, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			pathVal = strings.TrimPrefix(e, "PATH=")
+		}
+	}
+	want := serverShimDirFor(renv)
+	if !strings.HasPrefix(pathVal, want+":") {
+		t.Fatalf("PATH = %q, want prefix %q", pathVal, want+":")
+	}
+	if !strings.HasSuffix(pathVal, ":/usr/bin:/bin") {
+		t.Fatalf("PATH = %q, want original platform PATH preserved", pathVal)
 	}
 }

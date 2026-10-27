@@ -1,3 +1,7 @@
+//go:build !noterminal
+
+// 快捷指令属于终端功能（见 quickcmds.go），无终端构建里一并跳过。
+
 package main
 
 // quickcmds_test.go —— 快捷指令持久化的原子写（审查 C10）。
@@ -155,3 +159,21 @@ func TestSaveQuickCmdsConcurrentStaysParseable(t *testing.T) {
 }
 
 // 落盘文件的权限与 config.json 同档（0600），且不残留任何临时文件。
+
+// 快捷指令文件路径的兜底解析（空 RuntimeEnv / 包级默认）必须走统一数据目录，
+// 不能各自退回 TRIM_PKGVAR 之外的路径。
+//
+// 这组断言原本在 data_dir_test.go：无终端构建（-tags noterminal）里 quickCmdsPath
+// 不存在（quickcmds.go 整体剔除），data_dir_test 要能在两种构建下编译。
+func TestQuickCmdsPathFallsBackToDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("HARNESS_DATA_DIR", dataDir)
+	t.Setenv("HARNESS_QUICK_CMDS_FILE", filepath.Join(t.TempDir(), "quickcmds.json"))
+	want := filepath.Join(dataDir, "quickcmds.json")
+	if p := quickCmdsPath(nil); p != want {
+		t.Errorf("quickCmdsPath(nil) = %q", p)
+	}
+	if p := quickCmdsPath(&RuntimeEnv{}); p != want {
+		t.Errorf("quickCmdsPath(空 renv) = %q", p)
+	}
+}

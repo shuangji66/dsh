@@ -28,7 +28,7 @@ const toggleCollapse = () => {
 
 // 导航项：label 用 i18n 翻译。用 as const 固定 icon 为字面量联合类型，
 // 模板里 icons[item.icon] 才能被 vue-tsc 正确推导（否则 icon 退化为 string）。
-const nav = [
+const allNav = [
   { name: 'overview', labelKey: 'nav_overview', icon: 'overview' },
   { name: 'settings', labelKey: 'nav_settings', icon: 'settings' },
   { name: 'directory', labelKey: 'nav_directory', icon: 'folder' },
@@ -36,6 +36,10 @@ const nav = [
   { name: 'terminal', labelKey: 'nav_terminal', icon: 'terminal' },
   { name: 'logs', labelKey: 'nav_logs', icon: 'logs' }
 ] as const
+
+// 终端功能可在编译期整体剔除（TERMINAL=0，见 vite.config.ts）：入口一并消失，
+// 产物里也没有终端页/xterm。其余页面不在这次构建里时照旧。
+const nav = allNav.filter((item) => item.name !== 'terminal' || __TERMINAL_ENABLED__)
 
 // 当前子页面：优先 URL 查询参数，否则固定为概览页。
 // 「打开时的默认页面」设置已移除：控制台打开就是概览，页面切换只走 ?view=。

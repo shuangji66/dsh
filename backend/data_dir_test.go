@@ -47,13 +47,20 @@ func TestRuntimeEnvDerivesPathsFromDataDir(t *testing.T) {
 		"QuickCmdsFile": renv.QuickCmdsFile,
 		"SessionDir":    renv.SessionDir,
 	}
+	// 终端会话目录随构建变体：无终端构建（-tags noterminal）里 SessionDir 为空，
+	// 启动流程因此不会创建它（见 terminal_enabled.go / terminal_disabled.go）。
+	wantSessionDir, wantQuickCmdsFile := "", ""
+	if terminalFeature {
+		wantSessionDir = filepath.Join(dataDir, "terminal-sessions")
+		wantQuickCmdsFile = filepath.Join(dataDir, "quickcmds.json")
+	}
 	want := map[string]string{
 		"ConfigFile":    filepath.Join(dataDir, "config.json"),
 		"LogFile":       filepath.Join(dataDir, "harness.log"),
 		"PidFile":       filepath.Join(dataDir, "harness.pid"),
 		"DshPidFile":    filepath.Join(dataDir, "dsh.pid"),
-		"QuickCmdsFile": filepath.Join(dataDir, "quickcmds.json"),
-		"SessionDir":    filepath.Join(dataDir, "terminal-sessions"),
+		"QuickCmdsFile": wantQuickCmdsFile,
+		"SessionDir":    wantSessionDir,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -96,15 +103,6 @@ func TestDataPathFallbacksFollowDataDir(t *testing.T) {
 	t.Setenv("HARNESS_DATA_DIR", dataDir)
 	setLegacyPathEnvs(t)
 
-	if p := quickCmdsPath(nil); p != filepath.Join(dataDir, "quickcmds.json") {
-		t.Errorf("quickCmdsPath(nil) = %q", p)
-	}
-	if p := quickCmdsPath(&RuntimeEnv{}); p != filepath.Join(dataDir, "quickcmds.json") {
-		t.Errorf("quickCmdsPath(空 renv) = %q", p)
-	}
-	if p := (&SessionManager{}).sessionDir(); p != filepath.Join(dataDir, "terminal-sessions") {
-		t.Errorf("sessionDir(空 renv) = %q", p)
-	}
 	// 空 RuntimeEnv 的 UpdateManager（部分单测直接构造字面量）同理。
 	if p := (&UpdateManager{}).backupDir(); p != filepath.Join(dataDir, "backup") {
 		t.Errorf("backupDir(空 renv) = %q", p)

@@ -1,3 +1,7 @@
+//go:build !noterminal
+
+// 快捷指令属于终端功能（见 quickcmds.go），无终端构建里一并跳过。
+
 package main
 
 // quickcmds_crypt_test.go —— 快捷指令命令内容的落盘加密（quickcmds.go + secret.go）。
@@ -27,32 +31,6 @@ import (
 // trickyContent 是「加解密不能破坏命令的内容和格式」的判据：前导空格、行尾空格、续行反斜杠
 // 与多行换行都必须原样回来（后端曾在 sanitize 里 trim 过内容，这几项正好是它会改掉的东西）。
 const trickyContent = "  mysql -uroot -pS3cret \\\n    -h db.internal \\\n    app_db   \n"
-
-// testCryptorAt 用指定的主密钥文件路径构造 cryptor（路径相同 = 同一把密钥，用来模拟重启）。
-func testCryptorAt(t *testing.T, keyPath string) *cryptor {
-	t.Helper()
-	c, err := loadCryptor(keyPath, "")
-	if err != nil {
-		t.Fatalf("loadCryptor(%s): %v", keyPath, err)
-	}
-	return c
-}
-
-// testCryptor 造一把「用完就丢」的临时主密钥。
-func testCryptor(t *testing.T) *cryptor {
-	t.Helper()
-	return testCryptorAt(t, filepath.Join(t.TempDir(), masterKeyFileName))
-}
-
-// readFileStr 读一个文件（测试断言失败时打印现场用）。
-func readFileStr(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("读 %s 失败: %v", path, err)
-	}
-	return string(raw)
-}
 
 // quickCmdsFileAt 读回磁盘上的那一份（用后端自己的类型，自动走 UnmarshalJSON）。
 func quickCmdsFileAt(t *testing.T, path string) quickCmdsFile {

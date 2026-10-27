@@ -1,3 +1,7 @@
+//go:build !noterminal
+
+// 终端会话的挂载/顶号语义（见 terminal.go）。终端被编译剔除时本文件一并跳过。
+
 package main
 
 import (

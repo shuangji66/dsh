@@ -182,6 +182,11 @@ func loadRuntimeEnv() RuntimeEnv {
 	if dshHome == "" && home != "" {
 		dshHome = filepath.Join(home, ".dsh")
 	}
+	// 快捷指令与终端会话目录都属于终端功能：无终端构建（-tags noterminal）里两者都是
+	// 空串，启动/退出流程因此不会创建或删除会话目录（见 terminal_enabled.go /
+	// terminal_disabled.go）。
+	quickCmdsFile := quickCmdsFileFor(dataDir)
+	sessionDir := sessionDirFor(dataDir)
 	return RuntimeEnv{
 		DataDir:       dataDir,
 		ConfigFile:    filepath.Join(dataDir, "config.json"),
@@ -198,8 +203,8 @@ func loadRuntimeEnv() RuntimeEnv {
 		DshHome:       dshHome,
 		PnpmHome:      os.Getenv("PNPM_HOME"),
 		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
-		QuickCmdsFile: filepath.Join(dataDir, "quickcmds.json"),
-		SessionDir:    filepath.Join(dataDir, "terminal-sessions"),
+		QuickCmdsFile: quickCmdsFile,
+		SessionDir:    sessionDir,
 		// 主密钥：优先 HARNESS_MASTER_KEY（外部注入的 32 字节 base64/hex），
 		// 否则用数据目录里的 master.key（缺失时自动生成 0600）。
 		MasterKey:     os.Getenv("HARNESS_MASTER_KEY"),

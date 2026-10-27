@@ -13,7 +13,12 @@ const router = createRouter({
     },
     { path: '/directory', redirect: { path: '/', query: { view: 'directory' } } },
     { path: '/plugins', redirect: { path: '/', query: { view: 'plugins' } } },
-    { path: '/terminal', redirect: { path: '/', query: { view: 'terminal' } } },
+    // 旧 `/terminal` 直达链接：有终端构建时进终端页；无终端构建时回概览，
+    // 而不是落到一条没有匹配的路由（那会白屏）。
+    {
+      path: '/terminal',
+      redirect: { path: '/', query: { view: __TERMINAL_ENABLED__ ? 'terminal' : 'overview' } },
+    },
     { path: '/logs', redirect: { path: '/', query: { view: 'logs' } } },
   ],
 })

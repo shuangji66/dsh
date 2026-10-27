@@ -18,6 +18,32 @@ import (
 	"testing"
 )
 
+// testCryptorAt 用指定的主密钥文件路径构造 cryptor（路径相同 = 同一把密钥，用来模拟重启）。
+func testCryptorAt(t *testing.T, keyPath string) *cryptor {
+	t.Helper()
+	c, err := loadCryptor(keyPath, "")
+	if err != nil {
+		t.Fatalf("loadCryptor(%s): %v", keyPath, err)
+	}
+	return c
+}
+
+// testCryptor 造一把「用完就丢」的临时主密钥。
+func testCryptor(t *testing.T) *cryptor {
+	t.Helper()
+	return testCryptorAt(t, filepath.Join(t.TempDir(), masterKeyFileName))
+}
+
+// readFileStr 读一个文件（测试断言失败时打印现场用）。
+func readFileStr(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读 %s 失败: %v", path, err)
+	}
+	return string(raw)
+}
+
 // 主密钥的解析：标准/URL/裸 base64 与 hex 都认，长度不对或非法编码一律拒绝。
 func TestDecodeMasterKey(t *testing.T) {
 	key := make([]byte, masterKeyLen)

@@ -25,8 +25,10 @@
   `go clean -cache` 后构建 Go 二进制。**Go 缓存默认放项目本地**（`.gocache` / `.gopath`，
   可用环境变量覆盖）。
 - **终端功能可在编译期整体剔除**：`TERMINAL=0 make`（或 `make noterminal`）/
-  `TERMINAL=0 ./build.sh`。两半必须一起关：Go 侧 `-tags noterminal`（`terminal.go` /
-  `terminal_routes.go` / `quickcmds.go` 带 `//go:build !noterminal`，无终端构建由
+  `TERMINAL=0 ./build.sh`，或 `./build-noterminal.sh`（一次交叉编译 linux/amd64 +
+  linux/arm64，产物在 `dist/harness-{amd64,arm64}`）。两半必须一起关：Go 侧
+  `-tags noterminal`（`terminal.go` / `terminal_routes.go` / `quickcmds.go` 带
+  `//go:build !noterminal`，无终端构建由
   `terminal_disabled.go` 提供空实现），前端侧 `VITE_TERMINAL=0`（`vite.config.ts` 用
   alias 把 `TerminalView.vue` 换成 `TerminalViewDisabled.vue`，并把 `__TERMINAL_ENABLED__`
   置 false 以收起侧边栏入口与旧路径）。**新增终端相关接口请加在 `terminal_routes.go` 的

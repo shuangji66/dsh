@@ -166,10 +166,16 @@ make clean
 TERMINAL=0 make                  # 等价于 make noterminal
 TERMINAL=0 make release V=1.0.1
 TERMINAL=0 ./build.sh            # build.sh 同样认这个开关
+
+./build-noterminal.sh            # 一次交叉编译 amd64 + arm64 发布产物
 ```
 
 两半是同一个开关：Go 侧 `-tags noterminal`，前端侧 `VITE_TERMINAL=0`。直接调
 `go build` / `vite build` 时需要自己给这两个参数。
+
+`./build-noterminal.sh` 固定按 `linux/amd64`、`linux/arm64` 编译（`CGO_ENABLED=0`），
+产物为 `dist/harness-amd64` 与 `dist/harness-arm64`；第一个参数可换输出目录，
+`VERSION=1.0.1` 可覆盖版本号。
 
 GitHub Actions（`.github/workflows/`）提供 CI 构建：
 

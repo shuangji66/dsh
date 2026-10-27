@@ -398,7 +398,8 @@ test('rejects non-images, hidden paths, DSH_HOME and cross-origin token requests
     await writeFile(hidden, Buffer.from([1]));
     await writeFile(secret, Buffer.from([1]));
     const handle = await open(large, 'w');
-    await handle.truncate(20 * 1024 * 1024 + 1);
+    // 图片上限是 8 MB（src/host/images.ts 的 MAX_IMAGE_BYTES），这里刚好越界 1 字节。
+    await handle.truncate(8 * 1024 * 1024 + 1);
     await handle.close();
 
     await withServer(async (base) => {

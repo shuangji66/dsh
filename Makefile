@@ -69,6 +69,13 @@ test: ## Run backend unit tests
 build:
 	@echo "==> Building frontend..."
 	cd "$(FRONTEND)" && npm install --no-audit --no-fund && VITE_TERMINAL=$(VITE_TERMINAL) npm run build
+	@if [ "$(TERMINAL)" = "0" ]; then \
+		echo "==> Verifying no terminal assets in dist..."; \
+		if grep -rIl --include='*.js' --include='*.css' --include='*.html' 'xterm' "$(FRONTEND)/dist"; then \
+			echo "ERROR: xterm leaked into the frontend bundle (TERMINAL=0 build)"; \
+			exit 1; \
+		fi; \
+	fi
 	@echo "==> Copying frontend dist into embed dir..."
 	rm -rf "$(EMBED)"
 	mkdir -p "$(EMBED)"

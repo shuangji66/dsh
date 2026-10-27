@@ -11,7 +11,9 @@ package main
 
 import "net/http"
 
-// terminalFeature 为 false：无终端构建不创建会话目录、也不执行快捷指令迁移。
+// terminalFeature 为 false：测试据此断言无终端构建的默认会话目录/快捷指令路径为空
+// （见 data_dir_test.go）。生产路径的空转由本文件的 sessionDirFor / quickCmdsFileFor /
+// terminalRoute 空实现负责，不读这个常量。
 const terminalFeature = false
 
 // SessionManager 是空壳：AdminMux.sessions 字段在两种构建下面目一致，但这里没有任何

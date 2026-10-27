@@ -37,6 +37,16 @@ echo "==> Building frontend (TERMINAL=${TERMINAL})..."
 # so build with vite's default relative base (./assets/...).
 ( cd "$FRONTEND_DIR" && npm install --no-audit --no-fund && VITE_TERMINAL="$VITE_TERMINAL" npm run build )
 
+# 无终端构建的产物守卫：alias 一旦失配（改名/换导入写法/调换顺序），xterm 会被静默
+# 打回包里 —— 这里在拷贝进 embed 之前拦下，别等发布后才发现。
+if [ "$TERMINAL" = "0" ]; then
+  echo "==> Verifying no terminal assets in dist..."
+  if grep -rIl --include='*.js' --include='*.css' --include='*.html' 'xterm' "$FRONTEND_DIR/dist"; then
+    echo "ERROR: xterm leaked into the frontend bundle (TERMINAL=0 build)" >&2
+    exit 1
+  fi
+fi
+
 echo "==> Copying frontend dist into embed dir..."
 rm -rf "$EMBED_DIR"
 mkdir -p "$EMBED_DIR"

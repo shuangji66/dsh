@@ -44,7 +44,7 @@ const nav = allNav.filter((item) => item.name !== 'terminal' || __TERMINAL_ENABL
 // 当前子页面：优先 URL 查询参数，否则固定为概览页。
 // 「打开时的默认页面」设置已移除：控制台打开就是概览，页面切换只走 ?view=。
 const current = computed(() => {
-  const q = route.query.view as string | undefined
+  const q = typeof route.query.view === 'string' ? route.query.view : ''
   if (q && nav.some((n) => n.name === q)) return q
   return 'overview'
 })
@@ -177,7 +177,7 @@ onMounted(() => {
               ? 'bg-brand text-white shadow-glow font-semibold'
               : 'text-ink-soft dark:text-[#A6A6AD] hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink dark:hover:text-white',
             collapsed ? 'px-2.5 py-2 justify-center hover:scale-105' : 'px-3.5 py-2.5 justify-start hover:translate-x-1'
-          ]" :title="t(item.labelKey)">
+          ]" :title="t(item.labelKey)" :aria-label="t(item.labelKey)">
           <span class="w-5 h-5 flex-shrink-0 inline-block" v-html="icons[item.icon]"></span>
           <span
             class="whitespace-nowrap overflow-hidden transition-all duration-300 ease-in-out"
@@ -221,16 +221,19 @@ onMounted(() => {
          高度 = 3.5rem 内容高度 + 底部安全区（--bottom-nav-h，与 main / 终端页一致）：
          box-sizing: border-box 下 padding-bottom 由安全区吃掉，图标仍居中在安全区之上；
          左右安全区（横屏刘海）一并留出，避免图标贴边或被遮挡。
+         **窄屏间距要收紧**：6 个 48px 按钮 + 5×18px gap + 左右 16px 内边距在 375px 屏上
+         会把每个按钮压到 ~42px（320px 屏只剩 33px），低于 44px 的触控建议值。窄屏用
+         gap-2 + 8px 内边距，44px 才放得下；sm 以上（本栏仍显示到 768px）恢复原间距。
          bottom 恒为 0：底栏必须稳稳贴底 —— 拖动页面时地址栏伸缩会让视口高度变化，
          一旦拿视口量当偏移量，底栏就会上下乱窜。键盘弹起时整条底栏由 style.css 的
          html[data-kb] 规则隐去，终端页改为贴合键盘（功能键栏落在键盘顶边）。 -->
     <nav
-      class="mobile-bottom-nav flex md:hidden fixed bottom-0 left-0 right-0 bg-surface dark:bg-[#111115] border-t border-line dark:border-[#2A2A32] items-center justify-center z-10 gap-[18px]"
-      style="height: var(--bottom-nav-h); padding-left: calc(env(safe-area-inset-left) + 1rem); padding-right: calc(env(safe-area-inset-right) + 1rem); padding-bottom: env(safe-area-inset-bottom);">
+      class="mobile-bottom-nav flex md:hidden fixed bottom-0 left-0 right-0 bg-surface dark:bg-[#111115] border-t border-line dark:border-[#2A2A32] items-center justify-center z-10 gap-2 sm:gap-[18px]"
+      style="height: var(--bottom-nav-h); padding-left: calc(env(safe-area-inset-left) + 0.5rem); padding-right: calc(env(safe-area-inset-right) + 0.5rem); padding-bottom: env(safe-area-inset-bottom);">
       <button v-for="item in nav" :key="item.name" @click="navigate(item.name)"
         class="flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xl transition-all duration-200 active:scale-90 cursor-pointer"
         :class="current === item.name ? 'text-brand scale-105' : 'text-ink-soft dark:text-[#A6A6AD] hover:bg-black/5 dark:hover:bg-white/5'"
-        :title="t(item.labelKey)">
+        :title="t(item.labelKey)" :aria-label="t(item.labelKey)">
         <span class="w-6 h-6 inline-block" v-html="icons[item.icon]"></span>
       </button>
     </nav>

@@ -22,9 +22,9 @@ const { t } = useI18n()
 // 余额档位配色（与 OverviewView 的 CPU/内存阈值同一套色）：≥10 元绿 / 3–10 元黄 /
 // <3 元（含欠款）红；读不到余额时保持正文色，不给「—」上色误导用户。
 const BALANCE_COLORS: Record<BalanceLevel, string> = {
-  high: 'text-success dark:text-[#10B981]',
-  mid: 'text-warning dark:text-[#F59E0B]',
-  low: 'text-danger dark:text-[#EF4444]',
+  high: 'text-success-ink dark:text-[#10B981]',
+  mid: 'text-warning-ink dark:text-[#F59E0B]',
+  low: 'text-danger-ink',
   unknown: 'text-ink dark:text-[#EDEDF0]'
 }
 const balanceColor = computed(() => BALANCE_COLORS[balanceLevel(account.status?.balance)])
@@ -93,7 +93,7 @@ onMounted(() => {
            此时不渲染「未登录」——读不到状态不等于没登录；账号列表仍来自控制台自己的
            账号库，照常显示（切换/移除按钮禁用）。 -->
       <div v-if="account.unavailable" class="flex items-start justify-between gap-3">
-        <p class="text-sm text-danger dark:text-[#EF4444] leading-relaxed">{{ unavailableText }}</p>
+        <p class="text-sm text-danger-ink leading-relaxed">{{ unavailableText }}</p>
         <button
           class="g-btn-secondary !h-7 !px-2 !text-xs flex-shrink-0"
           :disabled="account.refreshing"
@@ -121,7 +121,7 @@ onMounted(() => {
             </span>
             <span v-if="account.bonusText" class="g-chip">
               {{ t('account_bonus') }}
-              <span class="font-mono text-success dark:text-[#10B981]">{{ account.bonusText }}</span>
+              <span class="font-mono text-success-ink dark:text-[#10B981]">{{ account.bonusText }}</span>
             </span>
           </div>
         </div>
@@ -144,7 +144,7 @@ onMounted(() => {
           <div class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('account_list_title') }}</div>
           <button
             v-if="account.signedIn"
-            class="text-xs text-ink-soft dark:text-[#A6A6AD] hover:text-danger dark:hover:text-[#EF4444] transition-colors"
+            class="text-xs text-ink-soft dark:text-[#A6A6AD] hover:text-danger-ink transition-colors"
             :disabled="account.confirmBusy"
             @click="logoutVisible = true"
           >{{ t('account_logout') }}</button>

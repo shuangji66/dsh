@@ -3,11 +3,19 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps<{ text: string }>()
 
+const root = ref<HTMLElement | null>(null)
 const track = ref<HTMLElement | null>(null)
 const seg = ref<HTMLElement | null>(null)
 const overflowing = ref(false)
+// 是否在视口附近：离屏的插件卡片不跑动画、也不保留合成层。
+// 支持 IntersectionObserver 时先按「不可见」渲染，等首帧回调再决定；
+// 不支持（或没有 root）时退回 true，保证动画照常运行。
+const visible = ref(typeof IntersectionObserver === 'undefined')
 // 动画时长（秒）随文本长度增大，保证较长名字的滚动速度更自然
 const duration = ref(8)
+
+let observer: IntersectionObserver | null = null
+let measureRaf = 0
 
 function measure() {
   const segEl = seg.value
@@ -21,23 +29,53 @@ function measure() {
   duration.value = Math.max(6, Math.min(18, Math.round(single / 32)))
 }
 
+// 大量插件卡片同时监听 window.resize 时，每个实例都量一次会集中在同一帧里抖动；
+// 用 rAF 合并到每帧一次（各实例仍各量一次，但不会重复排队）。
+function scheduleMeasure() {
+  if (measureRaf) return
+  measureRaf = requestAnimationFrame(() => {
+    measureRaf = 0
+    measure()
+  })
+}
+
 onMounted(() => {
   // 首帧后测量（等字体就绪），再监听尺寸变化
-  requestAnimationFrame(measure)
-  window.addEventListener('resize', measure)
+  scheduleMeasure()
+  window.addEventListener('resize', scheduleMeasure)
+  // 离屏卡片暂停动画并移除 will-change：长列表（几十个插件）时，
+  // 每个跑马灯都是一个常驻合成层，白白占 GPU 内存。
+  if (typeof IntersectionObserver !== 'undefined' && root.value) {
+    observer = new IntersectionObserver(
+      (entries) => {
+        visible.value = entries[0]?.isIntersecting ?? true
+      },
+      { rootMargin: '120px' }
+    )
+    observer.observe(root.value)
+  } else {
+    visible.value = true
+  }
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', measure)
+  window.removeEventListener('resize', scheduleMeasure)
+  if (measureRaf) cancelAnimationFrame(measureRaf)
+  observer?.disconnect()
+  observer = null
 })
 </script>
 
 <template>
-  <span class="block overflow-hidden">
+  <span ref="root" class="marquee-root block overflow-hidden">
     <span
       ref="track"
-      class="inline-block whitespace-nowrap will-change-transform"
-      :class="overflowing ? 'marquee-track' : ''"
+      class="inline-block whitespace-nowrap"
+      :class="{
+        'marquee-track': overflowing,
+        'will-change-transform': overflowing && visible,
+        'marquee-paused': overflowing && !visible,
+      }"
       :style="overflowing ? { animationDuration: duration + 's' } : undefined"
     >
       <span ref="seg" class="marquee-seg">{{ text }}</span>
@@ -53,6 +91,23 @@ onBeforeUnmount(() => {
   animation-name: marquee-scroll;
   animation-timing-function: linear;
   animation-iteration-count: infinite;
+}
+
+/* 离屏（IntersectionObserver 判定在视口外）时暂停：动画与合成层都省下来。
+   animation-play-state 不会重启动画，滚回视口时从原位置继续。 */
+.marquee-paused {
+  animation-play-state: paused;
+}
+
+/* 尊重系统的「减少动态效果」：不滚动；改为允许手动横向拖动查看完整名称
+   （否则 overflow-hidden 会把名字直接截断，反而读不到）。 */
+@media (prefers-reduced-motion: reduce) {
+  .marquee-track {
+    animation: none;
+  }
+  .marquee-root {
+    overflow-x: auto;
+  }
 }
 
 /* 每份副本自带尾部间隔（即循环中的首尾间隙）。

@@ -22,13 +22,20 @@
   --color-success: #10B981;
   --color-warning: #F59E0B;
   --color-danger: #EF4444;
+  /* 语义色的**文字**版本：浅色主题下上面的亮色放在白底上对比度只有 2.1–2.5:1，
+     不满足 WCAG AA（正文/小字 4.5:1）。填充、圆点、边框继续用亮色 token，
+     只有文字用 *-ink；深色主题在下面的 .dark 里把 *-ink 换回亮色。 */
+  --color-success-ink: #047857;
+  --color-warning-ink: #B45309;
+  --color-danger-ink: #B91C1C;
   /* 中性层：背景 / 表面 / 边框 / 文本 */
   --color-bg: #FAFAFA;
   --color-surface: #FFFFFF;
   --color-line: #E8E8EC;
   --color-ink: #0A0A0A;
   --color-ink-soft: #6B6B6B;
-  --color-ink-faint: #9C9C9C;
+  /* #9C9C9C 在 #FAFAFA 上只有 2.63:1（提示文字/placeholder 也用它）。#737373 ≈ 4.54:1。 */
+  --color-ink-faint: #737373;
 
   /* ===== 字体：全站统一用系统字体 =====
      不再加载任何 Web 字体（原先正文/展示标题/代码分别是 DM Sans、General Sans、
@@ -54,6 +61,16 @@
 
   /* ===== 宽度 ===== */
   --max-width-content: 1280px;
+}
+
+/* 深色主题的 token 覆盖：同一批类名（text-ink-faint / text-success-ink …）在两种主题下
+   各自满足对比度，调用处不用再逐条写 dark: 变体。深色背景是 #16161B（卡片）/ #0B0B0F（页面），
+   这里的亮色值在两者上都在 5:1 以上。 */
+html.dark {
+  --color-ink-faint: #8A8A92;
+  --color-success-ink: #10B981;
+  --color-warning-ink: #F59E0B;
+  --color-danger-ink: #EF4444;
 }
 
 /* 移动端底部导航的占用高度 = 内容高度 3.5rem + iOS 底部安全区（Home Indicator）。
@@ -347,9 +364,9 @@ html, body {
   /* 危险按钮：红字红框 */
   .g-btn-danger {
     @apply inline-flex items-center justify-center gap-2 bg-transparent
-      border border-[#EF4444] text-[#EF4444]
+      border border-danger text-danger-ink
       font-medium rounded-md px-4 h-10 text-sm
-      hover:bg-[#EF4444]/10
+      hover:bg-danger/10
       disabled:opacity-50 disabled:cursor-not-allowed
       transition-all duration-150;
   }
@@ -360,9 +377,9 @@ html, body {
   /* 警告按钮：橙字橙框（同危险按钮结构，仅颜色不同） */
   .g-btn-warning {
     @apply inline-flex items-center justify-center gap-2 bg-transparent
-      border border-[#F59E0B] text-[#F59E0B]
+      border border-warning text-warning-ink
       font-medium rounded-md px-4 h-10 text-sm
-      hover:bg-[#F59E0B]/10
+      hover:bg-warning/10
       disabled:opacity-50 disabled:cursor-not-allowed
       transition-all duration-150;
   }

@@ -6,12 +6,26 @@ export type Locale = 'zh' | 'en'
 const LOCALE_KEY = 'console-language'
 
 function readStoredLocale(): Locale {
-  const v = localStorage.getItem(LOCALE_KEY)
-  return isLocale(v || '') ? (v as Locale) : 'zh'
+  try {
+    const v = localStorage.getItem(LOCALE_KEY)
+    return isLocale(v || '') ? (v as Locale) : 'zh'
+  } catch {
+    // 隐私模式 / localStorage 被禁用：回退中文，不影响应用启动。
+    return 'zh'
+  }
 }
 
 // 当前语言（模块级共享，reactive）
 const locale = ref<Locale>(readStoredLocale()) as Ref<Locale>
+
+// <html lang> 跟随界面语言：读屏器、连字符与浏览器翻译都依赖它。
+// 首屏由 index.html 的内联脚本先设，这里负责启动时对齐与切换时更新。
+function applyDocumentLang(l: Locale) {
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = l === 'en' ? 'en' : 'zh-CN'
+  }
+}
+applyDocumentLang(locale.value)
 
 export function isLocale(v: string): v is Locale {
   return v === 'zh' || v === 'en'
@@ -1129,7 +1143,12 @@ const dict: Record<Locale, Record<string, string>> = { zh, en }
 
 export function setLocale(l: Locale) {
   locale.value = l
-  localStorage.setItem(LOCALE_KEY, l)
+  applyDocumentLang(l)
+  try {
+    localStorage.setItem(LOCALE_KEY, l)
+  } catch {
+    /* 隐私模式：本次会话内仍生效 */
+  }
 }
 
 // tr 是本模块的翻译实现：useI18n().t 与下面的 uiText / uiErrText 共用。

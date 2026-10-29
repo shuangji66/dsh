@@ -210,7 +210,7 @@ async function onAuthToggle() {
     <!-- 页头（图标 + 标题 + 未保存标记 + 保存按钮；标题栏按钮统一样式：小一号字号 + 细边框 + 不填充底色） -->
     <PageHeader sticky class="mb-3" :title="t('settings_title')" :icon="icons.settings">
       <!-- ② 类字段（需点保存才生效）改动后的常驻标记：toast 只停几秒，这个留到保存成功 -->
-      <span v-if="unsaved" class="text-xs text-warning flex-shrink-0">{{ t('settings_unsaved') }}</span>
+      <span v-if="unsaved" class="text-xs text-warning-ink flex-shrink-0">{{ t('settings_unsaved') }}</span>
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
@@ -298,10 +298,10 @@ async function onAuthToggle() {
                  - 手动设置且过低：「<800」黄字提醒但不阻止保存，「<500」红字并阻止保存
                    （阻止逻辑在 store.save()，后端有同阈值校验兜底）；
                  - 其余情况：自动设置时说明当前上限由系统 node 决定，手动时给一般提示。 -->
-            <p v-if="memLimitLevel === 'danger'" class="text-xs text-danger mt-1.5">
+            <p v-if="memLimitLevel === 'danger'" class="text-xs text-danger-ink mt-1.5">
               {{ t('settings_dsh_mem_too_low') }}
             </p>
-            <p v-else-if="memLimitLevel === 'warn'" class="text-xs text-warning mt-1.5">
+            <p v-else-if="memLimitLevel === 'warn'" class="text-xs text-warning-ink mt-1.5">
               {{ t('settings_dsh_mem_warn') }}
             </p>
             <p v-else class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">

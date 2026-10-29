@@ -7,6 +7,7 @@ import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
@@ -196,6 +197,10 @@ useBodyScrollLock(
   () => lifecycleDialogVisible.value || aboutVisible.value || entryFrameVisible.value
 )
 
+// 「关于」是页内联弹窗（不是独立组件），同样补上键盘/读屏支持。
+const aboutPanel = ref<HTMLElement | null>(null)
+useDialogA11y(aboutVisible, aboutPanel, { onClose: () => (aboutVisible.value = false) })
+
 // 打开弹窗时顺便查一次「有没有插件操作在跑」：有的话弹窗里多显示一条风险提示
 // （停 dsh 会中断那次安装/卸载，并可能留下陈旧的 profile 写锁，之后插件列表与
 // 安装都会白等 120 秒）。这两个按钮刻意不硬挡 —— 点它是用户的即时意图。
@@ -332,16 +337,16 @@ watch(() => status.value, (cur) => adoptStatus(cur, false), { immediate: true })
 // CPU 占用阈值颜色：0-20% 绿 / 20-50% 橙 / 50% 以上红；未知用黑色（—）
 function cpuColor(v?: number): string {
   if (v === undefined || v === null || isNaN(v)) return 'text-ink dark:text-[#EDEDF0]'
-  if (v < 20) return 'text-success dark:text-[#10B981]'
-  if (v < 50) return 'text-warning dark:text-[#F59E0B]'
-  return 'text-danger dark:text-[#EF4444]'
+  if (v < 20) return 'text-success-ink dark:text-[#10B981]'
+  if (v < 50) return 'text-warning-ink dark:text-[#F59E0B]'
+  return 'text-danger-ink'
 }
 // 内存阈值颜色：<500MB 绿 / 500-1000MB 橙 / 1000MB 以上红；未知用黑色（—）
 function memColor(v?: number): string {
   if (v === undefined || v === null || isNaN(v)) return 'text-ink dark:text-[#EDEDF0]'
-  if (v < 500) return 'text-success dark:text-[#10B981]'
-  if (v < 1000) return 'text-warning dark:text-[#F59E0B]'
-  return 'text-danger dark:text-[#EF4444]'
+  if (v < 500) return 'text-success-ink dark:text-[#10B981]'
+  if (v < 1000) return 'text-warning-ink dark:text-[#F59E0B]'
+  return 'text-danger-ink'
 }
 
 // 仅初次加载时显示“加载中…”，之后由 SSE 推送增量更新，避免文字闪烁
@@ -685,7 +690,14 @@ onBeforeUnmount(() => {
         <div v-if="aboutVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="aboutVisible = false"></div>
           <!-- 比默认弹窗略宽：特性按类别双列排布，窄了会大量折行 -->
-          <div class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+          <div
+            ref="aboutPanel"
+            tabindex="-1"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="t('about_title')"
+            class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+          >
             <DialogCloseButton :label="t('dialog_close')" @close="aboutVisible = false" />
             <!-- 标题 + 本仓库的 GitHub 裸图标（紧靠标题；右侧留出 X 的位置） -->
             <div class="flex items-center gap-2 pr-11 mb-5">

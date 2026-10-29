@@ -7,6 +7,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>DeepSeek Harness 控制台</title>
     <meta name="theme-color" content="#FAFAFA" />
+    <!-- 主题/语言的**首屏**初始化：必须在内联脚本里、且早于 CSS 与 Vue 执行。
+         主题只在 useTheme 的 onMounted 里应用的话，JS 下载/解析期间（慢网、老设备上
+         可达数百毫秒到数秒）深色用户会先看到一整屏白色再切成深色。这里按与
+         src/composables/useTheme.ts 相同的规则提前把 class / colorScheme / theme-color
+         落好；useTheme 挂载后仍会再应用一次（幂等）。
+         语言同理：先按 localStorage 把 <html lang> 设对，避免英文界面在首屏被读成中文。
+         **改这里的键名或判定时，必须同步改 useTheme.ts / useI18n.ts。** -->
+    <script>
+      ;(function () {
+        try {
+          var root = document.documentElement
+          var mode = localStorage.getItem('theme-mode') || 'system'
+          var dark =
+            mode === 'dark' ||
+            (mode !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          root.classList.toggle('dark', dark)
+          root.style.colorScheme = dark ? 'dark' : 'light'
+          var meta = document.querySelector('meta[name="theme-color"]')
+          if (meta) meta.setAttribute('content', dark ? '#0B0B0F' : '#FAFAFA')
+          var lang = localStorage.getItem('console-language')
+          root.lang = lang === 'en' ? 'en' : 'zh-CN'
+        } catch (e) {
+          /* localStorage / matchMedia 不可用（隐私模式等）：保持默认浅色与中文 */
+        }
+      })()
+    </script>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <!-- 字体：全站统一走系统字体（system-ui / ui-monospace，见 src/style.css 的 @theme）。
          这里刻意不引入任何外链 Web 字体：原先的 DM Sans / General Sans / JetBrains Mono 来自
          两个 CDN，来源与可用性各不相同，缺哪一套就按字符回退，同一页里会同时出现好几套字形；

@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import type { QuickCmd } from '@/serverapi'
 
@@ -28,6 +29,9 @@ watch(
 
 // 弹窗打开期间锁定页面滚动，避免在弹窗背后继续滚动/拖动页面
 useBodyScrollLock(() => open.value)
+
+const panel = ref<HTMLElement | null>(null)
+useDialogA11y(() => open.value, panel, { onClose: close })
 
 // 表单状态：编辑时以传入的 cmd 初始化，新增时清空
 const name = ref('')
@@ -78,7 +82,12 @@ function onSave() {
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
         <div class="g-modal-mask" @click="close"></div>
         <div
-          class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6"
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="props.cmd ? t('qc_edit_title') : t('qc_add_title')"
+          class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
         >
           <DialogCloseButton :label="t('dialog_close')" @close="close" />
           <h3 class="g-dialog-title mb-4">
@@ -93,8 +102,9 @@ function onSave() {
             :placeholder="t('qc_name_placeholder')"
             maxlength="120"
             autocomplete="off"
+            data-autofocus
           />
-          <p v-if="nameError" class="text-xs text-[#EF4444] mb-2">{{ nameError }}</p>
+          <p v-if="nameError" class="text-xs text-danger-ink mb-2">{{ nameError }}</p>
 
           <label class="block mt-3 mb-1 text-sm font-medium text-ink dark:text-white">{{ t('qc_content') }}</label>
           <textarea
@@ -104,7 +114,7 @@ function onSave() {
             :placeholder="t('qc_content_placeholder')"
             autocomplete="off"
           ></textarea>
-          <p v-if="contentError" class="text-xs text-[#EF4444] mb-2">{{ contentError }}</p>
+          <p v-if="contentError" class="text-xs text-danger-ink mb-2">{{ contentError }}</p>
 
           <label class="flex items-start gap-3 mt-3 cursor-pointer select-none group">
             <input v-model="auto" type="checkbox" class="peer sr-only" />

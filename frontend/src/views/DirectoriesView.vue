@@ -6,6 +6,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useDshBackup } from '@/composables/useDshBackup'
 import { api, type DshDataBackup } from '@/serverapi'
 import { trimAppReady } from '@/utils/trimApp'
@@ -105,6 +106,25 @@ const anyDialogOpen = computed(
     restoreDeleteName.value !== null
 )
 useBodyScrollLock(anyDialogOpen)
+
+// 本页几个内联弹窗（备份 / 恢复 / 恢复确认 / 删除备份）同样接入键盘与读屏支持。
+// 组件化弹窗（ConfirmDialog 等）各自在内部调用；这里只补内联实现。
+const backupPanel = ref<HTMLElement | null>(null)
+const restorePanel = ref<HTMLElement | null>(null)
+const confirmRestorePanel = ref<HTMLElement | null>(null)
+const deleteBackupPanel = ref<HTMLElement | null>(null)
+useDialogA11y(() => backupDialogVisible.value, backupPanel, { onClose: closeBackupDialog })
+useDialogA11y(() => restoreVisible.value, restorePanel, {
+  onClose: () => {
+    if (!restoreBusy.value) restoreVisible.value = false
+  }
+})
+useDialogA11y(() => confirmRestoreVisible.value, confirmRestorePanel, {
+  onClose: () => (confirmRestoreVisible.value = false)
+})
+useDialogA11y(() => restoreDeleteName.value !== null, deleteBackupPanel, {
+  onClose: () => (restoreDeleteName.value = null)
+})
 
 async function loadHomeInfo() {
   if (!settings.runtime) await settings.load()
@@ -540,7 +560,14 @@ onBeforeUnmount(() => {
       >
         <div v-if="backupDialogVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="closeBackupDialog()"></div>
-          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+          <div
+            ref="backupPanel"
+            tabindex="-1"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="t('confirm_backup_title')"
+            class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+          >
             <DialogCloseButton :label="t('dialog_close')" @close="closeBackupDialog()" />
             <h3 class="g-dialog-title mb-3">{{ t('confirm_backup_title') }}</h3>
 
@@ -563,7 +590,7 @@ onBeforeUnmount(() => {
                 · {{ t('backup_progress_files', { done: backupStatus?.files || 0, total: backupStatus?.totalFiles || 0 }) }}
               </div>
               <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mt-3 leading-relaxed">{{ t('backup_keep_hint') }}</p>
-              <p v-if="backupCancelling" class="text-xs text-[#EF4444] mt-1">{{ t('backup_cancelling') }}</p>
+              <p v-if="backupCancelling" class="text-xs text-danger-ink mt-1">{{ t('backup_cancelling') }}</p>
             </div>
 
             <!-- 打开弹窗时的状态同步：避免确认视图闪一下再跳到进度视图 -->
@@ -584,7 +611,7 @@ onBeforeUnmount(() => {
             <!-- 未开始：确认 -->
             <div v-else>
               <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed whitespace-pre-line">{{ t('confirm_backup_msg') }}</p>
-              <p v-if="backupLastError" class="mt-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-[#EF4444] break-words">{{ backupLastError }}</p>
+              <p v-if="backupLastError" class="mt-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-danger-ink break-words">{{ backupLastError }}</p>
             </div>
 
             <div class="g-dialog-actions">
@@ -627,7 +654,14 @@ onBeforeUnmount(() => {
       >
         <div v-if="restoreVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="restoreBusy ? null : (restoreVisible = false)"></div>
-          <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+          <div
+            ref="restorePanel"
+            tabindex="-1"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="t('confirm_restore_title')"
+            class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+          >
             <DialogCloseButton :label="t('dialog_close')" :disabled="restoreBusy" @close="restoreVisible = false" />
             <h3 class="g-dialog-title mb-2">{{ t('confirm_restore_title') }}</h3>
 
@@ -637,7 +671,7 @@ onBeforeUnmount(() => {
             </div>
 
             <template v-else>
-              <div v-if="restoreError" class="mb-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-[#EF4444] break-words">{{ restoreError }}</div>
+              <div v-if="restoreError" class="mb-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-danger-ink break-words">{{ restoreError }}</div>
 
               <div v-if="dshBackups.length === 0" class="py-6 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
                 {{ t('restore_empty') }}
@@ -665,7 +699,7 @@ onBeforeUnmount(() => {
                   </div>
                   <button
                     type="button"
-                    class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger dark:hover:text-[#EF4444] transition-colors"
+                    class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger-ink dark:hover:text-danger-ink transition-colors"
                     :title="t('restore_delete')"
                     @click.prevent="openRestoreDelete(b.name)"
                   >
@@ -700,7 +734,14 @@ onBeforeUnmount(() => {
       >
         <div v-if="confirmRestoreVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="confirmRestoreVisible = false"></div>
-          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+          <div
+            ref="confirmRestorePanel"
+            tabindex="-1"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="t('confirm_restore_title')"
+            class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+          >
             <DialogCloseButton :label="t('dialog_close')" @close="confirmRestoreVisible = false" />
             <h3 class="g-dialog-title mb-3">{{ t('confirm_restore_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('confirm_restore_msg', { name: selectedRestore || '' }) }}</p>
@@ -725,7 +766,14 @@ onBeforeUnmount(() => {
       >
         <div v-if="restoreDeleteName" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
           <div class="g-modal-mask" @click="restoreDeleteName = null"></div>
-          <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+          <div
+            ref="deleteBackupPanel"
+            tabindex="-1"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="t('restore_delete_confirm_title')"
+            class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+          >
             <DialogCloseButton :label="t('dialog_close')" @close="restoreDeleteName = null" />
             <h3 class="g-dialog-title mb-3">{{ t('restore_delete_confirm_title') }}</h3>
             <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('restore_delete_confirm_msg', { name: restoreDeleteName || '' }) }}</p>

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import type { ManagedPluginKind, UpdateStatus } from '@/serverapi'
 import { uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
@@ -85,6 +86,9 @@ function close() {
 // 弹窗打开期间锁定背景页面滚动（叠加的卸载确认框由 ConfirmDialog 自己再锁一层，
 // 引用计数归零才解锁），否则移动端能拖拽弹窗背后的控制台页面。
 useBodyScrollLock(() => props.visible || removeConfirm.value)
+
+const panel = ref<HTMLElement | null>(null)
+useDialogA11y(() => props.visible, panel, { onClose: close })
 </script>
 
 <template>
@@ -99,7 +103,14 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
     >
       <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
         <div class="g-modal-mask" @click="close"></div>
-        <div class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+        <div
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="targetName"
+          class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+        >
           <DialogCloseButton :label="t('dialog_close')" @close="close" />
           <!-- 标题 + 对应仓库的 GitHub 裸图标外链，紧靠标题；右侧留出 X 的位置。
                与 dsh 版本弹窗同一形态。 -->
@@ -172,7 +183,7 @@ useBodyScrollLock(() => props.visible || removeConfirm.value)
             <!-- 失败提示 -->
             <div
               v-if="status.error"
-              class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]"
+              class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-danger-ink"
             >{{ uiText(status.error, status.errorRef) }}</div>
 
             <!-- 检测诊断：已安装但查不到更新信息（镜像源失败）、或本地检测本身查不了

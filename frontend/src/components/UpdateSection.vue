@@ -1,12 +1,25 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { api, sseUrl, type ManagedPluginKind, type UpdateKind, type ServerVersions, type UpdateStatus } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
+import { usePluginsStore } from '@/stores/plugins'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import CheckUpdateButton from '@/components/CheckUpdateButton.vue'
-import ServerVersionsDialog from '@/components/ServerVersionsDialog.vue'
-import ManagedPluginDialog from '@/components/ManagedPluginDialog.vue'
+
+// 两个弹窗按需加载：它们连同 marked（插件更新日志的 Markdown 渲染）原本都打进
+// 概览页的 chunk，而用户可能整场都不打开它们。改为异步组件后，OverviewView 的
+// chunk 从 ~104KB 降到 ~40KB（gzip 30KB → 12KB）。
+//
+// **只加 defineAsyncComponent 不够**：异步组件一旦被渲染（哪怕内部 v-if 不显示）
+// 就会立刻加载。因此模板里用 mounted 标记控制首次挂载 —— 否则请求一个不少，
+// 只是把静态 import 换成了异步请求。
+const ServerVersionsDialog = defineAsyncComponent(
+  () => import('@/components/ServerVersionsDialog.vue')
+)
+const ManagedPluginDialog = defineAsyncComponent(
+  () => import('@/components/ManagedPluginDialog.vue')
+)
 
 // 概览页「版本」卡片：三个版本（dsh 服务 / 插件市场 / 增强插件）的当前版本、检查更新
 // 入口与各自的弹窗。
@@ -21,6 +34,9 @@ import ManagedPluginDialog from '@/components/ManagedPluginDialog.vue'
 // 本组件是这三者的**唯一数据源**：它持有 /api/update/stream 的 SSE 快照并按 kind 分发，
 // 子弹窗只收 props、只发意图事件。
 const toast = useToastStore()
+// 插件页的列表是「缓存优先」（stores/plugins.ts）：市场 / 增强插件在这里装完或卸掉后，
+// 必须把那份缓存作废，否则切到插件页看到的还是旧列表，直到用户手动点刷新。
+const pluginsStore = usePluginsStore()
 const { t } = useI18n()
 
 // 后端推送的更新状态（dsh 服务 / 插件市场 / 增强插件 各一份）。本地版本号由
@@ -49,6 +65,12 @@ function statusOf(kind: UpdateKind): UpdateStatus {
 // 弹窗上的名字，因此这里用 kind 参数化，避免把同一套逻辑写两遍。
 const managedKinds: ManagedPluginKind[] = ['market', 'advanced']
 const managedDialogVisible = ref<Record<ManagedPluginKind, boolean>>({ market: false, advanced: false })
+// 首次打开后保持挂载：异步 chunk 只加载一次，且弹窗自己的 Transition 仍能播关闭动画
+// （若用 `v-if="visible"` 直接卸载，关闭会瞬间消失）。
+const managedDialogMounted = ref<Record<ManagedPluginKind, boolean>>({
+  market: false,
+  advanced: false
+})
 const pendingManagedAction = ref<Record<ManagedPluginKind, 'install' | 'update' | 'remove' | null>>({
   market: null,
   advanced: null
@@ -62,6 +84,9 @@ function managedStatusOf(kind: ManagedPluginKind): UpdateStatus {
 
 async function runManagedAction(kind: ManagedPluginKind, action: 'install' | 'update' | 'remove') {
   pendingManagedAction.value[kind] = action
+  // 操作一开始就作废插件页缓存：用户可能在安装/卸载完成前切到插件页，
+  // 那时本组件的 SSE 已随概览页卸载，等不到 done 事件。
+  pluginsStore.clearPluginsCache()
   try {
     if (action === 'install') await api.pluginInstall(kind)
     else if (action === 'update') await api.pluginUpdate(kind)
@@ -107,6 +132,8 @@ function handleManagedResult(kind: ManagedPluginKind) {
     announcedManagedOp[kind] = sig
     const action = pendingManagedAction.value[kind]
     pendingManagedAction.value[kind] = null
+    // 装/卸都会改变 profile 里的插件集合：作废插件页的列表缓存。
+    pluginsStore.clearPluginsCache()
     toast.show(
       action
         ? t('plugin_dialog_toast_done', { action: managedActionLabel(action) })
@@ -129,11 +156,13 @@ for (const kind of managedKinds) {
 
 // --- dsh 服务版本弹窗 ---
 const serverDialogVisible = ref(false)
+const serverDialogMounted = ref(false)
 const serverLoading = ref(false)
 
 // openServerDialog 打开 dsh 版本列表：先用后端快照兜底显示，再拉一次（避免显示别人
 // 刷新前的旧列表）；加载期间按钮禁用，不阻塞已装版本的切换/删除。
 async function openServerDialog() {
+  serverDialogMounted.value = true
   serverDialogVisible.value = true
   if (serverVersions.value) return
   await refreshServerVersions(false)
@@ -197,6 +226,8 @@ async function onRemoveVersion(version: string) {
 async function onSwitchVersion(version: string) {
   try {
     await api.dshVersionSwitch(version)
+    // 不同 dsh 版本的插件可用性不同，插件页缓存一并作废（它会重新跑 dsh plugin list）。
+    pluginsStore.clearPluginsCache()
     toast.show(t('dsh_ver_switched', { v: version }), 'success')
     // 切换会停 dsh 并用新版本重启：稍等片刻再刷新，避免刷新出启动等待页。
     setTimeout(() => window.location.reload(), 3000)
@@ -274,6 +305,7 @@ function openDialog(kind: UpdateKind) {
     openServerDialog()
     return
   }
+  managedDialogMounted.value[kind] = true
   managedDialogVisible.value[kind] = true
 }
 
@@ -375,8 +407,10 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- dsh 服务版本列表弹窗（下载 / 删除 / 切换，行内显示下载与包处理进度） -->
+    <!-- dsh 服务版本列表弹窗（下载 / 删除 / 切换，行内显示下载与包处理进度）。
+         首次打开才挂载异步组件（加载 chunk），之后保持挂载：关闭时仍能播 Transition。 -->
     <ServerVersionsDialog
+      v-if="serverDialogMounted"
       :visible="serverDialogVisible"
       :status="serverVersions"
       :loading="serverLoading"
@@ -388,18 +422,21 @@ onMounted(() => {
       @switch="onSwitchVersion"
     />
 
-    <!-- 受管插件弹窗（插件市场 / 增强插件）：安装 / 更新 / 卸载，共用同一份实现 -->
-    <ManagedPluginDialog
-      v-for="kind in managedKinds"
-      :key="kind"
-      :visible="managedDialogVisible[kind]"
-      :status="managedStatusOf(kind)"
-      :plugin="kind"
-      @close="closeManagedDialog(kind)"
-      @install="runManagedAction(kind, 'install')"
-      @update="runManagedAction(kind, 'update')"
-      @remove="runManagedAction(kind, 'remove')"
-      @ack="onManagedAck(kind)"
-    />
+    <!-- 受管插件弹窗（插件市场 / 增强插件）：安装 / 更新 / 卸载，共用同一份实现。
+         v-for 与 v-if 不能写在同一个元素上（v-if 先求值，拿不到 kind），因此用
+         template 包一层；mounted 标记保证首次打开才加载异步组件，之后保持挂载。 -->
+    <template v-for="kind in managedKinds" :key="kind">
+      <ManagedPluginDialog
+        v-if="managedDialogMounted[kind]"
+        :visible="managedDialogVisible[kind]"
+        :status="managedStatusOf(kind)"
+        :plugin="kind"
+        @close="closeManagedDialog(kind)"
+        @install="runManagedAction(kind, 'install')"
+        @update="runManagedAction(kind, 'update')"
+        @remove="runManagedAction(kind, 'remove')"
+        @ack="onManagedAck(kind)"
+      />
+    </template>
   </section>
 </template>

@@ -39,7 +39,7 @@ const { t } = useI18n()
       </div>
     </div>
     <div class="flex items-center gap-2 flex-shrink-0">
-      <span v-if="account.active" class="g-status bg-success/10 text-success">
+      <span v-if="account.active" class="g-status bg-success/10 text-success-ink">
         {{ t('account_in_use') }}
       </span>
       <template v-else>

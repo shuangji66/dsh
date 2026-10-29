@@ -328,7 +328,7 @@ onBeforeUnmount(() => {
                 class="g-status"
                 :class="p.disabled
                   ? 'bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]'
-                  : 'bg-success/10 text-success'"
+                  : 'bg-success/10 text-success-ink'"
               >
                 <span class="w-1.5 h-1.5 rounded-full" :class="p.disabled ? 'bg-ink-faint' : 'bg-success'"></span>
                 {{ p.disabled ? t('plugin_status_disabled') : t('plugin_status_enabled') }}

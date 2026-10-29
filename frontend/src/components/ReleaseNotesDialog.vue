@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 
 // ReleaseNotesDialog.vue —— 「某个版本的更新日志」弹窗（dsh 版本列表 / 插件市场共用）。
@@ -41,6 +42,9 @@ const { t, locale } = useI18n()
 // 弹窗打开期间锁背景滚动（与其它弹窗一致）。
 useBodyScrollLock(() => props.visible)
 
+const panel = ref<HTMLElement | null>(null)
+useDialogA11y(() => props.visible, panel, { onClose: () => emit('close') })
+
 // 按界面语言选正文：英文缺段落时回退中文。
 const body = computed(() => {
   if (locale.value === 'en') return (props.noteEn || '').trim() || (props.note || '').trim()
@@ -61,7 +65,14 @@ const hasBody = computed(() => body.value !== '')
     >
       <div v-if="visible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
         <div class="g-modal-mask" @click="emit('close')"></div>
-        <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+        <div
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`${t('release_notes_title')} ${version}`"
+          class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+        >
           <DialogCloseButton :label="t('dialog_close')" @close="emit('close')" />
           <!-- 标题行只放「更新日志 + 版本号」：右侧留出 X 的位置由 .g-dialog-title 自带的 pr-11 负责 -->
           <h3 class="g-dialog-title mb-3">

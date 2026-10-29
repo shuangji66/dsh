@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { api, type DshVersionEntry, type ServerVersions } from '@/serverapi'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useReleaseNotes } from '@/composables/useReleaseNotes'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -124,6 +125,9 @@ function confirmCancel() {
 // 全部关掉才解锁）—— 否则在移动端可以拖拽弹窗背后的控制台页面。
 useBodyScrollLock(() => props.visible || cancelConfirm.value || deleteConfirm.value || switchConfirm.value)
 
+const panel = ref<HTMLElement | null>(null)
+useDialogA11y(() => props.visible, panel, { onClose: () => emit('close') })
+
 // --- 更新日志（点版本号打开） ---
 //
 // 这一处**刻意由本组件自己拉取**（其它动作都走「props 进来、事件出去」）：更新日志只是
@@ -158,7 +162,14 @@ const {
     >
       <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
         <div class="g-modal-mask" @click="emit('close')"></div>
-        <div class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6">
+        <div
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('dsh_ver_dialog_title')"
+          class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
+        >
           <DialogCloseButton :label="t('dialog_close')" @close="emit('close')" />
 
           <!-- 标题 + 上游仓库（deepseek-ai/deepseek-harness）的 GitHub 裸图标外链，
@@ -217,7 +228,7 @@ const {
                     >{{ tag }}</span>
                     <span
                       v-if="row.active"
-                      class="g-status bg-success/10 text-success"
+                      class="g-status bg-success/10 text-success-ink"
                     >{{ t('dsh_ver_active') }}</span>
                     <span
                       v-else-if="row.installed"
@@ -294,7 +305,7 @@ const {
             v-if="!installing && install && (install.phase === 'error' || install.cancelled)"
             class="mt-3 rounded-lg px-3 py-2 text-xs break-words select-text"
             :class="install.phase === 'error'
-              ? 'bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-[#EF4444]'
+              ? 'bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 text-danger-ink'
               : 'bg-black/5 dark:bg-white/5 border border-line dark:border-[#2A2A32] text-ink-soft dark:text-[#A6A6AD]'"
           >
             <template v-if="install.phase === 'error'">{{ uiText(install.error, install.errorRef) }}</template>

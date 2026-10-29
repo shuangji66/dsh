@@ -9,6 +9,7 @@ import { computed, ref, watch } from 'vue'
 import { useAccountStore } from '@/stores/account'
 import { useI18n, uiText } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useToastStore } from '@/stores/toast'
 import { copyText } from '@/utils/clipboard'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
@@ -42,6 +43,9 @@ const failedText = computed(() =>
 )
 
 useBodyScrollLock(() => props.visible)
+
+const panel = ref<HTMLElement | null>(null)
+useDialogA11y(() => props.visible, panel, { onClose: close })
 
 async function begin() {
   startFailed.value = false
@@ -135,7 +139,12 @@ function selectAll(e: FocusEvent) {
         <!-- 比默认弹窗略宽：授权链接是长串 URL，窄了只能看到尾部；限高后内部滚动，
              保证小屏（含手机键盘弹起时）底部按钮仍可触达。 -->
         <div
-          class="relative w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6"
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('account_add_dialog_title')"
+          class="relative w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
         >
           <DialogCloseButton :label="t('dialog_close')" @close="close" />
           <h3 class="g-dialog-title mb-2">{{ t('account_add_dialog_title') }}</h3>
@@ -153,7 +162,7 @@ function selectAll(e: FocusEvent) {
           </div>
 
           <!-- 上一次尝试失败 / 过期 / 本次申请失败：留在原地说明原因，用户可以重试 -->
-          <p v-else-if="failed" class="mt-3 text-sm text-danger dark:text-[#EF4444] leading-relaxed">
+          <p v-else-if="failed" class="mt-3 text-sm text-danger-ink leading-relaxed">
             {{ failedText }}
           </p>
 
@@ -179,7 +188,7 @@ function selectAll(e: FocusEvent) {
                   @focus="selectAll"
                 />
                 <div class="flex flex-wrap items-center gap-2 mt-2">
-                  <button class="g-btn-secondary !h-9" @click="openAuthorizePage">
+                  <button class="g-btn-secondary !h-9" data-autofocus @click="openAuthorizePage">
                     {{ t('account_login_open_link') }}
                   </button>
                   <button class="g-btn-secondary !h-9" @click="copyAuthorizeLink">
@@ -206,7 +215,7 @@ function selectAll(e: FocusEvent) {
                   @keydown.enter="complete"
                 />
                 <!-- 地址打不开是正常的这一步，就在这里说（授权流程中也要看得到） -->
-                <p class="mt-1.5 text-xs font-medium text-warning dark:text-[#F59E0B] leading-relaxed">
+                <p class="mt-1.5 text-xs font-medium text-warning-ink dark:text-[#F59E0B] leading-relaxed">
                   {{ t('account_desc_callback') }}
                 </p>
               </div>

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import type { QuickCmd } from '@/serverapi'
 
@@ -43,6 +44,9 @@ watch(
 // 弹窗打开期间锁定页面滚动，避免在弹窗背后继续滚动/拖动页面
 useBodyScrollLock(() => open.value)
 
+const panel = ref<HTMLElement | null>(null)
+useDialogA11y(() => open.value, panel, { onClose: close })
+
 function close() {
   open.value = false
   emit('update:visible', false)
@@ -81,7 +85,12 @@ function moveDown(idx: number) {
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
         <div class="g-modal-mask" @click="close"></div>
         <div
-          class="relative w-full max-w-lg h-[90dvh] max-h-full bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card flex flex-col"
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('qc_title')"
+          class="relative w-full max-w-lg h-[90dvh] max-h-full bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card flex flex-col outline-none"
         >
           <!-- 右上角 X：所有弹窗统一（见 DialogCloseButton.vue）。这里多传 top-3 —— 本弹窗
                是「标题栏式」布局（标题自带一条 px-5 py-3 的头部条、没有 p-6 内边距），X 要
@@ -145,7 +154,7 @@ function moveDown(idx: number) {
                       </button>
                       <!-- 删除（垃圾桶，红色） -->
                       <button
-                        class="g-btn-ghost !h-7 !px-2 !text-danger hover:!bg-danger/10"
+                        class="g-btn-ghost !h-7 !px-2 !text-danger-ink hover:!bg-danger/10"
                         @click.stop="emit('delete', c)"
                       >
                         <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

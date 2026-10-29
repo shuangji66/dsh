@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useI18n } from '@/composables/useI18n'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 
@@ -32,6 +33,10 @@ const { t } = useI18n()
 // 弹窗打开期间锁定页面滚动，避免在弹窗背后继续滚动/拖动页面
 useBodyScrollLock(() => open.value)
 
+// 键盘/读屏：role=dialog + Escape + 焦点进出 + 背景 inert（见 useDialogA11y）。
+const panel = ref<HTMLElement | null>(null)
+useDialogA11y(() => open.value, panel, { onClose: close })
+
 function close() {
   open.value = false
   emit('update:visible', false)
@@ -59,7 +64,12 @@ function onConfirm() {
         <div class="g-modal-mask" @click="close"></div>
         <!-- 弹窗 -->
         <div
-          class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6"
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="title"
+          class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
         >
           <!-- 右上角 X：所有弹窗统一（见 DialogCloseButton.vue）；放在标题前是为了让
                键盘 Tab 顺序也是「先关闭、再取消、最后确认」 -->

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, type ComponentPublicInstance } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePluginsStore } from '@/stores/plugins'
 import { useSettingsStore } from '@/stores/settings'
@@ -11,6 +11,7 @@ import MarqueeText from '@/components/MarqueeText.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
 import { copyText } from '@/utils/clipboard'
+import { captureScroll, restoreScroll } from '@/utils/scroll'
 
 const store = usePluginsStore()
 const { plugins, pluginsLoading } = storeToRefs(store)
@@ -32,6 +33,13 @@ const restarting = ref(false)
 const restartDialogVisible = ref(false)
 const restartTarget = ref<string | null>(null)
 
+// 顶栏的实测高度：重启提示条要贴死在顶栏下沿（见模板的 sticky 提示条）。
+// 顶栏高度不是常数 —— 断点会改顶部留白（pt-3 / sm:pt-4），换语言或更窄的屏幕还可能让
+// 标题与按钮换行。写死一个像素值迟早会压住标题栏，所以直接量。
+const headerRef = ref<ComponentPublicInstance | null>(null)
+const headerHeight = ref(0)
+let headerObserver: ResizeObserver | null = null
+
 // 插件名点击即复制：只复制名字（版本号既不可选中也不做复制入口）。
 // 复制走 utils/clipboard 的兜底实现（http 反代访问时没有 Clipboard API）。
 function copyPluginName(name: string) {
@@ -48,14 +56,29 @@ function onResetClick() {
   resetDialogVisible.value = true
 }
 
+// 自动刷新（启停 / 卸载 / 重置后的重拉）前后保持滚动位置：重拉前记下，列表重绘后还原，
+// 用户回到刚才看的那一片。手动刷新按钮刻意不走这里 —— 那一次仍回到列表最上方。
+//
+// 开头那个 nextTick 不能省：卸载/重置是在确认弹窗关闭后才发起的，而弹窗的滚动锁
+// （useBodyScrollLock）要到下一个 flush 才释放并把文档滚回原位，抢在它前面记录只会
+// 记到被锁期间的 0。
+async function reloadKeepingScroll() {
+  await nextTick()
+  const snapshot = captureScroll()
+  store.clearPluginsCache()
+  await store.loadPlugins(true)
+  // 等新列表渲染完再还原：高度还没长回来时写回的滚动位置会被浏览器夹成 0
+  await nextTick()
+  restoreScroll(snapshot)
+}
+
 async function removePlugin(name: string) {
   removingPlugin.value = name
   try {
     const p = await api.removePlugin(name)
     if (p.ok) {
-      // 卸载后清除缓存并重新拉取列表
-      store.clearPluginsCache()
-      await store.loadPlugins(true)
+      // 卸载后清除缓存并重新拉取列表（保持滚动位置）
+      await reloadKeepingScroll()
       toast.show(t('plugin_removed', { name: p.removed }), 'success')
     } else {
       toast.show(p.msg || t('plugin_remove_failed'), 'error')
@@ -81,9 +104,8 @@ async function resetPlugins() {
     toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     resetting.value = false
-    // 重置后清除缓存并重新拉取列表
-    store.clearPluginsCache()
-    await store.loadPlugins(true)
+    // 重置后清除缓存并重新拉取列表（保持滚动位置）
+    await reloadKeepingScroll()
   }
 }
 
@@ -94,6 +116,8 @@ async function resetPlugins() {
 async function togglePlugin(p: { name: string; disabled?: boolean }) {
   const enable = !!p.disabled
   togglingPlugin.value = p.name
+  // 启停成功后 store 会重拉列表：位置在重拉前记下（此时列表还没被加载态替换）
+  const snapshot = captureScroll()
   try {
     const r = await store.togglePlugin(p.name, enable)
     if (r.ok) {
@@ -110,6 +134,9 @@ async function togglePlugin(p: { name: string; disabled?: boolean }) {
           4000
         )
       }
+      // 列表与（可能的）内联提示条都渲染完再还原，否则高度还差一截，位置会被夹小
+      await nextTick()
+      restoreScroll(snapshot)
     } else {
       toast.show(r.msg || t('plugin_toggle_failed'), 'error')
     }
@@ -178,13 +205,29 @@ async function executeRestart() {
 onMounted(() => {
   // 命中缓存则直接使用，避免切换子页面时重复命令拉取
   store.loadPlugins()
+
+  // 量顶栏高度并跟着它变（视口宽度、语言、按钮换行都会改高度）。
+  // 组件根节点就是那层 sticky 遮罩，量它的高度 = 顶栏下沿到视口顶的距离（静止与固定时相同）。
+  const el = headerRef.value?.$el as HTMLElement | undefined
+  if (!el) return
+  headerHeight.value = el.offsetHeight
+  if (typeof ResizeObserver === 'undefined') return
+  headerObserver = new ResizeObserver(() => {
+    headerHeight.value = el.offsetHeight
+  })
+  headerObserver.observe(el)
+})
+
+onBeforeUnmount(() => {
+  headerObserver?.disconnect()
+  headerObserver = null
 })
 </script>
 
 <template>
   <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
-    <!-- 页头（图标 + 标题 + 刷新/重置按钮） -->
-    <PageHeader sticky class="mb-3" :title="t('nav_plugins')" :icon="icons.plugin">
+    <!-- 页头（图标 + 标题 + 刷新/重置按钮）；ref 用于实测高度，给下面的 sticky 提示条定位 -->
+    <PageHeader ref="headerRef" sticky class="mb-3" :title="t('nav_plugins')" :icon="icons.plugin">
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="store.loadPlugins(true)">
         {{ t('plugin_refresh') }}
       </button>
@@ -193,21 +236,36 @@ onMounted(() => {
       </button>
     </PageHeader>
 
-    <!-- 启用需重启的插件后的内联提示条（右对齐的重启生效按钮） -->
+    <!-- 启用需重启的插件后的提示条（右对齐的重启生效按钮）。
+         它**贴在顶栏下沿不动**、浮在列表之上：自动刷新已经会保住滚动位置，用户往下翻着
+         操作时这条「重启生效」不能跟着滚出视口（否则要再滚回顶部才能点）。
+         实现要点：
+           1. 自己是 sticky，`top` = 实测的顶栏高度（不写死像素，理由见 script 里 headerHeight）；
+           2. `-mt-3 pt-3` 与页头的 `mb-3` 抵消：静止位与固定位重合，不会先跳 12px 再粘住；
+              `pt-3` 那段就是固定后标题栏与提示条之间的间隙，由这层的页面底色遮住后面滚过的卡片；
+           3. 底色必须不透明（页面底色，同 PageHeader 的遮罩层）：提示条本身是半透明的琥珀色，
+              只靠它自己的背景，卡片会从底下透出来；下面那条 `pb-3` 同理，给列表留出同色间隙；
+           4. z-10：高于列表（`.g-fade-in` 会自建层叠上下文，卡片都在里面），低于顶栏（z-20）、
+              弹窗（z-50）与 toast（z-[100]）。 -->
     <div
       v-if="needsRestartPlugin"
-      class="flex items-center justify-between gap-3 mb-4 px-3 py-2.5 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10"
+      class="sticky z-10 -mt-3 pt-3 pb-3 bg-bg dark:bg-[#0B0B0F]"
+      :style="{ top: `${headerHeight}px` }"
     >
-      <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">
-        {{ t('plugin_restart_prompt', { name: needsRestartPlugin }) }}
-      </span>
-      <button
-        class="g-btn-warning h-8 px-3 text-xs flex-shrink-0"
-        :disabled="restarting || resetting"
-        @click="confirmRestart"
+      <div
+        class="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10"
       >
-        {{ restarting ? t('plugin_restarting') : t('plugin_restart_apply') }}
-      </button>
+        <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">
+          {{ t('plugin_restart_prompt', { name: needsRestartPlugin }) }}
+        </span>
+        <button
+          class="g-btn-warning h-8 px-3 text-xs flex-shrink-0"
+          :disabled="restarting || resetting"
+          @click="confirmRestart"
+        >
+          {{ restarting ? t('plugin_restarting') : t('plugin_restart_apply') }}
+        </button>
+      </div>
     </div>
 
     <!-- 每个插件一张卡片，按容器宽度自适应分栏（.g-card-grid）；

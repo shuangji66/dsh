@@ -67,3 +67,43 @@ export function formatBalance(amount: string, currency: string): string {
 export function formatWallets(wallets?: WalletView[] | null): string {
   return (wallets ?? []).map((w) => formatBalance(w.balance, w.currency)).join(' + ')
 }
+
+/** 解析金额文本：只有非空且能解析成有限数字时才返回数值，否则 undefined。 */
+function parseAmount(amount: string): number | undefined {
+  const raw = (amount ?? '').trim()
+  if (!raw) return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
+/** 金额文本是否为 0：只认能解析成有限数字且等于 0 的文本。 */
+function isZeroAmount(amount: string): boolean {
+  return parseAmount(amount) === 0
+}
+
+/**
+ * 同 `formatWallets`，但金额为 0 的钱包不参与展示（赠送金用：没赠送就不占一行）。
+ * 空串 / `--` 这类读不出数值的金额**不算 0** —— 平台一换字段宁可照常显示，别静默藏掉。
+ */
+export function formatNonZeroWallets(wallets?: WalletView[] | null): string {
+  return formatWallets((wallets ?? []).filter((w) => !isZeroAmount(w.balance)))
+}
+
+/** 余额档位：页面据此上色（见 AccountCard）。 */
+export type BalanceLevel = 'high' | 'mid' | 'low' | 'unknown'
+
+/**
+ * 余额档位：≥10 元 high（绿）/ 3–10 元 mid（黄）/ <3 元（含欠款）low（红）。
+ * 多币种取**最低**的一档：宁可提示余额偏低，也别让另一种货币把颜色抬成绿色。
+ * 没有可解析的金额（空列表 / `--`）返回 unknown —— 上色必须基于确定的数字。
+ */
+export function balanceLevel(wallets?: WalletView[] | null): BalanceLevel {
+  const values = (wallets ?? [])
+    .map((w) => parseAmount(w.balance))
+    .filter((v): v is number => v !== undefined)
+  if (!values.length) return 'unknown'
+  const lowest = Math.min(...values)
+  if (lowest >= 10) return 'high'
+  if (lowest >= 3) return 'mid'
+  return 'low'
+}

@@ -14,7 +14,7 @@ import { defineStore } from 'pinia'
 import { api, type AccountEntryView, type AccountLoginState, type AccountStatusPayload } from '@/serverapi'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useToastStore } from '@/stores/toast'
-import { formatWallets } from '@/utils/money'
+import { formatNonZeroWallets, formatWallets } from '@/utils/money'
 
 export const useAccountStore = defineStore('account', () => {
   const { t, locale } = useI18n()
@@ -39,9 +39,10 @@ export const useAccountStore = defineStore('account', () => {
   const authorizeUrl = computed(() => login.value?.authorizeUrl ?? '')
 
   // 余额/赠送金：格式规则抄 dsh 自己的账号面板（见 utils/money.ts），否则同一个账号
-  // 在 dsh 与控制台里会显示成两个数。
+  // 在 dsh 与控制台里会显示成两个数。**余额无论多少都要显示**（0 也是 ¥0.00）；
+  // 赠送金为 0 的那一项不显示，全是 0（或平台没给）时格式化成空串，卡片据此整块隐藏。
   const balanceText = computed(() => formatWallets(status.value?.balance))
-  const bonusText = computed(() => formatWallets(status.value?.bonus))
+  const bonusText = computed(() => formatNonZeroWallets(status.value?.bonus))
 
   function accountLabel(a: AccountEntryView) {
     return a.name || a.contact || t('account_unknown')

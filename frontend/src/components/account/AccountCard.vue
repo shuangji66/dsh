@@ -10,6 +10,7 @@ import { computed, onMounted, ref } from 'vue'
 import type { AccountEntryView } from '@/serverapi'
 import { useAccountStore } from '@/stores/account'
 import { useI18n, uiText } from '@/composables/useI18n'
+import { balanceLevel, type BalanceLevel } from '@/utils/money'
 import AccountAvatar from '@/components/account/AccountAvatar.vue'
 import AccountListItem from '@/components/account/AccountListItem.vue'
 import AddAccountDialog from '@/components/account/AddAccountDialog.vue'
@@ -17,6 +18,16 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
 const account = useAccountStore()
 const { t } = useI18n()
+
+// 余额档位配色（与 OverviewView 的 CPU/内存阈值同一套色）：≥10 元绿 / 3–10 元黄 /
+// <3 元（含欠款）红；读不到余额时保持正文色，不给「—」上色误导用户。
+const BALANCE_COLORS: Record<BalanceLevel, string> = {
+  high: 'text-success dark:text-[#10B981]',
+  mid: 'text-warning dark:text-[#F59E0B]',
+  low: 'text-danger dark:text-[#EF4444]',
+  unknown: 'text-ink dark:text-[#EDEDF0]'
+}
+const balanceColor = computed(() => BALANCE_COLORS[balanceLevel(account.status?.balance)])
 
 const addVisible = ref(false)
 const logoutVisible = ref(false)
@@ -100,14 +111,17 @@ onMounted(() => {
           <div v-if="account.status?.contact" class="text-xs text-ink-faint dark:text-[#8A8A92] truncate">
             {{ account.status.contact }}
           </div>
-          <div v-if="account.balanceText || account.bonusText" class="mt-1.5 flex flex-wrap gap-1.5">
-            <span v-if="account.balanceText" class="g-chip">
+          <!-- 余额无条件显示（0 也显示成 ¥0.00）；平台没给余额时退到「—」——
+               读不到的余额绝不伪造成 0.00（见 utils/money.ts）。金额按档位着色
+               （≥10 元绿 / 3–10 元黄 / <3 元与欠款红），赠送金为 0 时不显示、显示时恒绿。 -->
+          <div class="mt-1.5 flex flex-wrap gap-1.5">
+            <span class="g-chip">
               {{ t('account_balance') }}
-              <span class="font-mono text-ink dark:text-[#EDEDF0]">{{ account.balanceText }}</span>
+              <span class="font-mono" :class="balanceColor">{{ account.balanceText || '—' }}</span>
             </span>
             <span v-if="account.bonusText" class="g-chip">
               {{ t('account_bonus') }}
-              <span class="font-mono text-ink dark:text-[#EDEDF0]">{{ account.bonusText }}</span>
+              <span class="font-mono text-success dark:text-[#10B981]">{{ account.bonusText }}</span>
             </span>
           </div>
         </div>

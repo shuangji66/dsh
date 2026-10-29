@@ -162,6 +162,16 @@ func spaHandler(fsys fs.FS, baseurl string) http.Handler {
 			if reqPath == "index.html" && base != "" {
 				b = rewriteIndexBase(b, base)
 			}
+			// 构建期已为 hashed assets 生成 .gz 兄弟文件（vite.config.ts 的
+			// precompressAssets）；只在客户端明确接受 gzip 时发预压缩字节。
+			// index.html 不预压缩：它每次都要注入 <base>，且 entry 很小。
+			if strings.HasPrefix(reqPath, "assets/") && acceptsGzip(r) {
+				if gz, gzErr := fs.ReadFile(fsys, reqPath+".gz"); gzErr == nil {
+					w.Header().Set("Content-Encoding", "gzip")
+					serveBytes(w, r, reqPath, gz)
+					return
+				}
+			}
 			serveBytes(w, r, reqPath, b)
 			return
 		}
@@ -191,6 +201,28 @@ func rewriteIndexBase(body []byte, base string) []byte {
 	return []byte(headTag + s)
 }
 
+// acceptsGzip 判断 Accept-Encoding 是否接受 gzip（含 q=0 的显式拒绝）。
+// 只做 gzip：.gz 是构建期产物，运行时不需要 br/zstd 的压缩库。
+func acceptsGzip(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		fields := strings.Split(strings.TrimSpace(part), ";")
+		if len(fields) == 0 || !strings.EqualFold(strings.TrimSpace(fields[0]), "gzip") {
+			continue
+		}
+		q := 1.0
+		for _, f := range fields[1:] {
+			f = strings.TrimSpace(f)
+			if strings.HasPrefix(f, "q=") {
+				if v, err := strconv.ParseFloat(strings.TrimSpace(f[2:]), 64); err == nil {
+					q = v
+				}
+			}
+		}
+		return q > 0
+	}
+	return false
+}
+
 // serveBytes 输出一个内嵌静态文件，并按文件类型带上缓存策略：
 //
 //   - `assets/**` 是 Vite 构建的**内容哈希产物**（index-DAFlHLaA.css / LogView-xxx.js），
@@ -207,6 +239,8 @@ func serveBytes(w http.ResponseWriter, r *http.Request, name string, data []byte
 	}
 	if strings.HasPrefix(name, "assets/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		// 同一 URL 有 identity / gzip 两种表示（见 spaHandler），缓存必须按该头分流。
+		w.Header().Set("Vary", "Accept-Encoding")
 	} else {
 		etag := etagOf(data)
 		w.Header().Set("ETag", etag)
@@ -705,6 +739,7 @@ func validPluginName(name string) bool {
 //   - dsh 的 profile 写锁仍被活着的进程持有（profileLockHeld；陈旧锁不算）——
 //     pnpm 写清单时确实持有它，但只在写的那一瞬，所以它只是补充；
 //   - 插件市场自己在装/更新（marketBusyFn，市场面板发起时控制台没有命令计数）。
+//
 // 市场不回答（没装/未就绪）按不忙处理，与忙守卫的既有语义一致。
 func (m *AdminMux) pluginProfileWriteBusy() bool {
 	if m.dsh == nil {

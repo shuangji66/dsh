@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent } from 'vue'
+import type { Component } from 'vue'
 import { useRoute } from 'vue-router'
+import OverviewView from '@/views/OverviewView.vue'
 
 const route = useRoute()
 
-// 懒加载子页面，保持按需分包
-const views: Record<string, ReturnType<typeof defineAsyncComponent>> = {
-  overview: defineAsyncComponent(() => import('@/views/OverviewView.vue')),
+// 子页面按需分包，但**默认页（概览）静态引入**：它本来每次打开都要加载，再拆成一层
+// 异步 chunk 只会把首屏变成 index → ViewSwitcher → Overview 三跳（本地实测多 ~40ms，
+// 弱网/网关下多一个 RTT）。静态引入后 ViewSwitcher 的 chunk 直接带概览，首屏两跳。
+// 其余页面保持懒加载：设置/目录/插件/终端/日志都不会拖进首屏。
+const views: Record<string, Component> = {
+  overview: OverviewView,
   settings: defineAsyncComponent(() => import('@/views/SettingsView.vue')),
   directory: defineAsyncComponent(() => import('@/views/DirectoriesView.vue')),
   plugins: defineAsyncComponent(() => import('@/views/PluginsView.vue')),

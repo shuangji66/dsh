@@ -21,24 +21,42 @@
 //   2) 全局只建一个实例（SDK 内部本就按模块缓存宿主连接，重复 new 只是白跑一遍初始化链）；
 //   3) ready 带超时：宿主监听已经销毁时（刷新页面也救不回来，只能回桌面重开应用窗口），
 //      把「静默失效」变成一次可读的报错提示，避免按钮点了没反应。
+//
+// SDK 约 12KB gzip，原本静态打进入口 chunk。改为**动态 import**后它不再阻塞首屏：
+// primeTrimApp() 仍在内联入口执行时立刻发起加载，握手依旧落在宿主 60 秒窗口内，
+// 只是不参与入口 chunk 的解析/执行。
 
-import { TrimApp } from '@trimjs/web-app'
+import type { TrimApp } from '@trimjs/web-app'
+
+type TrimAppModule = typeof import('@trimjs/web-app')
 
 // 等待宿主桥接就绪的上限。宿主无应答时 SDK 要先跑完 1.5s（宿主探测）+ 5s（扩展宿主探测）
 // 才进入永不 settle 的兜底连接，10 秒足够覆盖这一段，也远大于正常握手的耗时（通常 <100ms）。
 const READY_TIMEOUT_MS = 10_000
 
 let instance: TrimApp | null = null
+let modulePromise: Promise<TrimAppModule> | null = null
 
-/** 取宿主 SDK 单例（首次调用即触发初始化/握手）。 */
-export function trimApp(): TrimApp {
-  if (!instance) instance = new TrimApp()
+function loadSdk(): Promise<TrimAppModule> {
+  // 模块只加载一次；失败也不缓存 rejection（下次调用可重试）。
+  modulePromise ??= import('@trimjs/web-app').catch((e) => {
+    modulePromise = null
+    throw e
+  })
+  return modulePromise
+}
+
+function createInstance(mod: TrimAppModule): TrimApp {
+  // 首次 new 即触发初始化/握手。
+  if (!instance) instance = new mod.TrimApp()
   return instance
 }
 
 /** 页面加载时调用：尽早与宿主握手，避免错过宿主的 60 秒握手窗口。 */
 export function primeTrimApp(): void {
-  trimApp()
+  void loadSdk()
+    .then(createInstance)
+    .catch((e) => console.warn('[trimApp] SDK load failed', e))
 }
 
 /**
@@ -46,7 +64,6 @@ export function primeTrimApp(): void {
  * 超时（宿主的握手监听已被销毁）返回 null，由调用方提示用户回桌面重开应用窗口。
  */
 export async function trimAppReady(timeoutMs = READY_TIMEOUT_MS): Promise<TrimApp | null> {
-  const sdk = trimApp()
   let timer: ReturnType<typeof setTimeout> | null = null
   const timeout = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
@@ -54,8 +71,14 @@ export async function trimAppReady(timeoutMs = READY_TIMEOUT_MS): Promise<TrimAp
       resolve(null)
     }, timeoutMs)
   })
+  const ready = loadSdk()
+    .then((mod) => {
+      const sdk = createInstance(mod)
+      return sdk.ready().then(() => sdk)
+    })
+    .catch(() => null)
   try {
-    return await Promise.race([sdk.ready().then(() => sdk), timeout])
+    return await Promise.race([ready, timeout])
   } finally {
     if (timer) clearTimeout(timer)
   }

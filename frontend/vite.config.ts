@@ -1,6 +1,9 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 // The frontend is embedded into the Go binary at build time and served over the
 // admin unix socket under a baseurl prefix fronted by nginx. The baseurl is NOT
@@ -14,8 +17,33 @@ import { fileURLToPath, URL } from 'node:url'
 // 页面入口（侧边栏 / 旧路径）由 __TERMINAL_ENABLED__ 在编译期一并收起。
 const terminalEnabled = process.env.VITE_TERMINAL !== '0'
 
+// 构建期为 assets 生成 .gz 兄弟文件（构建产物是 Go //go:embed 的，运行时不再压缩）。
+// 后端的 spaHandler/serveBytes 在 Accept-Encoding 含 gzip 时直接发这份预压缩字节，
+// 并带上 Vary: Accept-Encoding；未压缩的原始文件仍然保留给不支持 gzip 的客户端。
+// 只压 hashed assets（js/css），不压 index.html（它每次要注入 <base>，不能预压缩）。
+function precompressAssets(): Plugin {
+  const assetsDir = fileURLToPath(new URL('./dist/assets', import.meta.url))
+  return {
+    name: 'harness-precompress-assets',
+    apply: 'build',
+    closeBundle() {
+      let files: string[]
+      try {
+        files = readdirSync(assetsDir)
+      } catch {
+        return
+      }
+      for (const name of files) {
+        if (!/\.(js|css)$/.test(name)) continue
+        const file = join(assetsDir, name)
+        writeFileSync(file + '.gz', gzipSync(readFileSync(file), { level: 9 }))
+      }
+    }
+  }
+}
+
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), precompressAssets()],
   define: {
     __TERMINAL_ENABLED__: JSON.stringify(terminalEnabled)
   },

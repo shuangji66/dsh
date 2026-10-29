@@ -188,7 +188,6 @@ const restartBusyText = computed(() => {
 
 async function executeRestart() {
   restarting.value = true
-  const name = restartTarget.value
   restartTarget.value = null
   restartDialogVisible.value = false
   try {

@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run lint && npm run test"
   },
   "dependencies": {
     "@trimjs/web-app": "^0.5.0",
@@ -21,13 +24,20 @@
     "vue-router": "^5.4.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@vitejs/plugin-vue": "^6.0.10",
     "autoprefixer": "^10.6.2",
+    "eslint": "^10.13.0",
+    "eslint-plugin-vue": "^10.12.0",
+    "globals": "^17.13.0",
+    "happy-dom": "^21.0.4",
     "postcss": "^8.5.32",
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.1",
     "vite": "^8.3.5",
+    "vitest": "^5.0.5",
     "vue-tsc": "^3.3.13"
   }
 }

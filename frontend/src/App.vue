@@ -84,7 +84,14 @@ function applyDefaultView() {
 const themeIcon = computed(() =>
   themeMode.value === 'dark' ? icons.moon : themeMode.value === 'light' ? icons.sun : icons.monitor
 )
-const themeTitle = computed(() => t('theme_' + themeMode.value))
+// 用一张字面量表把 ThemeMode 映射到 i18n key：`'theme_' + mode` 会被 TS 推成 string，
+// 在 t() 收窄为 I18nKey 之后无法通过类型检查。
+const THEME_TITLE_KEYS = {
+  light: 'theme_light',
+  dark: 'theme_dark',
+  system: 'theme_system'
+} as const
+const themeTitle = computed(() => t(THEME_TITLE_KEYS[themeMode.value]))
 
 // 语言切换：点击在 中文 ↔ English 之间循环（与设置页语言选择共享同一 locale）
 function cycleLanguage() {

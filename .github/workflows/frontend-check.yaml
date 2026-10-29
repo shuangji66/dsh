@@ -1,0 +1,44 @@
+name: frontend-check
+
+on:
+  push:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-check.yaml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-check.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm run test
+      - name: Build (terminal enabled)
+        run: npm run build
+      - name: Build (TERMINAL=0) and assert xterm is not bundled
+        run: |
+          VITE_TERMINAL=0 npm run build
+          if grep -rIl --include='*.js' --include='*.css' --include='*.html' 'xterm' dist; then
+            echo "ERROR: xterm leaked into the TERMINAL=0 bundle"
+            exit 1
+          fi

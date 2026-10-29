@@ -45,7 +45,7 @@ const npmRegistryOptions = [
   { value: 'tencent', label: 'settings_npm_registry_tencent' },
   { value: 'huawei', label: 'settings_npm_registry_huawei' },
   { value: 'npmjs', label: 'settings_npm_registry_official' }
-]
+] as const
 
 // 访问密码明文/密文切换
 const showPassword = ref(false)

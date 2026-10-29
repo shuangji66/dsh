@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-const props = defineProps<{ text: string }>()
+defineProps<{ text: string }>()
 
 const root = ref<HTMLElement | null>(null)
 const track = ref<HTMLElement | null>(null)

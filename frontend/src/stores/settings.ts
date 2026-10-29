@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { api, type AppConfig, type DshStatus, type RuntimeInfo, type SettingsPayload } from '@/serverapi'
+import { api, type AppConfig, type DshStatus, type RuntimeInfo } from '@/serverapi'
 import { useToastStore } from '@/stores/toast'
 import { uiErrText, useI18n } from '@/composables/useI18n'
 

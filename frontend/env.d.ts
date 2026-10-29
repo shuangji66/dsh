@@ -6,6 +6,8 @@ declare const __TERMINAL_ENABLED__: boolean
 
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
+  // Vue 官方推荐的 SFC 类型签名就是空对象泛型，这里保留语义并局部豁免规则。
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   const component: DefineComponent<{}, {}, any>
   export default component
 }

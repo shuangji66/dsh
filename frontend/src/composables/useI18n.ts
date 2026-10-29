@@ -31,7 +31,7 @@ export function isLocale(v: string): v is Locale {
   return v === 'zh' || v === 'en'
 }
 
-const zh: Record<string, string> = {
+const zh = {
   // 导航
   nav_overview: '概览',
   nav_settings: '设置',
@@ -590,7 +590,9 @@ const zh: Record<string, string> = {
   msg_account_login_done: '已登录 DeepSeek 账号 {contact}',
 }
 
-const en: Record<string, string> = {
+// en 以 zh 的键集合为类型：漏译（少键）或多出无效键都会在 vue-tsc 阶段报错，
+// 不再静默回退中文（旧行为让「英文界面里冒出一句中文」很难被发现）。
+const en: Record<keyof typeof zh, string> = {
   nav_overview: 'Overview',
   nav_settings: 'Settings',
   nav_directory: 'Directories',
@@ -1141,6 +1143,9 @@ const en: Record<string, string> = {
 
 const dict: Record<Locale, Record<string, string>> = { zh, en }
 
+/** 前端界面文案的合法 key（由中文词典推导）。 */
+export type I18nKey = keyof typeof zh
+
 export function setLocale(l: Locale) {
   locale.value = l
   applyDocumentLang(l)
@@ -1178,8 +1183,14 @@ function tr(key: string, params?: Record<string, string | number>): string {
   return s
 }
 
+// 对外的 t 只接受字典里真实存在的 key：拼错、改名漏改都会在 vue-tsc 阶段暴露。
+// 后端下发的动态 code 走下面的 uiText/uiErrText（它们内部用 tr，允许未知 code 回退原文）。
+function t(key: I18nKey, params?: Record<string, string | number>): string {
+  return tr(key, params)
+}
+
 export function useI18n() {
-  return { locale, t: tr, setLocale }
+  return { locale, t, setLocale }
 }
 
 // --- 后端返回文案的本地化 ---

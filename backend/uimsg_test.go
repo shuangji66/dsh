@@ -162,8 +162,8 @@ func TestUserFacingCodesTranslatedInFrontend(t *testing.T) {
 		t.Fatalf("读取前端 i18n 字典失败: %v", err)
 	}
 	src := string(data)
-	zh := parseFrontendDict(t, src, "const zh: Record<string, string> = {")
-	en := parseFrontendDict(t, src, "const en: Record<string, string> = {")
+	zh := parseFrontendDict(t, src, "const zh = {")
+	en := parseFrontendDict(t, src, "const en: Record<keyof typeof zh, string> = {")
 
 	seen := map[string]bool{}
 	for _, s := range sites {

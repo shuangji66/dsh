@@ -6,7 +6,7 @@
  * has, and the plugin's rows are clones of the first existing item so they
  * inherit its styling without relying on CSS-module class names.
  */
-import { buildAuthUrl, openAuthPopup, requestAuth } from './auth.ts';
+import { buildAuthUrl, openAuthPopup, requestAuth, windowSurface } from './auth.ts';
 import { isCancellationText } from './cancel.ts';
 import {
   CHECK_DIR_ATTR,
@@ -224,7 +224,7 @@ export async function authorizeWorkspacePath(path: string, popup: Window | null)
   try {
     const state = randomId();
     const auth = await requestAuth({
-      popup: windowRef,
+      surface: windowSurface(windowRef),
       state,
       buildUrl: () => buildAuthUrl(base, state, 'authorizeUserFile', { path }, config.appName || 'Harness'),
     });

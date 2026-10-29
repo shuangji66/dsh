@@ -47,6 +47,7 @@ export const EN = Object.freeze({
   '打开选择器失败': 'Could not open the picker',
   '当前宿主未提供内嵌选择器，已改用网页授权。': 'The native picker is unavailable; using web authorization.',
   '浏览器拦截了授权窗口，请允许弹窗后重试。': 'The browser blocked the authorization window. Allow popups and retry.',
+  '无法打开授权页面，请重试。': 'Could not open the authorization page. Try again.',
   '授权超时，请重试': 'Authorization timed out. Retry.',
   '授权窗口已关闭': 'Authorization window closed',
   '授权结果里没有路径': 'Authorization returned no path',

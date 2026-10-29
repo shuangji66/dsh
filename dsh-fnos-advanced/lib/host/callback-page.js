@@ -1,11 +1,12 @@
 /**
  * The fnOS authorization callback page.
  *
- * fnOS redirects the popup here with the authorization result in the query
- * string. The page hands that result back through three independent channels,
- * because each one can be lost on its own:
+ * fnOS redirects the popup (or the fnOS App's embedded iframe) here with the
+ * authorization result in the query string. The page hands that result back
+ * through three independent channels, because each one can be lost on its own:
  *
- *   1. `postMessage` to the opener — fastest, gone when COOP severs the opener;
+ *   1. `postMessage` to the opener/parent — fastest, gone when COOP severs the
+ *      opener;
  *   2. `localStorage` — survives the severed opener, gone with storage
  *      partitioning in some browsers;
  *   3. `POST auth-result` to the host half — same-origin, so the dsh page can
@@ -107,6 +108,15 @@ export const CALLBACK_HTML = `<!doctype html>
       window.opener.postMessage(payload, window.location.origin);
     }
   } catch (_) { /* cross-origin opener */ }
+
+  // The fnOS App embeds this page in an iframe instead of a popup; deliver the
+  // result to the dsh page as well. In a popup window.parent === window, so
+  // this does not double-deliver.
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(payload, window.location.origin);
+    }
+  } catch (_) { /* cross-origin parent */ }
 
   // Third channel: hand the raw query to the same-origin host route. The dsh
   // page polls it, so neither COOP nor storage partitioning can lose the

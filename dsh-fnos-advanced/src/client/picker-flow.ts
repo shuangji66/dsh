@@ -9,10 +9,18 @@
  * The flow object carries the per-surface differences, so the authorization
  * machinery exists only once.
  */
-import { buildAuthUrl, requestAuth } from './auth.ts';
+import {
+  buildAuthUrl,
+  openAuthFrame,
+  requestAuth,
+  windowSurface,
+  type AuthFrame,
+  type AuthSurface,
+} from './auth.ts';
 import { isCancellationText, isPickerCancelled } from './cancel.ts';
 import { LOG_PREFIX, POPUP_FEATURES } from './constants.ts';
 import { closePopup, randomId, writePopupLoading } from './dom.ts';
+import { isFnosApp } from './env.ts';
 import type { PickFlow } from './flow.ts';
 import { t, translateError } from './i18n.ts';
 import { pickerParams } from './picker.ts';
@@ -37,11 +45,17 @@ export async function runPickFlow(button: HTMLButtonElement, flow: PickFlow): Pr
 
   markBusy(button, flow);
 
+  // In the fnOS mobile app the native pickUserFile bridge is broken for
+  // personal folders (it applies shared-folder authorization), so the
+  // directory flow goes straight to the web authorization page. That page is
+  // embedded in an iframe later (see startAuthFlow), which needs no popup.
+  const appDirectory = isFnosApp() && flow.directory === true;
+
   // Top-level browsers need the popup opened inside the click task. Host
   // environments (fnOS desktop / mobile app) get the native picker first and do
   // not need a popup at all.
   let popup: Window | null = null;
-  if (!isHostLikeWindow()) {
+  if (!appDirectory && !isHostLikeWindow()) {
     popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
     if (popup) writePopupLoading(popup);
   }
@@ -73,10 +87,12 @@ export async function runPickFlow(button: HTMLButtonElement, flow: PickFlow): Pr
       return;
     }
 
-    if (!popup || popup.closed) {
-      popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+    if (!appDirectory) {
+      if (!popup || popup.closed) {
+        popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
+      }
+      if (!popup) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
     }
-    if (!popup) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
 
     await startAuthFlow(flow, appName, target.base, popup);
   } catch (error) {
@@ -107,11 +123,15 @@ export async function finishPick(flow: PickFlow, paths: string[]): Promise<void>
 }
 
 /**
- * In fnOS desktop / the mobile app, the official SDK can open the native picker
- * directly through the host bridge. Only fall back to URL authorization when
- * that bridge is not available.
+ * In fnOS desktop the official SDK can open the native picker directly through
+ * the host bridge. The fnOS mobile app is different: its pickUserFile bridge
+ * applies shared-folder authorization and fails for personal folders, so the
+ * directory flow skips the bridge and uses the web authorization page. Other
+ * bridge features (file details / open / re-authorize) are unaffected.
  */
 export async function pickPathsDirect(flow: PickFlow): Promise<DirectPickResult> {
+  if (isFnosApp() && flow.directory === true) return { handled: false };
+
   const sdk = getSdk();
   try {
     await sdk.ready();
@@ -159,16 +179,30 @@ export async function startAuthFlow(
   flow.setLabel(t('等待授权…'));
   const state = randomId();
 
+  // The fnOS App's WebView cannot reliably open popups, and the workspace
+  // dialog lives in this page. Embed the authorization page in a full-screen
+  // iframe instead; the callback posts to window.parent and we stay here.
+  const useFrame = isFnosApp() && flow.directory === true;
+  let frame: AuthFrame | null = null;
   let popup = existingPopup;
-  if (!popup || popup.closed) {
-    popup = window.open('', `dsh-fnos-advanced-auth-${state}`, POPUP_FEATURES);
+  let surface: AuthSurface;
+
+  if (useFrame) {
+    frame = openAuthFrame();
+    if (!frame) throw new Error(t('无法打开授权页面，请重试。'));
+    surface = frame.surface;
+  } else {
+    if (!popup || popup.closed) {
+      popup = window.open('', `dsh-fnos-advanced-auth-${state}`, POPUP_FEATURES);
+    }
+    if (!popup) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
+    writePopupLoading(popup);
+    surface = windowSurface(popup);
   }
-  if (!popup) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
-  writePopupLoading(popup);
 
   try {
     const auth = await requestAuth({
-      popup,
+      surface,
       state,
       buildUrl: () => buildAuthUrl(base, state, flow.method, { ...pickerParams(flow) }, appName),
     });
@@ -196,6 +230,8 @@ export async function startAuthFlow(
   } catch (error) {
     closePopup(popup);
     throw error;
+  } finally {
+    frame?.close();
   }
 }
 

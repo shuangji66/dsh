@@ -3,7 +3,7 @@
  *
  * The result arrives through whichever of the three channels survives:
  * `postMessage` from the callback page, the `storage` event, or polling the
- * host's `auth-result` route. The popup closing is the cancellation signal.
+ * host's `auth-result` route. Closing the popup/frame is the cancellation signal.
  */
 import type { AppAuthResult } from '@trimjs/web-app';
 import { AUTH_TIMEOUT_MS, MSG_TYPE, POPUP_FEATURES, STORAGE_KEY } from './constants.ts';
@@ -87,6 +87,125 @@ export function openAuthPopup(): Window | null {
   return popup;
 }
 
+/** The part of a popup/iframe that the authorization waiter needs. */
+export interface AuthSurface {
+  readonly closed: boolean;
+  navigate(url: string): void;
+}
+
+/** Adapt a real popup window to {@link AuthSurface}. */
+export function windowSurface(win: Window): AuthSurface {
+  return {
+    get closed() {
+      return win.closed;
+    },
+    navigate(url: string) {
+      win.location.replace(url);
+    },
+  };
+}
+
+export interface AuthFrame {
+  surface: AuthSurface;
+  close(): void;
+}
+
+/**
+ * Embed the fnOS authorization page in a full-screen iframe.
+ *
+ * The fnOS App's WebView does not reliably open popups, and the picker dialog
+ * that initiated the flow lives in the dsh page — a same-window navigation
+ * would destroy it. The iframe keeps that page alive; the callback page posts
+ * its result to `window.parent` (see host/callback-page.ts), so requestAuth
+ * receives it exactly like a popup's postMessage.
+ */
+export function openAuthFrame(): AuthFrame | null {
+  if (typeof document === 'undefined' || !document.body) return null;
+
+  let closed = false;
+  const overlay = document.createElement('div');
+  overlay.setAttribute('data-dsh-fnos-auth-frame', '');
+  overlay.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'z-index:2147483000',
+    'display:flex',
+    'flex-direction:column',
+    'box-sizing:border-box',
+    'background:#fff',
+    'color:#1f2328',
+    'overscroll-behavior:contain',
+    // Keep the bar/iframe clear of the iOS notch and home indicator.
+    'padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)',
+  ].join(';');
+
+  const bar = document.createElement('div');
+  bar.style.cssText = 'flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid rgba(127,127,127,.28);font:13px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+  const title = document.createElement('span');
+  title.textContent = t('飞牛授权');
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.textContent = t('取消');
+  cancel.style.cssText = 'flex:0 0 auto;border:1px solid rgba(127,127,127,.4);border-radius:8px;background:transparent;color:inherit;font:inherit;padding:4px 12px;cursor:pointer';
+  bar.append(title, cancel);
+
+  const frame = document.createElement('iframe');
+  frame.title = t('飞牛授权');
+  frame.setAttribute('allow', 'clipboard-read; clipboard-write');
+  frame.style.cssText = 'flex:1 1 auto;width:100%;border:0;background:#fff';
+  const loading = t('正在打开飞牛授权页面…')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  frame.srcdoc = `<!doctype html><meta charset="utf-8"><style>html,body{height:100%;margin:0;display:flex;align-items:center;justify-content:center;font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",system-ui,sans-serif;color:#6a6f76;background:#f6f7f9}</style><p>${loading}</p>`;
+  // Move focus into the authorization page so dsh's global shortcuts do not
+  // keep handling keys behind the overlay. Cross-origin frames (direct-port
+  // deployments) throw; the click into the page still focuses them.
+  frame.addEventListener('load', () => {
+    try {
+      frame.contentWindow?.focus();
+    } catch { /* cross-origin frame */ }
+  });
+  overlay.append(bar, frame);
+
+  function close(): void {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKeydown);
+    overlay.remove();
+  }
+
+  function onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') close();
+  }
+
+  cancel.addEventListener('click', close);
+  // The dsh picker dialog closes on outside clicks. Events inside the iframe
+  // stay in its own document, but clicks on the overlay bar/background would
+  // bubble to dsh and could close the dialog behind the authorization page.
+  for (const type of ['pointerdown', 'mousedown', 'click', 'touchstart'] as const) {
+    overlay.addEventListener(type, (event) => event.stopPropagation());
+  }
+  document.addEventListener('keydown', onKeydown);
+  document.body.appendChild(overlay);
+
+  return {
+    surface: {
+      get closed() {
+        return closed;
+      },
+      navigate(url: string) {
+        if (closed) return;
+        // `srcdoc` wins over `src` while its load is pending; drop it first so
+        // the authorization URL actually replaces the loading page.
+        frame.removeAttribute('srcdoc');
+        frame.src = url;
+      },
+    },
+    close,
+  };
+}
+
 /** Read the callback page's storage copy. */
 export function readStoredResult(): StoredResult | null {
   try {
@@ -124,7 +243,8 @@ export function parseAuthPayload(payload: AuthPayload | null | undefined): AuthR
 }
 
 export interface AuthRequest {
-  popup: Window;
+  /** Popup window or embedded frame that hosts the authorization page. */
+  surface: AuthSurface;
   state: string;
   /** Build the authorization URL; called once the listeners are installed. */
   buildUrl: () => Promise<string>;
@@ -133,10 +253,10 @@ export interface AuthRequest {
 /**
  * Wait for the callback of one authorization attempt.
  *
- * Resolves with `{ status: 'cancelled' }` when the popup is closed, rejects on
- * timeout or when the URL cannot be built.
+ * Resolves with `{ status: 'cancelled' }` when the surface is closed, rejects
+ * on timeout or when the URL cannot be built.
  */
-export function requestAuth({ popup, state, buildUrl }: AuthRequest): Promise<AuthOutcome> {
+export function requestAuth({ surface, state, buildUrl }: AuthRequest): Promise<AuthOutcome> {
   return new Promise<AuthOutcome>((resolve, reject) => {
     let settled = false;
     let closeTimer = 0;
@@ -232,10 +352,10 @@ export function requestAuth({ popup, state, buildUrl }: AuthRequest): Promise<Au
     resultPollTimer = window.setInterval(pollServerResult, 900);
 
     pollTimer = window.setInterval(() => {
-      if (!popup.closed) return;
+      if (!surface.closed) return;
       window.clearInterval(pollTimer);
       // Give the callback page a moment to publish its result before treating
-      // the closed popup as a cancellation.
+      // the closed surface as a cancellation.
       closeTimer = window.setTimeout(async () => {
         const stored = readStoredResult();
         if (stored) {
@@ -255,7 +375,7 @@ export function requestAuth({ popup, state, buildUrl }: AuthRequest): Promise<Au
       try {
         const url = await buildUrl();
         if (settled) return;
-        popup.location.replace(url);
+        surface.navigate(url);
       } catch (error) {
         fail(error instanceof Error ? error : new Error(String(error)));
       }

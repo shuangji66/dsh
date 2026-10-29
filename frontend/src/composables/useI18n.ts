@@ -181,7 +181,6 @@ const zh: Record<string, string> = {
 
   // 资源页
   directory_title: '资源',
-  directory_fnapp_auth_unavailable: '飞牛APP暂时无法添加授权',
   directory_add: '添加',
   directory_loading: '加载中…',
   directory_empty: '暂无已授权的目录',
@@ -196,6 +195,7 @@ const zh: Record<string, string> = {
   confirm_directory_remove_msg: '确定要移除授权的目录「{path}」吗？移除后将无法通过该应用访问此目录。',
   directory_auth_success: '授权成功',
   directory_auth_cancel: '已取消授权',
+  directory_auth_failed: '目录授权失败，请重试',
   directory_auth_updated: '授权目录已更新',
   directory_appid_missing: '无法获取应用标识，请稍后重试',
   directory_pick_title: '选择授权目录',
@@ -735,7 +735,6 @@ const en: Record<string, string> = {
 
   // 资源页
   directory_title: 'Resources',
-  directory_fnapp_auth_unavailable: 'Adding directory authorization is not available in the fnOS app yet.',
   directory_add: 'Add',
   directory_loading: 'Loading…',
   directory_empty: 'No authorized directories',
@@ -750,6 +749,7 @@ const en: Record<string, string> = {
   confirm_directory_remove_msg: 'Are you sure you want to remove authorized directory "{path}"? This app will no longer access it.',
   directory_auth_success: 'Authorization succeeded',
   directory_auth_cancel: 'Authorization canceled',
+  directory_auth_failed: 'Directory authorization failed. Please try again.',
   directory_auth_updated: 'Authorized directories updated',
   directory_appid_missing: 'Unable to get app ID, please try again',
   directory_pick_title: 'Select directory to authorize',

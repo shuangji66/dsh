@@ -10,6 +10,15 @@ import { useDshBackup } from '@/composables/useDshBackup'
 import { api, type DshDataBackup } from '@/serverapi'
 import { trimAppReady } from '@/utils/trimApp'
 import { isFnosApp } from '@/utils/fnosApp'
+import {
+  buildFnosAuthURL,
+  fnosAuthReturnURL,
+  readFnosAuthReturn,
+  rememberFnosAuthState,
+  stripFnosAuthReturn,
+  takeFnosAuthState,
+} from '@/utils/fnosAuth'
+import { randomId } from '@/utils/randomId'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -21,9 +30,10 @@ const { paths, loading, convertedPaths } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
 
-// 飞牛 App 内置 WebView：目录授权依赖宿主桥接，当前在 App 内不可用 ——
-// 页面顶部给一条常驻提示（不挡住页面，也不禁用按钮：宿主后续开放后无需再改代码）。
-const fnosApp = isFnosApp()
+// 飞牛 App 内置 WebView 的目录授权走「独立 Web」那条路（见 openPicker）：
+// App 的宿主桥接 pickUserFile 在 iOS 1.37.x 上会按共享授权处理并报鉴权异常，
+// 而平台的网页授权页（/app-auth/pick-user-file）在 App 内可用 —— 同窗口跳过去，
+// 选完目录由平台整页跳回本页（结果参数由 handleFnosAuthReturn 解析）。
 
 // 宿主 SDK（@trimjs/web-app）是 utils/trimApp.ts 里的单例，且在页面加载时（main.ts）
 // 就已开始握手 —— 不能在这里 new：宿主桌面的握手监听只保留 60 秒，等本页挂载再握手，
@@ -252,6 +262,9 @@ async function loadBackupDir() {
 }
 
 onMounted(() => {
+  // 飞牛网页授权（App 内「独立 Web」通路）会整页跳回本页并带上结果参数：
+  // 先消费结果（toast + 清地址栏），再照常拉列表。
+  handleFnosAuthReturn()
   store.load()
   loadHomeInfo()
   loadBackupDir()
@@ -260,6 +273,32 @@ onMounted(() => {
   backup.sync()
   window.addEventListener('message', handleAuthCallback)
 })
+
+// 解析平台授权页带回的 status / state / path。
+// 失败（state 对不上）时只提示、不当作授权成功 —— 同窗口回跳时 sessionStorage 里的
+// state 一定还在，对不上说明不是本次点击发起的授权。
+function handleFnosAuthReturn() {
+  const result = readFnosAuthReturn()
+  if (!result) return
+
+  const expected = takeFnosAuthState()
+  stripFnosAuthReturn()
+
+  if (expected && result.state !== expected) {
+    toast.show(t('directory_auth_failed'), 'error')
+    return
+  }
+
+  if (result.status === 'success') {
+    toast.show(t('directory_auth_success'), 'success')
+    return
+  }
+  if (result.status === 'cancel' || result.error === 'access_denied') {
+    toast.show(t('directory_auth_cancel'), 'info')
+    return
+  }
+  toast.show(t('directory_auth_failed'), 'error')
+}
 
 function handleAuthCallback(event: MessageEvent) {
   if (event.origin !== window.location.origin) return
@@ -281,7 +320,40 @@ function handleAuthCallback(event: MessageEvent) {
   toast.show(t('directory_auth_updated'), 'success')
 }
 
+// 飞牛 App：把内置 WebView 当作「独立 Web」，打开平台的目录授权页。
+// 授权完成后平台整页跳回本页，结果由 onMounted 里的 handleFnosAuthReturn 消费。
+async function startFnosAppAuth() {
+  let appName = settings.runtime?.appName || ''
+  if (!appName) {
+    await settings.load()
+    appName = settings.runtime?.appName || ''
+  }
+  if (!appName) {
+    toast.show(t('directory_appid_missing'), 'error')
+    return
+  }
+
+  const state = randomId()
+  rememberFnosAuthState(state)
+  const url = buildFnosAuthURL({
+    appName,
+    redirectUri: fnosAuthReturnURL(),
+    state,
+    directory: true,
+  })
+  // 同窗口跳转：App 的 WebView 没有可靠的 window.open/opener，弹窗方案会静默失败。
+  // 用 replace 而不是 assign，授权完成后 history 里不留一页已经用过的授权页。
+  window.location.replace(url)
+}
+
 async function openPicker() {
+  // 飞牛 App 内置 WebView：官方桥接的 pickUserFile 在 iOS App 上会按「应用共享授权」
+  // 处理并报应用鉴权异常（个人目录授权不可用），改走平台的网页授权通路。
+  if (isFnosApp()) {
+    await startFnosAppAuth()
+    return
+  }
+
   // 等宿主桥接就绪；返回 null = 宿主的握手监听已销毁（重开应用窗口才能恢复）
   const sdk = await trimAppReady()
   if (!sdk) {
@@ -372,15 +444,6 @@ onBeforeUnmount(() => {
       </button>
       <button class="g-btn-secondary h-8 px-3 text-xs flex-shrink-0" @click="openPicker()">{{ t('directory_add') }}</button>
     </PageHeader>
-
-    <!-- 飞牛 App 访问：目录授权暂不可用。黄色提示常驻在标题栏下（与「插件操作进行中」
-         的风险提示同一套配色），说明「添加授权」当前点了也没有结果。 -->
-    <div
-      v-if="fnosApp"
-      class="mb-3 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-3 py-2 text-xs leading-relaxed text-[#B45309] dark:bg-[#F59E0B]/15 dark:text-[#FBBF24]"
-    >
-      {{ t('directory_fnapp_auth_unavailable') }}
-    </div>
 
     <!-- 每个目录一张卡片，按容器宽度自适应分栏（.g-card-grid）：
          主目录固定为第一张，备份目录紧随其后，其余为已授权目录；加载/空态卡片占满整行。 -->

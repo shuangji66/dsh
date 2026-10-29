@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isFnosApp } from '../src/client/env.ts';
+import { isConsoleEmbeddedDsh, isFnosApp } from '../src/client/env.ts';
 
 test('recognizes the fnOS app WebView on iOS and Android', () => {
   assert.equal(isFnosApp(
@@ -17,4 +17,13 @@ test('plain browsers and the fnOS desktop iframe are not the app WebView', () =>
   assert.equal(isFnosApp('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15'), false);
   assert.equal(isFnosApp(''), false);
   assert.equal(isFnosApp('Mozilla/5.0 (iPhone) FNOS/1.2.0800 Mobile/15E148'), false);
+});
+
+test('recognizes the console embedded dsh mount but not the direct dsh entry', () => {
+  assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui/'), true);
+  assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui'), true);
+  assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui/fnos-advanced/x'), true);
+  assert.equal(isConsoleEmbeddedDsh('/app/Harness/dsh/'), false);
+  assert.equal(isConsoleEmbeddedDsh('/app/Harness/'), false);
+  assert.equal(isConsoleEmbeddedDsh('/app/Harness/dsh/gui/'), true);
 });

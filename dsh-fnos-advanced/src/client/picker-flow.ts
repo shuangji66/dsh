@@ -20,7 +20,7 @@ import {
 import { isCancellationText, isPickerCancelled } from './cancel.ts';
 import { LOG_PREFIX, POPUP_FEATURES } from './constants.ts';
 import { closePopup, randomId, writePopupLoading } from './dom.ts';
-import { isFnosApp } from './env.ts';
+import { isConsoleEmbeddedDsh, isFnosApp } from './env.ts';
 import type { PickFlow } from './flow.ts';
 import { t, translateError } from './i18n.ts';
 import { pickerParams } from './picker.ts';
@@ -39,23 +39,39 @@ interface DirectPickResult {
   error?: string;
 }
 
+/**
+ * Whether the native picker bridge is unusable and the fnOS web authorization
+ * page must be used instead.
+ *
+ * - The console's embedded dsh (`/gui/`) has no usable host bridge at all, so
+ *   both file and directory picks are browser-like — even inside the fnOS App.
+ * - The fnOS App icon entry (direct dsh) keeps the native picker for files;
+ *   only the directory flow is switched, because the app's native pickUserFile
+ *   applies shared-folder authorization and fails for personal folders.
+ */
+function usesWebPicker(flow: PickFlow): boolean {
+  return isConsoleEmbeddedDsh() || (isFnosApp() && flow.directory === true);
+}
+
+/** Whether the web authorization page should be embedded instead of a popup. */
+function usesAuthFrame(flow: PickFlow): boolean {
+  return isFnosApp() && usesWebPicker(flow);
+}
+
 /** Drive one picker attempt from a click. */
 export async function runPickFlow(button: HTMLButtonElement, flow: PickFlow): Promise<void> {
   if (button.dataset.busy === '1') return;
 
   markBusy(button, flow);
 
-  // In the fnOS mobile app the native pickUserFile bridge is broken for
-  // personal folders (it applies shared-folder authorization), so the
-  // directory flow goes straight to the web authorization page. That page is
-  // embedded in an iframe later (see startAuthFlow), which needs no popup.
-  const appDirectory = isFnosApp() && flow.directory === true;
+  const webPicker = usesWebPicker(flow);
+  const useFrame = usesAuthFrame(flow);
 
-  // Top-level browsers need the popup opened inside the click task. Host
-  // environments (fnOS desktop / mobile app) get the native picker first and do
-  // not need a popup at all.
+  // Web authorization needs its popup opened inside the click task when the
+  // page itself is browser-like (top-level or the console iframe). The app's
+  // iframe surface needs no popup; host environments use the native picker.
   let popup: Window | null = null;
-  if (!appDirectory && !isHostLikeWindow()) {
+  if (!useFrame && (webPicker || !isHostLikeWindow())) {
     popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
     if (popup) writePopupLoading(popup);
   }
@@ -87,7 +103,7 @@ export async function runPickFlow(button: HTMLButtonElement, flow: PickFlow): Pr
       return;
     }
 
-    if (!appDirectory) {
+    if (!useFrame) {
       if (!popup || popup.closed) {
         popup = window.open('', `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
       }
@@ -124,13 +140,13 @@ export async function finishPick(flow: PickFlow, paths: string[]): Promise<void>
 
 /**
  * In fnOS desktop the official SDK can open the native picker directly through
- * the host bridge. The fnOS mobile app is different: its pickUserFile bridge
- * applies shared-folder authorization and fails for personal folders, so the
- * directory flow skips the bridge and uses the web authorization page. Other
+ * the host bridge. The console's embedded dsh has no usable bridge, and the
+ * fnOS App's pickUserFile bridge applies shared-folder authorization (fails
+ * for personal folders), so those flows use the web authorization page. Other
  * bridge features (file details / open / re-authorize) are unaffected.
  */
 export async function pickPathsDirect(flow: PickFlow): Promise<DirectPickResult> {
-  if (isFnosApp() && flow.directory === true) return { handled: false };
+  if (usesWebPicker(flow)) return { handled: false };
 
   const sdk = getSdk();
   try {
@@ -179,10 +195,11 @@ export async function startAuthFlow(
   flow.setLabel(t('等待授权…'));
   const state = randomId();
 
-  // The fnOS App's WebView cannot reliably open popups, and the workspace
-  // dialog lives in this page. Embed the authorization page in a full-screen
-  // iframe instead; the callback posts to window.parent and we stay here.
-  const useFrame = isFnosApp() && flow.directory === true;
+  // The fnOS App's WebView cannot reliably open popups, and the picker dialog
+  // lives in this page. Embed the authorization page in a full-screen iframe
+  // instead; the callback posts to window.parent and we stay here. The console
+  // entry (`/gui/`) is browser-like even outside the app, so it uses a popup.
+  const useFrame = usesAuthFrame(flow);
   let frame: AuthFrame | null = null;
   let popup = existingPopup;
   let surface: AuthSurface;

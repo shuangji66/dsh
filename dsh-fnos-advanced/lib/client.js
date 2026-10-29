@@ -2430,6 +2430,19 @@ var Ue = class {
   }
 };
 
+// src/client/env.ts
+function isFnosApp(userAgent) {
+  const ua = userAgent ?? (typeof navigator !== "undefined" ? navigator.userAgent || "" : "");
+  return /FNAppType\//.test(ua);
+}
+function isConsoleEmbeddedDsh(pathname) {
+  const path = pathname ?? (typeof window !== "undefined" ? window.location.pathname : "");
+  return /\/gui(?:\/|$)/.test(path);
+}
+function isFnosAppEmbedded() {
+  return isFnosApp() && isConsoleEmbeddedDsh();
+}
+
 // src/client/sdk.ts
 var sdkInstance = null;
 function getSdk() {
@@ -2437,6 +2450,7 @@ function getSdk() {
   return sdkInstance;
 }
 function isFnosHost() {
+  if (isConsoleEmbeddedDsh()) return false;
   const sdk = getSdk();
   if (sdk.isWeb && sdk.isStandaloneWeb) return false;
   return window.parent !== window || sdk.isWeb === false;
@@ -2694,12 +2708,6 @@ function requestAuth({ surface, state, buildUrl }) {
   });
 }
 
-// src/client/env.ts
-function isFnosApp(userAgent) {
-  const ua = userAgent ?? (typeof navigator !== "undefined" ? navigator.userAgent || "" : "");
-  return /FNAppType\//.test(ua);
-}
-
 // src/client/picker.ts
 var SIDEBAR_GROUPS = Object.freeze([
   "myFiles",
@@ -2732,12 +2740,19 @@ function isDuplicateWorkspacePath(candidate, workspacePaths2) {
 }
 
 // src/client/picker-flow.ts
+function usesWebPicker(flow) {
+  return isConsoleEmbeddedDsh() || isFnosApp() && flow.directory === true;
+}
+function usesAuthFrame(flow) {
+  return isFnosApp() && usesWebPicker(flow);
+}
 async function runPickFlow(button, flow) {
   if (button.dataset.busy === "1") return;
   markBusy(button, flow);
-  const appDirectory = isFnosApp() && flow.directory === true;
+  const webPicker = usesWebPicker(flow);
+  const useFrame = usesAuthFrame(flow);
   let popup = null;
-  if (!appDirectory && !isHostLikeWindow()) {
+  if (!useFrame && (webPicker || !isHostLikeWindow())) {
     popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
     if (popup) writePopupLoading(popup);
   }
@@ -2765,7 +2780,7 @@ async function runPickFlow(button, flow) {
       showAuthChooser(flow, appName, target.choices);
       return;
     }
-    if (!appDirectory) {
+    if (!useFrame) {
       if (!popup || popup.closed) {
         popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
       }
@@ -2795,7 +2810,7 @@ async function finishPick(flow, paths) {
   window.setTimeout(() => flow.restore(), 1600);
 }
 async function pickPathsDirect(flow) {
-  if (isFnosApp() && flow.directory === true) return { handled: false };
+  if (usesWebPicker(flow)) return { handled: false };
   const sdk = getSdk();
   try {
     await sdk.ready();
@@ -2826,7 +2841,7 @@ async function pickPathsDirect(flow) {
 async function startAuthFlow(flow, appName, base, existingPopup) {
   flow.setLabel(t("等待授权…"));
   const state = randomId();
-  const useFrame = isFnosApp() && flow.directory === true;
+  const useFrame = usesAuthFrame(flow);
   let frame = null;
   let popup = existingPopup;
   let surface;
@@ -3302,7 +3317,7 @@ function injectPickItem(template) {
 var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.1";
+var VERSION = "0.6.2";
 
 // src/client/workspace-menu.ts
 var lastWorkspaceMenu = null;
@@ -3361,7 +3376,7 @@ function injectOpenDirItem(menu) {
   });
   const reauth = make(REAUTH_DIR_ATTR, t("重新授权目录"), FOLDER_OPEN_SVG, (id) => {
     let popup = null;
-    if (!isFnosHost()) popup = openAuthPopup();
+    if (!isFnosHost() && !isFnosAppEmbedded()) popup = openAuthPopup();
     void reauthWorkspaceFromMenu(id, popup);
   });
   if (reauth) viewport.insertBefore(reauth, viewport.firstChild);
@@ -3453,13 +3468,22 @@ async function authorizeWorkspacePath(path, popup) {
   } else {
     base = target.base;
   }
+  let frame = null;
   let windowRef = popup;
-  if (!windowRef || windowRef.closed) windowRef = openAuthPopup();
-  if (!windowRef) throw new Error(t("浏览器拦截了授权窗口，请允许弹窗后重试。"));
+  let surface;
+  if (isFnosAppEmbedded()) {
+    frame = openAuthFrame();
+    if (!frame) throw new Error(t("无法打开授权页面，请重试。"));
+    surface = frame.surface;
+  } else {
+    if (!windowRef || windowRef.closed) windowRef = openAuthPopup();
+    if (!windowRef) throw new Error(t("浏览器拦截了授权窗口，请允许弹窗后重试。"));
+    surface = windowSurface(windowRef);
+  }
   try {
     const state = randomId();
     const auth = await requestAuth({
-      surface: windowSurface(windowRef),
+      surface,
       state,
       buildUrl: () => buildAuthUrl(base, state, "authorizeUserFile", { path }, config.appName || "Harness")
     });
@@ -3471,6 +3495,8 @@ async function authorizeWorkspacePath(path, popup) {
   } catch (error) {
     closePopup(windowRef);
     throw error;
+  } finally {
+    frame?.close();
   }
 }
 
@@ -3888,7 +3914,7 @@ function WorkspaceHealthSection({ disabled }) {
   };
   const reauth = async (result) => {
     let popup = null;
-    if (!isFnosHost()) popup = openAuthPopup();
+    if (!isFnosHost() && !isFnosAppEmbedded()) popup = openAuthPopup();
     try {
       await authorizeWorkspacePath(result.path, popup);
       const [next] = await checkWorkspaceHealth([result.id]);

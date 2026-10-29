@@ -30,6 +30,7 @@ import {
   type SettingsHostState,
   type WorkspaceHealthRow,
 } from './plugin-api.ts';
+import { isFnosAppEmbedded } from './env.ts';
 import { getSdk, isFnosHost } from './sdk.ts';
 import { authorizeWorkspacePath } from './workspace-menu.ts';
 
@@ -585,7 +586,7 @@ function WorkspaceHealthSection({ disabled }: { disabled: boolean }): React.Reac
 
   const reauth = async (result: WorkspaceHealthRow) => {
     let popup: Window | null = null;
-    if (!isFnosHost()) popup = openAuthPopup();
+    if (!isFnosHost() && !isFnosAppEmbedded()) popup = openAuthPopup();
     try {
       await authorizeWorkspacePath(result.path, popup);
       const [next] = await checkWorkspaceHealth([result.id]);

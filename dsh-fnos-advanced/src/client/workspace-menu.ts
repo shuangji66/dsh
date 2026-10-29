@@ -6,7 +6,15 @@
  * has, and the plugin's rows are clones of the first existing item so they
  * inherit its styling without relying on CSS-module class names.
  */
-import { buildAuthUrl, openAuthPopup, requestAuth, windowSurface } from './auth.ts';
+import {
+  buildAuthUrl,
+  openAuthFrame,
+  openAuthPopup,
+  requestAuth,
+  windowSurface,
+  type AuthFrame,
+  type AuthSurface,
+} from './auth.ts';
 import { isCancellationText } from './cancel.ts';
 import {
   CHECK_DIR_ATTR,
@@ -16,6 +24,7 @@ import {
   REAUTH_DIR_ATTR,
 } from './constants.ts';
 import { closePopup, isVisible, randomId, showToast } from './dom.ts';
+import { isFnosAppEmbedded } from './env.ts';
 import { t, translateError } from './i18n.ts';
 import {
   checkWorkspaceHealth,
@@ -110,8 +119,10 @@ function injectOpenDirItem(menu: Element): void {
     void checkWorkspaceFromMenu(id);
   });
   const reauth = make(REAUTH_DIR_ATTR, t('重新授权目录'), FOLDER_OPEN_SVG, (id) => {
+    // The app's embedded console dsh opens an iframe inside
+    // authorizeWorkspacePath; do not pre-open a popup there.
     let popup: Window | null = null;
-    if (!isFnosHost()) popup = openAuthPopup();
+    if (!isFnosHost() && !isFnosAppEmbedded()) popup = openAuthPopup();
     void reauthWorkspaceFromMenu(id, popup);
   });
 
@@ -190,9 +201,11 @@ export async function reauthWorkspaceFromMenu(id: string, popup: Window | null):
 }
 
 /**
- * Re-authorize one known path. In a fnOS host the SDK opens the native
- * authorization sheet; in a browser the existing app-auth popup is used. The
- * caller must open a blank popup inside its click handler for the browser path.
+ * Re-authorize one known path. A real fnOS host opens the native authorization
+ * sheet; a browser (including the console's embedded dsh, which has no usable
+ * host bridge) uses the app-auth web page. The caller must open a blank popup
+ * inside its click handler for the browser/popup path; the fnOS App's embedded
+ * console dsh uses an iframe instead.
  */
 export async function authorizeWorkspacePath(path: string, popup: Window | null): Promise<boolean> {
   if (isFnosHost()) {
@@ -217,14 +230,23 @@ export async function authorizeWorkspacePath(path: string, popup: Window | null)
     base = target.base;
   }
 
+  let frame: AuthFrame | null = null;
   let windowRef = popup;
-  if (!windowRef || windowRef.closed) windowRef = openAuthPopup();
-  if (!windowRef) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
+  let surface: AuthSurface;
+  if (isFnosAppEmbedded()) {
+    frame = openAuthFrame();
+    if (!frame) throw new Error(t('无法打开授权页面，请重试。'));
+    surface = frame.surface;
+  } else {
+    if (!windowRef || windowRef.closed) windowRef = openAuthPopup();
+    if (!windowRef) throw new Error(t('浏览器拦截了授权窗口，请允许弹窗后重试。'));
+    surface = windowSurface(windowRef);
+  }
 
   try {
     const state = randomId();
     const auth = await requestAuth({
-      surface: windowSurface(windowRef),
+      surface,
       state,
       buildUrl: () => buildAuthUrl(base, state, 'authorizeUserFile', { path }, config.appName || 'Harness'),
     });
@@ -236,5 +258,7 @@ export async function authorizeWorkspacePath(path: string, popup: Window | null)
   } catch (error) {
     closePopup(windowRef);
     throw error;
+  } finally {
+    frame?.close();
   }
 }

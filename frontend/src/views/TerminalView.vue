@@ -5,11 +5,11 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import '@xterm/xterm/css/xterm.css'
-import { useI18n, uiErrText } from '@/composables/useI18n'
+import { useI18n } from '@/composables/useI18n'
 import { useTheme } from '@/composables/useTheme'
+import { useQuickCmds } from '@/composables/useQuickCmds'
 import { useToastStore } from '@/stores/toast'
-import { api, type QuickCmd } from '@/serverapi'
-import { randomId } from '@/utils/randomId'
+import { api } from '@/serverapi'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import QuickCmdsDialog from '@/components/QuickCmdsDialog.vue'
 import QuickCmdEditDialog from '@/components/QuickCmdEditDialog.vue'
@@ -121,7 +121,6 @@ const shiftPressed = ref(false)
 let longPressTimer: number | null = null
 let touchStartX = 0
 let touchStartY = 0
-let touchStartTime = 0
 let pasteHelper: HTMLTextAreaElement | null = null
 
 // 触摸滚动相关（见 onTouchMove）：
@@ -132,17 +131,35 @@ const TOUCH_SCROLL_MIN = 10
 let touchLastY = 0
 let touchScrolling = false
 
-// 快捷指令弹窗状态
-const quickCmdsVisible = ref(false)
-const editVisible = ref(false)
-const editingCmd = ref<QuickCmd | null>(null)
-const quickCmds = ref<QuickCmd[]>([])
-const deleteTarget = ref<QuickCmd | null>(null)
-const deleteDialogVisible = ref(false)
-const cmdLoading = ref(false)
-// 加载失败标志：后端返回的是整表，**没加载成功就不能改**（本地那份可能是空的/过期的，
-// 保存上去等于用一条指令覆盖掉服务端已有的全部指令），所以弹窗要据此禁用「新增」并给重试入口。
-const cmdFailed = ref(false)
+// 快捷指令：状态与持久化在 useQuickCmds 里，这里只注入「往终端写」的三个动作。
+// 组件模板沿用原有变量名，避免大段改模板。
+const {
+  commands: quickCmds,
+  loading: cmdLoading,
+  failed: cmdFailed,
+  listVisible: quickCmdsVisible,
+  editVisible,
+  editing: editingCmd,
+  deleteVisible: deleteDialogVisible,
+  deleteTarget,
+  open: openQuickCmds,
+  reload: loadQuickCmds,
+  run: runQuickCmd,
+  startAdd: onQuickCmdAdd,
+  startEdit: onQuickCmdEdit,
+  startDelete: onQuickCmdDelete,
+  confirmDelete: confirmDeleteQuickCmd,
+  save: onQuickCmdSave,
+  reorder: onQuickCmdReorder
+} = useQuickCmds({
+  send: (data) => {
+    if (!sock || sock.readyState !== WebSocket.OPEN) return false
+    sock.send(data)
+    return true
+  },
+  focusTerminal: () => term?.focus(),
+  scrollToBottom: () => scrollToBottom()
+})
 
 function wsUrl(): string {
   const u = new URL(wsEndpoint, location.href)
@@ -329,7 +346,6 @@ function onTouchStart(e: TouchEvent) {
   touchStartX = touch.clientX
   touchStartY = touch.clientY
   touchLastY = touch.clientY
-  touchStartTime = Date.now()
   touchScrolling = false
   // 长按粘贴要求在线：没连上时连菜单都不弹，这里顺带不发定时器
   if (term && sock && sock.readyState === WebSocket.OPEN) {
@@ -446,10 +462,6 @@ onMounted(() => {
     openAndFit()
   }
 
-  term.onResize(({ cols, rows }) => {
-    // 不重复发送，由 fitAndResize 统一处理
-  })
-
   if (window.ResizeObserver) {
     resizeObserver = new ResizeObserver(debouncedFit)
     resizeObserver.observe(el.value)
@@ -513,16 +525,19 @@ onMounted(() => {
 function handleData(raw: string) {
   if (!raw) return
   let rest = raw
+  // eslint-disable-next-line no-control-regex -- OSC 控制帧本身含 ESC/BEL
   rest = rest.replace(/\x1b\]id;([0-9a-f]+)\x07/g, (_, id: string) => {
     sessionId.value = id
     return ''
   })
+  // eslint-disable-next-line no-control-regex -- OSC 控制帧本身含 ESC/BEL
   rest = rest.replace(/\x1b\]ready\x07/g, () => '')
   // 被其他设备接管：用常量做纯字符串匹配（帧本身含 ESC/]，不必拼正则）
   if (rest.includes(DETACHED_PAYLOAD)) {
     rest = rest.split(DETACHED_PAYLOAD).join('')
     markDetached()
   }
+  // eslint-disable-next-line no-control-regex -- OSC 控制帧本身含 ESC/BEL
   rest = rest.replace(/\x1b\]exit\x07/g, () => '')
   // 会话已不存在（如后端重启）：丢弃旧 id，稍后自动重建新会话
   if (rest.includes('session not found')) {
@@ -695,131 +710,6 @@ function clearTerminal() {
   // 清屏同步清空后端临时历史文件：重连/刷新后不再回放已清除的内容
   if (sessionId.value) {
     api.clearSessionHistory(sessionId.value).catch((e) => console.warn('clear session history:', e))
-  }
-}
-
-// ---------- 快捷指令：列表 / 新增 / 编辑 / 删除 / 执行 ----------
-async function loadQuickCmds() {
-  cmdLoading.value = true
-  cmdFailed.value = false
-  try {
-    const res = await api.listQuickCmds()
-    quickCmds.value = res.commands || []
-  } catch (e) {
-    // 失败要**留下痕迹**：不能只在 toast 里闪一下，然后让弹窗显示「暂无快捷指令」——
-    // 那会让用户以为自己的指令被删了，转头重建一份（而保存是整体覆盖，会把服务端那份盖掉）。
-    // 文案带后端原文（诊断信息，如「解密失败」），既有诊断价值又不随语言漂移。
-    cmdFailed.value = true
-    toast.show(uiErrText(e, t('qc_load_failed')), 'error')
-    console.warn('load quick cmds error:', e)
-  } finally {
-    cmdLoading.value = false
-  }
-}
-
-function openQuickCmds() {
-  quickCmdsVisible.value = true
-  loadQuickCmds()
-}
-
-// 将命令内容写入终端；勾选“自动执行”的命令在输入后自动回车执行，
-// 否则仅输入命令文本，由用户自行回车确认。
-function runQuickCmd(cmd: QuickCmd) {
-  if (!sock || sock.readyState !== WebSocket.OPEN) {
-    toast.show(t('qc_not_connected'), 'error')
-    return
-  }
-  // 多行内容统一转成回车（换行即输入命令的一部分）
-  const payload = cmd.content.replace(/\r?\n/g, '\r') + (cmd.auto ? '\r' : '')
-  sock.send(payload)
-  scrollToBottom()
-  // 点击命令卡片后自动关闭弹窗，并把光标聚焦到终端
-  quickCmdsVisible.value = false
-  term?.focus()
-}
-
-function onQuickCmdAdd() {
-  editingCmd.value = null
-  editVisible.value = true
-}
-
-function onQuickCmdEdit(cmd: QuickCmd) {
-  // 直接持有列表中的引用，保存时据此更新对应卡片
-  editingCmd.value = cmd
-  editVisible.value = true
-}
-
-function onQuickCmdDelete(cmd: QuickCmd) {
-  deleteTarget.value = cmd
-  deleteDialogVisible.value = true
-}
-
-async function confirmDeleteQuickCmd() {
-  const target = deleteTarget.value
-  if (!target) return
-  const snapshot = snapshotQuickCmds() // 必须在改动之前拍，见 persistQuickCmds
-  quickCmds.value = quickCmds.value.filter((c) => c.id !== target.id)
-  deleteTarget.value = null
-  deleteDialogVisible.value = false
-  try {
-    await persistQuickCmds(snapshot)
-    toast.show(t('qc_deleted'), 'success')
-  } catch {
-    // persistQuickCmds 已提示失败并把列表回滚到改动前
-  }
-}
-
-// 改动前的深拷贝快照：回滚路径必须回到「用户动手之前」的状态。
-// 旧实现把快照拍在 persistQuickCmds 内部，那时本地改动已经发生，回滚写回的是
-// 「已改动」状态（qc_deleted 等操作失败后界面与后端不一致）。
-function snapshotQuickCmds(): QuickCmd[] {
-  return quickCmds.value.map((c) => ({ ...c }))
-}
-
-// 把当前列表整体写回持久化文件；失败时回滚到调用方在改动之前拍下的快照
-async function persistQuickCmds(rollbackTo: QuickCmd[]) {
-  try {
-    const res = await api.saveQuickCmds(quickCmds.value)
-    quickCmds.value = res.commands || quickCmds.value
-  } catch (e) {
-    quickCmds.value = rollbackTo
-    toast.show(t('qc_save_failed'), 'error')
-    console.warn('save quick cmds error:', e)
-    throw e
-  }
-}
-
-async function onQuickCmdSave(payload: { name: string; content: string; auto: boolean }) {
-  const snapshot = snapshotQuickCmds() // 改动之前拍快照（编辑是就地改，push 是新增）
-  if (editingCmd.value) {
-    editingCmd.value.name = payload.name
-    editingCmd.value.content = payload.content
-    editingCmd.value.auto = payload.auto
-  } else {
-    quickCmds.value.push({
-      id: randomId(),
-      name: payload.name,
-      content: payload.content,
-      auto: payload.auto
-    })
-  }
-  editVisible.value = false
-  try {
-    await persistQuickCmds(snapshot)
-    toast.show(t('qc_saved'), 'success')
-  } catch {
-    // persistQuickCmds 已提示失败并回滚（编辑场景同样还原为改动前的内容）
-  }
-}
-
-// 快捷指令上移/下移：QuickCmdsDialog 已算出新顺序，这里整体写回持久化文件
-async function onQuickCmdReorder(ordered: QuickCmd[]) {
-  const snapshot = snapshotQuickCmds() // 改动之前拍快照
-  quickCmds.value = ordered
-  try {
-    await persistQuickCmds(snapshot)
-  } catch {
-    // persistQuickCmds 已提示失败并回滚为改动前的顺序
   }
 }
 

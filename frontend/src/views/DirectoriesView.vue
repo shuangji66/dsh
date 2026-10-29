@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
+import { onMounted, onBeforeUnmount, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useDirectoriesStore } from '@/stores/directories'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
-import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
-import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
-import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useDshBackup } from '@/composables/useDshBackup'
-import { api, type DshDataBackup } from '@/serverapi'
+import { uiErrText, useI18n } from '@/composables/useI18n'
+import { api } from '@/serverapi'
 import { trimAppReady } from '@/utils/trimApp'
 import { isFnosApp } from '@/utils/fnosApp'
 import {
@@ -21,7 +19,8 @@ import {
 } from '@/utils/fnosAuth'
 import { randomId } from '@/utils/randomId'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import DialogCloseButton from '@/components/DialogCloseButton.vue'
+import BackupDialog from '@/components/directories/BackupDialog.vue'
+import RestoreDialog from '@/components/directories/RestoreDialog.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { icons } from '@/utils/icons'
 
@@ -30,6 +29,8 @@ const settings = useSettingsStore()
 const { paths, loading, convertedPaths } = storeToRefs(store)
 const toast = useToastStore()
 const { t } = useI18n()
+// 只观察备份是否在跑（页头小转圈）；进度/结果在 BackupDialog 内部。
+const { running: backupRunning, sync: syncBackup } = useDshBackup()
 
 // 飞牛 App 内置 WebView 的目录授权走「独立 Web」那条路（见 openPicker）：
 // App 的宿主桥接 pickUserFile 在 iOS 1.37.x 上会按共享授权处理并报鉴权异常，
@@ -45,86 +46,17 @@ const { t } = useI18n()
 const homeDir = ref('') // 主目录（dsh 的 HOME）实际系统路径
 const homeDirConverted = ref('') // 主目录 sdk 转换后的语义路径
 
-// 备份当前主目录 ~/.dsh 的弹窗状态。
-//
-// 备份本身跑在**服务端**（见 useDshBackup 的头注释）：这里只有「弹窗开没开」是本地状态，
-// 进度与结果都来自后端快照 —— 因此关掉弹窗备份继续跑，重新打开时 syncForDialog() 会把
-// 进度追平。backupDialogVisible 只是渲染开关，不参与任何取消逻辑。
+// 备份 / 恢复弹窗的显示开关：进度、列表、恢复轮询都在各自组件内部。
 const backupDialogVisible = ref(false)
-// 打开弹窗时的同步状态：先显示「检查中」，避免确认视图闪一下再跳到进度视图。
-const backupSyncing = ref(false)
-const backup = useDshBackup()
-// 这些 ref 必须是**顶层绑定**才能被模板自动解包（`backup.running` 在模板里是个 Ref 对象，
-// 恒为真 —— 不要在模板里写 backup.xxx 当状态用）。
-const backupStatus = computed(() => backup.status.value)
-const backupRunning = backup.running
-const backupCancelling = backup.cancelling
-const backupStarting = backup.starting
-const backupLastError = backup.lastError
-const backupPercent = computed(() => {
-  const st = backupStatus.value
-  if (!st || st.totalBytes <= 0) return 0
-  // 打包期间源目录仍可能被 dsh 写入，百分比可能略微超过 100，一律夹取。
-  return Math.min(100, Math.max(0, Math.round((st.bytes / st.totalBytes) * 100)))
-})
-// 总量未知（预扫描失败/空目录）时不显示百分比，交给不确定进度条（.progress-indeterminate）
-const backupTotalKnown = computed(() => (backupStatus.value?.totalBytes ?? 0) > 0)
-// 结束后的结论文案（成功/取消/失败），供弹窗的结果视图使用
-const backupResultText = computed(() => {
-  const st = backupStatus.value
-  if (!st || st.running) return ''
-  if (st.cancelled) return t('backup_cancelled')
-  if (st.ok) return t('directory_backup_success', { name: st.name || '' })
-  return uiText(st.error, st.errorRef, t('directory_backup_failed'))
-})
-
-// dsh 数据备份恢复状态
 const restoreVisible = ref(false) // 恢复备份选择弹窗
-const restoreBusy = ref(false) // 恢复进行中
-const restoreError = ref('')
-const dshBackups = ref<DshDataBackup[]>([]) // 可用备份列表
-const selectedRestore = ref<string | null>(null) // 选中的备份名
-const confirmRestoreVisible = ref(false) // 恢复二次确认
-const restoreDeleteName = ref<string | null>(null) // 待删除备份
-let restorePollTimer: ReturnType<typeof setInterval> | null = null
 
 // 备份目录（统一备份路径 + sdk 转换后的语义路径）
 const backupDirPath = ref('')
 const backupDirConverted = ref('')
 
-// 移除授权目录的确认弹窗状态
+// 移除授权目录的确认弹窗状态（确认框由 ConfirmDialog 自己锁滚动/焦点）
 const removeDirDialogVisible = ref(false)
 const removeDirTarget = ref<string | null>(null)
-
-// 任一弹窗打开期间锁定页面滚动（弹窗会叠加：恢复备份弹窗之上还有二次确认）
-const anyDialogOpen = computed(
-  () =>
-    backupDialogVisible.value ||
-    removeDirDialogVisible.value ||
-    restoreVisible.value ||
-    confirmRestoreVisible.value ||
-    restoreDeleteName.value !== null
-)
-useBodyScrollLock(anyDialogOpen)
-
-// 本页几个内联弹窗（备份 / 恢复 / 恢复确认 / 删除备份）同样接入键盘与读屏支持。
-// 组件化弹窗（ConfirmDialog 等）各自在内部调用；这里只补内联实现。
-const backupPanel = ref<HTMLElement | null>(null)
-const restorePanel = ref<HTMLElement | null>(null)
-const confirmRestorePanel = ref<HTMLElement | null>(null)
-const deleteBackupPanel = ref<HTMLElement | null>(null)
-useDialogA11y(() => backupDialogVisible.value, backupPanel, { onClose: closeBackupDialog })
-useDialogA11y(() => restoreVisible.value, restorePanel, {
-  onClose: () => {
-    if (!restoreBusy.value) restoreVisible.value = false
-  }
-})
-useDialogA11y(() => confirmRestoreVisible.value, confirmRestorePanel, {
-  onClose: () => (confirmRestoreVisible.value = false)
-})
-useDialogA11y(() => restoreDeleteName.value !== null, deleteBackupPanel, {
-  onClose: () => (restoreDeleteName.value = null)
-})
 
 async function loadHomeInfo() {
   if (!settings.runtime) await settings.load()
@@ -142,129 +74,9 @@ async function loadHomeInfo() {
   }
 }
 
-// 打开备份弹窗：先追平后端进度（备份可能正在跑，或上次的结果还在），再显示弹窗。
-async function onBackupClick() {
-  backupDialogVisible.value = true
-  backupSyncing.value = true
-  try {
-    await backup.syncForDialog()
-  } finally {
-    backupSyncing.value = false
-  }
-}
-
-// 关闭弹窗：**不**触碰备份本身（服务端继续跑）——只把本轮结果态清掉，
-// 下次打开回到确认视图；备份仍在跑时会直接回到进度视图。
-function closeBackupDialog() {
-  backupDialogVisible.value = false
-  backup.clearResult()
-}
-
-// 开始备份：启动后弹窗切到进度视图，后续进度由 useDshBackup 的轮询推进。
-async function confirmBackup() {
-  await backup.start()
-}
-
 function onRemoveDirClick(path: string) {
   removeDirTarget.value = path
   removeDirDialogVisible.value = true
-}
-
-// --- dsh 数据备份恢复 ---
-
-// 拉取 dsh 数据备份列表
-async function fetchDshBackups() {
-  try {
-    const res = await api.listDshDataBackups()
-    dshBackups.value = res.backups || []
-  } catch { /* ignore */ }
-}
-
-// 打开恢复备份弹窗
-function onRestoreClick() {
-  restoreError.value = ''
-  restoreBusy.value = false
-  selectedRestore.value = null
-  fetchDshBackups()
-  restoreVisible.value = true
-}
-
-// 选择一个备份
-function selectRestore(name: string) {
-  selectedRestore.value = name
-}
-
-// 二次确认恢复
-function openConfirmRestore() {
-  if (!selectedRestore.value) return
-  confirmRestoreVisible.value = true
-}
-
-// 执行恢复
-async function doRestore() {
-  const name = selectedRestore.value
-  if (!name) return
-  confirmRestoreVisible.value = false
-  restoreBusy.value = true
-  restoreError.value = ''
-  try {
-    await api.dshDataRestore(name)
-    // 轮询恢复状态直到完成
-    if (restorePollTimer) clearInterval(restorePollTimer)
-    restorePollTimer = setInterval(async () => {
-      try {
-        const res = await api.dshDataRestoreStatus()
-        const st = res.status
-        if (st.done) {
-          clearInterval(restorePollTimer!)
-          restorePollTimer = null
-          restoreBusy.value = false
-          if (st.ok) {
-            toast.show(t('restore_success'), 'success')
-            restoreVisible.value = false
-            // 恢复数据后刷新页面（dsh 已重启，加载新配置）
-            setTimeout(() => window.location.reload(), 1000)
-          } else {
-            restoreError.value = uiText(st.error, st.errorRef, t('restore_failed'))
-          }
-        }
-      } catch { /* 继续轮询 */ }
-    }, 2000)
-  } catch (e) {
-    restoreError.value = uiErrText(e, t('restore_failed'))
-    restoreBusy.value = false
-  }
-}
-
-// 删除备份
-function openRestoreDelete(name: string) {
-  restoreDeleteName.value = name
-}
-async function doRestoreDelete() {
-  const name = restoreDeleteName.value
-  if (!name) return
-  try {
-    await api.deleteDshDataBackup(name)
-    toast.show(t('restore_deleted'), 'success')
-    restoreDeleteName.value = null
-    fetchDshBackups()
-  } catch (e) {
-    toast.show(uiErrText(e, t('common_op_failed')), 'error')
-  }
-}
-
-// 格式化备份时间
-function fmtRestoreDate(iso: string): string {
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-// 格式化文件大小
-function fmtRestoreSize(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
 }
 
 // 拉取备份目录实际路径并转换语义路径
@@ -282,15 +94,15 @@ async function loadBackupDir() {
 }
 
 onMounted(() => {
+  // 后端可能正在跑一次备份（例如本页在上一次备份途中被刷新）：同步一次状态，
+  // 页头转圈能接上；没有备份在跑时这次同步没有副作用。
+  syncBackup()
   // 飞牛网页授权（App 内「独立 Web」通路）会整页跳回本页并带上结果参数：
   // 先消费结果（toast + 清地址栏），再照常拉列表。
   handleFnosAuthReturn()
   store.load()
   loadHomeInfo()
   loadBackupDir()
-  // 后端可能正在跑一次备份（例如本页在上一次备份途中被刷新）：挂上轮询，
-  // 这样进度能续上、结束时也能给出提示；没有备份在跑时这次同步没有副作用。
-  backup.sync()
   window.addEventListener('message', handleAuthCallback)
 })
 
@@ -441,9 +253,6 @@ async function openFileManager(path: string) {
 
 onBeforeUnmount(() => {
   window.removeEventListener('message', handleAuthCallback)
-  if (restorePollTimer) clearInterval(restorePollTimer)
-  // 刻意**不**停掉 useDshBackup 的轮询：备份在服务端跑，切走视图后它仍在进行 ——
-  // 轮询会一直持续到这次备份落定（那时才给提示并自动停止），不留下长期计时器。
 })
 </script>
 
@@ -453,9 +262,9 @@ onBeforeUnmount(() => {
          小一号字号 + 细边框 + 不填充底色） -->
     <PageHeader sticky class="mb-3" :title="t('nav_directory')" :icon="icons.folder">
       <!-- 恢复备份（红色边框红色文字，位于备份按钮左侧） -->
-      <button class="g-btn-danger h-8 px-3 text-xs flex-shrink-0" @click="onRestoreClick()">{{ t('directory_restore') }}</button>
+      <button class="g-btn-danger h-8 px-3 text-xs flex-shrink-0" @click="restoreVisible = true">{{ t('directory_restore') }}</button>
       <!-- 备份：备份进行中时按钮不置灰（点开就是进度视图），只加一个小转圈 -->
-      <button class="g-btn-secondary h-8 px-3 text-xs flex-shrink-0" @click="onBackupClick()">
+      <button class="g-btn-secondary h-8 px-3 text-xs flex-shrink-0" @click="backupDialogVisible = true">
         <span
           v-if="backupRunning"
           class="w-3 h-3 rounded-full border-2 border-line dark:border-[#2A2A32] border-t-brand animate-spin"
@@ -544,246 +353,8 @@ onBeforeUnmount(() => {
       @confirm="removeDirTarget && store.remove(removeDirTarget)"
     />
 
-    <!-- 备份当前主目录 ~/.dsh 弹窗。
-         备份在服务端异步执行（见 useDshBackup），本弹窗只是观察者：
-           · 进行中 → 进度条 + 取消（取消会删掉不完整的备份文件）；
-           · 关闭（X / 关闭按钮 / 遮罩）都不终止备份，重新打开时先同步后端进度再继续显示；
-           · 结束时 → 结论（成功 / 已取消 / 失败）。 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="backupDialogVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="closeBackupDialog()"></div>
-          <div
-            ref="backupPanel"
-            tabindex="-1"
-            role="dialog"
-            aria-modal="true"
-            :aria-label="t('confirm_backup_title')"
-            class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
-          >
-            <DialogCloseButton :label="t('dialog_close')" @close="closeBackupDialog()" />
-            <h3 class="g-dialog-title mb-3">{{ t('confirm_backup_title') }}</h3>
-
-            <!-- 进行中：进度条 + 进度文案。总量未知时用不确定进度条（不伪造百分比）。
-                 字号与「更新弹窗」同一档：主状态行 / 提示句 text-sm，字节数 / 文件数等元信息 text-xs。 -->
-            <div v-if="backupRunning" class="py-2">
-              <div class="flex items-center justify-between text-sm text-ink-soft dark:text-[#A6A6AD] mb-1">
-                <span>{{ t('backup_running') }}</span>
-                <span v-if="backupTotalKnown">{{ backupPercent }}%</span>
-              </div>
-              <div class="h-2 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
-                <div
-                  class="h-full rounded-full bg-brand transition-all duration-300"
-                  :class="backupTotalKnown ? '' : 'progress-indeterminate'"
-                  :style="backupTotalKnown ? { width: backupPercent + '%' } : {}"
-                ></div>
-              </div>
-              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">
-                {{ t('backup_progress_size', { done: fmtRestoreSize(backupStatus?.bytes || 0), total: fmtRestoreSize(backupStatus?.totalBytes || 0) }) }}
-                · {{ t('backup_progress_files', { done: backupStatus?.files || 0, total: backupStatus?.totalFiles || 0 }) }}
-              </div>
-              <p class="text-sm text-ink-soft dark:text-[#A6A6AD] mt-3 leading-relaxed">{{ t('backup_keep_hint') }}</p>
-              <p v-if="backupCancelling" class="text-xs text-danger-ink mt-1">{{ t('backup_cancelling') }}</p>
-            </div>
-
-            <!-- 打开弹窗时的状态同步：避免确认视图闪一下再跳到进度视图 -->
-            <div v-else-if="backupSyncing" class="py-8 text-center">
-              <div class="inline-block animate-spin h-5 w-5 border-2 border-brand border-t-transparent rounded-full"></div>
-            </div>
-
-            <!-- 已结束：结论（成功 / 已取消 / 失败） -->
-            <div v-else-if="backupStatus" class="py-2">
-              <p class="text-sm leading-relaxed whitespace-pre-line break-words" :class="backupStatus.ok ? 'text-ink dark:text-white' : 'text-ink-soft dark:text-[#A6A6AD]'">
-                {{ backupResultText }}
-              </p>
-              <p v-if="backupStatus.ok" class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">
-                {{ t('restore_size') }}: {{ fmtRestoreSize(backupStatus.size || 0) }}
-              </p>
-            </div>
-
-            <!-- 未开始：确认 -->
-            <div v-else>
-              <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed whitespace-pre-line">{{ t('confirm_backup_msg') }}</p>
-              <p v-if="backupLastError" class="mt-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-danger-ink break-words">{{ backupLastError }}</p>
-            </div>
-
-            <div class="g-dialog-actions">
-              <button class="g-btn-secondary" @click="closeBackupDialog()">{{ t('dialog_close') }}</button>
-              <!-- 进行中：取消备份（后端中止打包并删除不完整的备份文件） -->
-              <button
-                v-if="backupRunning"
-                class="g-btn-danger"
-                :disabled="backupCancelling"
-                @click="backup.cancel()"
-              >{{ backupCancelling ? t('backup_cancelling') : t('backup_cancel_btn') }}</button>
-              <!-- 取消/失败后可直接重试（成功只给关闭） -->
-              <button
-                v-else-if="backupStatus && !backupStatus.ok"
-                class="g-btn-secondary"
-                :disabled="backupStarting"
-                @click="confirmBackup()"
-              >{{ t('backup_retry') }}</button>
-              <button
-                v-else-if="!backupStatus && !backupSyncing"
-                class="g-btn-secondary"
-                :disabled="backupStarting"
-                @click="confirmBackup()"
-              >{{ t('backup_start') }}</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- 恢复备份选择弹窗 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="restoreVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="restoreBusy ? null : (restoreVisible = false)"></div>
-          <div
-            ref="restorePanel"
-            tabindex="-1"
-            role="dialog"
-            aria-modal="true"
-            :aria-label="t('confirm_restore_title')"
-            class="relative w-full max-w-lg bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
-          >
-            <DialogCloseButton :label="t('dialog_close')" :disabled="restoreBusy" @close="restoreVisible = false" />
-            <h3 class="g-dialog-title mb-2">{{ t('confirm_restore_title') }}</h3>
-
-            <div v-if="restoreBusy" class="py-8 text-center">
-              <div class="inline-block animate-spin h-6 w-6 border-2 border-danger border-t-transparent rounded-full mb-2"></div>
-              <div class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('restore_running') }}</div>
-            </div>
-
-            <template v-else>
-              <div v-if="restoreError" class="mb-3 rounded-lg bg-danger/10 dark:bg-[#EF4444]/10 border border-danger/30 dark:border-[#EF4444]/30 px-3 py-2 text-xs text-danger-ink break-words">{{ restoreError }}</div>
-
-              <div v-if="dshBackups.length === 0" class="py-6 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
-                {{ t('restore_empty') }}
-              </div>
-
-              <div v-else class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32] max-h-64 overflow-auto">
-                <label
-                  v-for="b in dshBackups"
-                  :key="b.name"
-                  class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                >
-                  <input
-                    type="radio"
-                    name="dshrestore"
-                    :value="b.name"
-                    :checked="selectedRestore === b.name"
-                    class="accent-danger flex-shrink-0"
-                    @change="selectRestore(b.name)"
-                  />
-                  <div class="flex-1 min-w-0">
-                    <div class="text-sm font-mono text-ink dark:text-[#EDEDF0] truncate">{{ b.name }}</div>
-                    <div class="text-xs text-ink-faint dark:text-[#8A8A92]">
-                      {{ t('restore_date') }}: {{ fmtRestoreDate(b.modified) }} · {{ t('restore_size') }}: {{ fmtRestoreSize(b.size) }}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    class="flex-shrink-0 text-ink-soft dark:text-[#A6A6AD] hover:text-danger-ink dark:hover:text-danger-ink transition-colors"
-                    :title="t('restore_delete')"
-                    @click.prevent="openRestoreDelete(b.name)"
-                  >
-                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  </button>
-                </label>
-              </div>
-            </template>
-
-            <div class="g-dialog-actions">
-              <button class="g-btn-secondary" :disabled="restoreBusy" @click="restoreVisible = false">{{ t('confirm_cancel') }}</button>
-              <button
-                v-if="selectedRestore && !restoreBusy"
-                class="g-btn-danger"
-                @click="openConfirmRestore"
-              >{{ t('restore_to') }}</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- 恢复备份二次确认弹窗 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="confirmRestoreVisible" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="confirmRestoreVisible = false"></div>
-          <div
-            ref="confirmRestorePanel"
-            tabindex="-1"
-            role="dialog"
-            aria-modal="true"
-            :aria-label="t('confirm_restore_title')"
-            class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
-          >
-            <DialogCloseButton :label="t('dialog_close')" @close="confirmRestoreVisible = false" />
-            <h3 class="g-dialog-title mb-3">{{ t('confirm_restore_title') }}</h3>
-            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('confirm_restore_msg', { name: selectedRestore || '' }) }}</p>
-            <div class="g-dialog-actions">
-              <button class="g-btn-secondary" @click="confirmRestoreVisible = false">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-danger" @click="doRestore">{{ t('confirm_ok') }}</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- 删除备份确认弹窗 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="restoreDeleteName" class="fixed inset-0 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="restoreDeleteName = null"></div>
-          <div
-            ref="deleteBackupPanel"
-            tabindex="-1"
-            role="dialog"
-            aria-modal="true"
-            :aria-label="t('restore_delete_confirm_title')"
-            class="relative w-full max-w-sm bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
-          >
-            <DialogCloseButton :label="t('dialog_close')" @close="restoreDeleteName = null" />
-            <h3 class="g-dialog-title mb-3">{{ t('restore_delete_confirm_title') }}</h3>
-            <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mb-6 whitespace-pre-line">{{ t('restore_delete_confirm_msg', { name: restoreDeleteName || '' }) }}</p>
-            <div class="g-dialog-actions">
-              <button class="g-btn-secondary" @click="restoreDeleteName = null">{{ t('confirm_cancel') }}</button>
-              <button class="g-btn-danger" @click="doRestoreDelete">{{ t('restore_delete') }}</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- 备份 / 恢复弹窗（内部各自处理滚动锁、焦点与嵌套确认） -->
+    <BackupDialog v-model:visible="backupDialogVisible" />
+    <RestoreDialog v-model:visible="restoreVisible" />
   </div>
 </template>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
@@ -7,15 +7,12 @@ import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
-import { useDialogA11y } from '@/composables/useDialogA11y'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import DialogCloseButton from '@/components/DialogCloseButton.vue'
-import GithubIconLink from '@/components/GithubIconLink.vue'
-import { repoSlugs, repoURL } from '@/constants/repos'
 import UpdateSection from '@/components/UpdateSection.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AccountCard from '@/components/account/AccountCard.vue'
-import { useWideLayout } from '@/composables/useMobileLayout'
+import AboutDialog from '@/components/overview/AboutDialog.vue'
+import VisitorsCard from '@/components/overview/VisitorsCard.vue'
 import { isFnosApp } from '@/utils/fnosApp'
 import { icons } from '@/utils/icons'
 
@@ -24,7 +21,7 @@ defineOptions({ name: 'OverviewView' })
 const store = useSettingsStore()
 const { status, loading, runtime } = storeToRefs(store)
 const toast = useToastStore()
-const { t, locale } = useI18n()
+const { t } = useI18n()
 
 // dsh 卡片右上角「进入」的目标：当前访问环境下经飞牛网关访问 dsh 服务的地址。
 // 优先后端按请求头换算的结果（控制台访问源 + 控制台入口下的 /gui/ 反代）；后端推不出
@@ -121,7 +118,7 @@ function retryEntryFrame() {
 
 function onEntryFrameLoad(ev: Event) {
   const el = ev.target as HTMLIFrameElement
-  let text = ''
+  let text: string
   try {
     text = (el.contentDocument?.body?.innerText || '').trim()
   } catch {
@@ -147,46 +144,6 @@ function openAbout() {
   aboutVisible.value = true
 }
 
-// 关于弹窗特性介绍：按类别分组，条目为简短词组，
-// 分别对应 useI18n 里的 about_group_* / about_feature_* 键。
-const aboutFeatureGroups = [
-  {
-    title: 'about_group_runtime',
-    features: [
-      'about_feature_lifecycle',
-      'about_feature_monitor',
-      'about_feature_update',
-      'about_feature_backup',
-    ],
-  },
-  {
-    title: 'about_group_access',
-    // 账号与「凭据/快捷指令加密存储」都归在这里：它们解决的正是「谁拿着这台设备上的凭据」
-    // （账号见 components/account/AccountCard.vue / backend/account.go，加密见 backend/secret.go 的威胁模型）。
-    features: [
-      'about_feature_auth',
-      'about_feature_account',
-      'about_feature_secrets',
-      'about_feature_proxy',
-      'about_feature_dirs',
-    ],
-  },
-  {
-    title: 'about_group_tools',
-    features: [
-      'about_feature_plugins',
-      // 终端功能可在编译期整体剔除（TERMINAL=0）：介绍里也不再列它。
-      ...(__TERMINAL_ENABLED__ ? ['about_feature_terminal'] : []),
-      'about_feature_logs',
-      'about_feature_console',
-    ],
-  },
-]
-
-// 打开 GitHub 用户主页（新标签页）
-function openGithubUser(user: string) {
-  window.open(`https://github.com/${user}`, '_blank', 'noopener')
-}
 
 // 停止/重启的二次确认弹窗：无论是否忙碌，每次点击都先弹窗确认
 const lifecycleAction = ref<'stop' | 'restart' | null>(null)
@@ -194,12 +151,8 @@ const lifecycleDialogVisible = ref(false)
 
 // 任一弹窗（停止/重启确认、"关于"）或 App 内的 dsh 全屏容器打开期间锁定页面滚动
 useBodyScrollLock(
-  () => lifecycleDialogVisible.value || aboutVisible.value || entryFrameVisible.value
+  () => lifecycleDialogVisible.value || entryFrameVisible.value
 )
-
-// 「关于」是页内联弹窗（不是独立组件），同样补上键盘/读屏支持。
-const aboutPanel = ref<HTMLElement | null>(null)
-useDialogA11y(aboutVisible, aboutPanel, { onClose: () => (aboutVisible.value = false) })
 
 // 打开弹窗时顺便查一次「有没有插件操作在跑」：有的话弹窗里多显示一条风险提示
 // （停 dsh 会中断那次安装/卸载，并可能留下陈旧的 profile 写锁，之后插件列表与
@@ -242,15 +195,6 @@ function onLifecycleConfirm() {
   const action = lifecycleAction.value
   lifecycleAction.value = null
   if (action) executeLifecycle(action)
-}
-
-// 格式化最近访问时间 / 登录有效期至
-function fmt(iso: string): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 // 格式化 CPU 使用率（%）/ 内存占用（MB）
@@ -393,91 +337,6 @@ async function removeVisitor(id: string) {
   }
 }
 
-// 网关访问（飞牛入口）没有 harness 会话 cookie：列表里标记来源为「网关访问」、
-// 显示飞牛用户名与来源 IP（同一个人从不同环境访问飞牛时 IP 不同，各占一条），
-// 不显示登录有效期。它没有会话可注销，但可以手动删除这条记录（只清列表、不踢人，
-// 该用户再次访问时会重新出现），不必干等闲置超时。
-function isGateway(v: Visitor): boolean {
-  return v.source === 'gateway'
-}
-
-// 列表条目「名称」：网关访问是飞牛用户名，端口访问是来源 IP（与列表里显示的保持一致）。
-function visitorName(v: Visitor): string {
-  return (isGateway(v) ? v.username : v.ip) || ''
-}
-
-// 按名称排序后再渲染：后端每次快照都是遍历 map（顺序随机），而 SSE 会随用户连接、
-// 注销与过期清理不断重推整份列表 —— 不排序的话同一条记录会不停跳位。名称相同的
-// （同一用户在多个环境/端口访问）再按 id 兜底，保证顺序稳定。
-const sortedVisitors = computed(() =>
-  [...visitors.value].sort((a, b) => {
-    const cmp = visitorName(a).localeCompare(visitorName(b), undefined, { numeric: true, sensitivity: 'base' })
-    return cmp !== 0 ? cmp : a.id.localeCompare(b.id)
-  })
-)
-
-// 登录列表的限高**只在桌面端**生效：最多同时显示 3 条，超出后在卡片内滚动
-// （桌面栅格里卡片高度受相邻卡片影响，不限高会把整行越撑越长）。
-//
-// 移动端刻意**不限制高度**：手机上没有「相邻卡片同高」的约束，页面本身就在 `main`
-// 里滚动；再套一层内部滚动只会让触屏手势和底栏互相打架。列表随内容增长，由页面滚动。
-//
-// 高度不能写死像素：网关记录只有「来源 IP / 最近访问」两行，端口记录还多一行
-// 「登录有效期」，窄屏下文本换行也会改变行高。因此按**前 3 条记录的实际渲染高度**
-// 计算滚动区的 max-height（只限制列表、不限制卡片：同一栅格里相邻卡片更高时，
-// 卡片仍会被拉伸到同高）。
-const VISITOR_VISIBLE_COUNT = 3
-const wideLayout = useWideLayout()
-const visitorCardEl = ref<HTMLElement | null>(null)
-const visitorListEl = ref<HTMLElement | null>(null)
-const visitorListMaxHeight = ref<number | null>(null)
-
-function measureVisitorList() {
-  const el = visitorListEl.value
-  // 移动端（<md）不限高：直接清掉 max-height，列表随内容自然增长。
-  if (!el || !wideLayout.value) {
-    visitorListMaxHeight.value = null
-    return
-  }
-  const items = Array.from(el.children) as HTMLElement[]
-  if (items.length <= VISITOR_VISIBLE_COUNT) {
-    visitorListMaxHeight.value = null
-    return
-  }
-  let height = 0
-  for (let i = 0; i < VISITOR_VISIBLE_COUNT; i++) {
-    height += items[i].getBoundingClientRect().height
-  }
-  visitorListMaxHeight.value = Math.ceil(height)
-}
-
-// 列表内容/条数变化（初次加载、SSE 推送、删除、语言切换）后重算；
-// immediate 在 setup 阶段跑一次时节点还没挂载，函数自己会安全返回。
-watch(
-  () => sortedVisitors.value,
-  async () => {
-    await nextTick()
-    measureVisitorList()
-  },
-  { immediate: true }
-)
-
-// 宽度变化会改变文本换行与行高（栅格列数、侧栏折叠、窗口缩放），需要重新量；
-// 切换语言会改变标签长度与换行，而列表被 max-height 固定时卡片尺寸不再变化，
-// ResizeObserver 察觉不到，因此单独监听 locale。
-watch(locale, async () => {
-  await nextTick()
-  measureVisitorList()
-})
-
-// 跨过 md 断点（窗口缩放 / 旋转）时重新决定是否限高：进入桌面要重新量，
-// 回到移动端要立刻清掉已有的 max-height。
-watch(wideLayout, async () => {
-  await nextTick()
-  measureVisitorList()
-})
-
-let visitorResizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
   store.load()
@@ -488,10 +347,6 @@ onMounted(() => {
   uptimeTimer = window.setInterval(() => {
     uptimeTick.value = Date.now()
   }, 1000)
-  if (typeof ResizeObserver !== 'undefined' && visitorCardEl.value) {
-    visitorResizeObserver = new ResizeObserver(() => measureVisitorList())
-    visitorResizeObserver.observe(visitorCardEl.value)
-  }
   window.addEventListener('popstate', onEntryPopState)
 })
 
@@ -500,8 +355,6 @@ onBeforeUnmount(() => {
     clearInterval(uptimeTimer)
     uptimeTimer = null
   }
-  visitorResizeObserver?.disconnect()
-  visitorResizeObserver = null
   window.removeEventListener('popstate', onEntryPopState)
 })
 </script>
@@ -568,70 +421,13 @@ onBeforeUnmount(() => {
       <!-- ③ DeepSeek 官方账号：头像 / 余额 / 多账号管理（登录弹窗在卡片内部） -->
       <AccountCard />
 
-      <!-- ④ 登录列表：与其它卡片同宽（桌面 2×2 的最后半格），不再独占一行。
-           桌面端仍按「最多显示 3 条」限高并内部滚动，移动端不限制高度、随页面滚动。
-           字段仍按「逐项独立一行」排列。 -->
-      <section ref="visitorCardEl" class="g-card g-card-hover p-5 flex flex-col">
-        <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('login_list') }}</h2>
-        <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-4">{{ t('login_list_desc') }}</p>
-
-        <div v-if="visitorsLoading" class="text-sm text-ink-soft dark:text-[#A6A6AD] py-6 text-center">{{ t('loading') }}</div>
-
-        <div v-else-if="visitors.length === 0" class="text-sm text-ink-faint dark:text-[#8A8A92] py-6 text-center">
-          {{ t('no_visitors') }}
-        </div>
-
-        <ul
-          v-else
-          ref="visitorListEl"
-          class="divide-y divide-line dark:divide-[#2A2A32] overflow-y-auto overscroll-contain pr-4 -mr-4"
-          :class="wideLayout ? '[scrollbar-gutter:stable]' : ''"
-          :style="visitorListMaxHeight ? { maxHeight: visitorListMaxHeight + 'px' } : undefined"
-        >
-          <li v-for="v in sortedVisitors" :key="v.id" class="py-4">
-            <!-- 第一行：来源标记 + 身份（端口访问显示来源 IP、网关访问显示飞牛用户名） -->
-            <div class="flex items-center gap-2 mb-1">
-              <!-- 来源标记：端口访问（带 harness 会话 cookie，可注销）/ 飞牛网关访问
-                   （飞牛 OS 已认证，没有 cookie；记录可手动删除，但不影响该用户继续访问）。 -->
-              <span
-                class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0"
-                :class="isGateway(v)
-                  ? 'bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand'
-                  : 'bg-[#E8E8EC] text-ink-soft dark:bg-[#2A2A32] dark:text-[#A6A6AD]'"
-              >
-                {{ isGateway(v) ? t('visitor_gateway') : t('visitor_port') }}
-              </span>
-              <!-- 网关访问：附飞牛 OS 用户名；端口访问：紧跟来源 IP -->
-              <span v-if="isGateway(v) && v.username" class="text-sm font-medium text-ink dark:text-white truncate">{{ v.username }}</span>
-              <span v-if="!isGateway(v)" class="font-mono text-sm font-medium text-ink dark:text-white truncate">{{ v.ip }}</span>
-            </div>
-            <!-- 第二行：信息字段（逐项独立一行）+ 操作按钮。按钮与字段区同行并垂直居中，
-                 因此在窄屏下也跟「最近访问 / 登录有效期」处在一个水平线上，不单独占一行。
-                 端口访问是「注销」（吊销会话），网关访问是「删除记录」（只清列表）。 -->
-            <div class="flex items-center gap-3">
-              <div class="grid grid-cols-1 gap-y-1 text-xs text-ink-soft dark:text-[#A6A6AD] flex-1 min-w-0">
-                <!-- 网关访问的 IP 单列展示（与端口访问一致，用于区分不同访问环境），
-                     登录有效期不适用于网关访问（网关已完成认证，没有 harness 会话）。
-                     窄卡片/长 IP（如 IPv6）放不下时按单行省略号截断，悬停可看完整地址。 -->
-                <span v-if="isGateway(v) && v.ip" class="block truncate" :title="v.ip">{{ t('visitor_ip') }}：<span class="text-ink dark:text-[#EDEDF0] font-mono">{{ v.ip }}</span></span>
-                <span>{{ t('last_access') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.lastAccess) }}</span></span>
-                <span v-if="!isGateway(v)">{{ t('expires_at') }}：<span class="text-ink dark:text-[#EDEDF0]">{{ fmt(v.expiresAt) }}</span></span>
-              </div>
-              <button
-                class="g-btn-danger !h-8 !px-3 !text-xs flex-shrink-0"
-                :disabled="deleting === v.id"
-                @click="removeVisitor(v.id)"
-              >
-                {{
-                  deleting === v.id
-                    ? isGateway(v) ? t('deleting_record') : t('logging_out')
-                    : isGateway(v) ? t('visitor_delete_record') : t('logout')
-                }}
-              </button>
-            </div>
-          </li>
-        </ul>
-      </section>
+      <!-- ④ 登录列表：卡片自身负责排序、桌面端限高与来源标记 -->
+      <VisitorsCard
+        :visitors="visitors"
+        :loading="visitorsLoading"
+        :deleting-id="deleting"
+        @remove="removeVisitor"
+      />
     </div>
 
     <!-- 停止/重启确认弹窗 -->
@@ -678,59 +474,6 @@ onBeforeUnmount(() => {
     </Teleport>
 
     <!-- 关于弹窗 -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div v-if="aboutVisible" class="fixed inset-0 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div class="g-modal-mask" @click="aboutVisible = false"></div>
-          <!-- 比默认弹窗略宽：特性按类别双列排布，窄了会大量折行 -->
-          <div
-            ref="aboutPanel"
-            tabindex="-1"
-            role="dialog"
-            aria-modal="true"
-            :aria-label="t('about_title')"
-            class="relative w-full max-w-md bg-white dark:bg-[#16161B] border border-[#E8E8EC] dark:border-[#2A2A32] rounded-xl shadow-card p-6 outline-none"
-          >
-            <DialogCloseButton :label="t('dialog_close')" @close="aboutVisible = false" />
-            <!-- 标题 + 本仓库的 GitHub 裸图标（紧靠标题；右侧留出 X 的位置） -->
-            <div class="flex items-center gap-2 pr-11 mb-5">
-              <h3 class="g-dialog-title !pr-0">{{ t('about_title') }}</h3>
-              <GithubIconLink :href="repoURL(repoSlugs.harness)" :label="t('about_github')" />
-            </div>
-
-            <!-- 特性介绍：按类别分组，条目双列排布（窄弹窗里省高度） -->
-            <div class="mb-5">
-              <div class="text-sm font-medium text-ink dark:text-white mb-2.5">{{ t('about_features') }}</div>
-              <div v-for="g in aboutFeatureGroups" :key="g.title" class="mb-3 last:mb-0">
-                <div class="text-[11px] font-medium text-ink-faint dark:text-[#8A8A92] mb-1.5">{{ t(g.title) }}</div>
-                <ul class="grid grid-cols-2 gap-x-3 gap-y-1.5">
-                  <li v-for="f in g.features" :key="f" class="flex items-start gap-1.5">
-                    <svg class="mt-0.5 w-3 h-3 text-brand shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                    <span class="text-xs text-ink-soft dark:text-[#A6A6AD] leading-snug">{{ t(f) }}</span>
-                  </li>
-                </ul>
-              </div>
-            </div>
-
-            <!-- 鸣谢 -->
-            <div>
-              <div class="text-sm font-medium text-ink dark:text-white mb-2">{{ t('about_credits') }}</div>
-              <p class="text-xs text-ink-soft dark:text-[#A6A6AD] leading-relaxed">
-                {{ t('about_credits_pre') }}<button class="inline text-brand hover:underline" @click="openGithubUser('yuexps')">yuexps</button>{{ t('about_credits_suf') }}
-              </p>
-            </div>
-
-            <!-- 关闭入口只有右上角的 X（底部不再放「关闭」按钮） -->
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <AboutDialog v-model:visible="aboutVisible" />
   </div>
 </template>

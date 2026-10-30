@@ -39,6 +39,11 @@ const AUTH_RETURN_PARAMS = ['status', 'method', 'appName', 'state', 'path', 'err
  * - HTTPS 的 443 端口通常也是网关本身（与独立 Web 的 `:5666` 约定一致）。
  *
  * 这里只做「从当前访问地址推断」，不引入额外设置项：App 场景一定走第一条。
+ *
+ * 已知假设：最后那条 `:5666` 是平台的**默认** HTTP 网关端口。若设备把网关改成别的端口
+ * （例如 HTTPS 的 5667）且用户又是经反代端口访问控制台，推断会落空、授权页打不开。
+ * 这种情况目前无解（页面运行在控制台 origin 上，读不到网关配置），
+ * 所以保持原样、只在这里记明；经 `/app/…` 入口访问时不受影响。
  */
 export function fnosAuthBase(): string {
   const { origin, pathname, protocol, hostname, port } = window.location

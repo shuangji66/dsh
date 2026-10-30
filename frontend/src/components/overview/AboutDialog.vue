@@ -94,7 +94,7 @@ function close() {
           <div class="mb-5">
             <div class="text-sm font-medium text-ink dark:text-white mb-2.5">{{ t('about_features') }}</div>
             <div v-for="g in aboutFeatureGroups" :key="g.title" class="mb-3 last:mb-0">
-              <div class="text-[11px] font-medium text-ink-faint dark:text-[#8A8A92] mb-1.5">{{ t(g.title) }}</div>
+              <div class="text-xs font-medium text-ink-faint dark:text-[#8A8A92] mb-1.5">{{ t(g.title) }}</div>
               <ul class="grid grid-cols-2 gap-x-3 gap-y-1.5">
                 <li v-for="f in g.features" :key="f" class="flex items-start gap-1.5">
                   <svg class="mt-0.5 w-3 h-3 text-brand shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>

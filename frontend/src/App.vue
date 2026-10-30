@@ -16,10 +16,22 @@ const { themeMode, cycleTheme } = useTheme() // 初始化/跟随系统主题 + �
 // 否则固定底栏会停在键盘背后（见 composable 内的说明）。
 useKeyboardInset()
 
-// 侧边栏折叠状态
-const collapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
+// 侧边栏折叠状态。localStorage 在隐私模式 / 被禁用的 WebView 里连读都会抛错：
+// 这里必须兜住，否则 setup 阶段直接抛异常，整个控制台白屏（主题与语言已各自兜过）。
+function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem('sidebar-collapsed') === 'true'
+  } catch {
+    return false
+  }
+}
+const collapsed = ref(readSidebarCollapsed())
 watch(collapsed, (val) => {
-  localStorage.setItem('sidebar-collapsed', String(val))
+  try {
+    localStorage.setItem('sidebar-collapsed', String(val))
+  } catch {
+    /* 隐私模式：本次会话内仍然生效 */
+  }
 })
 
 const toggleCollapse = () => {

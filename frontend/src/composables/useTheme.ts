@@ -56,9 +56,11 @@ function setTheme(mode: ThemeMode) {
   applyTheme(mode)
 }
 
-let mediaQuery: MediaQueryList | null = null
-
+// mediaQuery 放在 useTheme 内部：App / 终端页 / 设置页都会调用它，模块级变量会让
+// 后挂载的那个覆盖前一个 —— 先挂载的组件卸载时删掉的是别人的监听器。
 export function useTheme() {
+  let mediaQuery: MediaQueryList | null = null
+
   const cycleTheme = () => {
     const modes: ThemeMode[] = ['light', 'dark', 'system']
     const idx = modes.indexOf(themeMode.value)
@@ -67,22 +69,22 @@ export function useTheme() {
   }
 
   onMounted(() => {
-    // 确保初始主题与 localStorage 一致（首屏 class 已由 index.html 的内联脚本落好，
-    // 这里再对齐一次模块状态，并兜住脚本被 CSP/隐私模式挡掉的情况）。
-    themeMode.value = readStoredTheme()
+    // 只应用模块级已读到的主题，**不要**在这里重读 localStorage：存储被禁用时
+    // readStoredTheme() 会回退 system，把用户本次会话里刚选的主题顶掉（与 setTheme 的注释矛盾）。
     applyTheme(themeMode.value)
 
     // 监听系统主题变化
     mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+    const query = mediaQuery
     const handler = (e: MediaQueryListEvent) => {
       systemPrefersDark.value = e.matches
       if (themeMode.value === 'system') {
         applyTheme('system')
       }
     }
-    mediaQuery.addEventListener('change', handler)
+    query.addEventListener('change', handler)
     onBeforeUnmount(() => {
-      mediaQuery?.removeEventListener('change', handler)
+      query.removeEventListener('change', handler)
     })
   })
 

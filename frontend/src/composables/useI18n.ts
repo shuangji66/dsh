@@ -191,6 +191,8 @@ const zh = {
   confirm_cancel: '取消',
   // 弹窗右上角 X 的悬停提示 / 无障碍标签（见 components/DialogCloseButton.vue）
   dialog_close: '关闭',
+  // 按需加载的弹窗 chunk 取不到（升级后旧资源被替换、网关缓存了旧 index.html 等）
+  dialog_load_failed: '弹窗资源加载失败，请重试；仍不行就刷新页面',
   confirm_delete: '删除',
 
   // 资源页
@@ -747,6 +749,7 @@ const en: Record<keyof typeof zh, string> = {
   confirm_ok: 'Confirm',
   confirm_cancel: 'Cancel',
   dialog_close: 'Close',
+  dialog_load_failed: 'Could not load the dialog. Try again, or reload the page if it keeps failing.',
   confirm_delete: 'Delete',
 
   // 资源页

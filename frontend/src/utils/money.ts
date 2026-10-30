@@ -47,13 +47,14 @@ function groupThousands(int: string): string {
 
 /**
  * 格式化一个余额（平台给的是十进制字符串）。
- * 非数字（空串、`--`、平台换字段）时原样带符号显示，绝不显示成「0.00」骗人。
+ * 读不出数值（空串、`--`、平台换字段）时返回「—」：既不显示成「0.00」骗人，也不拼出
+ * `¥--` 这种既不像金额又带着货币符号的串（与概览页「读不到就是 —」的约定一致）。
  */
 export function formatBalance(amount: string, currency: string): string {
   const symbol = currencySymbol(currency)
   const raw = (amount ?? '').trim()
   const value = Number(raw)
-  if (!raw || !Number.isFinite(value)) return `${symbol}${raw}`
+  if (!raw || !Number.isFinite(value)) return '—'
   if (value === 0) return `${symbol}0.00`
   if (value < 0) return value > -0.01 ? `-${symbol}0.01` : `-${symbol}${fixed2Text(raw)}`
   if (value < 0.01) return `<${symbol}0.01`

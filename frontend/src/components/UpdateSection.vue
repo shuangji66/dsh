@@ -14,12 +14,24 @@ import CheckUpdateButton from '@/components/CheckUpdateButton.vue'
 // **只加 defineAsyncComponent 不够**：异步组件一旦被渲染（哪怕内部 v-if 不显示）
 // 就会立刻加载。因此模板里用 mounted 标记控制首次挂载 —— 否则请求一个不少，
 // 只是把静态 import 换成了异步请求。
-const ServerVersionsDialog = defineAsyncComponent(
-  () => import('@/components/ServerVersionsDialog.vue')
-)
-const ManagedPluginDialog = defineAsyncComponent(
-  () => import('@/components/ManagedPluginDialog.vue')
-)
+//
+// **必须给 onError**：chunk 取不到时 Vue 只把 error 记在内部、组件保持挂载并渲染空白，
+// 而父组件的 mounted 标记仍为 true —— 本会话这个弹窗就再也打不开了（只能整页刷新）。
+// 这里把标记置回 false，下次点开就是一次全新的加载。
+const ServerVersionsDialog = defineAsyncComponent({
+  loader: () => import('@/components/ServerVersionsDialog.vue'),
+  onError: (_error, _retry, fail) => {
+    onDialogLoadError('server')
+    fail()
+  }
+})
+const ManagedPluginDialog = defineAsyncComponent({
+  loader: () => import('@/components/ManagedPluginDialog.vue'),
+  onError: (_error, _retry, fail) => {
+    onDialogLoadError('managed')
+    fail()
+  }
+})
 
 // 概览页「版本」卡片：三个版本（dsh 服务 / 插件市场 / 增强插件）的当前版本、检查更新
 // 入口与各自的弹窗。
@@ -80,6 +92,20 @@ const announcedManagedOp: Record<ManagedPluginKind, string> = { market: '', adva
 
 function managedStatusOf(kind: ManagedPluginKind): UpdateStatus {
   return statusOf(kind)
+}
+
+// 异步弹窗的 chunk 加载失败：把 mounted 标记置回 false —— 否则组件会带着内部的
+// error 状态一直挂着（渲染空白），本会话该弹窗再也打不开。置回后下次点开就是一次
+// 全新的加载；同时给一句可读提示，别让用户以为「按钮坏了」。
+function onDialogLoadError(scope: 'server' | 'managed') {
+  if (scope === 'server') {
+    serverDialogMounted.value = false
+    serverDialogVisible.value = false
+  } else {
+    managedDialogMounted.value = { market: false, advanced: false }
+    managedDialogVisible.value = { market: false, advanced: false }
+  }
+  toast.show(t('dialog_load_failed'), 'error')
 }
 
 async function runManagedAction(kind: ManagedPluginKind, action: 'install' | 'update' | 'remove') {

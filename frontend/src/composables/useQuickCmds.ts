@@ -31,22 +31,45 @@ export function useQuickCmds(io: QuickCmdsIO) {
   const deleteVisible = ref(false)
   const deleteTarget = ref<QuickCmd | null>(null)
 
-  async function load() {
-    if (loading.value) return
-    loading.value = true
-    failed.value = false
-    try {
-      const res = await api.listQuickCmds()
-      commands.value = res.commands || []
-    } catch (e) {
-      // 失败要**留下痕迹**：不能只在 toast 里闪一下，然后让弹窗显示「暂无快捷指令」——
-      // 那会让用户以为自己的指令被删了，转头重建一份（而保存是整体覆盖，会把服务端那份盖掉）。
-      failed.value = true
-      toast.show(uiErrText(e, t('qc_load_failed')), 'error')
-      console.warn('load quick cmds error:', e)
-    } finally {
-      loading.value = false
-    }
+  // 在途请求：并发调用（打开弹窗时连点、重开弹窗）复用它，而不是直接 return。
+  //
+  // **不能写成 `if (loading.value) return`**：`api.request()` 没有超时/Abort，首个请求一旦
+  // 挂住，loading 就永远是 true —— 关掉再打开弹窗只会撞上这个 guard，重试按钮又只在
+  // failed 分支渲染，用户只能整页刷新（丢当前终端会话）。这里改成复用同一个 promise，
+  // 并给一个「卡太久就允许重发」的出口：UI 上仍然是 loading，但重开会发起一次新请求。
+  let pending: Promise<void> | null = null
+  let pendingSince = 0
+  // 请求代号：被 15 秒出口放弃的旧请求晚到时，不能覆盖新请求的结果、也不能清掉它的状态。
+  let loadSeq = 0
+  const LOAD_STALL_MS = 15_000
+
+  function load(): Promise<void> {
+    const now = Date.now()
+    if (pending && now - pendingSince < LOAD_STALL_MS) return pending
+    pendingSince = now
+    const seq = ++loadSeq
+    const run = (async () => {
+      loading.value = true
+      failed.value = false
+      try {
+        const res = await api.listQuickCmds()
+        if (seq === loadSeq) commands.value = res.commands || []
+      } catch (e) {
+        if (seq !== loadSeq) return
+        // 失败要**留下痕迹**：不能只在 toast 里闪一下，然后让弹窗显示「暂无快捷指令」——
+        // 那会让用户以为自己的指令被删了，转头重建一份（而保存是整体覆盖，会把服务端那份盖掉）。
+        failed.value = true
+        toast.show(uiErrText(e, t('qc_load_failed')), 'error')
+        console.warn('load quick cmds error:', e)
+      } finally {
+        if (seq === loadSeq) {
+          loading.value = false
+          pending = null
+        }
+      }
+    })()
+    pending = run
+    return run
   }
 
   function open() {

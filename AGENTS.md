@@ -298,6 +298,10 @@
   `text-sm` + `text-ink-soft dark:text-[#A6A6AD]`（多行配 `leading-relaxed`）；次要信息
   （字节数、版本号等元信息、小标题、标签）用 `text-xs` + `text-ink-faint dark:text-[#8A8A92]`。
   更新弹窗的 release 正文曾写成 `text-xs`（比同屏的版本行还小），现已与其它弹窗同档。
+  **弹窗打开时 `#app` 会被设成 `inert`**（`composables/useDialogA11y.ts`，引用计数，
+  叠加的弹窗全部关闭才还原），所以「弹窗期间仍要能点、仍要被读屏播报」的东西**不能留在
+  `#app` 里**：`Toast` 因此 `<Teleport to="body">`（否则关闭按钮点不动、`role="alert"`
+  也不播报）。以后新增全局浮层（横幅、进度条之类）照这条来。
   **更新类弹窗的标题右侧要挂对应仓库的 GitHub 裸图标**（`components/GithubIconLink.vue`）：
   标题与图标同处一个 `flex items-center gap-2 pr-11` 的行里，标题用 `.g-dialog-title !pr-0`
   （把 `.g-dialog-title` 自带的 `pr-11` 让给外层容器，否则图标会被推到 X 底下），图标不套
@@ -548,6 +552,14 @@
   embed 资产改动一定被编进去；不要误以为异常。
 - **`embeddedFS` 的 embed 目录在构建后会被 `rm -rf`** —— 编译产物里已内含资源，
   源码树中 `backend/embed` 通常不存在/为空，属正常。
+- **懒加载 chunk 取不到时的兜底不能无条件 `preventDefault()`** —— Vite 的
+  `handlePreloadError` 在事件被取消时是 `return` 而不是 `throw`（`baseModule().catch(…)`），
+  动态 import 会以 `undefined` **resolve**：`defineAsyncComponent` 把这个结果缓存成「已解析」
+  后**永不重试**，界面永久空白，`router.onError` 也拿不到错误。`main.ts` 只在「真的发起了
+  整页重载」时才吞掉错误（30 秒节流命中就放行），并给了原生 DOM 的刷新横幅作为出口；
+  按需加载的弹窗（如 `UpdateSection` 的两个）必须传 `onError` 并把 mounted 标记置回 false，
+  否则一次偶发失败就让该弹窗在本会话内再也打不开。CSS 预加载失败不属于这一类，别触发重载
+  （会丢掉终端页 KeepAlive 状态与未保存表单）。
 - **token 仅捕获一次** —— `tokenScanner` 命中后回调置空；每次 `dsh.Start()` 会重置
   token 与 Cookie。旧版 dsh 不打印 token，`WaitToken` 会空等超时返回 `""`。
 - **反代放行门禁只有一个入口 `reverseProxy.state()`** —— 反代从控制台启动的第一刻就在

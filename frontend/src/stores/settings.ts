@@ -145,15 +145,20 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  async function restartDsh() {
+  // 返回 true 表示后端确实重启成功。**必须给出成败**：调用方（插件页）只在成功时
+  // 收起「重启生效」提示条 —— 早先这里吞掉异常，重启失败时那条提示也照样消失，
+  // 用户会以为插件已经生效。
+  async function restartDsh(): Promise<boolean> {
     try {
       loading.value = true
       status.value = await api.dshRestart()
       locked.value = status.value.running
       toast.show(t('dsh_restarted'), 'success')
       await load()
+      return true
     } catch (e) {
       toast.show(uiErrText(e, t('common_op_failed')), 'error')
+      return false
     } finally {
       loading.value = false
     }

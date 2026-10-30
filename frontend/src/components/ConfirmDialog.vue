@@ -34,8 +34,14 @@ const { t } = useI18n()
 useBodyScrollLock(() => open.value)
 
 // 键盘/读屏：role=dialog + Escape + 焦点进出 + 背景 inert（见 useDialogA11y）。
+// Escape 与右上角 X 走同一条规则：操作进行中（confirmLoading）不允许关闭 ——
+// 否则键盘能绕过按钮上的 disabled，把一次正在进行的操作当成「取消」。
 const panel = ref<HTMLElement | null>(null)
-useDialogA11y(() => open.value, panel, { onClose: close })
+useDialogA11y(() => open.value, panel, {
+  onClose: () => {
+    if (!props.confirmLoading) close()
+  }
+})
 
 function close() {
   open.value = false

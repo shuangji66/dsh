@@ -26,9 +26,16 @@ describe('money', () => {
     expect(formatBalance('0.001', 'CNY')).toBe('<¥0.01')
   })
 
-  it('does not fake an unreadable amount as 0.00', () => {
-    expect(formatBalance('--', 'CNY')).toBe('¥--')
-    expect(formatBalance('', 'CNY')).toBe('¥')
+  it('renders an unreadable amount as an em dash, never as 0.00 or a bare currency sign', () => {
+    expect(formatBalance('--', 'CNY')).toBe('—')
+    expect(formatBalance('', 'CNY')).toBe('—')
+    expect(formatBalance('   ', 'CNY')).toBe('—')
+    expect(formatBalance('NaN', 'USD')).toBe('—')
+    // 多个钱包里有一个读不出来：其余照常显示，不整体降级
+    expect(formatWallets([
+      { currency: 'CNY', balance: '1.20' },
+      { currency: 'USD', balance: '--' },
+    ])).toBe('¥1.20 + —')
   })
 
   it('joins multiple wallets and hides zero bonus', () => {

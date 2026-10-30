@@ -25,30 +25,34 @@ const typeIcon = computed(() => {
 </script>
 
 <template>
-  <Transition
-    enter-active-class="transition duration-300 ease-out"
-    enter-from-class="transform opacity-0 translate-y-4 scale-95"
-    enter-to-class="transform opacity-100 translate-y-0 scale-100"
-    leave-active-class="transition duration-200 ease-in"
-    leave-from-class="transform opacity-100 translate-y-0 scale-100"
-    leave-to-class="transform opacity-0 translate-y-4 scale-95"
-  >
-    <div
-      v-if="toast.visible"
-      class="fixed top-5 left-1/2 -translate-x-1/2 z-[100] w-auto max-w-[90%] sm:max-w-sm shadow-card rounded-xl pointer-events-auto flex items-center p-3 sm:p-4 text-white"
-      :class="typeClass"
-      role="alert"
+  <!-- 必须 Teleport 到 body：弹窗打开时 useDialogA11y 会把 #app 设成 inert，
+       留在 #app 里的 toast 会变成「看得见、点不动」，role="alert" 也不再被读屏器播报。 -->
+  <Teleport to="body">
+    <Transition
+      enter-active-class="transition duration-300 ease-out"
+      enter-from-class="transform opacity-0 translate-y-4 scale-95"
+      enter-to-class="transform opacity-100 translate-y-0 scale-100"
+      leave-active-class="transition duration-200 ease-in"
+      leave-from-class="transform opacity-100 translate-y-0 scale-100"
+      leave-to-class="transform opacity-0 translate-y-4 scale-95"
     >
-      <span class="mr-3 flex-shrink-0 w-4 h-4 inline-block" v-html="typeIcon"></span>
-      <span class="flex-1 text-sm font-medium break-words">{{ toast.message }}</span>
-      <button
-        @click="toast.hide"
-        class="ml-3 flex-shrink-0 text-white/80 hover:text-white focus:outline-none"
+      <div
+        v-if="toast.visible"
+        class="fixed top-5 left-1/2 -translate-x-1/2 z-[100] w-auto max-w-[90%] sm:max-w-sm shadow-card rounded-xl pointer-events-auto flex items-center p-3 sm:p-4 text-white"
+        :class="typeClass"
+        role="alert"
       >
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5" viewBox="0 0 20 20" fill="currentColor">
-          <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
-        </svg>
-      </button>
-    </div>
-  </Transition>
+        <span class="mr-3 flex-shrink-0 w-4 h-4 inline-block" v-html="typeIcon"></span>
+        <span class="flex-1 text-sm font-medium break-words">{{ toast.message }}</span>
+        <button
+          @click="toast.hide"
+          class="ml-3 flex-shrink-0 text-white/80 hover:text-white focus:outline-none"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+          </svg>
+        </button>
+      </div>
+    </Transition>
+  </Teleport>
 </template>

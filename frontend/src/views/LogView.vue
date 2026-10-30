@@ -153,6 +153,9 @@ function armStreamDownCheck() {
   if (streamDownTimer) return
   streamDownTimer = setTimeout(() => {
     streamDownTimer = null
+    // 页面在后台时流是**按设计**断开的（useEventStream 的 pauseWhenHidden）：
+    // 这时候没连上不是故障，别在回到前台的一瞬间闪一句「拉不到日志」。
+    if (document.hidden) return
     if (!logStream.connected.value && !gotSnapshot.value) streamDown.value = true
   }, STREAM_DOWN_GRACE_MS)
 }

@@ -62,8 +62,20 @@ export function primeTrimApp(): void {
 /**
  * 等待宿主桥接就绪。
  * 超时（宿主的握手监听已被销毁）返回 null，由调用方提示用户回桌面重开应用窗口。
+ *
+ * 计时**必须在 SDK 模块到手之后**才开始：动态 import 是一次真实的网络请求，
+ * 把它的 RTT 算进「宿主探测」的 10 秒预算里，弱网下会把本来正常的握手判成超时。
  */
 export async function trimAppReady(timeoutMs = READY_TIMEOUT_MS): Promise<TrimApp | null> {
+  let sdk: TrimApp
+  try {
+    sdk = createInstance(await loadSdk())
+  } catch (e) {
+    // 模块加载失败（chunk 取不到等）：与「宿主不应答」是两回事，日志里要能区分。
+    console.warn('[trimApp] SDK load failed', e)
+    return null
+  }
+
   let timer: ReturnType<typeof setTimeout> | null = null
   const timeout = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
@@ -71,12 +83,15 @@ export async function trimAppReady(timeoutMs = READY_TIMEOUT_MS): Promise<TrimAp
       resolve(null)
     }, timeoutMs)
   })
-  const ready = loadSdk()
-    .then((mod) => {
-      const sdk = createInstance(mod)
-      return sdk.ready().then(() => sdk)
-    })
-    .catch(() => null)
+  // ready() 的拒绝同样折成 null（调用方的契约是「拿不到可用的 SDK」），但单独留一条日志，
+  // 免得和「宿主没应答」混成一句。
+  const ready = sdk.ready().then(
+    () => sdk,
+    (e) => {
+      console.warn('[trimApp] host bridge handshake failed', e)
+      return null
+    }
+  )
   try {
     return await Promise.race([ready, timeout])
   } finally {

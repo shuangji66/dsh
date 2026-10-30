@@ -116,8 +116,6 @@ async function resetPlugins() {
 async function togglePlugin(p: { name: string; disabled?: boolean }) {
   const enable = !!p.disabled
   togglingPlugin.value = p.name
-  // 启停成功后 store 会重拉列表：位置在重拉前记下（此时列表还没被加载态替换）
-  const snapshot = captureScroll()
   try {
     const r = await store.togglePlugin(p.name, enable)
     if (r.ok) {
@@ -134,9 +132,10 @@ async function togglePlugin(p: { name: string; disabled?: boolean }) {
           4000
         )
       }
-      // 列表与（可能的）内联提示条都渲染完再还原，否则高度还差一截，位置会被夹小
-      await nextTick()
-      restoreScroll(snapshot)
+      // 命令跑完才重拉列表：滚动快照由 reloadKeepingScroll 在清缓存**之前**拍。
+      // 不能在发命令前拍 —— 那条 `dsh plugin …` 要 1~3 秒，期间用户还在滚，
+      // 还原时会被拽回点击时的位置。
+      await reloadKeepingScroll()
     } else {
       toast.show(r.msg || t('plugin_toggle_failed'), 'error')
     }
@@ -191,11 +190,9 @@ async function executeRestart() {
   restartTarget.value = null
   restartDialogVisible.value = false
   try {
-    await settingsStore.restartDsh()
-    // 重启完成后清掉内联提示（列表刷新后该插件应已生效）
-    needsRestartPlugin.value = null
-  } catch (e) {
-    toast.show(uiErrText(e, t('common_op_failed')), 'error')
+    // restartDsh() 自己会弹错误 toast 并返回 false —— 不要在失败时也把提示条收掉，
+    // 那会让「插件还没生效」看起来像已经生效。
+    if (await settingsStore.restartDsh()) needsRestartPlugin.value = null
   } finally {
     restarting.value = false
   }

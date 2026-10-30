@@ -35,14 +35,14 @@ export const usePluginsStore = defineStore('plugins', () => {
     plugins.value = []
   }
 
-  // 按官方 dsh 的包级开关启停：增删 dsh.profile.bundles（依赖保留）；成功后清缓存并重拉列表。
+  // 按官方 dsh 的包级开关启停：增删 dsh.profile.bundles（依赖保留）。
   // 返回 { ok, name, enabled, restart } 供视图决定是弹“重启 dsh”还是“刷新页面”的 toast。
+  //
+  // **刻意不在这里清缓存/重拉**：那条 `dsh plugin …` 命令要跑 1~3 秒，调用方需要在
+  // 命令**跑完之后**、列表还完整渲染着的时刻拍滚动快照（见 PluginsView 的
+  // reloadKeepingScroll）。在这里 clearPluginsCache() 会把列表先清空，快照就只剩 0。
   async function togglePlugin(name: string, enabled: boolean): Promise<{ ok: boolean; name: string; enabled: boolean; restart: boolean; msg?: string }> {
     const p = await api.togglePlugin(name, enabled)
-    if (p.ok) {
-      clearPluginsCache()
-      await loadPlugins(true)
-    }
     return { ok: p.ok, name, enabled, restart: !!p.restart, msg: p.error }
   }
 

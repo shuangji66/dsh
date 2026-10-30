@@ -36,7 +36,11 @@ function precompressAssets(): Plugin {
       for (const name of files) {
         if (!/\.(js|css)$/.test(name)) continue
         const file = join(assetsDir, name)
-        writeFileSync(file + '.gz', gzipSync(readFileSync(file), { level: 9 }))
+        const body = readFileSync(file)
+        // 太小的文件压完反而更大（gzip 头尾 ~18B 起步，如 _plugin-vue_export-helper
+        // 84B → 99B），而后端只要存在 .gz 就会优先发它 —— 小于 1KB 一律不生成。
+        if (body.length < 1024) continue
+        writeFileSync(file + '.gz', gzipSync(body, { level: 9 }))
       }
     }
   }

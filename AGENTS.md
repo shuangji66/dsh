@@ -96,6 +96,13 @@
   （单挂载点）**：`Session.attach` 换主并返回被顶掉的旧连接，handler 用 `kickDetached`
   通知旧端（`\x1b]detached\x07` + close 4001）；被顶掉端的输入 / 尺寸请求在服务端丢弃
   （`writeInput` / `resize` 走 `isOwner`，非操作端返回 `errNotOwner`，上层静默忽略）。
+  前端「清空」走 `POST /api/session/clear`，语义是**丢弃当前行之前的全部历史**，不是把
+  文件清零：历史文件是重连时唯一的回放源，而 shell 正停在的那一行（提示符，可能还带着
+  敲了一半的命令）在 PTY 侧并没有消失。整份清零会让「清空 → 重连」得到一个空白终端
+  （bash 以为提示符还在屏幕上、不会重打，必须手动回车一次才「有消息」）。实现见
+  `Session.truncateToCurrentLineLocked`：保留最后一个 `\n` 之后的内容（只认 `\n` ——
+  `\r` 是回行首重画、不是换行），当前行为空或长过 `clearKeepLineBytes`（8 KiB，进度条 /
+  全屏 TUI）时整份清空。回归测试见 `backend/terminal_history_test.go`。
 - `update.go` — **版本检测（dsh 服务 / 插件市场 / 增强插件）+ dsh 数据备份/恢复**。
   **控制台自身没有自我更新**（见规则 14）：没有 GitHub tag 探测、没有发布资产下载、
   没有 `.sha256` 校验、没有「下载 → 替换二进制 → exec」链路，也没有

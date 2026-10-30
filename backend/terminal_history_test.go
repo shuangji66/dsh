@@ -105,8 +105,9 @@ func TestHistoryReadAfterTrim(t *testing.T) {
 	}
 }
 
-// 清屏（clearHistory → Truncate(0)）之后不能因为「文件变小」而出现任何异常：
-// 后续追加与读取都要正常。
+// 清屏之后不能因为「文件变小」而出现任何异常：后续追加与读取都要正常。
+// （这份历史整份没有换行，长度又远超保留窗口，所以清屏后为空 —— 见后面的
+// TestClearKeepsCurrentPromptLine 与 TestClearDropsOverlongUnsplittableTail。）
 func TestHistoryAppendAfterClear(t *testing.T) {
 	s, path := newHistorySession(t, "clear")
 	mgr := &SessionManager{renv: &RuntimeEnv{}, sessions: map[string]*Session{"clear": s}}
@@ -126,6 +127,129 @@ func TestHistoryAppendAfterClear(t *testing.T) {
 	}
 	if st, err := os.Stat(path); err != nil || st.Size() != int64(len("after-clear\n")) {
 		t.Fatalf("文件长度不符: %v %v", st, err)
+	}
+}
+
+// 清屏必须留下**当前行**。终端的可见状态就是「当前行 + 光标列」，而当前行（提示符，
+// 可能还带着用户敲了一半的命令）在 PTY 侧并没有消失；历史文件是重连时唯一的回放源，
+// 整份截到 0 的话前端 reset 掉屏幕后没有任何字节可回放 —— bash 以为提示符还在屏幕上、
+// 不会重打，重连后就是一个空白终端，必须手动回车一次才「有消息」（用户报告的现象）。
+func TestClearKeepsCurrentPromptLine(t *testing.T) {
+	s, _ := newHistorySession(t, "keep")
+	mgr := &SessionManager{renv: &RuntimeEnv{}, sessions: map[string]*Session{"keep": s}}
+
+	appendHistory(s, []byte("old output\r\nsecond line\r\n"))
+	// 真实会话的当前行：readline 的粘贴模式开关 + 提示符（无结尾换行）
+	prompt := []byte("\x1b[?2004l\r\x1b[?2004hHarness@fnOS:~$ ")
+	appendHistory(s, prompt)
+
+	if err := mgr.clearHistory("keep"); err != nil {
+		t.Fatalf("clearHistory: %v", err)
+	}
+	got, err := mgr.history("keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, prompt) {
+		t.Fatalf("清屏后应只留当前行 %q，实际 %q", prompt, got)
+	}
+
+	// 清屏后继续输出：新内容接在保留的当前行后面（回放顺序与真实屏幕一致）
+	appendHistory(s, []byte("ls\r\nfile1\r\n"))
+	got, err = mgr.history("keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := string(prompt) + "ls\r\nfile1\r\n"; string(got) != want {
+		t.Fatalf("清屏后追加内容错位：want %q, got %q", want, got)
+	}
+}
+
+// 当前行为空（文件以换行结尾，光标停在空行行首）时没有可保留的内容：整份清空。
+func TestClearDropsEmptyCurrentLine(t *testing.T) {
+	s, _ := newHistorySession(t, "emptyline")
+	mgr := &SessionManager{renv: &RuntimeEnv{}, sessions: map[string]*Session{"emptyline": s}}
+
+	appendHistory(s, []byte("first\r\nsecond\r\n"))
+	if err := mgr.clearHistory("emptyline"); err != nil {
+		t.Fatalf("clearHistory: %v", err)
+	}
+	got, err := mgr.history("emptyline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("当前行为空时清屏应清空整份历史，实际 %q", got)
+	}
+}
+
+// 最后一行长到超过保留窗口（进度条 / 全屏 TUI 这类长时间不换行的输出）时不该被留下：
+// 清屏要真的清掉，不能让「找不到换行」把几 MB 的原样留在文件里。
+func TestClearDropsOverlongUnsplittableTail(t *testing.T) {
+	s, _ := newHistorySession(t, "longtail")
+	mgr := &SessionManager{renv: &RuntimeEnv{}, sessions: map[string]*Session{"longtail": s}}
+
+	appendHistory(s, []byte("done\r\n"))
+	appendHistory(s, bytes.Repeat([]byte("y"), clearKeepLineBytes*2))
+	if err := mgr.clearHistory("longtail"); err != nil {
+		t.Fatalf("clearHistory: %v", err)
+	}
+	got, err := mgr.history("longtail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("超长当前行应整份清空，实际剩 %d 字节", len(got))
+	}
+}
+
+// 整份历史只有一行（连换行都没有）：它就是当前行，清屏后要留下（回放即屏幕内容）。
+func TestClearKeepsSingleLineHistory(t *testing.T) {
+	s, _ := newHistorySession(t, "oneline")
+	mgr := &SessionManager{renv: &RuntimeEnv{}, sessions: map[string]*Session{"oneline": s}}
+
+	line := []byte("Harness@fnOS:~$ echo hi")
+	appendHistory(s, line)
+	if err := mgr.clearHistory("oneline"); err != nil {
+		t.Fatalf("clearHistory: %v", err)
+	}
+	got, err := mgr.history("oneline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, line) {
+		t.Fatalf("单行历史应原样保留，实际 %q", got)
+	}
+}
+
+// 清屏 → 重连（attach 回放）这条路径的端到端回归：回放的字节里必须还带着当前行的
+// 提示符。整份清零时这里回放不出任何内容，前端 reset 掉屏幕后就是一片空白 ——
+// 用户看到的现象正是「清空后点重连没有消息，要手动回车一次」。
+func TestReplayAfterClearStillShowsPrompt(t *testing.T) {
+	s, _ := newHistorySession(t, "replay")
+	mgr := &SessionManager{renv: &RuntimeEnv{}, sessions: map[string]*Session{"replay": s}}
+
+	appendHistory(s, []byte("Harness@fnOS:~$ ls\r\nfile1  file2\r\n"))
+	prompt := []byte("\x1b[?2004l\r\x1b[?2004hHarness@fnOS:~$ ")
+	appendHistory(s, prompt)
+
+	if err := mgr.clearHistory("replay"); err != nil {
+		t.Fatalf("clearHistory: %v", err)
+	}
+
+	c := &fakeConn{}
+	if _, err := s.attach(c); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	replay := c.bytes()
+	if !bytes.Contains(replay, prompt) {
+		t.Fatalf("重连回放里必须带当前行提示符 %q，实际 %q", prompt, replay)
+	}
+	if bytes.Contains(replay, []byte("file1")) {
+		t.Fatalf("清屏后不该再回放旧内容，实际 %q", replay)
+	}
+	if !bytes.HasSuffix(replay, []byte("\x1b]ready\x07")) {
+		t.Fatal("回放结束后必须紧跟 ready 帧（前端据此结束历史回放）")
 	}
 }
 

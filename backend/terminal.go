@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
@@ -527,8 +528,23 @@ func (m *SessionManager) history(id string) ([]byte, error) {
 	return io.ReadAll(s.hist)
 }
 
+// clearKeepLineBytes 是「清屏时从文件末尾往回找当前行行首」的窗口上限：最后一行比它
+// 还长（进度条、全屏 TUI 这类长时间不换行的输出）就当作没有可保留的当前行，整份清空。
+// 提示符加上用户敲了一半的命令远小于这个值。
+const clearKeepLineBytes = 8 * 1024
+
 // clearHistory 清空指定会话的历史临时文件（用于前端「清屏」同步清除历史，
 // 重连/刷新后不再回放旧内容）。
+//
+// 但**当前行必须留下**：清屏清掉的是「已经翻过去的内容」，shell 此刻正停在的那一行
+// （通常是提示符，可能还带着用户敲了一半的命令）并没有消失 —— 终端的可见状态就是
+// 「这一行 + 光标列」，而历史文件又是重连时唯一的回放源。整份截到 0 的话，前端
+// reset 掉屏幕后没有任何字节可回放：bash 以为提示符还在屏幕上，不会重打，于是重连
+// 得到一个空白终端，必须手动回车一次才「有消息」（用户报告的现象）。
+// 截到最后一个 '\n' 之后，回放的起点是行首、写出的列数与 PTY 侧完全一致。
+//
+// 当前行为空（文件以换行结尾，光标停在空行行首）时没有可保留的内容，仍然整份清空：
+// 那种状态下屏幕上本来就只有一条空行。
 func (m *SessionManager) clearHistory(id string) error {
 	s, ok := m.get(id)
 	if !ok {
@@ -539,7 +555,56 @@ func (m *SessionManager) clearHistory(id string) error {
 	if s.hist == nil {
 		return nil
 	}
-	return s.hist.Truncate(0)
+	return s.truncateToCurrentLineLocked()
+}
+
+// truncateToCurrentLineLocked 丢弃当前行之前的全部历史（语义见 clearHistory）。
+// 调用方必须持有 s.histMu：改写与 pump 的追加共用同一临界区，否则一次并发的
+// append 就会插到「清屏前」的位置上。
+//
+// 为什么不是一次 Truncate：Truncate 只能砍掉**文件末尾**，而这里要丢的是开头，
+// 只能「读出当前行 → 清空 → 写回」（与 trimHistoryLocked 同一个套路，只是它要保
+// 的是末尾）。代价是一次 ≤ clearKeepLineBytes 的读写；日志文件是 O_APPEND 打开的，
+// Truncate(0) 之后的 Write 必然落在位置 0。
+//
+// 只认 '\n' 作为换行：'\r' 是「回到行首重画」，行并没有结束，按它切会把半行输出
+// 留在文件开头、回放时错位。
+func (s *Session) truncateToCurrentLineLocked() error {
+	st, err := s.hist.Stat()
+	if err != nil {
+		return err
+	}
+	size := st.Size()
+	if size == 0 {
+		return nil
+	}
+	start := size - clearKeepLineBytes
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, size-start)
+	if _, err := s.hist.ReadAt(buf, start); err != nil {
+		return err
+	}
+	var keep []byte
+	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+		// 最后一个换行之后才是当前行；它恰好为空（文件以换行结尾）时没有可留的内容。
+		keep = buf[i+1:]
+	} else if start == 0 {
+		// 整份历史只有一行（刚建好、只打了一个提示符的会话就是这种形态）：
+		// 这一行就是当前行，不能因为「找不到换行」把它当成没有内容清掉。
+		keep = buf
+	}
+	// start > 0 且窗口里没有换行 = 当前行比 clearKeepLineBytes 还长（进度条 /
+	// 全屏 TUI）：从中间截一段回放只会是乱码，宁可整份清空。
+	if err := s.hist.Truncate(0); err != nil {
+		return err
+	}
+	if len(keep) == 0 {
+		return nil
+	}
+	_, err = s.hist.Write(keep)
+	return err
 }
 
 // closeByID 关闭指定会话并移除。

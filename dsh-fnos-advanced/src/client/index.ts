@@ -25,6 +25,7 @@
  * plugin-center settings page uses the `plugins.bundle.config` slot and the
  * shared `react` platform module.
  */
+import { recordAnchorObservations } from './anchor-status.ts';
 import { isCancellationText, isPickerCancelled } from './cancel.ts';
 import { addPathsToComposer, findActiveComposerInput, findComposerFileInput } from './composer.ts';
 import { scanCommandMenu } from './composer-menu.ts';
@@ -176,6 +177,9 @@ function scan(): void {
   scanReferenceMenu();
   scanFileTree();
   scanWorkspaceMenus();
+  // The diagnostics panel lives on the plugin page, where neither anchor is
+  // mounted; record them here, on the page that renders them.
+  recordAnchorObservations();
 }
 
 /** Mirror dsh's live workspace list so duplicate picks can be rejected exactly. */

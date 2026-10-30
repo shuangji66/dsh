@@ -45,6 +45,55 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
+// src/client/anchor-status.ts
+var observations = {
+  composer: null,
+  fileTree: null
+};
+function pickComposerObservation(regions, at) {
+  if (!regions.length) return null;
+  return { at, found: regions.some((region) => region.hasMultiFileInput) };
+}
+function pickFileTreeObservation(trees, at) {
+  if (!trees.length) return null;
+  const rows = trees.reduce((total, tree) => total + tree.rows, 0);
+  if (rows > 0) return { at, found: true, count: rows };
+  const rowLike = trees.reduce((total, tree) => total + tree.rowLike, 0);
+  return { at, found: false, empty: rowLike === 0 };
+}
+function classifyAnchor(observation) {
+  if (!observation) return "never";
+  if (observation.found) return "found";
+  return observation.empty ? "empty" : "missing";
+}
+function rememberComposerObservation(observation) {
+  if (observation) observations.composer = observation;
+}
+function rememberFileTreeObservation(observation) {
+  if (observation) observations.fileTree = observation;
+}
+function anchorObservation(name) {
+  return observations[name];
+}
+function recordAnchorObservations() {
+  const at = Date.now();
+  rememberComposerObservation(pickComposerObservation(
+    Array.from(document.querySelectorAll('[data-conversation-region="composer"]'), (region) => ({
+      hasMultiFileInput: Boolean(region.querySelector('input[type="file"][multiple]'))
+    })),
+    at
+  ));
+  rememberFileTreeObservation(pickFileTreeObservation(
+    Array.from(document.querySelectorAll("[data-files-root]"), (root) => ({
+      rows: root.querySelectorAll("[data-files-entry][data-files-path]").length,
+      // Row-shaped elements without the anchors mean the markup changed; `li` is
+      // dsh's row element in every version this plugin has shipped against.
+      rowLike: root.querySelectorAll('li, [role="treeitem"]').length
+    })),
+    at
+  ));
+}
+
 // src/client/cancel.ts
 var CANCEL_TEXTS = /* @__PURE__ */ new Set([
   "operation failed",
@@ -224,6 +273,11 @@ var EN = Object.freeze({
   "可用": "Present",
   "不可用": "Missing",
   "未检测": "Not detected",
+  "可用（{time}）": "Present ({time})",
+  "可用（{time} · {count} 行）": "Present ({time} · {count} rows)",
+  "不可用（{time}）": "Missing ({time})",
+  "未检测（文件树为空）": "Not detected (file tree is empty)",
+  "对话输入框与文件树只在对话页存在，这里显示最近一次在对应页面的检测结果。": "The composer and the file tree only exist on the conversation page; this is the last check made there.",
   "测试反代地址": "Test proxy",
   "测试内网地址": "Test LAN",
   "测试中…": "Testing…",
@@ -3317,7 +3371,7 @@ function injectPickItem(template) {
 var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.2";
+var VERSION = "0.6.3";
 
 // src/client/workspace-menu.ts
 var lastWorkspaceMenu = null;
@@ -3816,11 +3870,22 @@ function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embe
     if (status.reason === "unreachable") return t("无法连接");
     return t("可连接（{ms}ms）", { ms: status.ms ?? 0 });
   };
-  const composerRegion = document.querySelector('[data-conversation-region="composer"]');
-  const composerAnchor = composerRegion ? Boolean(composerRegion.querySelector('input[type="file"][multiple]')) : null;
-  const treeRoot = document.querySelector("[data-files-root]");
-  const fileTreeAnchor = treeRoot ? Boolean(treeRoot.querySelector("[data-files-entry][data-files-path]")) : null;
-  const anchorText = (value) => value === true ? t("可用") : value === false ? t("不可用") : t("未检测");
+  const composerAnchor = anchorObservation("composer");
+  const fileTreeAnchor = anchorObservation("fileTree");
+  const anchorClock = (at) => new Date(at).toLocaleTimeString(
+    currentLanguage() === "en" ? "en-US" : "zh-CN",
+    { hour: "2-digit", minute: "2-digit" }
+  );
+  const anchorText = (value) => {
+    const kind = classifyAnchor(value);
+    if (!value || kind === "never") return t("未检测");
+    if (kind === "found") {
+      const time = anchorClock(value.at);
+      return value.count ? t("可用（{time} · {count} 行）", { time, count: value.count }) : t("可用（{time}）", { time });
+    }
+    if (kind === "empty") return t("未检测（文件树为空）");
+    return t("不可用（{time}）", { time: anchorClock(value.at) });
+  };
   const testAddress = async (kind) => {
     const setStatus = kind === "proxy" ? setProxyStatus : setLanStatus;
     const base = kind === "proxy" ? normalizeBase(settings.proxyBase || "") : lanBaseFromSettings(settings);
@@ -3875,7 +3940,7 @@ function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embe
     const ok = await copyText(lines.join("\n"));
     setCopyMessage(Boolean(ok));
   };
-  return /* @__PURE__ */ React.createElement("div", { key: `diagnostics-${tick}`, style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 12 } }, /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("宿主")), /* @__PURE__ */ React.createElement("span", null, `${hostVersion || "?"} · ${hostStateText}`), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("客户端")), /* @__PURE__ */ React.createElement("span", null, VERSION), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("运行环境")), /* @__PURE__ */ React.createElement("span", null, runtime), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("图片读取")), /* @__PURE__ */ React.createElement("span", null, imageReadText), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("对话输入框")), /* @__PURE__ */ React.createElement("span", null, anchorText(composerAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("文件树")), /* @__PURE__ */ React.createElement("span", null, anchorText(fileTreeAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("工作区体检")), /* @__PURE__ */ React.createElement("span", null, workspaceHealthTextValue)), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
+  return /* @__PURE__ */ React.createElement("div", { key: `diagnostics-${tick}`, style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 12 } }, /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("宿主")), /* @__PURE__ */ React.createElement("span", null, `${hostVersion || "?"} · ${hostStateText}`), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("客户端")), /* @__PURE__ */ React.createElement("span", null, VERSION), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("运行环境")), /* @__PURE__ */ React.createElement("span", null, runtime), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("图片读取")), /* @__PURE__ */ React.createElement("span", null, imageReadText), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("对话输入框")), /* @__PURE__ */ React.createElement("span", null, anchorText(composerAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("文件树")), /* @__PURE__ */ React.createElement("span", null, anchorText(fileTreeAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("工作区体检")), /* @__PURE__ */ React.createElement("span", null, workspaceHealthTextValue)), /* @__PURE__ */ React.createElement("div", { style: hintStyle }, t("对话输入框与文件树只在对话页存在，这里显示最近一次在对应页面的检测结果。")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
     void testAddress("proxy");
   }, style: smallButtonStyle }, t("测试反代地址")), proxyStatus ? /* @__PURE__ */ React.createElement("span", { style: statusStyle(proxyStatus) }, proxyStatus.pending ? t("测试中…") : statusText(proxyStatus)) : null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
     void testAddress("lan");
@@ -3889,6 +3954,7 @@ function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embe
         setProxyStatus(null);
         setLanStatus(null);
         setCopyMessage(null);
+        recordAnchorObservations();
         loadHealth();
         setTick((value) => value + 1);
       },
@@ -4792,6 +4858,7 @@ function scan() {
   scanReferenceMenu();
   scanFileTree();
   scanWorkspaceMenus();
+  recordAnchorObservations();
 }
 function registerWorkspacePaths(ctx) {
   const inject = ctx?.inject;

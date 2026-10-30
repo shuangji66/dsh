@@ -10,6 +10,7 @@
 import * as React from 'react';
 import { DEFAULT_SETTINGS, normalizeBase, type AuthMode } from '../shared/settings.ts';
 import { VERSION } from '../version.ts';
+import { anchorObservation, classifyAnchor, recordAnchorObservations, type AnchorObservation } from './anchor-status.ts';
 import { openAuthPopup } from './auth.ts';
 import { closePopup, copyText, showToast } from './dom.ts';
 import { currentLanguage, getLanguagePreference, onLanguageChange, resolveHostLanguage, setLanguagePreference, t, translateError, type LanguagePreference } from './i18n.ts';
@@ -445,16 +446,27 @@ function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewa
     return t('可连接（{ms}ms）', { ms: status.ms ?? 0 });
   };
 
-  // Recompute anchors on every render (the sidebar/tab may have opened since).
-  const composerRegion = document.querySelector('[data-conversation-region="composer"]');
-  const composerAnchor = composerRegion
-    ? Boolean(composerRegion.querySelector('input[type="file"][multiple]'))
-    : null;
-  const treeRoot = document.querySelector('[data-files-root]');
-  const fileTreeAnchor = treeRoot ? Boolean(treeRoot.querySelector('[data-files-entry][data-files-path]')) : null;
-  const anchorText = (value: boolean | null): string => (
-    value === true ? t('可用') : value === false ? t('不可用') : t('未检测')
+  // Not a live query: dsh unmounts the conversation (composer + right sidebar)
+  // while the plugin page is open, so these come from the scanners that run on
+  // the page which actually renders the anchors. See `anchor-status.ts`.
+  const composerAnchor = anchorObservation('composer');
+  const fileTreeAnchor = anchorObservation('fileTree');
+  const anchorClock = (at: number): string => new Date(at).toLocaleTimeString(
+    currentLanguage() === 'en' ? 'en-US' : 'zh-CN',
+    { hour: '2-digit', minute: '2-digit' },
   );
+  const anchorText = (value: AnchorObservation | null): string => {
+    const kind = classifyAnchor(value);
+    if (!value || kind === 'never') return t('未检测');
+    if (kind === 'found') {
+      const time = anchorClock(value.at);
+      return value.count
+        ? t('可用（{time} · {count} 行）', { time, count: value.count })
+        : t('可用（{time}）', { time });
+    }
+    if (kind === 'empty') return t('未检测（文件树为空）');
+    return t('不可用（{time}）', { time: anchorClock(value.at) });
+  };
 
   const testAddress = async (kind: 'proxy' | 'lan') => {
     const setStatus = kind === 'proxy' ? setProxyStatus : setLanStatus;
@@ -534,6 +546,9 @@ function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewa
         <span style={hintStyle}>{t('文件树')}</span><span>{anchorText(fileTreeAnchor)}</span>
         <span style={hintStyle}>{t('工作区体检')}</span><span>{workspaceHealthTextValue}</span>
       </div>
+      <div style={hintStyle}>
+        {t('对话输入框与文件树只在对话页存在，这里显示最近一次在对应页面的检测结果。')}
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" onClick={() => { void testAddress('proxy'); }} style={smallButtonStyle}>{t('测试反代地址')}</button>
         {proxyStatus
@@ -552,6 +567,7 @@ function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewa
             setProxyStatus(null);
             setLanStatus(null);
             setCopyMessage(null);
+            recordAnchorObservations();
             loadHealth();
             setTick((value) => value + 1);
           }}

@@ -203,24 +203,34 @@ func rewriteIndexBase(body []byte, base string) []byte {
 
 // acceptsGzip 判断 Accept-Encoding 是否接受 gzip（含 q=0 的显式拒绝）。
 // 只做 gzip：.gz 是构建期产物，运行时不需要 br/zstd 的压缩库。
+//
+// `*` 通配符按 RFC 9110 处理：**显式的 gzip 条目优先于 `*`**（`gzip;q=0, *` 是拒绝），
+// 没有显式条目时才看 `*` 的 q。客户端什么都没写、或只写了别的编码时返回 false。
 func acceptsGzip(r *http.Request) bool {
+	wildcard := -1.0 // <0 表示客户端没写 `*`
 	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
 		fields := strings.Split(strings.TrimSpace(part), ";")
-		if len(fields) == 0 || !strings.EqualFold(strings.TrimSpace(fields[0]), "gzip") {
+		if len(fields) == 0 {
 			continue
 		}
+		name := strings.TrimSpace(fields[0])
 		q := 1.0
 		for _, f := range fields[1:] {
 			f = strings.TrimSpace(f)
-			if strings.HasPrefix(f, "q=") {
+			if len(f) >= 2 && strings.EqualFold(f[:2], "q=") {
 				if v, err := strconv.ParseFloat(strings.TrimSpace(f[2:]), 64); err == nil {
 					q = v
 				}
 			}
 		}
-		return q > 0
+		if strings.EqualFold(name, "gzip") {
+			return q > 0
+		}
+		if name == "*" {
+			wildcard = q
+		}
 	}
-	return false
+	return wildcard > 0
 }
 
 // serveBytes 输出一个内嵌静态文件，并按文件类型带上缓存策略：

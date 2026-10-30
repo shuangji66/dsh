@@ -93,6 +93,12 @@ func TestAcceptsGzip(t *testing.T) {
 		{"br;q=1, gzip;q=0.001", true},
 		{"br, deflate", false},
 		{"GZIP", true},
+		// `*` 通配符：没有显式 gzip 条目时才生效；显式条目优先（含 q=0 的拒绝）。
+		{"*", true},
+		{"*;q=0", false},
+		{"*;q=0.5, br", true},
+		{"gzip;q=0, *", false},
+		{"GZIP;Q=0.5", true},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)

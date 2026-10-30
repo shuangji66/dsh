@@ -1,6 +1,6 @@
 {
   "name": "dsh-fnos-advanced",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "飞牛文件与目录桥：选目录/选文件进对话、文件树与交付卡片操作、目录权限体检、诊断与中英文界面。fnOS picker, composer/file-tree/deliverable bridge, workspace access checks, diagnostics, and i18n for DeepSeekRuntime.",
   "type": "module",
   "main": "lib/index.js",

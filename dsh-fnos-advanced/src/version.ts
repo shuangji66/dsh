@@ -3,4 +3,4 @@
  * routes and by the client diagnostics panel. `test/version.test.ts` fails when
  * this drifts from package.json.
  */
-export const VERSION = '0.6.3';
+export const VERSION = '0.6.4';

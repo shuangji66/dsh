@@ -219,6 +219,17 @@ export function setWorkspacePaths(entries: Iterable<readonly [string, string]>):
   workspacePaths = new Map(entries);
 }
 
+/**
+ * Workspaces known right now (id + path), without touching the network.
+ *
+ * The picker's shortcut rows read this synchronously on every scan; the host
+ * route behind {@link knownWorkspacePaths} is only consulted when the live
+ * `workspaces` service has not reported anything yet.
+ */
+export function knownWorkspaces(): WorkspaceSummary[] {
+  return [...workspacePaths.entries()].map(([id, path]) => ({ id, path, title: '' }));
+}
+
 /** Unique workspace paths, from the live service or the host registry. */
 export async function knownWorkspacePaths(): Promise<string[]> {
   if (workspacePaths.size === 0) {

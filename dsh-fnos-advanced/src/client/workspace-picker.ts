@@ -19,16 +19,26 @@ import {
   STATUS_CLASS,
   WORKSPACE_TITLE_RE,
 } from './constants.ts';
+import { pickAuthorizedDirs } from './authorized-dirs.ts';
 import { fillAndEnter, isVisible, sleep } from './dom.ts';
 import { fileNameForPath } from './files.ts';
 import type { PickFlow } from './flow.ts';
 import { currentLanguage, t } from './i18n.ts';
-import { isDuplicateWorkspacePath } from './picker.ts';
+import { isDuplicateWorkspacePath, normalizeWorkspacePath } from './picker.ts';
 import { runPickFlow } from './picker-flow.ts';
-import { knownWorkspacePaths } from './plugin-api.ts';
+import { knownWorkspaces, knownWorkspacePaths } from './plugin-api.ts';
 import { clearRecentPaths, loadRecentPaths, recordRecentPath } from './recent-dirs.ts';
 
 const statusTimers = new WeakMap<HTMLElement, number>();
+
+/** Which shortcut row a chip belongs to. */
+type ShortcutRowKind = 'authorized' | 'recent';
+
+/** Every shortcut row carries the shared chip-row class for styling/cleanup. */
+const SHORTCUT_ROW_CLASS = 'dsh-fnos-recent';
+
+/** Dialogs whose host-side workspace lookup was already attempted. */
+const workspaceRefreshTried = new WeakSet<Element>();
 
 /** Add the button to every workspace picker currently in the DOM. */
 export function scanWorkspacePickers(): void {
@@ -44,7 +54,7 @@ export function scanWorkspacePickers(): void {
     if (button) refreshButtonLabels(button);
     else injectButton(dialog, footer);
 
-    renderRecentChips(dialog, footer);
+    renderShortcutRows(dialog, footer);
   }
 }
 
@@ -87,57 +97,124 @@ function refreshButtonLabels(button: HTMLButtonElement): void {
   if (button.title !== hint) button.title = hint;
 }
 
+interface ShortcutRowOptions {
+  kind: ShortcutRowKind;
+  label: string;
+  /** Tooltip on the row label (the chips carry their own full paths). */
+  hint?: string;
+  paths: readonly string[];
+  /** Render the "forget everything" button (recent row only). */
+  clearable?: boolean;
+}
+
 /**
- * One compact row of recently authorized folders inside the picker footer.
+ * Two compact chip rows inside the picker footer.
+ *
+ * "已授权" lists the folders dsh already has as workspaces: they are in use,
+ * so access was granted when they were added, and the same folder is often
+ * reopened to promote a subfolder. "最近使用" keeps whatever this browser
+ * picked but is not a workspace yet; a folder already shown above is dropped
+ * from it so the same chip does not appear twice.
+ *
  * Chips only pre-fill the path input; they never re-authorize, so a stale
  * folder surfaces as an empty listing instead of an unexpected permission
- * prompt. The row is rebuilt only when the list or the interface language
+ * prompt. Each row is rebuilt only when its list or the interface language
  * changes (a MutationObserver scans often).
  */
-function renderRecentChips(dialog: Element, footer: Element): void {
-  const paths = loadRecentPaths();
-  let container = dialog.querySelector<HTMLElement>('.dsh-fnos-recent');
-  if (!paths.length) {
+function renderShortcutRows(dialog: Element, footer: Element): void {
+  const authorized = pickAuthorizedDirs(knownWorkspaces());
+  const seen = new Set(authorized);
+  const recent = loadRecentPaths().filter((path) => !seen.has(normalizeWorkspacePath(path)));
+
+  renderShortcutRow(dialog, footer, {
+    kind: 'authorized',
+    label: t('已授权'),
+    hint: t('已有工作区目录，点击填入并进入'),
+    paths: authorized,
+  });
+  renderShortcutRow(dialog, footer, {
+    kind: 'recent',
+    label: t('最近使用'),
+    paths: recent,
+    clearable: true,
+  });
+
+  // The live `workspaces` service may inject after the first dialog opens;
+  // fall back to the host registry so the authorized row still appears.
+  if (!authorized.length) void requestWorkspaceRefresh(dialog);
+  repositionStatus(dialog);
+}
+
+/** Render (or remove) one shortcut row. */
+function renderShortcutRow(dialog: Element, footer: Element, options: ShortcutRowOptions): void {
+  const selector = `.${SHORTCUT_ROW_CLASS}[data-dsh-fnos-row="${options.kind}"]`;
+  let container = dialog.querySelector<HTMLElement>(selector);
+  if (!options.paths.length) {
     container?.remove();
-    repositionStatus(dialog);
     return;
   }
 
   if (!container) {
     container = document.createElement('div');
-    container.className = 'dsh-fnos-recent';
+    container.className = SHORTCUT_ROW_CLASS;
+    container.dataset.dshFnosRow = options.kind;
   }
-  if (footer.firstElementChild !== container) footer.insertBefore(container, footer.firstChild);
+  placeShortcutRow(footer, container, options.kind);
 
-  const signature = `${currentLanguage()}\n${paths.join('\n')}`;
+  const signature = `${currentLanguage()}\n${options.paths.join('\n')}`;
   if (container.dataset.signature === signature) return;
   container.dataset.signature = signature;
   container.replaceChildren();
 
   const label = document.createElement('span');
   label.className = 'dsh-fnos-recent-label';
-  label.textContent = t('最近使用');
+  label.textContent = options.label;
+  if (options.hint) label.title = options.hint;
   container.append(label);
 
-  for (const path of paths) {
-    const chip = document.createElement('button');
-    chip.type = 'button';
-    chip.className = 'dsh-fnos-recent-chip';
-    chip.textContent = fileNameForPath(path);
-    chip.title = path;
-    chip.setAttribute('aria-label', t('填入最近使用的目录：{path}', { path }));
-    chip.addEventListener('mousedown', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    chip.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void useRecentPath(dialog, path);
-    });
-    container.append(chip);
-  }
+  for (const path of options.paths) container.append(createPathChip(dialog, path, options.kind));
+  if (options.clearable) container.append(createClearChip(dialog, footer));
+}
 
+/** Authorized row on top, recent row right below it, both above the buttons. */
+function placeShortcutRow(footer: Element, container: HTMLElement, kind: ShortcutRowKind): void {
+  const anchor = kind === 'recent'
+    ? footer.querySelector(`.${SHORTCUT_ROW_CLASS}[data-dsh-fnos-row="authorized"]`)
+    : null;
+  if (!anchor) {
+    if (footer.firstElementChild !== container) footer.insertBefore(container, footer.firstChild);
+    return;
+  }
+  if (anchor.nextElementSibling !== container) footer.insertBefore(container, anchor.nextElementSibling);
+}
+
+/** One folder chip; clicking fills the path input and submits it. */
+function createPathChip(dialog: Element, path: string, kind: ShortcutRowKind): HTMLButtonElement {
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'dsh-fnos-recent-chip';
+  chip.textContent = fileNameForPath(path);
+  chip.title = path;
+  chip.setAttribute(
+    'aria-label',
+    kind === 'authorized'
+      ? t('填入已授权的目录：{path}', { path })
+      : t('填入最近使用的目录：{path}', { path }),
+  );
+  chip.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  chip.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void useShortcutPath(dialog, path, kind === 'recent');
+  });
+  return chip;
+}
+
+/** "×" that forgets the recent list but keeps the authorized row. */
+function createClearChip(dialog: Element, footer: Element): HTMLButtonElement {
   const clear = document.createElement('button');
   clear.type = 'button';
   clear.className = 'dsh-fnos-recent-clear';
@@ -148,10 +225,28 @@ function renderRecentChips(dialog: Element, footer: Element): void {
     event.preventDefault();
     event.stopPropagation();
     clearRecentPaths();
-    renderRecentChips(dialog, footer);
+    renderShortcutRows(dialog, footer);
   });
-  container.append(clear);
-  repositionStatus(dialog);
+  return clear;
+}
+
+/**
+ * Ask the host for the workspace registry once per dialog, when the live
+ * service has not reported anything yet. The lookup populates the shared map,
+ * so the row renders on the next scan.
+ */
+async function requestWorkspaceRefresh(dialog: Element): Promise<void> {
+  if (workspaceRefreshTried.has(dialog)) return;
+  workspaceRefreshTried.add(dialog);
+
+  try {
+    await knownWorkspacePaths();
+  } catch {
+    return; // older host or a transient failure: the row stays hidden
+  }
+  if (!dialog.isConnected) return;
+  const footer = findFooter(dialog);
+  if (footer) renderShortcutRows(dialog, footer);
 }
 
 /**
@@ -165,15 +260,21 @@ function repositionStatus(dialog: Element): void {
   status.style.bottom = `${(footer instanceof HTMLElement ? footer.offsetHeight : 56) + 12}px`;
 }
 
-/** Navigate the picker to one remembered folder. */
-async function useRecentPath(dialog: Element, path: string): Promise<void> {
+/**
+ * Navigate the picker to one listed folder.
+ *
+ * Recent chips also bump their folder to the front of the recent list;
+ * authorized chips do not, because the folder is already pinned above and
+ * recording it would only churn localStorage.
+ */
+async function useShortcutPath(dialog: Element, path: string, record: boolean): Promise<void> {
   const input = await ensurePathInput(dialog);
   if (!input) {
     showStatus(dialog, t('没有找到目录选择器的路径输入框'), true);
     return;
   }
   fillAndEnter(input, path);
-  recordRecentPath(path);
+  if (record) recordRecentPath(path);
   showStatus(dialog, t('已填入路径'), false);
 }
 
@@ -281,7 +382,7 @@ function directoryFlow(dialog: Element, button: HTMLButtonElement): PickFlow {
       fillAndEnter(input, paths[0]);
       recordRecentPath(paths[0]);
       const footer = findFooter(dialog);
-      if (footer) renderRecentChips(dialog, footer);
+      if (footer) renderShortcutRows(dialog, footer);
     },
     doneText: (paths) => t('已填入授权目录：{path}', { path: paths[0] }),
     setLabel: (text) => { button.textContent = text; },

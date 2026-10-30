@@ -193,6 +193,9 @@ var EN = Object.freeze({
   "已取消授权": "Authorization cancelled",
   "已填入授权目录：{path}": "Folder authorized: {path}",
   "已填入路径": "Path filled",
+  "已授权": "Authorized",
+  "已有工作区目录，点击填入并进入": "Workspace folders already in use; click to fill and open",
+  "填入已授权的目录：{path}": "Fill the authorized folder: {path}",
   "最近使用": "Recent",
   "填入最近使用的目录：{path}": "Fill the recently used folder: {path}",
   "清除最近记录": "Clear recent folders",
@@ -809,6 +812,9 @@ async function fetchPluginHealth() {
 var workspacePaths = /* @__PURE__ */ new Map();
 function setWorkspacePaths(entries) {
   workspacePaths = new Map(entries);
+}
+function knownWorkspaces() {
+  return [...workspacePaths.entries()].map(([id, path]) => ({ id, path, title: "" }));
 }
 async function knownWorkspacePaths() {
   if (workspacePaths.size === 0) {
@@ -3391,7 +3397,7 @@ function injectPickItem(template) {
 var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.3";
+var VERSION = "0.6.4";
 
 // src/client/workspace-menu.ts
 var lastWorkspaceMenu = null;
@@ -4500,6 +4506,22 @@ function injectStyle() {
   (document.head || document.documentElement).appendChild(style);
 }
 
+// src/client/authorized-dirs.ts
+var MAX_AUTHORIZED_DIRS = 8;
+function pickAuthorizedDirs(workspaces, max = MAX_AUTHORIZED_DIRS) {
+  if (max <= 0) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const paths = [];
+  for (const workspace of workspaces) {
+    const path = normalizeWorkspacePath(workspace?.path);
+    if (!path.startsWith("/") || seen.has(path)) continue;
+    seen.add(path);
+    paths.push(path);
+    if (paths.length >= max) break;
+  }
+  return paths;
+}
+
 // src/client/recent-dirs.ts
 var STORAGE_KEY2 = "dsh-fnos-advanced:recent-dirs";
 var MAX_RECENT_DIRS = 8;
@@ -4554,6 +4576,8 @@ function clearRecentPaths() {
 
 // src/client/workspace-picker.ts
 var statusTimers = /* @__PURE__ */ new WeakMap();
+var SHORTCUT_ROW_CLASS = "dsh-fnos-recent";
+var workspaceRefreshTried = /* @__PURE__ */ new WeakSet();
 function scanWorkspacePickers() {
   for (const dialog of document.querySelectorAll('[role="dialog"]')) {
     if (!isWorkspacePicker(dialog)) {
@@ -4565,7 +4589,7 @@ function scanWorkspacePickers() {
     const button = dialog.querySelector(`[${BUTTON_ATTR}]`);
     if (button) refreshButtonLabels(button);
     else injectButton(dialog, footer);
-    renderRecentChips(dialog, footer);
+    renderShortcutRows(dialog, footer);
   }
 }
 function isWorkspacePicker(dialog) {
@@ -4595,46 +4619,81 @@ function refreshButtonLabels(button) {
   if (button.textContent !== label) button.textContent = label;
   if (button.title !== hint) button.title = hint;
 }
-function renderRecentChips(dialog, footer) {
-  const paths = loadRecentPaths();
-  let container = dialog.querySelector(".dsh-fnos-recent");
-  if (!paths.length) {
+function renderShortcutRows(dialog, footer) {
+  const authorized = pickAuthorizedDirs(knownWorkspaces());
+  const seen = new Set(authorized);
+  const recent = loadRecentPaths().filter((path) => !seen.has(normalizeWorkspacePath(path)));
+  renderShortcutRow(dialog, footer, {
+    kind: "authorized",
+    label: t("已授权"),
+    hint: t("已有工作区目录，点击填入并进入"),
+    paths: authorized
+  });
+  renderShortcutRow(dialog, footer, {
+    kind: "recent",
+    label: t("最近使用"),
+    paths: recent,
+    clearable: true
+  });
+  if (!authorized.length) void requestWorkspaceRefresh(dialog);
+  repositionStatus(dialog);
+}
+function renderShortcutRow(dialog, footer, options) {
+  const selector = `.${SHORTCUT_ROW_CLASS}[data-dsh-fnos-row="${options.kind}"]`;
+  let container = dialog.querySelector(selector);
+  if (!options.paths.length) {
     container?.remove();
-    repositionStatus(dialog);
     return;
   }
   if (!container) {
     container = document.createElement("div");
-    container.className = "dsh-fnos-recent";
+    container.className = SHORTCUT_ROW_CLASS;
+    container.dataset.dshFnosRow = options.kind;
   }
-  if (footer.firstElementChild !== container) footer.insertBefore(container, footer.firstChild);
+  placeShortcutRow(footer, container, options.kind);
   const signature = `${currentLanguage()}
-${paths.join("\n")}`;
+${options.paths.join("\n")}`;
   if (container.dataset.signature === signature) return;
   container.dataset.signature = signature;
   container.replaceChildren();
   const label = document.createElement("span");
   label.className = "dsh-fnos-recent-label";
-  label.textContent = t("最近使用");
+  label.textContent = options.label;
+  if (options.hint) label.title = options.hint;
   container.append(label);
-  for (const path of paths) {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "dsh-fnos-recent-chip";
-    chip.textContent = fileNameForPath(path);
-    chip.title = path;
-    chip.setAttribute("aria-label", t("填入最近使用的目录：{path}", { path }));
-    chip.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    chip.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void useRecentPath(dialog, path);
-    });
-    container.append(chip);
+  for (const path of options.paths) container.append(createPathChip(dialog, path, options.kind));
+  if (options.clearable) container.append(createClearChip(dialog, footer));
+}
+function placeShortcutRow(footer, container, kind) {
+  const anchor = kind === "recent" ? footer.querySelector(`.${SHORTCUT_ROW_CLASS}[data-dsh-fnos-row="authorized"]`) : null;
+  if (!anchor) {
+    if (footer.firstElementChild !== container) footer.insertBefore(container, footer.firstChild);
+    return;
   }
+  if (anchor.nextElementSibling !== container) footer.insertBefore(container, anchor.nextElementSibling);
+}
+function createPathChip(dialog, path, kind) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "dsh-fnos-recent-chip";
+  chip.textContent = fileNameForPath(path);
+  chip.title = path;
+  chip.setAttribute(
+    "aria-label",
+    kind === "authorized" ? t("填入已授权的目录：{path}", { path }) : t("填入最近使用的目录：{path}", { path })
+  );
+  chip.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  chip.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void useShortcutPath(dialog, path, kind === "recent");
+  });
+  return chip;
+}
+function createClearChip(dialog, footer) {
   const clear = document.createElement("button");
   clear.type = "button";
   clear.className = "dsh-fnos-recent-clear";
@@ -4645,10 +4704,21 @@ ${paths.join("\n")}`;
     event.preventDefault();
     event.stopPropagation();
     clearRecentPaths();
-    renderRecentChips(dialog, footer);
+    renderShortcutRows(dialog, footer);
   });
-  container.append(clear);
-  repositionStatus(dialog);
+  return clear;
+}
+async function requestWorkspaceRefresh(dialog) {
+  if (workspaceRefreshTried.has(dialog)) return;
+  workspaceRefreshTried.add(dialog);
+  try {
+    await knownWorkspacePaths();
+  } catch {
+    return;
+  }
+  if (!dialog.isConnected) return;
+  const footer = findFooter(dialog);
+  if (footer) renderShortcutRows(dialog, footer);
 }
 function repositionStatus(dialog) {
   const status = dialog.querySelector(`.${STATUS_CLASS}`);
@@ -4656,14 +4726,14 @@ function repositionStatus(dialog) {
   const footer = findFooter(dialog);
   status.style.bottom = `${(footer instanceof HTMLElement ? footer.offsetHeight : 56) + 12}px`;
 }
-async function useRecentPath(dialog, path) {
+async function useShortcutPath(dialog, path, record) {
   const input = await ensurePathInput(dialog);
   if (!input) {
     showStatus(dialog, t("没有找到目录选择器的路径输入框"), true);
     return;
   }
   fillAndEnter(input, path);
-  recordRecentPath(path);
+  if (record) recordRecentPath(path);
   showStatus(dialog, t("已填入路径"), false);
 }
 function findPathInput(dialog) {
@@ -4753,7 +4823,7 @@ function directoryFlow(dialog, button) {
       fillAndEnter(input, paths[0]);
       recordRecentPath(paths[0]);
       const footer = findFooter(dialog);
-      if (footer) renderRecentChips(dialog, footer);
+      if (footer) renderShortcutRows(dialog, footer);
     },
     doneText: (paths) => t("已填入授权目录：{path}", { path: paths[0] }),
     setLabel: (text) => {

@@ -78,12 +78,22 @@ export function anchorObservation(name: AnchorName): AnchorObservation | null {
   return observations[name];
 }
 
+const RECORD_MIN_INTERVAL_MS = 750;
+let lastRecordAt = Number.NEGATIVE_INFINITY;
+
 /**
  * Re-read both anchors from the current document. Absent containers are a
  * no-op: only the page that actually renders them can judge them.
+ *
+ * Throttled: the caller runs this from the 80 ms-debounced mutation scan, and a
+ * streaming reply keeps the DOM mutating continuously — two full-document
+ * queries per scan bought nothing (the panel only shows "last seen + time").
+ * `resetAnchorRecordingForTest` drops the throttle for unit tests.
  */
-export function recordAnchorObservations(): void {
-  const at = Date.now();
+export function recordAnchorObservations(now: number = Date.now()): void {
+  if (now - lastRecordAt < RECORD_MIN_INTERVAL_MS) return;
+  lastRecordAt = now;
+  const at = now;
   rememberComposerObservation(pickComposerObservation(
     Array.from(document.querySelectorAll('[data-conversation-region="composer"]'), (region) => ({
       hasMultiFileInput: Boolean(region.querySelector('input[type="file"][multiple]')),
@@ -93,10 +103,19 @@ export function recordAnchorObservations(): void {
   rememberFileTreeObservation(pickFileTreeObservation(
     Array.from(document.querySelectorAll('[data-files-root]'), (root) => ({
       rows: root.querySelectorAll('[data-files-entry][data-files-path]').length,
-      // Row-shaped elements without the anchors mean the markup changed; `li` is
-      // dsh's row element in every version this plugin has shipped against.
-      rowLike: root.querySelectorAll('li, [role="treeitem"]').length,
+      // Row-shaped elements without the anchors mean the markup changed. `li` is
+      // dsh's row element in every version this plugin has shipped against, but
+      // `[data-files-entry]` alone already proves "rows exist" even if the tag
+      // changes — without it a renamed element was reported as an empty folder.
+      rowLike: root.querySelectorAll('[data-files-entry], li, [role="treeitem"]').length,
     })),
     at,
   ));
+}
+
+/** Test hook: forget the throttle window and every recorded observation. */
+export function resetAnchorRecordingForTest(): void {
+  lastRecordAt = Number.NEGATIVE_INFINITY;
+  observations.composer = null;
+  observations.fileTree = null;
 }

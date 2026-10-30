@@ -31,7 +31,7 @@ import {
   type SettingsHostState,
   type WorkspaceHealthRow,
 } from './plugin-api.ts';
-import { isFnosAppEmbedded } from './env.ts';
+import { isFnosApp, isFnosAppEmbedded } from './env.ts';
 import { getSdk, isFnosHost } from './sdk.ts';
 import { authorizeWorkspacePath } from './workspace-menu.ts';
 
@@ -183,7 +183,10 @@ function SettingsPage(): React.ReactElement {
 
     const sdk = getSdk();
     sdk.ready().then(() => {
-      if (alive) setEmbedded(!sdk.isStandaloneWeb);
+      // `!sdk.isStandaloneWeb` 会把**任何 iframe** 都当成宿主（包括桌面浏览器里的
+      // 控制台内嵌 dsh /gui/）—— 而那条入口没有可用的宿主桥接，目录授权走网页授权。
+      // isFnosHost() 已经排除了它，与实际的 pick 分支判断保持一致。
+      if (alive) setEmbedded(isFnosHost());
     }).catch(() => { /* no host bridge */ });
 
     if (!/^\/app(?:\/|$)/.test(window.location.pathname)) {
@@ -250,11 +253,15 @@ function SettingsPage(): React.ReactElement {
     opacity: disabled ? 0.6 : 1,
   };
 
-  const accessNote = embedded
-    ? t('当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。')
-    : gatewayAccess
-      ? t('当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。')
-      : t('当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。');
+  // 三档要分开说：App 内的目录授权**已经**改走网页授权（0.6.1+），桌面的宿主仍然直接
+  // 调原生选择器；把两者混成一句会让诊断页给出与实际行为相反的结论。
+  const accessNote = isFnosApp()
+    ? t('当前运行在飞牛 App 内：目录授权打开平台的网页授权页，文件详情/在飞牛中打开仍走宿主桥接。')
+    : embedded
+      ? t('当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。')
+      : gatewayAccess
+        ? t('当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。')
+        : t('当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。');
 
   return (
     <div style={{
@@ -502,7 +509,11 @@ function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewa
     }
   };
 
-  const runtime = embedded ? t('飞牛桌面 / App') : gatewayAccess ? t('飞牛网关') : t('普通浏览器');
+  // 运行环境要按「有没有可用宿主桥接」说，而不是「在不在 iframe 里」：
+  // 控制台内嵌 dsh（/gui/）在桌面浏览器与 App 里都没有宿主桥接（见 isFnosHost）。
+  const runtime = isFnosApp()
+    ? t('飞牛 App')
+    : embedded ? t('飞牛桌面') : gatewayAccess ? t('飞牛网关') : t('普通浏览器');
   const hostStateText = hostState === 'ok'
     ? t('正常')
     : hostState === 'missing'

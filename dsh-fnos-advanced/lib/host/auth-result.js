@@ -1,4 +1,4 @@
-import { queryParam, readBody, writeJSON, writeMethodNotAllowed } from "./http.js";
+import { queryParam, readBody, sameOriginRequest, writeJSON, writeMethodNotAllowed } from "./http.js";
 export const RESULT_PATH = '/fnos-advanced/auth-result';
 const RESULT_TTL_MS = 5 * 60 * 1000;
 const MAX_RESULTS = 200;
@@ -21,6 +21,12 @@ function pruneResults() {
 export async function handleAuthResult(req, res) {
     pruneResults();
     if (req.method === 'POST') {
+        // 写入口只接受同源请求（与其它写入路由同一道闸）：state 虽然不可猜，
+        // 但跨站表单没有理由能往这里塞一份「授权结果」。
+        if (!sameOriginRequest(req)) {
+            writeJSON(res, 403, { ok: false, error: 'cross-origin request rejected' });
+            return;
+        }
         try {
             const body = JSON.parse(await readBody(req));
             const state = typeof body?.state === 'string' ? body.state : '';

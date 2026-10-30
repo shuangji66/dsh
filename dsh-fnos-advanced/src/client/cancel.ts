@@ -65,3 +65,34 @@ export function isPickerCancelled(result: PickerResponseLike | null | undefined)
   if (!msg) return result.code === 1;
   return isCancellationText(msg);
 }
+
+/** The subset of an app-auth result this module reads. */
+export interface AuthResultLike {
+  status?: string;
+  error?: string;
+}
+
+// The fnOS gateway answers a dismissed authorization page with `status=cancel`
+// (sometimes plus `error=access_denied`); the plugin's own waiters synthesize
+// `status=cancelled` when the popup/frame is closed. Both mean "user backed
+// out", and neither is a failure worth a red message.
+const CANCEL_STATUSES = new Set(['cancel', 'cancelled', 'canceled', 'abort', 'aborted']);
+const CANCEL_ERRORS = new Set(['access_denied', 'user_cancelled', 'user_canceled', 'user_cancel']);
+
+/**
+ * Whether an authorization result means "the user dismissed the page".
+ *
+ * Checked before the generic error path: the gateway's `status=cancel` carries
+ * no `error`, so matching only the error text (the previous behaviour) turned a
+ * plain cancellation into "Could not open the picker".
+ */
+export function isAuthCancelled(auth: AuthResultLike | null | undefined): boolean {
+  if (!auth) return false;
+  const status = String(auth.status ?? '').trim().toLowerCase();
+  const error = String(auth.error ?? '').trim().toLowerCase();
+  // A success with a stray error string is still a success.
+  if (status === 'success') return false;
+  if (CANCEL_STATUSES.has(status)) return true;
+  if (CANCEL_ERRORS.has(error)) return true;
+  return isCancellationText(error);
+}

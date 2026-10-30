@@ -75,8 +75,12 @@ function rememberFileTreeObservation(observation) {
 function anchorObservation(name) {
   return observations[name];
 }
-function recordAnchorObservations() {
-  const at = Date.now();
+var RECORD_MIN_INTERVAL_MS = 750;
+var lastRecordAt = Number.NEGATIVE_INFINITY;
+function recordAnchorObservations(now = Date.now()) {
+  if (now - lastRecordAt < RECORD_MIN_INTERVAL_MS) return;
+  lastRecordAt = now;
+  const at = now;
   rememberComposerObservation(pickComposerObservation(
     Array.from(document.querySelectorAll('[data-conversation-region="composer"]'), (region) => ({
       hasMultiFileInput: Boolean(region.querySelector('input[type="file"][multiple]'))
@@ -86,9 +90,11 @@ function recordAnchorObservations() {
   rememberFileTreeObservation(pickFileTreeObservation(
     Array.from(document.querySelectorAll("[data-files-root]"), (root) => ({
       rows: root.querySelectorAll("[data-files-entry][data-files-path]").length,
-      // Row-shaped elements without the anchors mean the markup changed; `li` is
-      // dsh's row element in every version this plugin has shipped against.
-      rowLike: root.querySelectorAll('li, [role="treeitem"]').length
+      // Row-shaped elements without the anchors mean the markup changed. `li` is
+      // dsh's row element in every version this plugin has shipped against, but
+      // `[data-files-entry]` alone already proves "rows exist" even if the tag
+      // changes — without it a renamed element was reported as an empty folder.
+      rowLike: root.querySelectorAll('[data-files-entry], li, [role="treeitem"]').length
     })),
     at
   ));
@@ -120,6 +126,17 @@ function isPickerCancelled(result) {
   const msg = String(result.msg || "").trim();
   if (!msg) return result.code === 1;
   return isCancellationText(msg);
+}
+var CANCEL_STATUSES = /* @__PURE__ */ new Set(["cancel", "cancelled", "canceled", "abort", "aborted"]);
+var CANCEL_ERRORS = /* @__PURE__ */ new Set(["access_denied", "user_cancelled", "user_canceled", "user_cancel"]);
+function isAuthCancelled(auth) {
+  if (!auth) return false;
+  const status = String(auth.status ?? "").trim().toLowerCase();
+  const error = String(auth.error ?? "").trim().toLowerCase();
+  if (status === "success") return false;
+  if (CANCEL_STATUSES.has(status)) return true;
+  if (CANCEL_ERRORS.has(error)) return true;
+  return isCancellationText(error);
 }
 
 // src/client/constants.ts
@@ -263,6 +280,8 @@ var EN = Object.freeze({
   "读取失败": "Error",
   "运行环境": "Runtime",
   "飞牛桌面 / App": "fnOS desktop / app",
+  "飞牛桌面": "fnOS desktop",
+  "飞牛 App": "fnOS app",
   "飞牛网关": "fnOS gateway",
   "普通浏览器": "Browser",
   "DOM 锚点": "DOM anchors",
@@ -318,6 +337,7 @@ var EN = Object.freeze({
   "无法读取宿主设置接口，请确认 dsh 运行正常。": "Could not read the host settings API. Check that dsh is running.",
   "保存失败（HTTP {status}）": "Save failed (HTTP {status})",
   "当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。": "Running inside fnOS desktop/app: the native picker is used; no web authorization popup.",
+  "当前运行在飞牛 App 内：目录授权打开平台的网页授权页，文件详情/在飞牛中打开仍走宿主桥接。": "Running inside the fnOS app: folder authorization opens the platform web page; file details / open-in-fnOS still use the host bridge.",
   "当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。": "Accessed through the fnOS gateway: the same origin is used for authorization; no entry chooser.",
   "当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。": "Not accessed through the fnOS gateway: with both proxy and LAN configured, choosing a folder asks which entry to use.",
   "反代 {proxy} · 内网 {lan}": "Proxy {proxy} · LAN {lan}",
@@ -2797,14 +2817,14 @@ function isDuplicateWorkspacePath(candidate, workspacePaths2) {
 function usesWebPicker(flow) {
   return isConsoleEmbeddedDsh() || isFnosApp() && flow.directory === true;
 }
-function usesAuthFrame(flow) {
-  return isFnosApp() && usesWebPicker(flow);
+function usesAuthFrame() {
+  return isFnosApp();
 }
 async function runPickFlow(button, flow) {
   if (button.dataset.busy === "1") return;
   markBusy(button, flow);
   const webPicker = usesWebPicker(flow);
-  const useFrame = usesAuthFrame(flow);
+  const useFrame = usesAuthFrame();
   let popup = null;
   if (!useFrame && (webPicker || !isHostLikeWindow())) {
     popup = window.open("", `dsh-fnos-advanced-auth-${randomId()}`, POPUP_FEATURES);
@@ -2895,7 +2915,7 @@ async function pickPathsDirect(flow) {
 async function startAuthFlow(flow, appName, base, existingPopup) {
   flow.setLabel(t("等待授权…"));
   const state = randomId();
-  const useFrame = usesAuthFrame(flow);
+  const useFrame = usesAuthFrame();
   let frame = null;
   let popup = existingPopup;
   let surface;
@@ -2918,8 +2938,8 @@ async function startAuthFlow(flow, appName, base, existingPopup) {
       buildUrl: () => buildAuthUrl(base, state, flow.method, { ...pickerParams(flow) }, appName)
     });
     if (!auth || auth.status !== "success") {
-      if (auth && (auth.status === "cancelled" || isCancellationText(auth.error))) {
-        if (auth.status !== "cancelled") {
+      if (isAuthCancelled(auth)) {
+        if (auth && auth.status !== "cancel" && auth.status !== "cancelled") {
           console.info(LOG_PREFIX, "authorization result treated as cancellation", auth);
         }
         flow.status(t("已取消选择"), false);
@@ -3542,7 +3562,7 @@ async function authorizeWorkspacePath(path, popup) {
       buildUrl: () => buildAuthUrl(base, state, "authorizeUserFile", { path }, config.appName || "Harness")
     });
     if (auth && auth.status === "success") return true;
-    if (auth && (auth.status === "cancelled" || isCancellationText(auth.error))) {
+    if (isAuthCancelled(auth)) {
       throw new Error(t("已取消授权"));
     }
     throw new Error(auth && auth.error ? translateError(auth.error) : t("打开选择器失败"));
@@ -3678,7 +3698,7 @@ function SettingsPage() {
     });
     const sdk = getSdk();
     sdk.ready().then(() => {
-      if (alive) setEmbedded(!sdk.isStandaloneWeb);
+      if (alive) setEmbedded(isFnosHost());
     }).catch(() => {
     });
     if (!/^\/app(?:\/|$)/.test(window.location.pathname)) {
@@ -3732,7 +3752,7 @@ function SettingsPage() {
     cursor: disabled ? "default" : "pointer",
     opacity: disabled ? 0.6 : 1
   };
-  const accessNote = embedded ? t("当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。") : gatewayAccess ? t("当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。") : t("当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。");
+  const accessNote = isFnosApp() ? t("当前运行在飞牛 App 内：目录授权打开平台的网页授权页，文件详情/在飞牛中打开仍走宿主桥接。") : embedded ? t("当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。") : gatewayAccess ? t("当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。") : t("当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。");
   return /* @__PURE__ */ React.createElement("div", { style: {
     display: "flex",
     flexDirection: "column",
@@ -3917,7 +3937,7 @@ function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embe
       if (timer) window.clearTimeout(timer);
     }
   };
-  const runtime = embedded ? t("飞牛桌面 / App") : gatewayAccess ? t("飞牛网关") : t("普通浏览器");
+  const runtime = isFnosApp() ? t("飞牛 App") : embedded ? t("飞牛桌面") : gatewayAccess ? t("飞牛网关") : t("普通浏览器");
   const hostStateText = hostState2 === "ok" ? t("正常") : hostState2 === "missing" ? t("缺失（需重启 dsh）") : hostState2 === "error" ? t("读取失败") : t("未检测");
   const imageReadText = health && health.features ? health.features.imageRead ? t("开") : t("关") : t("未检测");
   const workspaceHealthTextValue = health && health.features ? health.features.workspaceHealth ? t("可用") : t("不可用") : t("未检测");

@@ -15,7 +15,7 @@ import {
   type AuthFrame,
   type AuthSurface,
 } from './auth.ts';
-import { isCancellationText } from './cancel.ts';
+import { isAuthCancelled } from './cancel.ts';
 import {
   CHECK_DIR_ATTR,
   FOLDER_OPEN_SVG,
@@ -251,7 +251,9 @@ export async function authorizeWorkspacePath(path: string, popup: Window | null)
       buildUrl: () => buildAuthUrl(base, state, 'authorizeUserFile', { path }, config.appName || 'Harness'),
     });
     if (auth && auth.status === 'success') return true;
-    if (auth && (auth.status === 'cancelled' || isCancellationText(auth.error))) {
+    // 平台取消授权回的是 `status=cancel`（有时带 `error=access_denied`），
+    // 与弹窗/iframe 被关掉时合成的 `cancelled` 一样都该报「已取消」而不是失败。
+    if (isAuthCancelled(auth)) {
       throw new Error(t('已取消授权'));
     }
     throw new Error(auth && auth.error ? translateError(auth.error) : t('打开选择器失败'));

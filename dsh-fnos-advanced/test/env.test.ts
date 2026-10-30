@@ -23,7 +23,11 @@ test('recognizes the console embedded dsh mount but not the direct dsh entry', (
   assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui/'), true);
   assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui'), true);
   assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui/fnos-advanced/x'), true);
+  // 产品里的入口形态只有这两种：控制台入口下的 /gui/，以及 App 图标直连的 /dsh/。
   assert.equal(isConsoleEmbeddedDsh('/app/Harness/dsh/'), false);
   assert.equal(isConsoleEmbeddedDsh('/app/Harness/'), false);
-  assert.equal(isConsoleEmbeddedDsh('/app/Harness/dsh/gui/'), true);
+  assert.equal(isConsoleEmbeddedDsh('/'), false);
+  // 判定是「路径里出现 /gui/ 段」，其它挂载下的同名段也算内嵌 dsh（宁可按内嵌处理：
+  // 误判只会少用宿主桥接，多一次网页授权；反过来则会在无桥接处调用原生选择器）。
+  assert.equal(isConsoleEmbeddedDsh('/gui/'), true);
 });

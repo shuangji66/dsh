@@ -17,7 +17,7 @@ import {
   type AuthFrame,
   type AuthSurface,
 } from './auth.ts';
-import { isCancellationText, isPickerCancelled } from './cancel.ts';
+import { isAuthCancelled, isPickerCancelled } from './cancel.ts';
 import { LOG_PREFIX, POPUP_FEATURES } from './constants.ts';
 import { closePopup, randomId, writePopupLoading } from './dom.ts';
 import { isConsoleEmbeddedDsh, isFnosApp } from './env.ts';
@@ -53,9 +53,19 @@ function usesWebPicker(flow: PickFlow): boolean {
   return isConsoleEmbeddedDsh() || (isFnosApp() && flow.directory === true);
 }
 
-/** Whether the web authorization page should be embedded instead of a popup. */
-function usesAuthFrame(flow: PickFlow): boolean {
-  return isFnosApp() && usesWebPicker(flow);
+/**
+ * Whether the web authorization page should be embedded instead of a popup.
+ *
+ * Decided by the **surface**, not by which picker is in use: the fnOS App's
+ * WebView cannot reliably open popups at all, so any web authorization there
+ * (directory picks, and also the file flow when the native bridge fails) has to
+ * run in the in-page iframe. Tying this to `usesWebPicker` left the App's file
+ * fallback opening a popup several awaits after the click, which the WebView
+ * blocks — the user ended up with "the browser blocked the authorization
+ * window" instead of a working flow.
+ */
+function usesAuthFrame(): boolean {
+  return isFnosApp();
 }
 
 /** Drive one picker attempt from a click. */
@@ -65,7 +75,7 @@ export async function runPickFlow(button: HTMLButtonElement, flow: PickFlow): Pr
   markBusy(button, flow);
 
   const webPicker = usesWebPicker(flow);
-  const useFrame = usesAuthFrame(flow);
+  const useFrame = usesAuthFrame();
 
   // Web authorization needs its popup opened inside the click task when the
   // page itself is browser-like (top-level or the console iframe). The app's
@@ -199,7 +209,7 @@ export async function startAuthFlow(
   // lives in this page. Embed the authorization page in a full-screen iframe
   // instead; the callback posts to window.parent and we stay here. The console
   // entry (`/gui/`) is browser-like even outside the app, so it uses a popup.
-  const useFrame = usesAuthFrame(flow);
+  const useFrame = usesAuthFrame();
   let frame: AuthFrame | null = null;
   let popup = existingPopup;
   let surface: AuthSurface;
@@ -224,11 +234,12 @@ export async function startAuthFlow(
       buildUrl: () => buildAuthUrl(base, state, flow.method, { ...pickerParams(flow) }, appName),
     });
     if (!auth || auth.status !== 'success') {
-      if (auth && (auth.status === 'cancelled' || isCancellationText(auth.error))) {
-        // Text matching is a heuristic (older hosts report cancellation as
-        // "Operation failed" instead of a status). Leave a breadcrumb so a
+      if (isAuthCancelled(auth)) {
+        // Status matching covers the gateway's `cancel` and our synthetic
+        // `cancelled`; the error-text fallback is for older hosts that report
+        // cancellation as "Operation failed". Leave a breadcrumb so a
         // misclassified genuine failure can still be diagnosed.
-        if (auth.status !== 'cancelled') {
+        if (auth && auth.status !== 'cancel' && auth.status !== 'cancelled') {
           console.info(LOG_PREFIX, 'authorization result treated as cancellation', auth);
         }
         flow.status(t('已取消选择'), false);

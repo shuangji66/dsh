@@ -406,4 +406,9 @@ func TestAdminMuxMountsDshUnderConsoleBase(t *testing.T) {
 	if got, want := m.dshUI.mount.dir(), "/app/Harness/dsh/"; got != want {
 		t.Fatalf("dsh 挂载 = %q, want %q", got, want)
 	}
+	// 账号登录回调与 TCP 根挂载线同一套：反代线自留 /oauth/callback，不转发给 dsh
+	// （见 accountCallbackMountPaths）。
+	if m.dshUI.account != m {
+		t.Fatal("dshUI 必须挂上账号回调处理器（withAccount）")
+	}
 }

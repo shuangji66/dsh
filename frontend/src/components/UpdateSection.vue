@@ -33,7 +33,7 @@ const ManagedPluginDialog = defineAsyncComponent({
   }
 })
 
-// 概览页「版本」卡片：三个版本（dsh 服务 / 插件市场 / 增强插件）的当前版本、检查更新
+// 概览页「部署版本」卡片：三个版本（dsh 服务 / 插件市场 / 增强插件）的当前版本、检查更新
 // 入口与各自的弹窗。
 //
 // 控制台自身的版本不在这里展示，也不支持就地自我更新：升级只走 fpk 安装包。
@@ -378,7 +378,7 @@ onMounted(() => {
 })
 </script>
 <template>
-  <!-- 概览页「版本」卡片：三行版本 + 各自检查更新入口；各自的弹窗挂在卡片内（Teleport 到 body） -->
+  <!-- 概览页「部署版本」卡片：三行版本 + 各自检查更新入口；各自的弹窗挂在卡片内（Teleport 到 body） -->
   <section class="g-card g-card-hover p-5 flex flex-col">
     <h2 class="font-display text-base font-semibold text-ink dark:text-white">{{ t('overview_versions') }}</h2>
     <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1 mb-3">{{ t('overview_versions_hint') }}</p>

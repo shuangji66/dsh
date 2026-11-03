@@ -68,7 +68,9 @@ func newAdminMux(renv *RuntimeEnv, dsh *DshManager, auth *Auth, upd *UpdateManag
 	// 网关只看 gatewayPrefix（/app/Harness），整条 dsh 流量都由 app.sock 承接。
 	if auth != nil && dsh != nil {
 		dshBase := strings.TrimRight(renv.AdminBaseURL, "/") + "/dsh"
-		m.dshUI = newReverseProxyMount(auth, dsh, boot, dshBase, true)
+		// withAccount 与 TCP 根挂载线保持一致：反代线自留 /oauth/callback（见
+		// account.go 的 accountCallbackMountPaths），不让账号登录回调落到 dsh。
+		m.dshUI = newReverseProxyMount(auth, dsh, boot, dshBase, true).withAccount(m)
 		m.dshUI.trusted = true
 	}
 	return m
@@ -1207,21 +1209,37 @@ func (m *AdminMux) buildHandler() http.Handler {
 			if base != "" && (r.URL.Path == "/dsh" || strings.HasPrefix(r.URL.Path, "/dsh/")) {
 				r2 := r.Clone(r.Context())
 				r2.URL.Path = base + r.URL.Path
-				r2.URL.RawPath = ""
+				// RawPath 是转义形态：dsh 的插件 bundle 路径里带 %2F / %2C，剥掉它
+				// 会让反代按解码后的 Path 重新拼 URI，段的边界就变了（见 proxy.go
+				// stripMount 对 RawPath 的处理）。与 Path 一起补前缀。
+				if raw := r.URL.RawPath; raw != "" && strings.HasPrefix(raw, "/dsh") {
+					r2.URL.RawPath = base + raw
+				} else {
+					r2.URL.RawPath = ""
+				}
 				m.dshUI.ServeHTTP(w, r2)
 				return
 			}
 			// 旧路径 /gui 已被 /dsh 取代：永久重定向，避免旧书签/旧缓存页 404。
 			// 两种写法（带 base 与网关已剥 base）都认，重定向目标始终是浏览器可见地址。
+			// 非 GET/HEAD 用 308：旧的 dsh 页面会把相对路径的 POST 发到 /gui/…，
+			// 301 会把它们降级成 GET（方法+请求体一起丢），308 原样保留。
 			for _, legacy := range []string{base + "/gui", "/gui"} {
 				if r.URL.Path != legacy && !strings.HasPrefix(r.URL.Path, legacy+"/") {
 					continue
 				}
-				target := base + "/dsh" + strings.TrimPrefix(r.URL.Path, legacy)
+				// 用 EscapedPath 拼子路径，避免 %2F 这类转义在 301 目标里被解码后
+				// 改变段结构（与 stripMount 保持同一口径）。
+				suffix := strings.TrimPrefix(r.URL.EscapedPath(), legacy)
+				target := base + "/dsh" + suffix
 				if r.URL.RawQuery != "" {
 					target += "?" + r.URL.RawQuery
 				}
-				http.Redirect(w, r, target, http.StatusMovedPermanently)
+				code := http.StatusMovedPermanently
+				if r.Method != http.MethodGet && r.Method != http.MethodHead {
+					code = http.StatusPermanentRedirect
+				}
+				http.Redirect(w, r, target, code)
 				return
 			}
 		}

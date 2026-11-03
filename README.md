@@ -311,7 +311,7 @@ dsh web @ 127.0.0.1:13080   ← 只认 /、/api、/plugins
 会被 `trim_http_cgi` 以 `200 + 13 字节 "invalid token"` 拒绝（手动刷新一次才好）；
 现在控制台与 dsh 的 fpk entry 共用 `/app/Harness` 这一个前缀，请求始终在控制台
 入口的鉴权范围内，不再有跨入口问题。旧的 console 内 `/<base>/gui` 路径只保留
-一个 301 到 `/dsh`（兼容旧书签/旧缓存页）。
+一个 301 到 `/dsh`（非 GET/HEAD 用 308 保留方法与请求体；兼容旧书签/旧缓存页）。
 
 fpk 的 `ui/config` 里两个 entry 都指同一入口（示例）：
 
@@ -340,8 +340,9 @@ RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式�
 - 进站路径先剥前缀，后续鉴权、握手、就绪门禁、等待页、转发全部工作在挂载内路径上；
 - 反代自留路径与跳转目标补回前缀：`/_login`、`/_logout`、`/_ready`、未登录时的
   302、登录成功后的 `next`、等待页的轮询地址与 `Refresh` 兜底 URL；
-- 裸挂载点（`/app/Harness/dsh` 无尾斜杠）301 到 `/app/Harness/dsh/`：dsh 前端的
-  `<base href="./">` 以**目录**为基准，缺尾斜杠会让相对路径解析到站点根；
+- 裸挂载点（`/app/Harness/dsh` 无尾斜杠）301 到 `/app/Harness/dsh/`（非 GET/HEAD
+  用 308 保留方法与请求体）：dsh 前端的 `<base href="./">` 以**目录**为基准，缺尾
+  斜杠会让相对路径解析到站点根；
 - 不属于该挂载的路径直接 404（网关配置错误时不会把流量悄悄转给 dsh）。
 
 部署时注意：
@@ -354,6 +355,9 @@ RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式�
 - 控制台 admin socket 上的 `/dsh` 挂载是 `trusted` 的（不再要求控制台登录）：它与
   网关入口同一条 socket，鉴权由 `trim_http_cgi` 完成；TCP 端口线不认网关注入的
   身份头，仍按控制台登录鉴权。
+- 网关到 `app.sock` 的转发必须透传 `Upgrade` / `Connection`（与原先 dsh.sock 那条
+  规则相同）：dsh 的流 mux 与终端走 WebSocket，只做普通 HTTP 代理时页面能开、实时流
+  会断。
 
 ## DeepSeek 官方账号登录（控制台侧完成授权）
 

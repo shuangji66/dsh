@@ -44,16 +44,16 @@ const fnosEntry = computed(() => {
 
 // 「进入」：桌面浏览器新标签页打开；飞牛 App 内用全屏 iframe 承载 dsh。
 //
-// 为什么 App 内不用 window.open / location.assign：App 的网关鉴权是**按入口
-// （gatewayPrefix）注入**的，不是浏览器那种 host 级 Cookie。控制台入口
-// （/app/Harness）的凭据不会自动带到 dsh 入口（/app/Harness/dsh）：
-//   - window.open 新建的 WebView 首个导航没有 dsh 入口的凭据；
-//   - 同窗口 location.assign 也一样（实测控制台页面确实被导航走了，dsh 仍收到
-//     trim_http_cgi 的 200 + 13 字节 "invalid token"）。
-// 但 iframe 是**控制台页面自己的子资源请求**，走的是控制台这个 WebView 的请求栈；
-// 而且入口地址是控制台 baseurl 之下的 /dsh/（由控制台的 app.sock 反代到 dsh，
-// 见 backend/admin.go 的 dshUI），始终在控制台这个网关入口内。如果仍然被网关拒绝
-// （iframe 里出现 13 字节错误页），只显示一个全屏的重试面板。
+// 历史原因：早先 dsh 是**独立的网关入口**（另一个 gatewayPrefix + dsh.sock），
+// App 的网关鉴权按入口（gatewayPrefix）注入，控制台入口的凭据带不过去 ——
+// window.open 新建的 WebView 首个导航、以及同窗口 location.assign 都会被
+// trim_http_cgi 以 `200 + 13 字节 "invalid token"` 拒绝（实测）。
+//
+// 现在 dsh 已收进控制台入口之下的 /dsh/（由控制台的 app.sock 反代到 dsh，见
+// backend/admin.go 的 dshUI），跨入口问题从结构上消失；但 App 内仍保留 iframe
+// 承载：它留在控制台这个 WebView / 请求栈里，返回手势、重试面板与历史记录都好
+// 处理。若之后实测 App 内新标签页已能直接打开，可再简化这条路径。
+// 如果网关仍然拒绝（iframe 里出现 13 字节错误页），只显示一个全屏的重试面板。
 const entryFrameVisible = ref(false)
 const entryFrameUrl = ref('')
 const entryFrameError = ref(false)

@@ -2,9 +2,9 @@ package main
 
 // 本文件覆盖「飞牛网关访问」这条通路：平台网关（fnOS open-gateway）在转发请求时会
 // 注入 X-Trim-Username / X-Trim-Isadmin / X-Trim-Userid 三个身份头，代表飞牛 OS
-// 已完成登录认证。因此网关那条线（Unix Socket 监听，见 startProxySocket）上的请求
-// 跳过 harness 登录鉴权，但仍要经过就绪门禁（等待页照旧），并在登录列表里以
-// 「网关访问」记录。
+// 已完成登录认证。因此网关那条线（控制台 admin socket 上的 /dsh 挂载，见
+// AdminMux.dshUI）上的请求跳过 harness 登录鉴权，但仍要经过就绪门禁（等待页照旧），
+// 并在登录列表里以「网关访问」记录。
 //
 // 关键约束：只有网关线认这三个头。TCP 端口（局域网可达）上的请求即使带齐三个头也
 // 必须照旧走登录鉴权 —— 否则任何人都能加三个头绕过端口鉴权。
@@ -12,10 +12,8 @@ package main
 // 全部测试用真实监听端口模拟 dsh（httptest / net.Listen），不启动任何 dsh 进程。
 
 import (
-	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -270,54 +268,6 @@ func TestGatewayLineWithoutHeadersFallsBackToLogin(t *testing.T) {
 	partial := map[string]string{headerTrimUserID: "1000"}
 	if rec := proxyGetWithHeaders(t, f.proxy, proxyMountTestBase+"/api/rpc", partial); rec.Code != http.StatusFound {
 		t.Fatalf("身份头不完整应重定向到登录页, code=%d", rec.Code)
-	}
-}
-
-// startProxySocket 起的监听必须真的按网关线构造（信任身份头）：端到端验证
-// 「socket + 三个头 + 无 cookie → 200」。
-func TestGatewaySocketEndToEndSkipsLogin(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "dsh-upstream")
-	}))
-	defer upstream.Close()
-
-	prev := GetConfig()
-	cfg := prev
-	cfg.DshPort = portOfURL(t, upstream.URL)
-	cfg.AuthEnabled = true
-	cfg.Password = proxyTestPassword
-	initConfig(&cfg)
-	t.Cleanup(func() { initConfig(&prev) })
-
-	dsh := newTestDshManager(t.TempDir(), "")
-	boot := newBootState()
-	boot.set(phaseReady, "")
-
-	sock := t.TempDir() + "/target/dsh.sock"
-	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot, nil)
-	t.Cleanup(stopProxySocket)
-
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-		},
-	}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-
-	req, err := http.NewRequest(http.MethodGet, "http://unix"+proxyMountTestBase+"/api/rpc", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for k, v := range gatewayHeaders(1000, "alice") {
-		req.Header.Set(k, v)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("经 socket 请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || string(body) != "dsh-upstream" {
-		t.Fatalf("网关访问应跳过鉴权: code=%d body=%q", resp.StatusCode, string(body))
 	}
 }
 

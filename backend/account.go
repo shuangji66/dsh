@@ -637,23 +637,12 @@ func loopbackOriginOf(origin string) (string, bool) {
 	return "", false
 }
 
-// proxyMountPrefixFor 返回反代的挂载前缀（网关那条 Unix Socket 线开启时非空）。
-// 与 startProxySocket 的判定保持一致。
-func proxyMountPrefixFor(renv *RuntimeEnv) string {
-	if renv == nil {
-		return ""
-	}
-	if s := strings.TrimSpace(renv.ProxySock); s == "" || s == "off" {
-		return ""
-	}
-	return newProxyMount(renv.ProxyBaseURL).prefix
-}
-
 // accountCallbackMountPaths 返回反代线上要自留的回调路径。
 //
-// 反代有两条监听、两种挂载，浏览器可能用三种写法打到同一条线上：
+// 反代有两种挂载，浏览器可能用三种写法打到同一条线上：
 //   - 根挂载（端口线 / 本地转发）：<origin>/oauth/callback；
-//   - 网关线：网关把 <dsh 挂载前缀>/… 整段转过来（stripMount 会剥掉），落回 /oauth/callback；
+//   - 控制台入口下的 /dsh 挂载：网关把 <AdminBaseURL>/dsh/… 整段转过来
+//     （stripMount 会剥掉），落回 /oauth/callback；
 //   - 本地转发指向反代端口、但地址里带了控制台 baseurl（飞牛客户端那种按 NAS 根映射的
 //     代理会这么拼）：<AdminBaseURL>/oauth/callback，根挂载线不剥前缀，得原样认。
 func accountCallbackMountPaths(renv *RuntimeEnv) []string {
@@ -665,9 +654,6 @@ func accountCallbackMountPaths(renv *RuntimeEnv) []string {
 			}
 		}
 		paths = append(paths, p)
-	}
-	if prefix := proxyMountPrefixFor(renv); prefix != "" {
-		add(prefix + accountCallbackPath)
 	}
 	if renv != nil {
 		if admin := strings.TrimRight(renv.AdminBaseURL, "/"); admin != "" {

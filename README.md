@@ -208,9 +208,10 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 
 二进制经 fnOS 平台以 `/var/apps/Harness` 部署，监听 **Admin Unix Socket**
 （默认 `<appDest>/app.sock`），前端由 nginx 反代到该 socket 的 baseurl 前缀。
-反向代理本身有**两条监听**：TCP 端口（配置项 `proxyPort`，默认 `3079`，占据站点根）
-与可选的 **Unix Socket 子路径挂载**（`HARNESS_PROXY_SOCK` +
-`HARNESS_PROXY_BASEURL`，见下文「子路径部署」）。
+对外只有**一个网关入口**（`gatewayPrefix=/app/Harness`、socket `app.sock`）：
+控制台在 `/app/Harness/…`，dsh 是它下面的 `/app/Harness/dsh/…` 子路径（由控制台
+自己反代，见下文「子路径部署」）。另有 TCP 端口（配置项 `proxyPort`，默认 `3079`，
+占据站点根）作为不走网关的直连入口。
 
 | 环境变量 | 说明 | 默认 |
 | --- | --- | --- |
@@ -218,8 +219,6 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_ADMIN_SOCK` | Admin Unix socket 路径 | `$TRIM_APPDEST/app.sock` |
 | `HARNESS_ADMIN_BASEURL` | 前端资源 baseurl 前缀 | `$TRIM_APPDEST` |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
-| `HARNESS_PROXY_SOCK` | 反向代理的子路径挂载 Unix socket（空或 `off` 关闭） | `$TRIM_APPDEST/dsh.sock` |
-| `HARNESS_PROXY_BASEURL` | 该 socket 对外占据的子路径（反代剥掉后再转发给 dsh） | `/app/Harness/dsh` |
 | `HARNESS_DSH_DIAG` | 设为 `1`/`true`/`yes` 时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
 | `HARNESS_MASTER_KEY` | 落盘加密的**主密钥**（32 字节 base64 或 hex）：加密 `quickcmds.json` 的命令内容与 `dsh-accounts.json` 账号库。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
 | `DSH_HOME` | dsh 的**数据根**（dsh 自己的解析规则：`$DSH_HOME` > `~/.dsh`；平台启动脚本会注入）。控制台只按它定位凭据文件 `<DSH_HOME>/.credentials.yaml` —— 位置写错会让登录「写入成功但 dsh 不认」；其余 `<HOME>/.dsh/...`（profiles、备份）仍按 `HOME` 拼 | `<HOME>/.dsh` |
@@ -291,23 +290,43 @@ node 堆内存上限（`dshMemLimit`，设置页「node 堆内存上限」）在
 
 ---
 
-## 子路径部署：反代挂载点与 Unix Socket 前置
+## 子路径部署：控制台入口下的 `/dsh` 挂载
 
-除了 TCP 端口（根挂载，端口见配置项 `proxyPort`），反代还会在
-**`HARNESS_PROXY_SOCK`（默认 `$TRIM_APPDEST/dsh.sock`）** 上再监听一个 Unix
-Socket，并把它挂在 **`HARNESS_PROXY_BASEURL`（默认 `/app/Harness/dsh`）** 子路径下：
+dsh 不作为独立的网关入口暴露。平台网关（fnOS open-gateway）只看到控制台这一个
+入口前缀（`gatewayPrefix=/app/Harness`、socket `app.sock`），dsh 挂在它下面的
+**`<AdminBaseURL>/dsh`**（默认 `/app/Harness/dsh`），由控制台自己的 `AdminMux.dshUI`
+反代到 dsh：
 
 ```text
 浏览器 https://<fnip>:<port>/app/Harness/dsh/…
-      ↓ 平台网关（fnOS open-gateway）原样转发（路径带前缀）
-Harness 反代 @ unix socket
+      ↓ 平台网关（gatewayPrefix=/app/Harness，socket app.sock）
+Harness admin socket（AdminMux）
       ↓ 剥掉 /app/Harness/dsh，补上 dsh 会话 Cookie
 dsh web @ 127.0.0.1:13080   ← 只认 /、/api、/plugins
 ```
 
-默认值刻意比控制台 baseurl（`/app/Harness`，走 admin socket）**深一层**，这样同
-一台设备上两条线各占一段路径、互不抢：控制台在 `/app/Harness/…`，dsh GUI 在
-`/app/Harness/dsh/…`。
+**为什么必须落在控制台入口里**：飞牛 App 的网关鉴权是**按入口（gatewayPrefix）
+注入**的，控制台入口的凭据不会自动带到另一个 dsh 入口。早先 dsh 用独立的
+`/app/Harness/dsh` 入口（另一个 `gatewayPrefix` + `dsh.sock`），跨入口的第一请求
+会被 `trim_http_cgi` 以 `200 + 13 字节 "invalid token"` 拒绝（手动刷新一次才好）；
+现在控制台与 dsh 的 fpk entry 共用 `/app/Harness` 这一个前缀，请求始终在控制台
+入口的鉴权范围内，不再有跨入口问题。旧的 console 内 `/<base>/gui` 路径只保留
+一个 301 到 `/dsh`（兼容旧书签/旧缓存页）。
+
+fpk 的 `ui/config` 里两个 entry 都指同一入口（示例）：
+
+```json
+"Harness.control": {
+  "gatewayPrefix": "/app/Harness",
+  "gatewaySocket": "app.sock",
+  "url": "/app/Harness"
+},
+"Harness.dsh": {
+  "gatewayPrefix": "/app/Harness",
+  "gatewaySocket": "app.sock",
+  "url": "/app/Harness/dsh"
+}
+```
 
 **为什么这样就成立**：dsh 0.1.7-alpha.1 起其前端产物全部使用**文档相对路径**
 （`dsh-host-frontend-static` 注入 `<base href="./">`，插件 bundle 引用、`/api`
@@ -330,13 +349,11 @@ RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式�
 - **dsh 需 ≥ 0.1.7-alpha.1**（控制台现在只允许安装/切换 **0.2.0-rc.1 及更新版本**，见
   「dsh 服务的多版本管理」）。更早版本注入的是 `<base href="/">` 且 API/SSE/WS 用绝对根路径，
   在子路径下必然 404（正是该版本的修复项）。
-- 网关若**不**剥离前缀（原样把 `/app/Harness/dsh/...` 交给本 socket），反代也能
-  正确剥离——前缀本来就由反代处理，网关只需保证路径原样透传、不额外改写。
-- **网关/nginx 必须按更长的前缀优先匹配**：控制台那条规则（admin socket，
-  `/app/Harness`）在前缀上包含 dsh 这条（`/app/Harness/dsh`），先匹配到控制台就
-  会把 dsh 的流量截走。nginx 天然按最长前缀匹配，自建规则时注意这一点。
-- 该监听是可选的：目录不可创建 / socket 被占用 / 监听失败时只记日志并跳过，
-  不影响控制台与 TCP 反代启动。`HARNESS_PROXY_SOCK=off` 可显式关闭。
+- 网关只需把 `/app/Harness/…` 原样透传到 `app.sock`；前缀剥离与自留路径换算都在
+  控制台内部完成，不再需要「按更长前缀优先匹配」来避免两条规则抢路径。
+- 控制台 admin socket 上的 `/dsh` 挂载是 `trusted` 的（不再要求控制台登录）：它与
+  网关入口同一条 socket，鉴权由 `trim_http_cgi` 完成；TCP 端口线不认网关注入的
+  身份头，仍按控制台登录鉴权。
 
 ## DeepSeek 官方账号登录（控制台侧完成授权）
 
@@ -429,20 +446,21 @@ dsh **自己没有多账号概念**：账号凭据只有一条固定键（`deeps
 访问 dsh 服务的地址，无需用户配置：控制台的当前访问地址（由请求的 `Origin` / `Referer`
 推断，缺失时退回 `Host` + `X-Forwarded-Proto`）**剥离控制台 baseurl**
 （`HARNESS_ADMIN_BASEURL`）得到飞牛 OS 的访问源，再拼上**控制台入口下的 dsh
-反代路径 `/gui/`**：
+反代路径 `/dsh/`**：
 
 ```text
 控制台 http://192.168.1.111:5666/app/Harness
   ├─ 剥离 /app/Harness      → 飞牛 OS 访问源 http://192.168.1.111:5666
-  └─ 拼接 /app/Harness/gui/ → http://192.168.1.111:5666/app/Harness/gui/
+  └─ 拼接 /app/Harness/dsh/ → http://192.168.1.111:5666/app/Harness/dsh/
 ```
 
-为什么不拼独立的 `/app/Harness/dsh`（`HARNESS_PROXY_BASEURL`）：飞牛 App 的网关
-鉴权是**按入口（gatewayPrefix）注入**的，控制台入口的凭据不会自动带到独立的 dsh
-入口。App 内从控制台跳过去时，第一请求会被 `trim_http_cgi` 以 `200 + 13 字节
-"invalid token"` 拒绝（手动刷新一次才好）。`/gui/` 由控制台自己的 `app.sock`
-反代到 dsh（`AdminMux.dshUI`，见 `backend/admin.go`），请求始终落在控制台入口的
-鉴权范围内；dsh 前端仍然靠 `<base href="./">` 在 `/gui/` 下解析相对路径。
+路径里的 `/dsh` 是**控制台入口下的子路径**，不是另一个网关入口：网关只看到
+`gatewayPrefix=/app/Harness`（socket `app.sock`），控制台与 dsh 的 fpk entry 共用
+这一个前缀。飞牛 App 的网关鉴权是**按入口（gatewayPrefix）注入**的，早先 dsh 用
+独立入口时，跨入口的第一请求会被 `trim_http_cgi` 以 `200 + 13 字节 "invalid token"`
+拒绝（手动刷新一次才好）——把 dsh 收进控制台入口（`AdminMux.dshUI`，见
+`backend/admin.go`）之后这条问题从结构上消失了；dsh 前端仍然靠
+`<base href="./">` 在 `/dsh/` 下解析相对路径。
 
 换算在 `backend/admin.go` 的 `fnosEntryURL` 完成，随 `GET /api/settings` 的
 `runtime.fnosEntryURL` 下发；后端拿不到访问地址时前端退回浏览器自身地址
@@ -474,7 +492,7 @@ popstate 派发到控制台的 window。注意这个长度是**组件挂载时**
 
 对 dsh 服务而言，这类请求无需再输一遍控制台密码：
 
-- **跳过登录鉴权** —— 网关那条线（Unix Socket 监听，`HARNESS_PROXY_SOCK`）上的请求
+- **跳过登录鉴权** —— 网关那条线（控制台 admin socket 上的 `/dsh` 挂载）上的请求
   只要带齐 `X-Trim-Username` + `X-Trim-Userid`，就不再被重定向到 `/_login`；
   WebSocket 升级共用同一份判定（不再回 `401`）。
 - **等待界面照旧** —— 跳过鉴权不等于跳过就绪门禁：dsh 未就绪时照样是等待页，
@@ -490,8 +508,8 @@ popstate 派发到控制台的 window。注意这个长度是**组件挂载时**
   4 小时，见 `gatewayVisitorIdleTTL`）后也会自动清除，避免列表长期堆积早已离开的
   用户。
 
-**只有网关那条线认这三个头**（`reverseProxy.gatewayLine`，由 `newReverseProxyAt`
-构造、`startProxySocket` 使用）。TCP 端口线（`proxyPort`，局域网可达）与回环地址
+**只有网关那条线认这三个头**（`reverseProxy.gatewayLine`，由 `AdminMux.dshUI`
+构造、即控制台 admin socket 上的 `/dsh` 挂载）。TCP 端口线（`proxyPort`，局域网可达）与回环地址
 一概不认：请求头是客户端自己就能加的，端口线若认它，任何人加三个头即可绕过端口
 鉴权。因此**局域网直连端口的伪造请求仍然要登录**；网关线上不带身份头、或身份头
 不完整时也退回原有 Cookie 鉴权（例如本机进程直连 socket）。
@@ -911,8 +929,8 @@ PATH，不能用来解析「当前选中的版本」。
 ## 主要流程
 
 1. **启动** — 解析环境变量 → 读取配置 → 校验密码 → 启动 Admin socket →
-   **启动反向代理**（TCP 根挂载 + 可选的 Unix Socket 子路径挂载；先监听、先鉴权，
-   dsh 未就绪时给等待页）→ 自动启动 dsh：**先看有没有选中的 dsh 版本**，没有就进入
+   **启动反向代理**（TCP 根挂载 + 控制台 admin socket 上的 `/dsh` 子路径挂载；先监听、
+   先鉴权，dsh 未就绪时给等待页）→ 自动启动 dsh：**先看有没有选中的 dsh 版本**，没有就进入
    `not-installed` 阶段（等待页提示去概览页下载 + 切换），有则启动该版本的
    `dsh web --no-open --port <port>`（除非 `HARNESS_AUTOSTART=0`）。
 2. **凭据交换** — 从 dsh 日志扫描一次性访问 token（`?token=`），用它访问一次

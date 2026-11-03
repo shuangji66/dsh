@@ -8,17 +8,17 @@ import (
 )
 
 // newFnOSEntryMux 构造一个只带环境（baseurl）的最小 AdminMux，用于换算飞牛入口。
-// 入口现在挂在控制台 baseurl 之下的 /gui（dshUI），不再依赖 ProxyBaseURL。
+// 入口挂在控制台 baseurl 之下的 /dsh（dshUI），没有独立的 dsh 网关入口。
 func newFnOSEntryMux(adminBaseURL string) *AdminMux {
-	m := &AdminMux{renv: &RuntimeEnv{AdminBaseURL: adminBaseURL, ProxyBaseURL: "/app/Harness/dsh"}}
+	m := &AdminMux{renv: &RuntimeEnv{AdminBaseURL: adminBaseURL}}
 	if base := strings.TrimRight(adminBaseURL, "/"); base != "" {
-		m.dshUI = newReverseProxyMount(nil, nil, nil, base+"/gui", true)
+		m.dshUI = newReverseProxyMount(nil, nil, nil, base+"/dsh", true)
 	}
 	return m
 }
 
 // 飞牛入口：控制台当前访问地址剥离控制台 baseurl 得到飞牛 OS 访问源，
-// 再拼接控制台入口下的 dsh 反代路径 /gui/。
+// 再拼接控制台入口下的 dsh 反代路径 /dsh/。
 func TestFnOSEntryURL(t *testing.T) {
 	m := newFnOSEntryMux("/app/Harness")
 
@@ -35,7 +35,7 @@ func TestFnOSEntryURL(t *testing.T) {
 				r.Header.Set("Origin", "http://192.168.1.111:5666")
 				return r
 			},
-			want: "http://192.168.1.111:5666/app/Harness/gui/",
+			want: "http://192.168.1.111:5666/app/Harness/dsh/",
 		},
 		{
 			// Referer 是控制台页面的完整地址，需剥离控制台 baseurl
@@ -45,7 +45,7 @@ func TestFnOSEntryURL(t *testing.T) {
 				r.Header.Set("Referer", "http://192.168.1.111:5666/app/Harness/?view=overview")
 				return r
 			},
-			want: "http://192.168.1.111:5666/app/Harness/gui/",
+			want: "http://192.168.1.111:5666/app/Harness/dsh/",
 		},
 		{
 			// 两个头都缺失时退回 Host，scheme 由转发头给出（网关反代 https）
@@ -56,7 +56,7 @@ func TestFnOSEntryURL(t *testing.T) {
 				r.Header.Set("X-Forwarded-Proto", "https")
 				return r
 			},
-			want: "https://fnos.example:5667/app/Harness/gui/",
+			want: "https://fnos.example:5667/app/Harness/dsh/",
 		},
 		{
 			// 自定义 baseurl 同样支持（网关与控制台 baseurl 都不在默认位置）
@@ -66,7 +66,7 @@ func TestFnOSEntryURL(t *testing.T) {
 				r.Header.Set("Origin", "https://10.0.0.2")
 				return r
 			},
-			want: "https://10.0.0.2/foo/gui/",
+			want: "https://10.0.0.2/foo/dsh/",
 		},
 	}
 

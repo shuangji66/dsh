@@ -24,11 +24,12 @@ const toast = useToastStore()
 const { t } = useI18n()
 
 // dsh 卡片右上角「进入」的目标：当前访问环境下经飞牛网关访问 dsh 服务的地址。
-// 优先后端按请求头换算的结果（控制台访问源 + 控制台入口下的 /gui/ 反代）；后端推不出
+// 优先后端按请求头换算的结果（控制台访问源 + 控制台入口下的 /dsh/ 反代）；后端推不出
 // 时退回浏览器自身地址 —— document.baseURI 就是控制台当前地址，origin 拼上
-// consoleDshURL（/app/Harness/gui/）即可。
-// 注意：这里不再拼独立的 /app/Harness/dsh —— 飞牛 App 的网关鉴权按入口注入，
-// 控制台入口的凭据带不过去（会先看到 trim_http_cgi 的 invalid token）。
+// consoleDshURL（/app/Harness/dsh/）即可。
+// 注意：`/app/Harness/dsh` 是**控制台 entry 下的子路径**（gatewayPrefix 仍是
+// /app/Harness、socket 仍是 app.sock），不是另一个 dsh 网关入口 —— 飞牛 App 的网关
+// 鉴权按入口注入，跨入口的凭据带不过去（会先看到 trim_http_cgi 的 invalid token）。
 const fnosEntry = computed(() => {
   const fromServer = runtime.value?.fnosEntryURL || ''
   if (fromServer) return fromServer
@@ -50,8 +51,8 @@ const fnosEntry = computed(() => {
 //   - 同窗口 location.assign 也一样（实测控制台页面确实被导航走了，dsh 仍收到
 //     trim_http_cgi 的 200 + 13 字节 "invalid token"）。
 // 但 iframe 是**控制台页面自己的子资源请求**，走的是控制台这个 WebView 的请求栈；
-// 而且入口地址是控制台 baseurl 之下的 /gui/（由控制台的 app.sock 反代到 dsh，
-// 见 backend/admin.go 的 dshUI），不跨到独立的 dsh 入口。如果仍然被网关拒绝
+// 而且入口地址是控制台 baseurl 之下的 /dsh/（由控制台的 app.sock 反代到 dsh，
+// 见 backend/admin.go 的 dshUI），始终在控制台这个网关入口内。如果仍然被网关拒绝
 // （iframe 里出现 13 字节错误页），只显示一个全屏的重试面板。
 const entryFrameVisible = ref(false)
 const entryFrameUrl = ref('')

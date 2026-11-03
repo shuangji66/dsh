@@ -99,7 +99,7 @@ func TestGetSettingsExposesNodeHeapLimitMB(t *testing.T) {
 	initConfig(&cfg)
 
 	m := &AdminMux{
-		renv: &RuntimeEnv{ProxyBaseURL: "/app/Harness/dsh"},
+		renv: &RuntimeEnv{},
 		dsh:  newTestDshManager(t.TempDir(), ""),
 	}
 	rec := httptest.NewRecorder()

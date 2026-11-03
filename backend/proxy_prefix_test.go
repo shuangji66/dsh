@@ -1,9 +1,9 @@
 package main
 
-// 本文件覆盖「子路径挂载 + unix socket 监听」这条部署形态：平台网关（fnOS
-// open-gateway）把 http://<fnip>:<port>/app/Harness/dsh 整段转发到本进程的
-// dsh.sock，反代剥掉该前缀再转发给 dsh（挂载点用的是默认值，见
-// HARNESS_PROXY_BASEURL）。
+// 本文件覆盖「控制台入口下的子路径挂载」这条部署形态：平台网关（fnOS
+// open-gateway）把 http://<fnip>:<port>/app/Harness/dsh 整段转发到控制台的
+// admin socket，由 AdminMux 的 dshUI 反代剥掉 /app/Harness/dsh 前缀再转发给
+// dsh（挂载点是控制台 baseurl 之下一层，见 AdminMux.dshUI）。
 //
 // dsh 0.1.7-alpha.1 起其前端产物完全按文档相对路径生成（index 由
 // dsh-host-frontend-static 注入 <base href="./">，插件 bundle、/api、SSE、流 mux
@@ -15,14 +15,11 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -47,7 +44,7 @@ func newMountedFixture(t *testing.T, dshPort int, baseURL string) *proxyFixture 
 	dsh := newTestDshManager(t.TempDir(), "")
 	boot := newBootState()
 	return &proxyFixture{
-		proxy: newReverseProxyAt(NewAuth(), dsh, boot, baseURL),
+		proxy: newReverseProxyMount(NewAuth(), dsh, boot, baseURL, true),
 		dsh:   dsh,
 		boot:  boot,
 	}
@@ -262,79 +259,6 @@ func TestProxyMountWaitingPageRefreshRejectsProtocolRelativeURI(t *testing.T) {
 	}
 }
 
-// --- unix socket 端到端 ---
-
-// startProxySocket 起的监听要真的能服务：建目录、建 socket、剥前缀转发，
-// 并在 stopProxySocket 后删掉 socket 文件。
-func TestProxySocketEndToEnd(t *testing.T) {
-	var gotURI string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotURI = r.URL.RequestURI()
-		_, _ = io.WriteString(w, "dsh-upstream")
-	}))
-	defer upstream.Close()
-
-	prev := GetConfig()
-	cfg := prev
-	cfg.DshPort = portOfURL(t, upstream.URL)
-	cfg.AuthEnabled = false // 端到端只验证挂载与剥前缀，鉴权由上面的用例覆盖
-	initConfig(&cfg)
-	t.Cleanup(func() { initConfig(&prev) })
-
-	dsh := newTestDshManager(t.TempDir(), "")
-	boot := newBootState()
-	boot.set(phaseReady, "")
-
-	sock := filepath.Join(t.TempDir(), "target", "dsh.sock")
-	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot, nil)
-	t.Cleanup(stopProxySocket)
-
-	if fi, err := os.Stat(sock); err != nil {
-		t.Fatalf("socket 未创建: %v", err)
-	} else if fi.Mode()&os.ModeSocket == 0 {
-		t.Fatalf("%s 不是 socket 文件 (mode=%v)", sock, fi.Mode())
-	}
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-			},
-		},
-		// 重定向交给用例自己判断（裸挂载点的 301 需要看到原始响应）。
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-
-	resp, err := client.Get("http://unix" + proxyMountTestBase + "/api/ping?x=1")
-	if err != nil {
-		t.Fatalf("经 socket 请求失败: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || string(body) != "dsh-upstream" {
-		t.Fatalf("经 socket 转发失败: code=%d body=%q", resp.StatusCode, string(body))
-	}
-	if gotURI != "/api/ping?x=1" {
-		t.Fatalf("上游 URI = %q, want /api/ping?x=1", gotURI)
-	}
-
-	// 裸挂载点重定向到目录。
-	resp, err = client.Get("http://unix" + proxyMountTestBase)
-	if err != nil {
-		t.Fatalf("裸挂载点请求失败: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusMovedPermanently || resp.Header.Get("Location") != proxyMountTestBase+"/" {
-		t.Fatalf("裸挂载点 code=%d location=%q", resp.StatusCode, resp.Header.Get("Location"))
-	}
-
-	// 退出清理：socket 文件必须被删掉，避免留下陈旧 socket。
-	stopProxySocket()
-	if _, err := os.Stat(sock); !os.IsNotExist(err) {
-		t.Fatalf("stopProxySocket 后 socket 文件仍在: %v", err)
-	}
-}
-
 // WebSocket 升级同样要按剥前缀后的路径转发：终端 / 流 mux 的 ws 请求由浏览器
 // 按挂载地址发出（<prefix>/…），dsh 只认 /…，剥不干净就会连到不存在的路由。
 func TestProxyMountUpgradeStripsPrefix(t *testing.T) {
@@ -384,13 +308,13 @@ func TestProxyMountUpgradeStripsPrefix(t *testing.T) {
 	boot := newBootState()
 	boot.set(phaseReady, "")
 
-	sock := filepath.Join(t.TempDir(), "dsh.sock")
-	startProxySocket(sock, proxyMountTestBase, NewAuth(), dsh, boot, nil)
-	t.Cleanup(stopProxySocket)
+	proxy := newReverseProxyMount(NewAuth(), dsh, boot, proxyMountTestBase, true)
+	srv := httptest.NewServer(proxy)
+	t.Cleanup(srv.Close)
 
-	conn, err := net.Dial("unix", sock)
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
 	if err != nil {
-		t.Fatalf("连接 socket 失败: %v", err)
+		t.Fatalf("连接反代失败: %v", err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
@@ -471,23 +395,15 @@ func TestProxyMountNormalization(t *testing.T) {
 	}
 }
 
-// 默认值守卫：dsh GUI 挂在 /app/Harness/dsh（控制台 baseurl 之下的一层），
-// socket 默认落在平台应用目录下的 dsh.sock。
-func TestRuntimeEnvProxyMountDefaults(t *testing.T) {
-	for _, k := range []string{"TRIM_APPDEST", "HARNESS_PROXY_SOCK", "HARNESS_PROXY_BASEURL", "HARNESS_ADMIN_BASEURL"} {
-		t.Setenv(k, "")
+// 控制台入口下的 dsh 挂载点必须是 <AdminBaseURL>/dsh：fpk 里的控制台与 dsh
+// 两个 entry 都指向同一个网关前缀（/app/Harness），dsh 只是它下面的子路径。
+func TestAdminMuxMountsDshUnderConsoleBase(t *testing.T) {
+	renv := &RuntimeEnv{AdminBaseURL: "/app/Harness"}
+	m := newAdminMux(renv, newTestDshManager(t.TempDir(), ""), NewAuth(), nil, nil, nil)
+	if m.dshUI == nil {
+		t.Fatal("dshUI 未挂载")
 	}
-	env := loadRuntimeEnv()
-	if env.ProxyBaseURL != "/app/Harness/dsh" {
-		t.Fatalf("ProxyBaseURL 默认 = %q, want /app/Harness/dsh", env.ProxyBaseURL)
-	}
-	if env.ProxySock != "/var/apps/Harness/target/dsh.sock" {
-		t.Fatalf("ProxySock 默认 = %q, want /var/apps/Harness/target/dsh.sock", env.ProxySock)
-	}
-	// 与控制台 baseurl（/app/Harness，走 admin socket）分层：dsh 挂载在其之下一层，
-	// 两者不会互相抢路径。
-	m := newProxyMount(env.ProxyBaseURL)
-	if want := env.AdminBaseURL + "/dsh/"; m.dir() != want {
-		t.Fatalf("dsh 挂载 = %q, want 控制台 baseurl 之下一层 %q", m.dir(), want)
+	if got, want := m.dshUI.mount.dir(), "/app/Harness/dsh/"; got != want {
+		t.Fatalf("dsh 挂载 = %q, want %q", got, want)
 	}
 }

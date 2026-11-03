@@ -83,13 +83,14 @@
 - `proxy.go` — 反向代理，转发时**携带 dsh 会话 Cookie**；`ServeHTTP` 里顺序是
   「剥挂载前缀 → 鉴权路由 → 就绪状态 `/_ready` → 鉴权 → 等待页/转发」，放行判定只在
   `reverseProxy.state()` 一处；等待页（`waitingPageHTML`）轮询 `/_ready` 并自动跳转。
-  反代有**两条监听、两种挂载**：TCP `proxyPort`（配置项，默认 `3079`）是根挂载（历史行为），可选的
-  Unix Socket（`HARNESS_PROXY_SOCK`，默认 `$TRIM_APPDEST/dsh.sock`）挂在
-  `HARNESS_PROXY_BASEURL`（默认 `/app/Harness/dsh`，刻意比控制台 baseurl 深一层）下
-  ——平台网关把该子路径整段转发到 socket，由反代**剥离前缀**后转发给 dsh（dsh 只认
-  `/`、`/api`、`/plugins`；其 0.1.7-alpha.1 起前端全走文档相对路径，靠
-  `<base href="./">` 自动拼出 `<prefix>/api`）。挂载换算集中在 `proxyMount`
-  （`strip`/`join`/`dir`/`joinURI`）。
+  反代有**两种挂载**：TCP `proxyPort`（配置项，默认 `3079`）是根挂载（历史行为）；
+  控制台 admin socket 上的 `<AdminBaseURL>/dsh`（默认 `/app/Harness/dsh`）是子路径挂载
+  （`AdminMux.dshUI`）——平台网关只看到控制台这一个入口前缀
+  （`gatewayPrefix=/app/Harness`、socket `app.sock`），dsh 不再单独注册网关入口，
+  从结构上消除了「跨入口第一请求 invalid token」。子路径这条线由反代**剥离前缀**后
+  转发给 dsh（dsh 只认 `/`、`/api`、`/plugins`；其 0.1.7-alpha.1 起前端全走文档
+  相对路径，靠 `<base href="./">` 自动拼出 `<prefix>/api`）。挂载换算集中在
+  `proxyMount`（`strip`/`join`/`dir`/`joinURI`）。
 - `terminal.go` — WebSocket + `creack/pty` 的交互式 bash。前端连 `/terminal`（`?id=` 为空
   则新建，非空则挂载既有会话：回放历史文件 + `\x1b]ready\x07` 后进入实时流），浏览器断开
   **只解挂载不杀会话**（会话继续运行并写历史临时文件）。**一个会话同时只有一个操作端
@@ -613,16 +614,17 @@
   `backend/proxy_market_restart_test.go`（含转发头清单守卫）与
   `backend/proxy_skill_explorer_fence_test.go`（九条路由 × 两种挂载）。
 - **反代有「根挂载」与「子路径挂载」两种形态，自留路径一律经 `proxyMount`** ——
-  子路径挂载来自平台网关把 `<prefix>/…` 整段转发到 `HARNESS_PROXY_SOCK`，反代在
+  子路径挂载是控制台 admin socket 上的 `<AdminBaseURL>/dsh`（`AdminMux.dshUI`），
+  网关把 `/app/Harness/…` 整段转发到 `app.sock`，反代在
   `stripMount` 里剥掉前缀（此后 `r.URL` 是挂载内路径），因此：
   1. **新增/修改反代自留路径（`/_login`、`/_logout`、`/_ready`）或任何 302 目标时，
      必须用 `p.mount.join(...)` / `joinURI(...)` 补回前缀** —— 直接写绝对路径在子路径
      部署下会把浏览器送出挂载目录（登录、登出、等待页轮询与 Refresh 兜底都会失效）。
      `auth.go` 的登录页表单 action 用 `__LOGIN_ACTION__` 占位符注入同一个换算结果。
-  2. **不要把挂载前缀硬编码进代码**：它来自 `HARNESS_PROXY_BASEURL`（默认
-     `/app/Harness/dsh`，位于控制台 baseurl 之下一层，避免与 admin socket 抢路径），
-     `HARNESS_PROXY_SOCK`（默认 `$TRIM_APPDEST/dsh.sock`）为空或 `off` 时这条监听
-     整体关闭。网关侧必须**按更长前缀优先匹配**，否则控制台那条规则会把 dsh 流量截走。
+  2. **不要把挂载前缀硬编码进代码**：它就是 `AdminBaseURL + "/dsh"`（在
+     `newAdminMux` 里拼出，见 `m.dshUI.mount`）。独立 dsh socket 那条线已移除
+     （`HARNESS_PROXY_SOCK` / `HARNESS_PROXY_BASEURL` 不再存在）；网关侧只有
+     `/app/Harness` 一个前缀，不需要「按更长前缀优先匹配」。
   3. **dsh 侧不需要 baseurl**：0.1.7-alpha.1 起其前端全走文档相对路径（`<base href="./">`），
      浏览器自己拼出 `<prefix>/api`；不要试图去改写 dsh 的产物，也不要为了“兼容子路径”
      给 dsh 传前缀参数。此机制的前提是 **dsh ≥ 0.1.7-alpha.1**，更早版本在子路径下必然 404。

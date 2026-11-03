@@ -123,8 +123,8 @@ const bootstrapScript = `(function () {
   //    实际 pathname 是 "<前缀>/open-in-app/apps"；只按根路径比较会漏拦，宿主照常
   //    返回应用列表（含 zed），按钮又冒出来。
   //    前缀取 document.baseURI 去掉结尾斜杠 —— 与浏览器解析这些相对路径用的是同一
-  //    份基准，既不硬编码挂载点，也不影响根挂载（HARNESS_PROXY_BASEURL 未启用时
-  //    baseURI 就是站点根，前缀为空，行为与原来完全一致）。
+  //    份基准，既不硬编码挂载点，也不影响根挂载（端口直连时 baseURI 就是站点根，
+  //    前缀为空，行为与原来完全一致）。
   var mountPath = function () {
     try {
       var base = new URL(document.baseURI || location.href, location.href).pathname;
@@ -810,11 +810,11 @@ type reverseProxy struct {
 	runAt    time.Time
 	runAlive bool
 	// mount 是这条监听对外占据的路径（见 proxyMount）：历史 TCP 端口是根挂载
-	// （prefix 为空，路径原样转发）；平台网关转发的 unix socket 挂在子路径下
-	// （默认 /app/Harness/dsh），进站请求剥掉前缀、自留路径与跳转目标补回前缀。
+	// （prefix 为空，路径原样转发）；控制台 admin socket 上的 dsh 挂载在
+	// <AdminBaseURL>/dsh 子路径下，进站请求剥掉前缀、自留路径与跳转目标补回前缀。
 	mount proxyMount
-	// gatewayLine 标记这条监听是否为「平台网关那条线」（Unix Socket，见
-	// startProxySocket）。只有它认网关注入的身份头（X-Trim-Username /
+	// gatewayLine 标记这条监听是否为「平台网关那条线」（控制台 admin socket 上的
+	// /dsh 挂载，见 AdminMux.dshUI）。只有它认网关注入的身份头（X-Trim-Username /
 	// X-Trim-Isadmin / X-Trim-Userid）并据此跳过登录鉴权：该 socket 不在网络上
 	// 暴露，只有本机网关进程能连；TCP 端口线在局域网内可达，认这三个头等于把
 	// 端口鉴权交给客户端自己声明。
@@ -834,7 +834,7 @@ type reverseProxy struct {
 //   - prefix 为空：根挂载。反代直接占据站点根，请求路径原样转发给 dsh（历史行为，
 //     TCP 端口监听即如此，端口见 AppConfig.ProxyPort）。
 //   - prefix 非空（如 "/app/Harness/dsh"）：反代挂在子路径下。这类部署来自平台网关
-//     ——它把 http://<fnip>:<port>/app/Harness/dsh 整段转发到本进程的 unix socket，
+//     ——它把 http://<fnip>:<port>/app/Harness/dsh 整段转发到控制台的 admin socket，
 //     反代必须把前缀剥干净再转发给 dsh（dsh 只认 /、/api、/plugins 等根路径），
 //     并把自留路径（/_login、/_logout、/_ready）与 302 目标重新加上前缀，使
 //     浏览器始终留在子路径下。
@@ -902,14 +902,6 @@ func newReverseProxy(a *Auth, dsh *DshManager, boot *bootState) *reverseProxy {
 func (p *reverseProxy) withAccount(account *AdminMux) *reverseProxy {
 	p.account = account
 	return p
-}
-
-// newReverseProxyAt 构造挂在 baseURL 下的反代（空串 = 根挂载，历史行为）。
-//
-// 该构造只用于 Unix Socket 监听（平台网关那条线，见 startProxySocket），因此信任
-// 网关注入的身份头：飞牛 OS 已完成登录认证，这条线上的请求跳过 harness 登录鉴权。
-func newReverseProxyAt(a *Auth, dsh *DshManager, boot *bootState, baseURL string) *reverseProxy {
-	return newReverseProxyMount(a, dsh, boot, baseURL, true)
 }
 
 func newReverseProxyMount(a *Auth, dsh *DshManager, boot *bootState, baseURL string, gatewayLine bool) *reverseProxy {

@@ -41,7 +41,7 @@ func writeAccountCreds(t *testing.T, body string) string {
 
 func newAccountTestMux(t *testing.T, home string) *AdminMux {
 	t.Helper()
-	renv := &RuntimeEnv{Home: home, AdminBaseURL: "/app/Harness", ProxySock: "/x/dsh.sock", ProxyBaseURL: "/app/Harness/dsh"}
+	renv := &RuntimeEnv{Home: home, AdminBaseURL: "/app/Harness"}
 	// 账号库是密文落盘（见 accountvault.go），所以测试里也得有一把主密钥
 	// （临时目录里的一把，见 quickcmds_crypt_test.go 的 testCryptor）。
 	return newAdminMux(renv, &DshManager{renv: renv, logf: func(logLevel, string, ...interface{}) {}}, nil, nil, nil, testCryptor(t))
@@ -183,12 +183,6 @@ func TestAccountRedirectURI(t *testing.T) {
 		if got := m.accountRedirectURI(tc.origin); got != tc.want {
 			t.Fatalf("accountRedirectURI(%q) = %q, want %q", tc.origin, got, tc.want)
 		}
-	}
-
-	// 网关那条线关闭时前缀为空（占位地址落在根挂载上）。
-	m.renv.ProxySock = "off"
-	if got := m.accountRedirectURI("https://fn.1kw.site:3333"); got != "http://127.0.0.1:3079/oauth/callback" {
-		t.Fatalf("无挂载前缀时 = %q", got)
 	}
 }
 
@@ -565,18 +559,13 @@ func TestAccountLogoutWaitsForDsh(t *testing.T) {
 	}
 }
 
-// 回调路径的三种写法都要被反代线认出来（尤其别退化成只剩根路径那种）。
+// 回调路径的两种写法都要被反代线认出来（尤其别退化成只剩根路径那种）。
 func TestAccountCallbackMountPaths(t *testing.T) {
-	renv := &RuntimeEnv{AdminBaseURL: "/app/Harness", ProxySock: "/x/dsh.sock", ProxyBaseURL: "/app/Harness/dsh"}
+	renv := &RuntimeEnv{AdminBaseURL: "/app/Harness"}
 	got := accountCallbackMountPaths(renv)
-	want := []string{"/oauth/callback", "/app/Harness/dsh/oauth/callback", "/app/Harness/oauth/callback"}
+	want := []string{"/oauth/callback", "/app/Harness/oauth/callback"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("accountCallbackMountPaths() = %v, want %v", got, want)
-	}
-	// 网关线关闭时只有根路径（不重复、不带挂载前缀）。
-	renv.ProxySock = "off"
-	if got := accountCallbackMountPaths(renv); strings.Join(got, ",") != "/oauth/callback,/app/Harness/oauth/callback" {
-		t.Fatalf("无挂载前缀时 = %v", got)
 	}
 }
 

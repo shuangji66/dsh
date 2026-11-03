@@ -285,10 +285,10 @@ func (a *Auth) recordVisitor(r *http.Request) {
 // --- 飞牛网关访问（网关注入的身份头） ---
 //
 // 平台网关（fnOS open-gateway）转发应用请求时会注入这三个头，代表请求已经过飞牛
-// OS 的登录认证。反代只在「网关那条线」（Unix Socket 监听，见 startProxySocket 与
-// reverseProxy.gatewayLine）上认可它们：那条 socket 不在网络上暴露，只有本机网关
-// 进程能连。TCP 端口在局域网内可达，认这三个头等于把端口鉴权交给客户端自己声明
-// （任何客户端加三个头就能绕过），故端口线一概不认。
+// OS 的登录认证。反代只在「网关那条线」（控制台 admin socket 上的 /dsh 挂载，见
+// AdminMux.dshUI 与 reverseProxy.gatewayLine）上认可它们：那条 socket 不在网络上
+// 暴露，只有本机网关进程能连。TCP 端口在局域网内可达，认这三个头等于把端口鉴权交给
+// 客户端自己声明（任何客户端加三个头就能绕过），故端口线一概不认。
 const (
 	headerTrimUsername = "X-Trim-Username"
 	headerTrimIsAdmin  = "X-Trim-Isadmin"

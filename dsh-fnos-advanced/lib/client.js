@@ -3310,7 +3310,7 @@ function scanFileTree() {
       continue;
     }
     if (action) {
-      const rowButton = row.querySelector(":scope > button");
+      const rowButton = findRowButton(row);
       const height = rowButton ? rowButton.offsetHeight : 0;
       if (height && action.style.height !== `${height}px`) action.style.height = `${height}px`;
       const label = t("飞牛操作");
@@ -3321,8 +3321,11 @@ function scanFileTree() {
     injectFileAction(row);
   }
 }
+function findRowButton(row) {
+  return row.querySelector(":scope > button") || row.querySelector(":scope > div > button");
+}
 function injectFileAction(row) {
-  const rowButton = row.querySelector(":scope > button");
+  const rowButton = findRowButton(row);
   if (!rowButton) return;
   row.classList.add("dsh-fnos-file-row");
   if (getComputedStyle(row).position === "static") {
@@ -3397,7 +3400,7 @@ function injectPickItem(template) {
 var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.4";
+var VERSION = "0.6.5";
 
 // src/client/workspace-menu.ts
 var lastWorkspaceMenu = null;
@@ -3439,7 +3442,7 @@ function injectOpenDirItem(menu) {
       event.preventDefault();
       event.stopPropagation();
       const context = lastWorkspaceMenu;
-      closeMenu(menu);
+      closeMenu();
       if (!context) {
         showToast(t("无法确定工作区"));
         return;
@@ -3463,22 +3466,25 @@ function injectOpenDirItem(menu) {
   if (check) viewport.insertBefore(check, viewport.firstChild);
   if (open) viewport.insertBefore(open, viewport.firstChild);
 }
-function closeMenu(menu) {
+function closeMenu() {
   try {
     const options = {
       key: "Escape",
       code: "Escape",
       keyCode: 27,
       which: 27,
-      bubbles: true
+      bubbles: true,
+      cancelable: true
     };
     document.dispatchEvent(new KeyboardEvent("keydown", options));
     window.dispatchEvent(new KeyboardEvent("keydown", options));
   } catch {
   }
-  window.setTimeout(() => {
-    if (menu.isConnected) menu.remove();
-  }, 0);
+  try {
+    const outside = typeof PointerEvent === "function" ? new PointerEvent("pointerdown", { bubbles: true, cancelable: true }) : new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+    (document.body || document.documentElement).dispatchEvent(outside);
+  } catch {
+  }
 }
 async function openWorkspaceDirectory(id) {
   const path = await resolveWorkspacePath(id);
@@ -4289,7 +4295,8 @@ var STYLE_TEXT = `
     padding: 0;
     color: var(--dsw-alias-label-tertiary, #888);
   }
-  .dsh-fnos-file-row > button {
+  .dsh-fnos-file-row > button:not(.dsh-fnos-file-action),
+  .dsh-fnos-file-row > div > button:first-child:not(.dsh-fnos-file-action) {
     padding-right: 34px;
   }
   .dsh-fnos-file-action {

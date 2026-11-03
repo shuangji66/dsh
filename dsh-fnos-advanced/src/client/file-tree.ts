@@ -3,9 +3,11 @@
  *
  * Rows expose `data-files-entry` (`file` / `directory` / `other`) and an
  * absolute `data-files-path`; both are deliberate automation anchors in
- * 0.2.0-rc.2 and 0.2.1-rc.2. The control sits outside the row <button> so a
- * click never opens/toggles the file itself. The menu itself is shared with the
- * slot-rendered surfaces and lives in `path-menu.ts`.
+ * 0.2.0-rc.2 and 0.2.1-rc.2. 0.2.2-alpha.3 wrapped the row's main button in a
+ * `div` (`<li><div><button>…</button><div class="accessory"/></div></li>`), so
+ * the button lookup accepts both shapes. The control sits outside the row
+ * <button> so a click never opens/toggles the file itself. The menu itself is
+ * shared with the slot-rendered surfaces and lives in `path-menu.ts`.
  */
 import { FILE_ACTION_ATTR, FILE_ACTION_SVG } from './constants.ts';
 import { t } from './i18n.ts';
@@ -28,7 +30,7 @@ export function scanFileTree(): void {
     }
 
     if (action) {
-      const rowButton = row.querySelector<HTMLElement>(':scope > button');
+      const rowButton = findRowButton(row);
       const height = rowButton ? rowButton.offsetHeight : 0;
       if (height && action.style.height !== `${height}px`) action.style.height = `${height}px`;
       const label = t('飞牛操作');
@@ -41,8 +43,20 @@ export function scanFileTree(): void {
   }
 }
 
+/**
+ * The row's main action button across dsh versions.
+ *
+ * 0.2.0–0.2.1 rendered it as a direct child of the row `<li>`; 0.2.2-alpha.3
+ * renders `<li><div class=row><button class=action>…</button><div class=accessory/></div></li>`.
+ * In both shapes the main button is the first button in the row.
+ */
+function findRowButton(row: HTMLElement): HTMLElement | null {
+  return row.querySelector<HTMLElement>(':scope > button')
+    || row.querySelector<HTMLElement>(':scope > div > button');
+}
+
 function injectFileAction(row: HTMLElement): void {
-  const rowButton = row.querySelector<HTMLElement>(':scope > button');
+  const rowButton = findRowButton(row);
   if (!rowButton) return;
 
   row.classList.add('dsh-fnos-file-row');

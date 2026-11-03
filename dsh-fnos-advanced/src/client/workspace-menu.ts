@@ -100,7 +100,7 @@ function injectOpenDirItem(menu: Element): void {
       event.preventDefault();
       event.stopPropagation();
       const context = lastWorkspaceMenu;
-      closeMenu(menu);
+      closeMenu();
       if (!context) {
         showToast(t('无法确定工作区'));
         return;
@@ -132,7 +132,18 @@ function injectOpenDirItem(menu: Element): void {
   if (open) viewport.insertBefore(open, viewport.firstChild);
 }
 
-function closeMenu(menu: Element): void {
+/**
+ * Close dsh's context menu through the dismissal paths dsh itself listens for.
+ *
+ * The menu belongs to dsh's React overlay. Removing its node by hand is what
+ * used to break this: React still owns that node, so its later unmount threw
+ * `NotFoundError: Failed to execute 'removeChild' on 'Node'` inside the
+ * `shell.overlay` slot, which tore the whole context-menu overlay down — the
+ * workspace menu could not be opened again until the page reloaded (dsh
+ * 0.2.2-alpha.3). Dispatch Escape and one outside pointerdown instead; both
+ * are handled by dsh's Menu, so React unmounts the menu normally.
+ */
+function closeMenu(): void {
   try {
     const options: KeyboardEventInit & { keyCode: number; which: number } = {
       key: 'Escape',
@@ -140,13 +151,17 @@ function closeMenu(menu: Element): void {
       keyCode: 27,
       which: 27,
       bubbles: true,
+      cancelable: true,
     };
     document.dispatchEvent(new KeyboardEvent('keydown', options));
     window.dispatchEvent(new KeyboardEvent('keydown', options));
   } catch { /* ignore */ }
-  window.setTimeout(() => {
-    if (menu.isConnected) menu.remove();
-  }, 0);
+  try {
+    const outside = typeof PointerEvent === 'function'
+      ? new PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+      : new MouseEvent('pointerdown', { bubbles: true, cancelable: true });
+    (document.body || document.documentElement).dispatchEvent(outside);
+  } catch { /* React also closes the menu on the next real outside click */ }
 }
 
 /** Open one workspace in the fnOS file manager (host environments only). */

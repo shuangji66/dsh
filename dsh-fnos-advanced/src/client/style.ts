@@ -94,7 +94,8 @@ const STYLE_TEXT = `
     padding: 0;
     color: var(--dsw-alias-label-tertiary, #888);
   }
-  .dsh-fnos-file-row > button {
+  .dsh-fnos-file-row > button:not(.dsh-fnos-file-action),
+  .dsh-fnos-file-row > div > button:first-child:not(.dsh-fnos-file-action) {
     padding-right: 34px;
   }
   .dsh-fnos-file-action {

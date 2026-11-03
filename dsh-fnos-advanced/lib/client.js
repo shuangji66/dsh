@@ -2519,12 +2519,13 @@ function isFnosApp(userAgent) {
 }
 function consoleBaseOf(pathname) {
   const match = /^(.*?)\/dsh(?:\/|$)/.exec(pathname);
-  return match ? match[1] : "";
+  return match ? match[1] : null;
 }
 function isConsoleEmbeddedPath(pathname, parentPath) {
   const base = consoleBaseOf(pathname);
-  if (!base) return false;
+  if (base === null) return false;
   if (parentPath === null) return true;
+  if (base === "") return parentPath === "" || parentPath.startsWith("/");
   return parentPath === base || parentPath.startsWith(base + "/");
 }
 function isConsoleEmbeddedDsh() {

@@ -27,11 +27,12 @@ export function isFnosApp(userAgent?: string): boolean {
 
 /**
  * 从 dsh 页面自身的路径反推控制台 base：`/app/Harness/dsh/...` → `/app/Harness`。
- * 认不出 `<base>/dsh` 形态时返回空串（此时无法判断，调用方按“非内嵌”处理）。
+ * 控制台挂在站点根（AdminBaseURL 为空）时 dsh 就是 `/dsh/...`，此时 base 是**空串**，
+ * 它和「认不出形态」是两回事，所以这里用 null 表示后者。
  */
-function consoleBaseOf(pathname: string): string {
+function consoleBaseOf(pathname: string): string | null {
   const match = /^(.*?)\/dsh(?:\/|$)/.exec(pathname);
-  return match ? match[1] : '';
+  return match ? match[1] : null;
 }
 
 /**
@@ -44,11 +45,15 @@ function consoleBaseOf(pathname: string): string {
  * 或者干脆是顶层窗口）。`parentPath` 为 null 表示父页面跨源、读不到 —— 按“内嵌”
  * 处理是安全方向：误判只会少用宿主桥接、多一次网页授权；反过来会在没有桥接的地方
  * 调用原生选择器。
+ *
+ * 根挂载（`consoleBase === ''`）是合法部署：控制台页面本身就是 `/`、`/index.html`
+ * 或 `/?view=…`，只要父页面是同源的绝对路径就按内嵌处理。
  */
 export function isConsoleEmbeddedPath(pathname: string, parentPath: string | null): boolean {
   const base = consoleBaseOf(pathname);
-  if (!base) return false;
+  if (base === null) return false;
   if (parentPath === null) return true;
+  if (base === '') return parentPath === '' || parentPath.startsWith('/');
   return parentPath === base || parentPath.startsWith(base + '/');
 }
 

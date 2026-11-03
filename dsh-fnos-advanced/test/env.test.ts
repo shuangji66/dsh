@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isConsoleEmbeddedPath, isFnosApp } from '../src/client/env.ts';
+import { isConsoleEmbeddedDsh, isConsoleEmbeddedPath, isFnosApp } from '../src/client/env.ts';
 
 test('recognizes the fnOS app WebView on iOS and Android', () => {
   assert.equal(isFnosApp(
@@ -32,4 +32,39 @@ test('recognizes the console-embedded dsh by its parent page, not by the mount p
   // 不是 <base>/dsh 形态：认不出，按非内嵌处理。
   assert.equal(isConsoleEmbeddedPath('/app/Harness/', '/app/Harness/'), false);
   assert.equal(isConsoleEmbeddedPath('/', '/'), false);
+});
+
+test('recognizes the console-embedded dsh when the console is mounted at the site root', () => {
+  // AdminBaseURL 为空时 dsh 就挂在 /dsh/：base 是合法的空串，不能和「认不出」混为一谈。
+  assert.equal(isConsoleEmbeddedPath('/dsh/', '/'), true);
+  assert.equal(isConsoleEmbeddedPath('/dsh/session/1', '/index.html'), true);
+  assert.equal(isConsoleEmbeddedPath('/dsh/', '/?view=overview'), true);
+  assert.equal(isConsoleEmbeddedPath('/dsh/', null), true);
+  // 路径里没有 /dsh 段时仍然认不出。
+  assert.equal(isConsoleEmbeddedPath('/api/x', '/'), false);
+});
+
+test('isConsoleEmbeddedDsh reads the parent window path at runtime', () => {
+  const g = globalThis as { window?: unknown };
+  const prev = g.window;
+  try {
+    const embedded: any = { location: { pathname: '/app/Harness/dsh/' } };
+    embedded.parent = { location: { pathname: '/app/Harness/' } };
+    g.window = embedded;
+    assert.equal(isConsoleEmbeddedDsh(), true);
+
+    // 顶层窗口（App 图标入口直接加载 / 浏览器新标签页）不是内嵌。
+    const top: any = { location: { pathname: '/app/Harness/dsh/' } };
+    top.parent = top;
+    g.window = top;
+    assert.equal(isConsoleEmbeddedDsh(), false);
+
+    // 父页面跨源、读不到 location：按内嵌处理（宁可按无宿主桥接）。
+    const cross: any = { location: { pathname: '/app/Harness/dsh/' } };
+    cross.parent = { get location(): any { throw new Error('cross-origin'); } };
+    g.window = cross;
+    assert.equal(isConsoleEmbeddedDsh(), true);
+  } finally {
+    g.window = prev;
+  }
 });

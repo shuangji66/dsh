@@ -28,6 +28,11 @@ const (
 	phaseDeps = "deps"
 	// phaseReady：启动流水线已收尾。此后能否转发仍由端口与凭据决定。
 	phaseReady = "ready"
+	// phaseAuthFailed：dsh 端口已通，但首次 20 秒内没有拿到访问 token，且上一次
+	// 留下的 cookie 也被 dsh 拒绝（401）。控制台仍会在后台继续补偿（见
+	// DshManager.StartAuthRepair），等待页给出可操作提示而不是一直转圈，更不会
+	// 把用户放行到没有凭据的 dsh（那只会看到 401）。
+	phaseAuthFailed = "auth-failed"
 	// phaseStopped：dsh 未在运行（用户手动停止，或启动流水线之外进程已退出）。
 	// 它不由 main 显式设置，而是由 reverseProxy.state() 在“端口未监听且进程不在”
 	// 时推导出来，用于把“等待启动”和“已经停了”区分开；与下面的 failed/disabled
@@ -47,7 +52,7 @@ const (
 // 且反代不会把它改写成 starting/stopped/auth）。
 func userActionPhase(phase string) bool {
 	switch phase {
-	case phaseFailed, phaseDisabled, phaseNotInstalled:
+	case phaseFailed, phaseDisabled, phaseNotInstalled, phaseAuthFailed:
 		return true
 	}
 	return false

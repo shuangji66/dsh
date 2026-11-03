@@ -403,14 +403,24 @@ func TestProxyReadyStatePhases(t *testing.T) {
 		bootPhase  string
 		bootDetail string
 		pend       bool
+		authFailed bool
 		wantPhase  string
 		wantReady  bool
 		wantDetail string
 	}{
 		{name: "启动流水线进行中即使端口已通也不放行", up: true, bootPhase: phaseDeps, wantPhase: phaseDeps},
 		{name: "凭据未落定", up: true, bootPhase: phaseReady, pend: true, wantPhase: phaseAuth},
+		// 凭据确认拿不到时停在 auth-failed（不放行），且优先于还在跑的启动流水线：
+		// captureDshSession 已经结束、node-pty 可能还在装，用户要立刻看到可操作提示。
+		{name: "凭据失败", up: true, bootPhase: phaseReady, pend: true, authFailed: true, wantPhase: phaseAuthFailed},
+		{name: "凭据失败时流水线未收尾也先报失败", up: true, bootPhase: phaseDeps, pend: true, authFailed: true, wantPhase: phaseAuthFailed},
+		// 进程已经退出（端口也没了）时显示已停止，而不是让用户去重启一个已停掉的服务。
+		{name: "凭据失败但进程已退出", up: false, bootPhase: phaseReady, pend: true, authFailed: true, wantPhase: phaseStopped},
 		{name: "端口未监听且进程不在", up: false, bootPhase: phaseReady, wantPhase: phaseStopped},
 		{name: "启动失败", up: false, bootPhase: phaseFailed, bootDetail: "boom", wantPhase: phaseFailed, wantDetail: "boom"},
+		// 控制台重启时 dsh 可能还在跑（Start 以 already running 失败），端口与
+		// 旧代号都“就绪”，但本进程没有会话 cookie：必须保留失败原因，不能放行。
+		{name: "启动失败但端口已被占用且代号已落定", up: true, bootPhase: phaseFailed, bootDetail: "boom", wantPhase: phaseFailed, wantDetail: "boom"},
 		// 端口通但凭据未落定时只把「流水线已收尾」的阶段改写成 auth；failed /
 		// disabled 必须原样保留（否则 dsh 启动失败而端口被旧进程占着时，等待页
 		// 只剩转圈、看不到失败原因）。
@@ -429,6 +439,9 @@ func TestProxyReadyStatePhases(t *testing.T) {
 			f.boot.set(tc.bootPhase, tc.bootDetail)
 			if tc.pend {
 				f.pendSession()
+			}
+			if tc.authFailed {
+				f.dsh.markAuthFailedGen(f.dsh.SessionGen())
 			}
 
 			rec := proxyGet(t, f.proxy, readyPath, sessionCookieHeader())
@@ -498,6 +511,40 @@ func TestProxyDoesNotForwardBeforeCredentialsSettled(t *testing.T) {
 	rec = proxyGet(t, f.proxy, "/", sessionCookieHeader())
 	if rec.Code != http.StatusOK || rec.Body.String() != "dsh-upstream" {
 		t.Fatalf("凭据落定后应转发到 dsh，实际 code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// 凭据确认拿不到时同样不转发（旧实现「超时也落定」会把用户送进 dsh 的 401），
+// 等待页必须显示 auth-failed 的可操作提示；后台补偿落定后立刻放行。
+func TestProxyDoesNotForwardWhenAuthFailed(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = io.WriteString(w, "dsh-upstream")
+	}))
+	defer upstream.Close()
+
+	f := newProxyFixture(t, portOfURL(t, upstream.URL))
+	f.boot.set(phaseReady, "")
+	f.pendSession()
+	f.dsh.markAuthFailedGen(f.dsh.SessionGen())
+
+	rec := proxyGet(t, f.proxy, "/", sessionCookieHeader())
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "__DSH_WAIT__") {
+		t.Fatalf("凭据失败时应给等待页，实际 code=%d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "无法获取 dsh 访问凭据") {
+		t.Fatal("等待页应显示 auth-failed 的可操作提示，而不是继续转圈")
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Fatalf("凭据失败时不应转发到 dsh，实际转发 %d 次", got)
+	}
+
+	// 后台补偿成功（落定）后立即放行。
+	f.dsh.markSessionSettledGen(f.dsh.SessionGen())
+	rec = proxyGet(t, f.proxy, "/", sessionCookieHeader())
+	if rec.Code != http.StatusOK || rec.Body.String() != "dsh-upstream" {
+		t.Fatalf("补偿落定后应转发到 dsh，实际 code=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
 

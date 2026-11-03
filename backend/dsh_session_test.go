@@ -5,25 +5,26 @@ package main
 // C3：ExchangeToken 在「token 无效 / 响应里没有 dsh-auth-* cookie」时旧实现静默返回
 // nil，与成功无法区分 —— 日志里没有任何线索，用户只能靠自己撞上 dsh 的 401 发现。
 // C4：markSessionSettled 旧实现写的是**当前**启动代号，而不是发起等待的那一代：
-// 上一代 captureDshSession 在旧版 dsh 上要空等 15 秒，期间 dsh 一旦重启，这次超时
-// 就会把新一代标成「凭据已落定」，反代据此放行，用户被送进 dsh 的未授权页。
+// 上一代 captureDshSession 要等满 20 秒，期间 dsh 一旦重启，这次超时就会把新一代
+// 标成「凭据已落定」，反代据此放行，用户被送进 dsh 的未授权页。
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// tokenExchangeFixture 造一个假 dsh（httptest server 当 dsh 的 HTTP 端点）与一个
-// 已捕获 token 的 DshManager。handler 决定假 dsh 如何响应 token 交换请求。
-func tokenExchangeFixture(t *testing.T, handler http.HandlerFunc) *DshManager {
+// initDshPortForTest 把测试用 httptest 服务器的端口写进全局配置（ProbeAuth 与
+// ExchangeToken 都从这里取 dsh 端口）。
+func initDshPortForTest(t *testing.T, srv *httptest.Server) {
 	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
 	u, err := url.Parse(srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +36,15 @@ func tokenExchangeFixture(t *testing.T, handler http.HandlerFunc) *DshManager {
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
 	initConfig(&AppConfig{DshPort: port})
+}
+
+// tokenExchangeFixture 造一个假 dsh（httptest server 当 dsh 的 HTTP 端点）与一个
+// 已捕获 token 的 DshManager。handler 决定假 dsh 如何响应 token 交换请求。
+func tokenExchangeFixture(t *testing.T, handler http.HandlerFunc) *DshManager {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	initDshPortForTest(t, srv)
 
 	dsh := newTestDshManager(t.TempDir(), "")
 	dsh.tokenMu.Lock()
@@ -122,7 +132,7 @@ func TestMarkSessionSettledIsGenerationScoped(t *testing.T) {
 		t.Fatal("同一代标记后应落定")
 	}
 
-	// 上一代的等待快结束时 dsh 又重启了两代（旧版 dsh 不打印 token 时会空等 15 秒）。
+	// 上一代的等待快结束时 dsh 又重启了两代（每次等待最长 20 秒）。
 	dsh.bumpSessionGen()
 	dsh.bumpSessionGen()
 	if dsh.SessionSettled() {
@@ -140,27 +150,254 @@ func TestMarkSessionSettledIsGenerationScoped(t *testing.T) {
 	}
 }
 
-// 保留语义：无论是否拿到 token 都要落定（旧版 dsh 不打印 token 时等待会立即结束，
-// 因为此时的 DshManager 判定进程未运行）。
-func TestCaptureDshSessionSettlesWithoutToken(t *testing.T) {
+// 新语义：拿不到 token、也没有可用的旧 cookie 时**不落定**（旧实现无条件落定，
+// 把用户放行到没有 cookie 的 dsh，只见 401）。
+// 这里的 DshManager 没有受管进程：WaitToken 会立即结束、Running() 为 false，
+// 属于「进程已退出」分支 —— 既不落定，也不该标成凭据失败（等待页会显示 stopped）。
+func TestCaptureDshSessionDoesNotSettleWithoutCredentials(t *testing.T) {
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
-	initConfig(&AppConfig{DshPort: 65535})
+	initConfig(&AppConfig{DshPort: closedPort(t)})
 	dsh := newTestDshManager(t.TempDir(), "")
 	dsh.bumpSessionGen()
 
 	done := make(chan struct{})
 	go func() {
-		captureDshSession(dsh)
+		captureDshSessionWithin(dsh, 50*time.Millisecond)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("拿不到 token 时也必须收尾落定，不能永久等待")
+		t.Fatal("拿不到凭据时也必须收尾，不能永久等待")
 	}
+	if dsh.SessionSettled() {
+		t.Fatal("没有可用凭据时不得落定（否则反代把用户放行到 401）")
+	}
+	if dsh.SessionAuthFailed() {
+		t.Fatal("进程已不在时不该标成凭据失败（等待页应显示已停止）")
+	}
+}
+
+// 拿到 token 且兑换成功 → 落定。
+func TestCaptureDshSessionSettlesWithToken(t *testing.T) {
+	dsh := tokenExchangeFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "dsh-auth-session", Value: "v1", Path: "/"})
+		w.WriteHeader(http.StatusOK)
+	})
+	dsh.bumpSessionGen()
+
+	captureDshSessionWithin(dsh, 50*time.Millisecond)
+
 	if !dsh.SessionSettled() {
-		t.Fatal("未拿到 token 也必须标记本代落定（否则反代永远停在等待页）")
+		t.Fatal("token 兑换成功后应落定")
+	}
+	if got := dsh.AuthCookie(); got != "dsh-auth-session=v1" {
+		t.Fatalf("会话 cookie = %q, want dsh-auth-session=v1", got)
+	}
+}
+
+// 没有新 token，但上一代留下的 cookie 仍然有效 → 直接落定（dsh 的 dsh-auth-*
+// 由持久签名密钥签发，插件市场自重启、node-pty 重启都属于这一类）。
+func TestCaptureDshSessionSettlesWithExistingValidCookie(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Cookie"), "dsh-auth-old=keep") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		http.Redirect(w, r, "./", http.StatusSeeOther)
+	}))
+	defer srv.Close()
+	initDshPortForTest(t, srv)
+
+	dsh := newTestDshManager(t.TempDir(), "")
+	dsh.setAuthCookie("dsh-auth-old=keep")
+	dsh.bumpSessionGen()
+
+	captureDshSessionWithin(dsh, 50*time.Millisecond)
+
+	if !dsh.SessionSettled() {
+		t.Fatal("旧 cookie 仍被 dsh 接受时应直接落定")
+	}
+	if dsh.SessionAuthFailed() {
+		t.Fatal("探测有效时不该标成凭据失败")
+	}
+}
+
+// 进程还活着、没有 token、旧 cookie 被 401 拒绝 → 不落定 + 标成凭据失败
+// （等待页停在 auth-failed，后台补偿继续重试）。
+func TestCaptureDshSessionMarksAuthFailedWhenCookieRejected(t *testing.T) {
+	prev := GetConfig()
+	t.Cleanup(func() { initConfig(&prev) })
+	initConfig(&AppConfig{DshPort: closedPort(t)})
+
+	dsh := newTestDshManager(t.TempDir(), "")
+	// Running() 需要有受管子进程：用 sleep 占位（不启动真正的 dsh）。
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("无法启动占位进程: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	dsh.cmd = cmd
+	dsh.bumpSessionGen()
+
+	captureDshSessionWithin(dsh, 50*time.Millisecond)
+
+	if dsh.SessionSettled() {
+		t.Fatal("没有凭据时不得落定")
+	}
+	if !dsh.SessionAuthFailed() {
+		t.Fatal("进程还活着但拿不到凭据时应标成 auth-failed（等待页要给出可操作提示）")
+	}
+	// 收尾：别让补偿 goroutine 在测试结束后继续跑。
+	dsh.cancelAuthRepair()
+}
+
+// 探测三态：401 = 未授权；303/200 = 有效；404/5xx/连接错误 = 未知（慢设备上
+// 插件还没加载完、路由还没挂上，不能据此判失败）。
+func TestProbeAuthClassifiesResponses(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   authProbeResult
+	}{
+		{"401", http.StatusUnauthorized, authProbeInvalid},
+		{"303", http.StatusSeeOther, authProbeValid},
+		{"200", http.StatusOK, authProbeValid},
+		{"404", http.StatusNotFound, authProbeUnknown},
+		{"503", http.StatusServiceUnavailable, authProbeUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			initDshPortForTest(t, srv)
+
+			dsh := newTestDshManager(t.TempDir(), "")
+			dsh.setAuthCookie("dsh-auth-x=y")
+			if got := dsh.ProbeAuth(1500 * time.Millisecond); got != tc.want {
+				t.Fatalf("ProbeAuth(%d) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// 没有 cookie 时探测直接判未授权，不发请求（dsh 从未启动过的常见路径）。
+func TestProbeAuthWithoutCookieSkipsRequest(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	defer srv.Close()
+	initDshPortForTest(t, srv)
+
+	dsh := newTestDshManager(t.TempDir(), "")
+	if got := dsh.ProbeAuth(time.Second); got != authProbeInvalid {
+		t.Fatalf("无 cookie 时应判未授权，实际 %v", got)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Fatalf("无 cookie 时不应发起请求，实际 %d 次", got)
+	}
+}
+
+// EnsureAuthProbe 是反代热路径的入口：有效 cookie 探测成功后必须自行落定。
+func TestEnsureAuthProbeSettlesWhenCookieValid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "./", http.StatusSeeOther)
+	}))
+	defer srv.Close()
+	initDshPortForTest(t, srv)
+
+	dsh := newTestDshManager(t.TempDir(), "")
+	dsh.setAuthCookie("dsh-auth-x=y")
+	dsh.bumpSessionGen()
+
+	dsh.EnsureAuthProbe()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if dsh.SessionSettled() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("有效 cookie 的异步探测应把本代标记为已落定")
+}
+
+// 失败标记同样按启动代号 compare-and-set：旧代失败不得作用于新代；
+// 一旦落定，本代也不再算失败。
+func TestSessionAuthFailedScopedToGeneration(t *testing.T) {
+	prev := GetConfig()
+	t.Cleanup(func() { initConfig(&prev) })
+	initConfig(&AppConfig{DshPort: 65535})
+	dsh := newTestDshManager(t.TempDir(), "")
+
+	dsh.bumpSessionGen()
+	gen1 := dsh.SessionGen()
+	dsh.markAuthFailedGen(gen1)
+	if !dsh.SessionAuthFailed() {
+		t.Fatal("本代失败标记应生效")
+	}
+	dsh.markSessionSettledGen(gen1)
+	if dsh.SessionAuthFailed() {
+		t.Fatal("落定后不该再算失败")
+	}
+
+	dsh.bumpSessionGen()
+	if dsh.SessionAuthFailed() {
+		t.Fatal("新一代未标失败，旧代的失败不得作用过来")
+	}
+	dsh.markAuthFailedGen(gen1)
+	if dsh.SessionAuthFailed() {
+		t.Fatal("旧代的失败标记不得写到新一代")
+	}
+	dsh.markAuthFailedGen(dsh.SessionGen())
+	if !dsh.SessionAuthFailed() {
+		t.Fatal("当前代标记后应生效")
+	}
+}
+
+// tokenScanner 必须按行扫描：一次写入远超旧实现的 8 KiB 窗口、且 token 行在前的
+// 输出，旧实现会在匹配之前把 token 行裁掉（静默漏扫），新实现必须命中。
+func TestTokenScannerFindsTokenInLargeWrite(t *testing.T) {
+	var got []string
+	var out bytes.Buffer
+	s := &tokenScanner{dst: &out, cb: func(tok string) { got = append(got, tok) }}
+	payload := "dsh web: http://127.0.0.1:3080/?token=abcdefgh1234\n" +
+		strings.Repeat("plugin loading output\n", 1200)
+	if _, err := s.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "abcdefgh1234" {
+		t.Fatalf("大段输出里的 token 必须被捕获，实际 %v", got)
+	}
+	if out.String() != payload {
+		t.Fatal("dsh 输出必须原样透传")
+	}
+}
+
+// 子进程输出不保证一次写完一行：token 行被拆成多次 Write 也要能识别。
+func TestTokenScannerHandlesSplitLine(t *testing.T) {
+	var got []string
+	var out bytes.Buffer
+	s := &tokenScanner{dst: &out, cb: func(tok string) { got = append(got, tok) }}
+	_, _ = s.Write([]byte("dsh web: http://127.0.0.1:3080/?tok"))
+	_, _ = s.Write([]byte("en=abcdefgh1234\n"))
+	if len(got) != 1 || got[0] != "abcdefgh1234" {
+		t.Fatalf("跨 Write 的 token 行必须被捕获，实际 %v", got)
+	}
+}
+
+// 超长无换行输出（进度条 / 全屏 TUI）不能把缓冲撑爆，也不能影响之后的 token 行。
+func TestTokenScannerHandlesHugeLine(t *testing.T) {
+	var got []string
+	var out bytes.Buffer
+	s := &tokenScanner{dst: &out, cb: func(tok string) { got = append(got, tok) }}
+	_, _ = s.Write([]byte(strings.Repeat("x", maxTokenLineBytes*2)))
+	_, _ = s.Write([]byte("\ndsh web: http://127.0.0.1:3080/?token=abcdefgh1234\n"))
+	if len(got) != 1 || got[0] != "abcdefgh1234" {
+		t.Fatalf("超长行之后的 token 行必须被捕获，实际 %v", got)
 	}
 }
 

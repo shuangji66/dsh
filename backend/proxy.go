@@ -516,8 +516,8 @@ func injectIntoHTML(body []byte, diag bool) []byte {
 //   - 轮询 /_ready 拿到真实状态（__WAIT_STATE__ 由服务端首次注入）。启动过程
 //     （starting/auth/deps）只显示一句话「正在等待 DeepSeek Harness 服务就绪」——
 //     换取凭据、安装 node-pty 都是内部细节，不对外展示；只有需要用户动手的状态
-//     （已停止 / 启动失败 / 未自动启动）才分别给出指引。旧版不看状态、10 秒后
-//     无条件报「启动失败」，属误报；
+//     （已停止 / 启动失败 / 未自动启动 / 拿不到 dsh 访问凭据）才分别给出指引。
+//     旧版不看状态、10 秒后无条件报「启动失败」，属误报；
 //   - 一旦 /_ready 报告就绪立即 location.replace 跳转，不再靠整页刷新撞时机。
 //
 // 无 JS（或轮询被中间层拦掉）时仍有兜底：serveWaitingPage 会带上 10 秒的
@@ -633,6 +633,9 @@ window.__DSH_WAIT__=__WAIT_STATE__;
     'not-installed':['尚未安装 dsh 服务','The dsh service is not installed',
       '请先在控制台「概览」页的版本列表里下载一个 dsh 版本，然后点「切换」启动它。',
       'Download a dsh version from the console overview page, then switch to it.'],
+    'auth-failed':['无法获取 dsh 访问凭据','Could not obtain dsh access credentials',
+      '控制台正在后台自动重试；若长时间未恢复，请在控制台「概览」页重启 dsh 服务。',
+      'The console keeps retrying in the background. If this persists, restart dsh from the console overview page.'],
     ready:['服务已就绪，正在跳转…','Ready, redirecting…',
       '正在进入 dsh 界面。','Entering the dsh interface.']
   };
@@ -654,7 +657,7 @@ window.__DSH_WAIT__=__WAIT_STATE__;
     var t=TEXT[(s&&s.phase)||'starting']||TEXT.starting;
     titleEl.textContent=t[0]+' / '+t[1];
     subEl.innerHTML=t[2]+'<span class="en">'+t[3]+'</span>';
-    var broken=s&&(s.phase==='failed'||s.phase==='stopped'||s.phase==='disabled'||s.phase==='not-installed');
+    var broken=s&&(s.phase==='failed'||s.phase==='stopped'||s.phase==='disabled'||s.phase==='not-installed'||s.phase==='auth-failed');
     spinnerEl.style.display=broken?'none':'';
     // failed / not-installed 的 detail 都要显示：前者是启动失败原因，后者是
     // 「该去哪里装版本」的指引（后端下发的是本地化后的安装目录路径）。
@@ -1001,15 +1004,38 @@ func (p *reverseProxy) state() (proxyState, *BackendChecker) {
 		phase, detail = phaseStarting, ""
 	}
 
+	// 端口已通但凭据还没落定：让后台探测一次上一次留下的 cookie 是否仍然有效
+	// （带节流与去重，不阻塞这里）。dsh 的 dsh-auth-* 由持久签名密钥签发，跨重启
+	// 有效：插件市场自重启、node-pty 重启这类场景通常根本不需要等新的 token。
+	// 探测成功会自行落定，下一次轮询就放行。
+	if portUp && !settled {
+		p.dsh.EnsureAuthProbe()
+	}
+
+	booting := p.boot.booting()
 	switch {
-	case p.boot.booting():
-		// 启动流水线进行中：即使端口已通也不放行，按流水线的阶段显示等待页。
-	case portUp && settled:
+	case portUp && settled && !booting && !userActionPhase(phase):
+		// 显式原因（启动失败 / 未自动启动 / 未安装）优先：控制台重启时 dsh 可能
+		// 还在跑（Start 会以 "already running" 失败），此时端口与旧代号都“就绪”，
+		// 但本进程手里没有会话 cookie —— 放行只会看到 401，不如把失败原因留在
+		// 等待页上。
 		return proxyState{Phase: phaseReady, Ready: true, Detail: detail}, checker
+	case portUp && p.dsh.SessionAuthFailed():
+		// 本代凭据确认拿不到：停在等待页并给出可操作提示（后台仍在补偿，见
+		// StartAuthRepair）。放在 booting 之前：captureDshSession 已经结束、流水线
+		// 可能还在装 node-pty，用户应该立刻看到「拿不到凭据」而不是继续转圈。
+		// 启动失败 / 未自动启动 / 未安装这些显式原因优先，不被这里改写。
+		if !userActionPhase(phase) {
+			phase = phaseAuthFailed
+			detail = ""
+		}
+	case booting:
+		// 启动流水线进行中：即使端口已通也不放行，按流水线的阶段显示等待页。
 	case !portUp:
 		// 端口未监听。流水线之外只有几种情况要区分：显式说明（启动失败 / 未自动
 		// 启动）原样保留；进程还在（自重启、更新后拉起）显示“启动中”；进程不在
-		// （用户手动停止）显示“已停止”。
+		// （用户手动停止）显示“已停止”。凭据失败在这里不单独呈现：端口都没通，
+		// 该说的事实是“还没起来 / 已经停了”，而不是“拿不到凭据”。
 		if !userActionPhase(phase) {
 			if p.dshAliveCached() {
 				phase = phaseStarting

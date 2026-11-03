@@ -1324,7 +1324,8 @@ func (m *UpdateManager) startDshCaptured() error {
 	if err := m.dsh.Start(); err != nil {
 		return err
 	}
-	// 异步等待捕获 token 并换取 cookie，不阻塞调用方主流程（最多等 15 秒）。
+	// 异步等待捕获 token 并换取 cookie，不阻塞调用方主流程（最多等 20 秒，
+	// 拿不到会标 auth-failed 并交由后台补偿继续重试，见 captureDshSession）。
 	go captureDshSession(m.dsh)
 	return nil
 }

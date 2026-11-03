@@ -281,28 +281,70 @@ func main() {
 	logInfo("backend stopped")
 }
 
+// dshTokenWait 是等待 dsh 启动日志里那一行带 token 的访问地址的上限。dsh 要等
+// 插件加载完成（loader.await 之后）才打印它，慢设备上会比端口监听晚很多，所以这个
+// 值不能太短；超过它也不算彻底放弃 —— 后台补偿会继续等（见 StartAuthRepair）。
+const dshTokenWait = 20 * time.Second
+
 // captureDshSession 等待并捕获 dsh 的一次性访问 token，并用 token 换取 dsh
 // 会话 cookie，供反向代理转发时携带。每次 dsh 启动都会生成新的 token，因此
 // dsh 重启后需重新调用本函数。
 //
-// 无论是否拿到 token 都要标记本代凭据「已落定」（SessionSettled）：反代据此
-// 决定放行还是继续显示等待页，漏标会让反代一直停在等待页。旧版 dsh 不打印
-// token 时等待会超时返回空串，同样算落定，避免永久卡住。
+// 落定（SessionSettled）的语义是「凭据确实可用」，不是「等待结束」：
+//  1. 拿到 token 且换取成功 → 落定；
+//  2. 没拿到 token（或换取失败）→ 先用上一次留下的 cookie 探测一次：dsh 的
+//     dsh-auth-* 由持久签名密钥签发，跨重启仍然有效，插件市场自重启、node-pty
+//     重启都属于这一类；
+//  3. 探测明确 401 → 标记本代「拿不到凭据」（等待页显示可操作提示）并启动后台
+//     补偿（继续等 token，最长 5 分钟）；
+//  4. 进程已退出 → 什么都不标，state() 会按 stopped 呈现。
 //
-// 但「本代」必须锁定为**发起这次等待时**的启动代号（gen）：旧版 dsh 的这一等就是
-// 整 15 秒，期间足够发生一次重启（dsh.Start 会递增代号使上一代凭据失效）。若结束时
-// 用「当前代号」标记，就会把新一代标成凭据已落定 —— 反代据此放行，而新一代的 token
-// 还没换取，用户被送进 dsh 的未授权页。因此这里取一次 gen，结束时 compare-and-set。
+// 旧实现无论拿没拿到 token 都在 defer 里落定，慢启动时会把用户放行到一个没有
+// cookie 的 dsh，只见 401，而且不会自愈。
 func captureDshSession(dsh *DshManager) {
+	captureDshSessionWithin(dsh, dshTokenWait)
+}
+
+// captureDshSessionWithin 是 captureDshSession 的实现体，等待时长可注入（测试用
+// 短窗口；生产固定 dshTokenWait）。
+func captureDshSessionWithin(dsh *DshManager, wait time.Duration) {
 	gen := dsh.SessionGen()
-	defer dsh.markSessionSettledGen(gen)
-	if tok := dsh.WaitToken(15 * time.Second); tok != "" {
+	if tok := dsh.WaitToken(wait); tok != "" {
 		// 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
 		// 供反代转发时携带（访问不带 token 的 dsh 地址）。成功时不输出日志。
 		if err := dsh.ExchangeToken(); err != nil {
 			logWarn("[dsh] token exchange failed: %v", err)
+		} else {
+			dsh.markSessionSettledGen(gen)
+			return
 		}
+	} else {
+		logWarn("[dsh] no access token captured within %s", wait)
 	}
+
+	// 没有可用 token：先看上一代留下的 cookie 是否仍然有效（dsh 每次启动会重新
+	// 打印 token，但签名密钥是持久的，cookie 不随重启失效）。
+	// 探测结果是三态：只有明确的 401 才算「凭据不可用」；404/5xx/连接错误说明 dsh
+	// 还没服务到这条路由（插件还在加载），不能据此判定失败。
+	switch dsh.ProbeAuth(dshAuthProbeTimeout) {
+	case authProbeValid:
+		logInfo("[dsh] existing dsh session cookie is still valid")
+		dsh.markSessionSettledGen(gen)
+		return
+	case authProbeInvalid:
+		logWarn("[dsh] dsh rejected the stored session cookie (http 401)")
+	default:
+		logWarn("[dsh] dsh session probe was inconclusive, will retry in the background")
+	}
+
+	if !dsh.Running() {
+		// 进程已经退出：这不是凭据问题，交给 state() 按 stopped 呈现。
+		return
+	}
+	// 端口通了但凭据拿不到：停在等待页（phaseAuthFailed），后台继续等 token。
+	// 慢设备上 token 可能晚于 dshTokenWait 才打印，补偿不是可选项。
+	dsh.markAuthFailedGen(gen)
+	dsh.StartAuthRepair(gen)
 }
 
 // initConfig applies a config as the process-wide singleton.

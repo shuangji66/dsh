@@ -43,7 +43,7 @@ type DshManager struct {
 	tokenMu      sync.RWMutex
 	token        string // 新版 dsh 启动时在日志输出的一次性访问 token
 	authMu       sync.RWMutex
-	authCookie   string // 用 token 换取到的 dsh 会话 cookie（形如 "dsh-auth-xxx=yyy"）
+	authCookie   string // 用 token 换取到的 dsh 会话 cookie（形如 "dsh-auth-xxx=yyy"）；跨重启保留（dsh 用持久签名密钥签发），是否仍有效由 ProbeAuth 判定
 	// sessionMu 保护下面两个「启动代号」：每代 dsh 启动都会生成新的 token，需要用
 	// 它异步换取会话凭据（见 captureDshSession），换取完成之前反代不应放行转发
 	// （否则转发到 dsh 必然被拒）。用独立互斥锁：Start 会长时间持有 m.mu，而标记
@@ -51,6 +51,19 @@ type DshManager struct {
 	sessionMu       sync.Mutex
 	sessionGen      int // dsh 启动代号：每次 Start 递增
 	sessionReadyGen int // 已完成凭据换取（或确认无需凭据）的启动代号
+	// sessionAuthFailedGen 记录「本代已确认拿不到 dsh 会话凭据」的启动代号。
+	// 反代据此把等待页从「正在启动」切换成「拿不到凭据」的可操作提示（见
+	// reverseProxy.state）。与 sessionReadyGen 一样按代号比较：新一代启动后，
+	// 上一次的失败自动作废。
+	sessionAuthFailedGen int
+	// authRepairCancel 取消上一次启动留下的凭据补偿 goroutine（见 StartAuthRepair）。
+	// 每次 Start 换一个新 channel，Stop 也会关掉它。
+	authRepairCancel chan struct{}
+	// authProbeMu 保护授权探测的节流状态：EnsureAuthProbe 由反代热路径调用，
+	// 必须去重（否则等待页 1.5 秒一次的轮询会变成每轮一次 HTTP 探测）。
+	authProbeMu   sync.Mutex
+	authProbeBusy bool
+	authProbeAt   time.Time
 	// livePidMu 保护对 livePid 的并发读写。
 	livePidMu sync.Mutex
 	livePid   int // 实际在运行的 dsh 进程 pid。dsh 装插件自重启后 m.cmd 的 pid 会失效，
@@ -107,25 +120,45 @@ var tokenRe = regexp.MustCompile(`[?&]token=([A-Za-z0-9_-]{8,})`)
 
 // tokenScanner 是一个 io.Writer：它把 dsh 子进程的输出原样转发到下游
 // （logOut），同时扫描其中的 token，命中后通过回调上报给 DshManager。
+//
+// 扫描必须**按行**做，不能保留「最近的 N 字节」再整体匹配：旧实现把缓冲区上限压到
+// 8 KiB（超出后只留下尾部 4 KiB），慢设备启动时 dsh 的插件加载日志很容易一次写入
+// 超过这个量，token 行在匹配之前就被裁掉 —— 而且完全静默（日志里能看到 token 行，
+// 控制台却永远换不到 cookie）。按行扫描后，只有「尚未出现换行的那一行」需要留在
+// 缓冲里，配合一个宽松的单行上限即可避免无限增长。
 type tokenScanner struct {
-	dst io.Writer
-	mu  sync.Mutex
-	buf bytes.Buffer
-	cb  func(token string)
+	dst  io.Writer
+	mu   sync.Mutex
+	line bytes.Buffer // 尚未遇到换行的当前行
+	cb   func(token string)
 }
+
+// maxTokenLineBytes 是单行缓冲上限：正常 token 行只有几十字节，这里留足余量。
+// 超过上限仍无换行（进度条、全屏 TUI 输出）时只保留尾部，避免内存无限增长；
+// 这类超长行本来也不可能是一行正常的 token 输出。
+const maxTokenLineBytes = 64 << 10
 
 func (s *tokenScanner) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	if s.cb != nil {
-		s.buf.Write(p)
-		// 限制缓冲大小，避免 token 尚未出现时无限增长
-		if s.buf.Len() > 8192 {
-			excess := s.buf.Len() - 4096
-			s.buf.Next(excess)
-		}
-		if m := tokenRe.FindSubmatch(s.buf.Bytes()); m != nil {
-			s.cb(string(m[1]))
-			s.cb = nil // 只上报一次
+		s.line.Write(p)
+		for s.cb != nil {
+			idx := bytes.IndexByte(s.line.Bytes(), '\n')
+			if idx < 0 {
+				if s.line.Len() > maxTokenLineBytes {
+					keep := maxTokenLineBytes / 2
+					rest := append([]byte(nil), s.line.Bytes()[s.line.Len()-keep:]...)
+					s.line.Reset()
+					s.line.Write(rest)
+				}
+				break
+			}
+			// Next 返回的切片在下一次 Write 之后可能失效，这里用完即弃。
+			line := s.line.Next(idx + 1)
+			if m := tokenRe.FindSubmatch(line[:len(line)-1]); m != nil {
+				s.cb(string(m[1]))
+				s.cb = nil // 只上报一次
+			}
 		}
 	}
 	n, err := s.dst.Write(p)
@@ -182,28 +215,218 @@ func (m *DshManager) bumpSessionGen() {
 
 // SessionGen 返回当前的 dsh 启动代号。captureDshSession 必须在**开始等待 token 之前**
 // 取一次，结束时用同一个代号做 compare-and-set（见 markSessionSettledGen）：
-// 等待期间 dsh 可能又重启了一代（旧版 dsh 不打印 token 时这次等待要空等 15 秒，
-// 期间足够发生一次重启），用「当前代号」标记会把**新一代**误标成凭据已落定，
-// 反代据此放行，用户被送进 dsh 的未授权页。
+// 等待期间 dsh 可能又重启了一代（等待最长 20 秒，期间足够发生一次重启），用「当前
+// 代号」标记会把**新一代**误标成凭据已落定，反代据此放行，用户被送进 dsh 的未授权页。
 func (m *DshManager) SessionGen() int {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 	return m.sessionGen
 }
 
-// SessionSettled 报告本代 dsh 的访问凭据是否已尘埃落定。
+// SessionSettled 报告本代 dsh 的访问凭据是否已经可用。
 //
-// dsh 每次启动都会打印一次性 token，harness 需要用它换取 dsh-auth-* 会话 cookie
-// （见 captureDshSession，由 Start 之后的调用方异步执行）。在换取完成之前反代
-// 转发必然拿不到凭据、只会收到 dsh 的未授权响应，因此反代据此决定「继续显示
-// 等待页」还是「放行」（见 reverseProxy.state）。
+// dsh 每次启动都会打印一次性 token，harness 用它换取 dsh-auth-* 会话 cookie
+// （见 captureDshSession）。凭据可用之前反代转发必然被 dsh 拒绝（401），因此
+// 反代据此决定「继续显示等待页」还是「放行」（见 reverseProxy.state）。
 //
-// 旧版 dsh 不打印 token 时，等待会在 15 秒后超时并同样标记为已落定，所以最坏
-// 情况只是多显示 15 秒等待页，不会永远卡住。
+// 语义已从「等待结束」收紧为「凭据确实可用」：旧实现无论拿没拿到 token 都会落定，
+// 慢启动时会把用户放行到一个没有 cookie 的 dsh，只看到 401。
 func (m *DshManager) SessionSettled() bool {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 	return m.sessionReadyGen >= m.sessionGen
+}
+
+// SessionAuthFailed 报告本代是否已确认「拿不到 dsh 会话凭据」（首次等待超时且
+// 上一次留下的 cookie 也被 dsh 拒绝）。它只影响等待页的文案：反代不会因此放行，
+// 后台补偿（StartAuthRepair）仍会继续尝试，直到超时或 dsh 重启。
+func (m *DshManager) SessionAuthFailed() bool {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.sessionAuthFailedGen == m.sessionGen && m.sessionReadyGen < m.sessionGen
+}
+
+// markAuthFailedGen 标记「这一代拿不到凭据」（compare-and-set，语义同
+// markSessionSettledGen）：等待期间 dsh 若已重启，这次失败不属于新一代。
+func (m *DshManager) markAuthFailedGen(gen int) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	if gen != m.sessionGen {
+		return
+	}
+	m.sessionAuthFailedGen = gen
+}
+
+// cancelAuthRepair 停掉正在跑的凭据补偿 goroutine。重复调用安全。
+func (m *DshManager) cancelAuthRepair() {
+	m.sessionMu.Lock()
+	if m.authRepairCancel != nil {
+		close(m.authRepairCancel)
+		m.authRepairCancel = nil
+	}
+	m.sessionMu.Unlock()
+}
+
+// StartAuthRepair 在「本代确认拿不到凭据」之后启动后台补偿：按退避继续等 dsh
+// 打印 token（慢设备上要等插件加载完才会打印），拿到就兑换并落定；同时探测上一次
+// 留下的 cookie 是否变得可用。不设「只试一次」：token 在 dsh 进程生命周期内可以
+// 重复兑换，重试只是一次本地 HTTP 请求；而只试一次会让慢设备（token 晚于 40 秒）
+// 永久停在等待页，用户重启 dsh 也只会重来一遍同样的窗口。
+func (m *DshManager) StartAuthRepair(gen int) {
+	m.sessionMu.Lock()
+	if m.authRepairCancel != nil {
+		close(m.authRepairCancel)
+	}
+	cancel := make(chan struct{})
+	m.authRepairCancel = cancel
+	m.sessionMu.Unlock()
+	go m.repairSession(gen, cancel)
+}
+
+// repairSession 是 StartAuthRepair 的实际执行体，按启动代号自我约束：gen 变了
+// （dsh 重启）或已落定就退出，绝不把结果写到新一代身上。
+func (m *DshManager) repairSession(gen int, cancel <-chan struct{}) {
+	backoff := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+	deadline := time.Now().Add(dshAuthRepairBudget)
+	reported := false
+	for i := 0; ; i++ {
+		wait := backoff[len(backoff)-1]
+		if i < len(backoff) {
+			wait = backoff[i]
+		}
+		select {
+		case <-cancel:
+			return
+		case <-time.After(wait):
+		}
+		if m.SessionGen() != gen || m.SessionSettled() {
+			return
+		}
+		if !m.Running() {
+			// 进程已退出：这不是凭据问题，state() 会按 stopped 呈现。
+			return
+		}
+		if tok := m.Token(); tok != "" {
+			if err := m.ExchangeToken(); err != nil {
+				m.logWarn("[dsh] session recovery: token exchange failed: %v", err)
+			} else {
+				m.markSessionSettledGen(gen)
+				m.logInfo("[dsh] session recovered from the delayed access token")
+				return
+			}
+		}
+		if m.ProbeAuth(dshAuthProbeTimeout) == authProbeValid {
+			m.markSessionSettledGen(gen)
+			m.logInfo("[dsh] session recovered: existing cookie accepted by dsh")
+			return
+		}
+		if time.Now().After(deadline) {
+			if !reported {
+				m.logError("[dsh] could not obtain dsh session credentials within %s; the waiting page stays until dsh is restarted", dshAuthRepairBudget)
+				reported = true
+			}
+			return
+		}
+	}
+}
+
+// authProbeResult 是「现有 cookie 还能不能用」的三态判定。
+type authProbeResult int
+
+const (
+	// authProbeUnknown：探测没有结论（dsh 还没开始服务、路由还没挂上、超时）。
+	// 绝不能把这种情况当成「cookie 无效」：慢设备上 20 秒时 dsh 的插件可能还在加载。
+	authProbeUnknown authProbeResult = iota
+	authProbeValid
+	authProbeInvalid
+)
+
+const (
+	dshAuthProbeTimeout = 1500 * time.Millisecond
+	// authProbeInterval 是热路径探测的最小间隔（等待页 1.5 秒轮询一次）。
+	authProbeInterval = 2 * time.Second
+	// dshAuthRepairBudget 是后台补偿的总时长：慢设备插件加载通常 30~60 秒，
+	// 留足余量但不无限重试。
+	dshAuthRepairBudget = 5 * time.Minute
+)
+
+// ProbeAuth 用当前保存的 dsh 会话 cookie 请求一次 dsh 根路径，判断凭据是否仍然有效。
+//
+// 判据只有三种：401 = 明确未授权；303/200 = 授权有效；其它（连接错误、404、5xx）
+// = 未知。dsh 的 authorizeIndex 对有效 cookie + GET / 回 303（location "./"），
+// 未授权回 401；插件尚未加载完时路由可能还没挂上，所以不能把 404 当成失败。
+func (m *DshManager) ProbeAuth(timeout time.Duration) authProbeResult {
+	m.authMu.RLock()
+	ck := m.authCookie
+	m.authMu.RUnlock()
+	if ck == "" {
+		return authProbeInvalid
+	}
+	port := GetConfig().DshPort
+	if port <= 0 {
+		return authProbeUnknown
+	}
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/", port), nil)
+	if err != nil {
+		return authProbeUnknown
+	}
+	req.Header.Set("Cookie", ck)
+	client := &http.Client{
+		Timeout: timeout,
+		// 探测只看第一跳状态码：dsh 对有效 cookie 回 303 到 "./"，跟随过去会多打一次。
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return authProbeUnknown
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusFound, http.StatusSeeOther:
+		return authProbeValid
+	case http.StatusUnauthorized:
+		return authProbeInvalid
+	default:
+		return authProbeUnknown
+	}
+}
+
+// EnsureAuthProbe 由反代热路径调用：端口已通但凭据未落定时，后台探测一次旧 cookie
+// 是否可用（成功就落定）。带节流与并发去重，绝不阻塞调用方。
+func (m *DshManager) EnsureAuthProbe() {
+	if m.AuthCookie() == "" {
+		return
+	}
+	m.authProbeMu.Lock()
+	if m.authProbeBusy || time.Since(m.authProbeAt) < authProbeInterval {
+		m.authProbeMu.Unlock()
+		return
+	}
+	m.authProbeBusy = true
+	m.authProbeMu.Unlock()
+
+	gen := m.SessionGen()
+	go func() {
+		res := m.ProbeAuth(dshAuthProbeTimeout)
+		m.authProbeMu.Lock()
+		m.authProbeBusy = false
+		m.authProbeAt = time.Now()
+		m.authProbeMu.Unlock()
+		if res == authProbeValid {
+			m.markSessionSettledGen(gen)
+		}
+	}()
+}
+
+// resetAuthProbe 让下一次 EnsureAuthProbe 立刻执行（每次 Start 换新代时调用）。
+func (m *DshManager) resetAuthProbe() {
+	m.authProbeMu.Lock()
+	m.authProbeBusy = false
+	m.authProbeAt = time.Time{}
+	m.authProbeMu.Unlock()
 }
 
 // markSessionSettled 标记「此刻这一代」凭据已落定（等价于
@@ -218,8 +441,8 @@ func (m *DshManager) markSessionSettled() {
 //
 // 语义：只有发起这次等待的那一代才算「已落定」。若等待期间 dsh 已重启（gen 前进），
 // 这一代的结果不代表新一代的凭据状态 —— 新一代由它自己的 captureDshSession 负责标记。
-// 注意「无论是否拿到 token 都要落定」的语义不变：调用方在等待结束（拿到或超时）后
-// 调用本方法，只要这一代还是当前代，就照样标记。
+// 调用方必须**确认凭据真的可用**（token 兑换成功、或旧 cookie 通过探测）才调用本方法；
+// 等待超时不再自动落定（旧语义会把用户放行到没有 cookie 的 dsh，只见 401）。
 func (m *DshManager) markSessionSettledGen(gen int) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
@@ -1010,13 +1233,19 @@ func (m *DshManager) Start() error {
 	// plugin-manager 可能来不及删除它的 `package.json.lock`，那份陈旧锁会让之后
 	// 所有插件操作白等 120 秒再失败（见 cleanStaleProfileLocks）。
 	m.cleanStaleProfileLocks()
-	// 每次启动都重置 token 与会话 cookie，避免复用上一次启动的旧凭据；同时递增
-	// 启动代号，让反代判定「本代凭据尚未落定」而继续显示等待页（见 SessionSettled）。
+	// 每次启动都重置 token（上一代的一次性 token 已随进程消失），但**保留会话
+	// cookie**：dsh 的 dsh-auth-* 是用持久签名密钥签发的，跨重启仍然有效（见
+	// ProbeAuth）—— 插件市场自重启、node-pty 重启这类场景本来就不需要新 token，
+	// 清掉它等于把唯一一条「不用等日志」的路堵死。是否真的可用由探测决定：端口
+	// 变了或 cookie 过期都会得到 401，探测不会误放行。
+	// 同时递增启动代号（反代据此判定「本代凭据尚未落定」），并取消上一代可能还在
+	// 跑的凭据补偿、清掉探测节流让新代能立刻探。
 	m.tokenMu.Lock()
 	m.token = ""
 	m.tokenMu.Unlock()
-	m.setAuthCookie("")
 	m.bumpSessionGen()
+	m.resetAuthProbe()
+	m.cancelAuthRepair()
 
 	cmd := exec.Command(bin, "web", "--no-open", "--port", fmt.Sprintf("%d", cfg.DshPort))
 	cmd.Dir = m.renv.TRIMAppDest
@@ -1057,6 +1286,10 @@ func (m *DshManager) Start() error {
 func (m *DshManager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// 停掉后台的凭据补偿：进程都没了，它只会在下一轮 Running() 处自行退出，
+	// 但显式取消更快，也避免它在 Stop 期间反复探测。
+	m.cancelAuthRepair()
 
 	var trackedCmd *exec.Cmd
 	tracked := 0

@@ -2517,9 +2517,26 @@ function isFnosApp(userAgent) {
   const ua = userAgent ?? (typeof navigator !== "undefined" ? navigator.userAgent || "" : "");
   return /FNAppType\//.test(ua);
 }
-function isConsoleEmbeddedDsh(pathname) {
-  const path = pathname ?? (typeof window !== "undefined" ? window.location.pathname : "");
-  return /\/gui(?:\/|$)/.test(path);
+function consoleBaseOf(pathname) {
+  const match = /^(.*?)\/dsh(?:\/|$)/.exec(pathname);
+  return match ? match[1] : "";
+}
+function isConsoleEmbeddedPath(pathname, parentPath) {
+  const base = consoleBaseOf(pathname);
+  if (!base) return false;
+  if (parentPath === null) return true;
+  return parentPath === base || parentPath.startsWith(base + "/");
+}
+function isConsoleEmbeddedDsh() {
+  if (typeof window === "undefined") return false;
+  if (window.parent === window) return false;
+  let parentPath;
+  try {
+    parentPath = window.parent.location.pathname;
+  } catch {
+    parentPath = null;
+  }
+  return isConsoleEmbeddedPath(window.location.pathname, parentPath);
 }
 function isFnosAppEmbedded() {
   return isFnosApp() && isConsoleEmbeddedDsh();
@@ -3402,7 +3419,7 @@ function injectPickItem(template) {
 var React2 = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.6";
+var VERSION = "0.6.7";
 
 // src/client/menu-target.ts
 function contextFromRowKey(key) {

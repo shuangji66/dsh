@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isConsoleEmbeddedDsh, isFnosApp } from '../src/client/env.ts';
+import { isConsoleEmbeddedPath, isFnosApp } from '../src/client/env.ts';
 
 test('recognizes the fnOS app WebView on iOS and Android', () => {
   assert.equal(isFnosApp(
@@ -19,15 +19,17 @@ test('plain browsers and the fnOS desktop iframe are not the app WebView', () =>
   assert.equal(isFnosApp('Mozilla/5.0 (iPhone) FNOS/1.2.0800 Mobile/15E148'), false);
 });
 
-test('recognizes the console embedded dsh mount but not the direct dsh entry', () => {
-  assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui/'), true);
-  assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui'), true);
-  assert.equal(isConsoleEmbeddedDsh('/app/Harness/gui/fnos-advanced/x'), true);
-  // 产品里的入口形态只有这两种：控制台入口下的 /gui/，以及 App 图标直连的 /dsh/。
-  assert.equal(isConsoleEmbeddedDsh('/app/Harness/dsh/'), false);
-  assert.equal(isConsoleEmbeddedDsh('/app/Harness/'), false);
-  assert.equal(isConsoleEmbeddedDsh('/'), false);
-  // 判定是「路径里出现 /gui/ 段」，其它挂载下的同名段也算内嵌 dsh（宁可按内嵌处理：
-  // 误判只会少用宿主桥接，多一次网页授权；反过来则会在无桥接处调用原生选择器）。
-  assert.equal(isConsoleEmbeddedDsh('/gui/'), true);
+test('recognizes the console-embedded dsh by its parent page, not by the mount path', () => {
+  // 控制台 iframe：父页面就是同一 base 下的控制台 SPA。
+  assert.equal(isConsoleEmbeddedPath('/app/Harness/dsh/', '/app/Harness/'), true);
+  assert.equal(isConsoleEmbeddedPath('/app/Harness/dsh/session/1', '/app/Harness/'), true);
+  assert.equal(isConsoleEmbeddedPath('/app/Harness/dsh', '/app/Harness'), true);
+  // 父页面是 fnOS 外壳（图标入口）：不是内嵌，保留原生桥接。
+  assert.equal(isConsoleEmbeddedPath('/app/Harness/dsh/', '/'), false);
+  assert.equal(isConsoleEmbeddedPath('/app/Harness/dsh/', '/index'), false);
+  // 父页面跨源读不到：按内嵌处理（宁可按无桥接）。
+  assert.equal(isConsoleEmbeddedPath('/app/Harness/dsh/', null), true);
+  // 不是 <base>/dsh 形态：认不出，按非内嵌处理。
+  assert.equal(isConsoleEmbeddedPath('/app/Harness/', '/app/Harness/'), false);
+  assert.equal(isConsoleEmbeddedPath('/', '/'), false);
 });

@@ -184,7 +184,7 @@ function SettingsPage(): React.ReactElement {
     const sdk = getSdk();
     sdk.ready().then(() => {
       // `!sdk.isStandaloneWeb` 会把**任何 iframe** 都当成宿主（包括桌面浏览器里的
-      // 控制台内嵌 dsh /gui/）—— 而那条入口没有可用的宿主桥接，目录授权走网页授权。
+      // 控制台内嵌 dsh）—— 而那条入口没有可用的宿主桥接，目录授权走网页授权。
       // isFnosHost() 已经排除了它，与实际的 pick 分支判断保持一致。
       if (alive) setEmbedded(isFnosHost());
     }).catch(() => { /* no host bridge */ });
@@ -510,7 +510,7 @@ function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewa
   };
 
   // 运行环境要按「有没有可用宿主桥接」说，而不是「在不在 iframe 里」：
-  // 控制台内嵌 dsh（/gui/）在桌面浏览器与 App 里都没有宿主桥接（见 isFnosHost）。
+  // 控制台内嵌 dsh 在桌面浏览器与 App 里都没有宿主桥接（见 isFnosHost）。
   const runtime = isFnosApp()
     ? t('飞牛 App')
     : embedded ? t('飞牛桌面') : gatewayAccess ? t('飞牛网关') : t('普通浏览器');

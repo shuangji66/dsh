@@ -43,7 +43,8 @@ interface DirectPickResult {
  * Whether the native picker bridge is unusable and the fnOS web authorization
  * page must be used instead.
  *
- * - The console's embedded dsh (`/gui/`) has no usable host bridge at all, so
+ * - The console's embedded dsh (dsh inside the console page's iframe) has no
+ *   usable host bridge at all, so
  *   both file and directory picks are browser-like — even inside the fnOS App.
  * - The fnOS App icon entry (direct dsh) keeps the native picker for files;
  *   only the directory flow is switched, because the app's native pickUserFile
@@ -208,7 +209,8 @@ export async function startAuthFlow(
   // The fnOS App's WebView cannot reliably open popups, and the picker dialog
   // lives in this page. Embed the authorization page in a full-screen iframe
   // instead; the callback posts to window.parent and we stay here. The console
-  // entry (`/gui/`) is browser-like even outside the app, so it uses a popup.
+  // entry (the console page's iframe) is browser-like even outside the app, so it
+  // uses a popup.
   const useFrame = usesAuthFrame();
   let frame: AuthFrame | null = null;
   let popup = existingPopup;

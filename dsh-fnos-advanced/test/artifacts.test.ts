@@ -61,6 +61,12 @@ test('the client bundle stays in the dsh loader contract', async () => {
   // dsh 0.2.2-alpha.3 wrapped each file-tree row button in a div; the injected
   // control must keep finding it (and must not remove the context-menu node).
   assert.match(bundle, /:scope > div > button/);
+  // The native "Show in folder" rows are enabled through the fnOS bridge; the
+  // target comes from the menu owner's aria-controls / data-row-key pair.
+  assert.match(bundle, /dsw-icon-folder-open-outline-regular/);
+  assert.match(bundle, /data-dsh-fnos-reveal/);
+  assert.match(bundle, /aria-controls/);
+  assert.match(bundle, /openSessionDirectory/);
   // File actions on the slot-rendered surfaces must stay registered by slot id
   // (list slots) and keep reading the owning surface's own path anchors.
   for (const slot of [

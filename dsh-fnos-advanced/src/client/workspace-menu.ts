@@ -1,10 +1,16 @@
 /**
- * Workspace context menu: open / check / re-authorize one workspace.
+ * Workspace and Session context menus.
  *
  * dsh renders a workspace row's "more" menu with localized labels ("Rename",
- * "Delete workspace", …). The menu is recognized by the delete row it always
- * has, and the plugin's rows are clones of the first existing item so they
- * inherit its styling without relying on CSS-module class names.
+ * "Delete workspace", …). The plugin's workspace rows are clones of the first
+ * existing item so they inherit its styling without CSS-module class names.
+ *
+ * Both menus also carry dsh's native "Show in folder" row. dsh disables it on
+ * this host because its `open-in-app` plugin found no desktop file manager;
+ * inside fnOS the fnOS bridge can open the folder instead, so the existing row
+ * is enabled and re-wired in place (rather than adding a second, duplicate
+ * item). The menu's owner is read from the `aria-controls` bridge dsh's Menu
+ * primitive publishes, which survives UI language changes.
  */
 import {
   buildAuthUrl,
@@ -22,10 +28,12 @@ import {
   LOG_PREFIX,
   OPEN_DIR_ATTR,
   REAUTH_DIR_ATTR,
+  REVEAL_ITEM_ATTR,
 } from './constants.ts';
 import { closePopup, isVisible, randomId, showToast } from './dom.ts';
 import { isFnosAppEmbedded } from './env.ts';
 import { t, translateError } from './i18n.ts';
+import { contextFromRowKey, type ContextMenuTarget } from './menu-target.ts';
 import {
   checkWorkspaceHealth,
   loadConfig,
@@ -36,34 +44,78 @@ import {
   workspaceHealthText,
 } from './plugin-api.ts';
 import { getSdk, isFnosHost } from './sdk.ts';
+import { sessionCwd } from './slot-actions.tsx';
 
-interface MenuContext {
+interface WorkspaceMenuContext {
   id: string;
   at: number;
 }
 
-/** Only the most recently opened workspace menu is augmented. */
-let lastWorkspaceMenu: MenuContext | null = null;
+/** Only the most recently opened workspace menu is augmented (pre-aria fallback). */
+let lastWorkspaceMenu: WorkspaceMenuContext | null = null;
 
 const MENU_TTL_MS = 5 * 60 * 1000;
 
-/** Remember which workspace the row click belongs to. */
+/** dsh's folder-open icon identifies the native reveal row across languages. */
+const REVEAL_ICON = '#dsw-icon-folder-open-outline-regular';
+const REVEAL_LABEL_RE = /^(?:Show in folder|Reveal in folder|在文件夹显示|在文件夹中显示|在資料夾顯示|在資料夾中顯示|Im Ordner anzeigen|Afficher dans le dossier|Mostrar en la carpeta|フォルダーで表示|Открыть папку|Abrir na pasta)$/i;
+
+/** Bound native click handlers, so unload can restore the row's disabled state. */
+const revealHandlers = new WeakMap<HTMLButtonElement, EventListener>();
+
+/** Remember which workspace the row click belongs to (older dsh without aria-controls). */
 export function noteWorkspaceRowClick(row: Element): void {
   const key = row.getAttribute('data-row-key') || '';
-  const id = key.startsWith('workspace:') ? key.slice('workspace:'.length) : '';
-  if (id) lastWorkspaceMenu = { id, at: Date.now() };
+  const target = contextFromRowKey(key);
+  if (target?.kind === 'workspace') lastWorkspaceMenu = { id: target.id, at: Date.now() };
 }
 
-/** Add the plugin's rows to a just-opened workspace menu. */
-export function scanWorkspaceMenus(): void {
-  if (!lastWorkspaceMenu || Date.now() - lastWorkspaceMenu.at > MENU_TTL_MS) return;
-
+/** Augment the visible workspace / session menus. */
+export function scanContextMenus(): void {
   for (const menu of document.querySelectorAll('[role="menu"]')) {
     if (!isVisible(menu)) continue;
-    if (menu.querySelector(`[${CHECK_DIR_ATTR}]`)) continue;
-    if (!isWorkspaceActionsMenu(menu)) continue;
-    injectOpenDirItem(menu);
+
+    const target = findMenuTarget(menu);
+    const isWorkspace = target?.kind === 'workspace' || isWorkspaceActionsMenu(menu);
+    let workspaceId = '';
+    if (isWorkspace) {
+      workspaceId = target?.kind === 'workspace' ? target.id : freshWorkspaceId();
+      if (workspaceId && !menu.querySelector(`[${CHECK_DIR_ATTR}]`)) {
+        injectOpenDirItem(menu, workspaceId);
+      }
+    }
+
+    // Older dsh has no aria-controls bridge; the clicked workspace row still
+    // identifies the menu, and its reveal row must be adapted the same way.
+    const revealTarget = target ?? (workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null);
+    adaptRevealItem(menu, revealTarget);
   }
+}
+
+/** The workspace id from the pre-aria click tracking, while it is still fresh. */
+function freshWorkspaceId(): string {
+  if (!lastWorkspaceMenu || Date.now() - lastWorkspaceMenu.at > MENU_TTL_MS) return '';
+  return lastWorkspaceMenu.id;
+}
+
+/**
+ * The row a visible contextual menu belongs to.
+ *
+ * dsh's Menu primitive sets `aria-controls` on the element that opened it (the
+ * "..." button or the row itself); that element sits inside the row that owns
+ * `data-row-key`.
+ */
+function findMenuTarget(menu: Element): ContextMenuTarget | null {
+  const menuId = menu.id;
+  if (!menuId) return null;
+  for (const trigger of document.querySelectorAll<HTMLElement>('[aria-controls]')) {
+    const controls = (trigger.getAttribute('aria-controls') || '').split(/\s+/);
+    if (!controls.includes(menuId)) continue;
+    const row = trigger.closest<HTMLElement>('[data-row-key]');
+    const target = contextFromRowKey(row?.getAttribute('data-row-key'));
+    if (target) return target;
+  }
+  return null;
 }
 
 function isWorkspaceActionsMenu(menu: Element): boolean {
@@ -71,7 +123,72 @@ function isWorkspaceActionsMenu(menu: Element): boolean {
   return /Delete workspace|删除工作区|删除工作空间|删除工作區/i.test(text);
 }
 
-function injectOpenDirItem(menu: Element): void {
+/** dsh's native "Show in folder" row, identified by its stable icon. */
+function findRevealItem(menu: Element): HTMLButtonElement | null {
+  for (const button of menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')) {
+    if (button.querySelector(`use[href="${REVEAL_ICON}"]`)) return button;
+    // Future icon names keep the same family suffix; the row is unique.
+    if (button.querySelector('use[href*="folder-open"]')) return button;
+    if (REVEAL_LABEL_RE.test((button.textContent || '').trim())) return button;
+  }
+  return null;
+}
+
+/**
+ * Enable dsh's disabled reveal row and open the folder through the fnOS bridge.
+ *
+ * The native row carries no run function when disabled, so React's select path
+ * cannot be reused: a native listener stops the click before React sees it.
+ * The row is only touched while fnOS reports a host bridge; a session row also
+ * needs a known cwd, otherwise it stays disabled.
+ */
+function adaptRevealItem(menu: Element, target: ContextMenuTarget | null): void {
+  if (!target || !isFnosHost()) return;
+  const button = findRevealItem(menu);
+  if (!button) return;
+
+  const bound = button.dataset.dshFnosRevealBound === '1';
+  const wasDisabled = button.disabled || button.getAttribute('aria-disabled') === 'true';
+  if (!wasDisabled && !bound) return;
+  if (target.kind === 'session' && !sessionCwd(target.id)) return;
+
+  // React may re-apply disabled on a re-render; keep the row enabled.
+  if (button.disabled) button.disabled = false;
+  if (button.getAttribute('aria-disabled') === 'true') button.removeAttribute('aria-disabled');
+  button.setAttribute(REVEAL_ITEM_ATTR, '1');
+  button.dataset.dshFnosRevealKind = target.kind;
+  button.dataset.dshFnosRevealId = target.id;
+
+  if (bound) return;
+  button.dataset.dshFnosRevealBound = '1';
+  const handler: EventListener = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const kind = button.dataset.dshFnosRevealKind;
+    const id = button.dataset.dshFnosRevealId || '';
+    closeMenu();
+    if (kind === 'workspace') void openWorkspaceDirectory(id);
+    else if (kind === 'session') void openSessionDirectory(id);
+  };
+  revealHandlers.set(button, handler);
+  button.addEventListener('click', handler);
+}
+
+/** Restore every native reveal row the plugin touched (plugin unload). */
+export function resetRevealItems(): void {
+  for (const button of document.querySelectorAll<HTMLButtonElement>(`[${REVEAL_ITEM_ATTR}]`)) {
+    const handler = revealHandlers.get(button);
+    if (handler) button.removeEventListener('click', handler);
+    revealHandlers.delete(button);
+    button.disabled = true;
+    button.removeAttribute(REVEAL_ITEM_ATTR);
+    delete button.dataset.dshFnosRevealBound;
+    delete button.dataset.dshFnosRevealKind;
+    delete button.dataset.dshFnosRevealId;
+  }
+}
+
+function injectOpenDirItem(menu: Element, workspaceId: string): void {
   const viewport = menu.querySelector('[role="presentation"]') || menu;
   const templateButton = menu.querySelector('button[role="menuitem"]');
   const template = templateButton && templateButton.closest('div');
@@ -81,7 +198,7 @@ function injectOpenDirItem(menu: Element): void {
     attr: string,
     label: string,
     icon: string,
-    onClick: (id: string) => void,
+    onClick: () => void,
   ): HTMLElement | null => {
     const item = template.cloneNode(true) as HTMLElement;
     item.setAttribute(attr, '1');
@@ -99,31 +216,28 @@ function injectOpenDirItem(menu: Element): void {
     button.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const context = lastWorkspaceMenu;
       closeMenu();
-      if (!context) {
-        showToast(t('无法确定工作区'));
-        return;
-      }
-      onClick(context.id);
+      onClick();
     });
     return item;
   };
 
-  const open = isFnosHost()
-    ? make(OPEN_DIR_ATTR, t('打开目录'), FOLDER_OPEN_SVG, (id) => {
-      void openWorkspaceDirectory(id);
+  // When dsh already renders its reveal row, the plugin enables and reuses it
+  // instead of adding a second "open folder" item.
+  const open = isFnosHost() && !findRevealItem(menu)
+    ? make(OPEN_DIR_ATTR, t('打开目录'), FOLDER_OPEN_SVG, () => {
+      void openWorkspaceDirectory(workspaceId);
     })
     : null;
-  const check = make(CHECK_DIR_ATTR, t('检查目录权限'), FOLDER_OPEN_SVG, (id) => {
-    void checkWorkspaceFromMenu(id);
+  const check = make(CHECK_DIR_ATTR, t('检查目录权限'), FOLDER_OPEN_SVG, () => {
+    void checkWorkspaceFromMenu(workspaceId);
   });
-  const reauth = make(REAUTH_DIR_ATTR, t('重新授权目录'), FOLDER_OPEN_SVG, (id) => {
+  const reauth = make(REAUTH_DIR_ATTR, t('重新授权目录'), FOLDER_OPEN_SVG, () => {
     // The app's embedded console dsh opens an iframe inside
     // authorizeWorkspacePath; do not pre-open a popup there.
     let popup: Window | null = null;
     if (!isFnosHost() && !isFnosAppEmbedded()) popup = openAuthPopup();
-    void reauthWorkspaceFromMenu(id, popup);
+    void reauthWorkspaceFromMenu(workspaceId, popup);
   });
 
   // Keep the existing order at the top: open, check, re-authorize.
@@ -164,14 +278,8 @@ function closeMenu(): void {
   } catch { /* React also closes the menu on the next real outside click */ }
 }
 
-/** Open one workspace in the fnOS file manager (host environments only). */
-export async function openWorkspaceDirectory(id: string): Promise<void> {
-  const path = await resolveWorkspacePath(id);
-  if (!path) {
-    showToast(t('无法获取工作区目录'));
-    return;
-  }
-
+/** Hand one absolute path to the fnOS file manager (host environments only). */
+async function openPathInFileManager(path: string): Promise<void> {
   const sdk = getSdk();
   try { await sdk.ready(); } catch { /* fall through to the bridge call */ }
   try {
@@ -180,6 +288,26 @@ export async function openWorkspaceDirectory(id: string): Promise<void> {
     console.warn(LOG_PREFIX, 'openFileManager failed', error);
     showToast(t('打开目录失败，当前宿主可能不支持该操作。'));
   }
+}
+
+/** Open one workspace in the fnOS file manager (host environments only). */
+export async function openWorkspaceDirectory(id: string): Promise<void> {
+  const path = await resolveWorkspacePath(id);
+  if (!path) {
+    showToast(t('无法获取工作区目录'));
+    return;
+  }
+  await openPathInFileManager(path);
+}
+
+/** Open the current folder of one session in the fnOS file manager. */
+export async function openSessionDirectory(id: string): Promise<void> {
+  const path = sessionCwd(id);
+  if (!path) {
+    showToast(t('无法获取会话目录'));
+    return;
+  }
+  await openPathInFileManager(path);
 }
 
 /** Check one workspace from the menu and report the outcome as a toast. */

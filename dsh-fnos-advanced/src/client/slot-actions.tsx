@@ -43,7 +43,12 @@ interface SlotActionProps {
  * Kept module-level (instead of a React hook) so the component also works in
  * slots that do not forward the standard `useSessions` hook.
  */
-let sessionCwd: (sessionId: string) => string = () => '';
+let sessionCwdOf: (sessionId: string) => string = () => '';
+
+/** The Session workspace root, resolved from the live `sessions` service. */
+export function sessionCwd(sessionId: string): string {
+  return sessionCwdOf(sessionId);
+}
 
 /** Session owning the slot entry: the standard prop, else the sidebar container. */
 function sessionIdOf(props: SlotActionProps, root: HTMLElement | null): string {
@@ -144,7 +149,7 @@ export function registerSessionCwd(ctx: ClientContext): void {
   inject(['sessions'], (scope) => {
     const list = scope.sessions?.list;
     if (!list || typeof list.getSnapshot !== 'function') return;
-    sessionCwd = (sessionId: string): string => {
+    sessionCwdOf = (sessionId: string): string => {
       if (!sessionId) return '';
       try {
         const cwd = list.getSnapshot?.()?.byId?.[sessionId]?.cwd;

@@ -58,7 +58,7 @@ import {
   isWorkspacePicker,
   scanWorkspacePickers,
 } from './workspace-picker.ts';
-import { noteWorkspaceRowClick, scanWorkspaceMenus } from './workspace-menu.ts';
+import { noteWorkspaceRowClick, resetRevealItems, scanContextMenus } from './workspace-menu.ts';
 
 let installedDispose: (() => void) | null = null;
 
@@ -148,6 +148,7 @@ export function install(): () => void {
       try { cleanup(); } catch { /* ignore */ }
     }
     closePathMenu();
+    resetRevealItems();
     for (const node of document.querySelectorAll(
       `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, .dsh-fnos-recent, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`,
     )) {
@@ -176,7 +177,7 @@ function scan(): void {
   scanCommandMenu();
   scanReferenceMenu();
   scanFileTree();
-  scanWorkspaceMenus();
+  scanContextMenus();
   // The diagnostics panel lives on the plugin page, where neither anchor is
   // mounted; record them here, on the page that renders them.
   recordAnchorObservations();

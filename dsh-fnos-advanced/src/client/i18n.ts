@@ -60,6 +60,7 @@ export const EN = Object.freeze({
   '没有找到目录选择器的路径输入框': "Could not find the folder picker's path input",
   '无法确定工作区': 'Could not determine the workspace',
   '无法获取工作区目录': 'Could not read the workspace folder',
+  '无法获取会话目录': 'Could not read the session folder',
   '打开目录失败，当前宿主可能不支持该操作。': 'Could not open the folder; the host may not support it.',
   '打开目录': 'Open folder',
 

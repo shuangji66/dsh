@@ -32,6 +32,8 @@ export const SLOT_ACTION_ATTR = 'data-dsh-fnos-slot-action';
 export const OPEN_DIR_ATTR = 'data-dsh-fnos-open-dir';
 export const CHECK_DIR_ATTR = 'data-dsh-fnos-check-dir';
 export const REAUTH_DIR_ATTR = 'data-dsh-fnos-reauth-dir';
+/** Marker on dsh's native "Show in folder" row once fnOS opens it instead. */
+export const REVEAL_ITEM_ATTR = 'data-dsh-fnos-reveal';
 
 export const STATUS_CLASS = 'dsh-fnos-advanced-status';
 export const STYLE_ID = 'dsh-fnos-advanced-style';

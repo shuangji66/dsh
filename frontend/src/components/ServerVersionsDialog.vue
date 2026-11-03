@@ -193,7 +193,7 @@ const {
           <!-- 列表拉取失败：只提示、不阻塞（本地已装版本仍可切换/删除） -->
           <div
             v-if="status?.error"
-            class="mb-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-[#B45309] dark:text-[#FBBF24]"
+            class="mb-3 rounded-lg px-3 py-2 text-xs break-words select-text bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-warning-ink dark:text-[#FBBF24]"
           >{{ status.error }}</div>
 
           <div v-if="loading && rows.length === 0" class="py-6 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
@@ -236,7 +236,7 @@ const {
                     >{{ t('dsh_ver_installed') }}</span>
                     <span
                       v-if="row.deprecated"
-                      class="g-status bg-[#F59E0B]/10 text-[#B45309] dark:bg-[#F59E0B]/15 dark:text-[#FBBF24]"
+                      class="g-status bg-[#F59E0B]/10 text-warning-ink dark:bg-[#F59E0B]/15 dark:text-[#FBBF24]"
                     >{{ t('dsh_ver_deprecated') }}</span>
                   </div>
                 </div>

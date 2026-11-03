@@ -20,14 +20,21 @@
   --color-brand-soft: rgba(99, 102, 241, 0.12);
   /* 语义色 */
   --color-success: #10B981;
-  --color-warning: #F59E0B;
+  /* 警告色在浅色下取深一档的琥珀（#D97706）：按钮边框是「非文本 UI」，
+     亮黄 #F59E0B 放在白底上只有 2.15:1（低于 3:1），加深后既保住黄色调
+     又让轮廓清楚。深色主题在 html.dark 里换回 #F59E0B（深底上亮黄才够亮）。 */
+  --color-warning: #D97706;
   --color-danger: #EF4444;
   /* 语义色的**文字**版本：浅色主题下上面的亮色放在白底上对比度只有 2.1–2.5:1，
      不满足 WCAG AA（正文/小字 4.5:1）。填充、圆点、边框继续用亮色 token，
-     只有文字用 *-ink；深色主题在下面的 .dark 里把 *-ink 换回亮色。 */
-  --color-success-ink: #047857;
-  --color-warning-ink: #B45309;
-  --color-danger-ink: #B91C1C;
+     只有文字用 *-ink；深色主题在下面的 .dark 里把 *-ink 换回亮色。
+
+     取值口径：同色相下挑 chroma（饱和度）尽量高的一档，同时保证在白底、
+     #FAFAFA 页面底和 bg-black/[0.03] 浅灰面板上都 ≥ 4.5:1。原来的 700 系
+     （#047857 / #B45309 / #B91C1C）对比够但灰调重，浅色模式看起来发闷。 */
+  --color-success-ink: #0B7A3B;
+  --color-warning-ink: #C2410C;
+  --color-danger-ink: #CC0000;
   /* 中性层：背景 / 表面 / 边框 / 文本 */
   --color-bg: #FAFAFA;
   --color-surface: #FFFFFF;
@@ -65,9 +72,11 @@
 
 /* 深色主题的 token 覆盖：同一批类名（text-ink-faint / text-success-ink …）在两种主题下
    各自满足对比度，调用处不用再逐条写 dark: 变体。深色背景是 #16161B（卡片）/ #0B0B0F（页面），
-   这里的亮色值在两者上都在 5:1 以上。 */
+   这里的亮色值在两者上都在 5:1 以上。--color-warning 也在这里换回亮黄：浅色下的 #D97706
+   是给白底边框用的深一档琥珀，放到深色背景上会发闷。 */
 html.dark {
   --color-ink-faint: #8A8A92;
+  --color-warning: #F59E0B;
   --color-success-ink: #10B981;
   --color-warning-ink: #F59E0B;
   --color-danger-ink: #EF4444;
@@ -361,10 +370,12 @@ html, body {
       transition-colors duration-150;
   }
 
-  /* 危险按钮：红字红框 */
+  /* 危险按钮：红字红框。边框也用 *-ink：浅色下比亮红更深、与文字同色系，
+     按钮的轮廓因此更清楚；深色下 *-ink 就是亮红（见 html.dark），与原来的
+     border-danger 完全一致，深色主题的观感不变。 */
   .g-btn-danger {
     @apply inline-flex items-center justify-center gap-2 bg-transparent
-      border border-danger text-danger-ink
+      border border-danger-ink text-danger-ink
       font-medium rounded-md px-4 h-10 text-sm
       hover:bg-danger/10
       disabled:opacity-50 disabled:cursor-not-allowed
@@ -374,7 +385,8 @@ html, body {
     transform: translateY(-1px);
   }
 
-  /* 警告按钮：橙字橙框（同危险按钮结构，仅颜色不同） */
+  /* 警告按钮：橙字橙框（同危险按钮结构，仅颜色不同）。边框用 --color-warning：
+     浅色下是深一档的琥珀 #D97706，深色下由 html.dark 换回亮黄 #F59E0B。 */
   .g-btn-warning {
     @apply inline-flex items-center justify-center gap-2 bg-transparent
       border border-warning text-warning-ink
@@ -502,7 +514,8 @@ html, body {
   color: #d6dce4;
 }
 .log-line-warn {
-  color: #b45309;
+  /* 浅色语义色统一取 *-ink（见 @theme），别在这里再写一份十六进制 */
+  color: var(--color-warning-ink);
 }
 .dark .log-line-warn {
   color: #fbbf24;

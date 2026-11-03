@@ -446,7 +446,7 @@ onBeforeUnmount(() => {
       </p>
       <div
         v-if="lifecycleBusyText"
-        class="mb-6 rounded-lg px-3 py-2 text-xs leading-relaxed bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-[#B45309] dark:text-[#FBBF24]"
+        class="mb-6 rounded-lg px-3 py-2 text-xs leading-relaxed bg-[#F59E0B]/10 dark:bg-[#F59E0B]/15 border border-[#F59E0B]/40 text-warning-ink dark:text-[#FBBF24]"
       >
         {{ lifecycleBusyText }}
       </div>

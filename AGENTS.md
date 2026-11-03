@@ -569,17 +569,21 @@
   否则一次偶发失败就让该弹窗在本会话内再也打不开。CSS 预加载失败不属于这一类，别触发重载
   （会丢掉终端页 KeepAlive 状态与未保存表单）。
 - **token 仅捕获一次** —— `tokenScanner` 命中后回调置空（按行扫描，不会因为启动日志
-  刷屏而漏扫）；每次 `dsh.Start()` 会重置 token，但**保留会话 Cookie**：dsh 的
-  `dsh-auth-*` 由持久签名密钥签发，跨重启仍然有效，是否真的可用由 `ProbeAuth` 探测
-  （401 = 无效、303/200 = 有效、404/5xx/连接错误 = 未知）。旧版 dsh 不打印 token 时，
-  `WaitToken` 会等满 20 秒返回 `""`。
+  刷屏而漏扫）；每次 `dsh.Start()` 会重置 token，但**保留会话 Cookie**（`Stop()` 也
+  刻意不清，见 `forgetDshProcessLocked`）：dsh 的 `dsh-auth-*` 由持久签名密钥签发，
+  跨重启/换版本仍然有效，是否真的可用由 `ProbeAuth` 探测（401 = 无效、200/303 =
+  有效、404/5xx/连接错误 = 未知；从未存过 cookie 时直接判无效且**不发请求**，日志要
+  把它和「dsh 拒绝了旧凭据」区分开）。旧版 dsh 不打印 token 时，`WaitToken` 会等满
+  20 秒返回 `""`。**别把 Stop 改回清 cookie**：重启路径会因此失去探测兜底，慢设备
+  又只能干等新 token。
 - **反代放行门禁只有一个入口 `reverseProxy.state()`** —— 反代从控制台启动的第一刻就在
   监听（早于 dsh），放行必须同时满足「启动流水线已收尾（`bootState` 不是
   starting/auth/deps）+ dsh 端口已监听 + `DshManager.SessionSettled()`」；等待页与
   `GET /_ready` 共用这一份判定，避免“轮询说就绪 → 跳转 → 又是等待页”的抖动。
   由此两条硬约束：
-  1. **任何启动/重启 dsh 的路径都必须经 `captureDshSession`** —— `Start()` 每次递增
-     启动代号使上一代凭据失效。`captureDshSession` 在 token 兑换成功、或探测到旧
+  1. **任何启动/重启 dsh 的路径都必须经 `captureDshSession`** —— `Start()` 与
+     `Stop()` 都会递增启动代号使上一代凭据失效（Stop 也递增，防止飞行中的探测/补偿
+     在停止后把旧代标成已落定）。`captureDshSession` 在 token 兑换成功、或探测到旧
      cookie 仍有效之后才调用 `markSessionSettledGen` 标记落定；**拿不到凭据不再算
      落定**（旧实现无论有没有 token 都落定，慢启动时会把用户放行到 dsh 的 401）。
      拿不到时标记 `auth-failed`（等待页停在可操作提示）并启动 `StartAuthRepair`

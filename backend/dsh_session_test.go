@@ -205,7 +205,8 @@ func TestCaptureDshSessionSettlesWithExistingValidCookie(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		http.Redirect(w, r, "./", http.StatusSeeOther)
+		// 真实 dsh：有效 cookie + 不带 token 的 GET / 直接给首页（200）。
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 	initDshPortForTest(t, srv)
@@ -227,9 +228,11 @@ func TestCaptureDshSessionSettlesWithExistingValidCookie(t *testing.T) {
 // 进程还活着、没有 token、旧 cookie 被 401 拒绝 → 不落定 + 标成凭据失败
 // （等待页停在 auth-failed，后台补偿继续重试）。
 func TestCaptureDshSessionMarksAuthFailedWhenCookieRejected(t *testing.T) {
-	prev := GetConfig()
-	t.Cleanup(func() { initConfig(&prev) })
-	initConfig(&AppConfig{DshPort: closedPort(t)})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	initDshPortForTest(t, srv)
 
 	dsh := newTestDshManager(t.TempDir(), "")
 	// Running() 需要有受管子进程：用 sleep 占位（不启动真正的 dsh）。
@@ -239,6 +242,7 @@ func TestCaptureDshSessionMarksAuthFailedWhenCookieRejected(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	dsh.cmd = cmd
+	dsh.setAuthCookie("dsh-auth-stale=1")
 	dsh.bumpSessionGen()
 
 	captureDshSessionWithin(dsh, 50*time.Millisecond)
@@ -251,6 +255,52 @@ func TestCaptureDshSessionMarksAuthFailedWhenCookieRejected(t *testing.T) {
 	}
 	// 收尾：别让补偿 goroutine 在测试结束后继续跑。
 	dsh.cancelAuthRepair()
+}
+
+// 后台补偿的核心承诺：首次等待窗口里没拿到 token 不代表彻底放弃 ——
+// repairSession 必须在退避后重新读 token、兑换成功并落定（慢设备上 token
+// 往往晚于 dshTokenWait 才打印）。
+func TestStartAuthRepairSettlesWhenTokenArrivesLater(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") != "late-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "dsh-auth-late", Value: "1", Path: "/"})
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	initDshPortForTest(t, srv)
+
+	dsh := newTestDshManager(t.TempDir(), "")
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("无法启动占位进程: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	dsh.cmd = cmd
+	dsh.bumpSessionGen()
+	gen := dsh.SessionGen()
+	t.Cleanup(dsh.cancelAuthRepair)
+
+	dsh.markAuthFailedGen(gen)
+	dsh.StartAuthRepair(gen)
+	// token 在首次等待窗口之后才出现（由 WaitToken 的超时分支交给补偿）。
+	dsh.tokenMu.Lock()
+	dsh.token = "late-token"
+	dsh.tokenMu.Unlock()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if dsh.SessionSettled() {
+			if got := dsh.AuthCookie(); got != "dsh-auth-late=1" {
+				t.Fatalf("补偿换到的 cookie = %q, want dsh-auth-late=1", got)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("迟到的 token 应被后台补偿兑换并落定")
 }
 
 // 探测三态：401 = 未授权；303/200 = 有效；404/5xx/连接错误 = 未知（慢设备上
@@ -423,5 +473,21 @@ func TestCaptureDshSessionOutdatedGenerationCannotSettle(t *testing.T) {
 	dsh.markSessionSettledGen(dsh.SessionGen())
 	if !dsh.SessionSettled() {
 		t.Fatal("新一代落定后应放行")
+	}
+}
+
+// WaitToken 在「本代已被反代探测落定」时必须提前结束：否则慢设备上会白等满
+// 20 秒，capture 还会打一条「没等到 token」的误导日志。
+func TestWaitTokenEndsWhenSessionAlreadySettled(t *testing.T) {
+	dsh := newTestDshManager(t.TempDir(), "")
+	dsh.bumpSessionGen()
+	dsh.markSessionSettledGen(dsh.SessionGen())
+
+	start := time.Now()
+	if tok := dsh.WaitToken(2 * time.Second); tok != "" {
+		t.Fatalf("已落定时不应再返回 token，实际 %q", tok)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("已落定时 WaitToken 应立即返回，实际耗时 %s", elapsed)
 	}
 }

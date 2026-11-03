@@ -1296,9 +1296,9 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 	}
 	outReq.Header = r.Header.Clone()
 	// 只转发 dsh 自己的会话 cookie（见 DshManager.ExchangeToken）：先无条件清掉
-	// 控制台的 harness_session —— 它不是给 dsh 的，而在 dsh 凭据为空时（旧版 dsh
-	// 不打印 token → 等待超时后仍算落定；ExchangeToken 失败）原样转发等于把控制台
-	// 登录凭据交给 dsh 及其插件。随后再按需设置 dsh 的 cookie。
+	// 控制台的 harness_session —— 它不是给 dsh 的，而在 dsh 凭据为空时（从未换取到
+	// 或旧 cookie 探测未通过，见 captureDshSession）原样转发等于把控制台登录凭据交给
+	// dsh 及其插件。随后再按需设置 dsh 的 cookie。
 	outReq.Header.Del("Cookie")
 	if ck := p.dsh.AuthCookie(); ck != "" {
 		outReq.Header.Set("Cookie", ck)

@@ -52,8 +52,8 @@ func TestStoppedDetectsDeadTrackedProcess(t *testing.T) {
 }
 
 // 回归（审查第 1 条）：受管进程已死且 /proc 里没有实时 dsh 时，Stop 必须收回
-// 受管状态（m.cmd 清空、凭据清空）并回收僵尸，否则 Start() 会一直被
-// 「already running」挡住。
+// 受管状态（m.cmd 清空、一次性 token 清空）并回收僵尸，否则 Start() 会一直被
+// 「already running」挡住；会话 cookie 则**刻意保留**，供下次启动的凭据探测使用。
 func TestStopClearsDeadTrackedProcess(t *testing.T) {
 	prev := GetConfig()
 	t.Cleanup(func() { initConfig(&prev) })
@@ -76,8 +76,11 @@ func TestStopClearsDeadTrackedProcess(t *testing.T) {
 	if tracked != nil {
 		t.Fatalf("Stop 后 m.cmd 应被清空，实际仍指向 pid %d", tracked.Process.Pid)
 	}
-	if ck := dsh.AuthCookie(); ck != "" {
-		t.Fatalf("Stop 后应清空会话 cookie，实际 %q", ck)
+	if ck := dsh.AuthCookie(); ck != "dsh-auth-stale=1" {
+		t.Fatalf("Stop 不应清空会话 cookie（下次启动靠它探测，见 forgetDshProcessLocked），实际 %q", ck)
+	}
+	if tok := dsh.Token(); tok != "" {
+		t.Fatalf("Stop 后应清空一次性 token，实际 %q", tok)
 	}
 
 	// Start 的前置检查同样不应再被「已死的受管 cmd」挡住（这里只验证判定，不去真的
@@ -87,5 +90,34 @@ func TestStopClearsDeadTrackedProcess(t *testing.T) {
 	dsh.mu.Unlock()
 	if blocked {
 		t.Fatal("alreadyRunningLocked() 不应把已退出且未回收的受管 cmd 算作运行中")
+	}
+}
+
+// Stop 必须结束当前这一代：仍在飞行中的 captureDshSession / repairSession 可能在
+// Stop 之后才拿到探测/兑换结果，若不加代号栅栏就会把已停止的一代标成「凭据已落定」。
+// 会话 cookie 本身保留（探测靠它），但「已落定」必须失效。
+func TestStopInvalidatesSessionSettled(t *testing.T) {
+	prev := GetConfig()
+	t.Cleanup(func() { initConfig(&prev) })
+	initConfig(&AppConfig{DshPort: 0})
+
+	dsh := newTestDshManager(t.TempDir(), "")
+	dsh.bumpSessionGen()
+	gen := dsh.SessionGen()
+	dsh.markSessionSettledGen(gen)
+	dsh.setAuthCookie("dsh-auth-keep=1")
+	if !dsh.SessionSettled() {
+		t.Fatal("前置：同一代标记后应落定")
+	}
+
+	if err := dsh.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if dsh.SessionSettled() {
+		t.Fatal("Stop 后旧代不得再算「凭据已落定」（否则 Stop 期间/之后仍可能放行）")
+	}
+	if got := dsh.AuthCookie(); got != "dsh-auth-keep=1" {
+		t.Fatalf("Stop 应保留会话 cookie 供下次启动探测，实际 %q", got)
 	}
 }

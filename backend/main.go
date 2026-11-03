@@ -289,13 +289,16 @@ const dshTokenWait = 20 * time.Second
 // dsh 重启后需重新调用本函数。
 //
 // 落定（SessionSettled）的语义是「凭据确实可用」，不是「等待结束」：
-//  1. 拿到 token 且换取成功 → 落定；
-//  2. 没拿到 token（或换取失败）→ 先用上一次留下的 cookie 探测一次：dsh 的
-//     dsh-auth-* 由持久签名密钥签发，跨重启仍然有效，插件市场自重启、node-pty
-//     重启都属于这一类；
-//  3. 探测明确 401 → 标记本代「拿不到凭据」（等待页显示可操作提示）并启动后台
-//     补偿（继续等 token，最长 5 分钟）；
-//  4. 进程已退出 → 什么都不标，state() 会按 stopped 呈现。
+//  1. 等待期间反代已用保留的 cookie 探测成功（EnsureAuthProbe / WaitToken 提前
+//     结束）→ 直接返回；
+//  2. 拿到 token 且换取成功 → 落定；
+//  3. 没拿到 token（或换取失败）→ 先用上一次留下的 cookie 探测一次：dsh 的
+//     dsh-auth-* 由持久签名密钥签发，跨重启仍然有效（Stop 也不清，见
+//     forgetDshProcessLocked），插件市场自重启、node-pty 重启都属于这一类；
+//  4. 没有可用凭据（明确 401、从未存过 cookie、或探测无结论）→ 标记本代
+//     「拿不到凭据」（等待页显示可操作提示）并启动后台补偿（继续等 token，最长
+//     5 分钟）；
+//  5. 进程已退出 → 什么都不标，state() 会按 stopped 呈现。
 //
 // 旧实现无论拿没拿到 token 都在 defer 里落定，慢启动时会把用户放行到一个没有
 // cookie 的 dsh，只见 401，而且不会自愈。
@@ -307,7 +310,13 @@ func captureDshSession(dsh *DshManager) {
 // 短窗口；生产固定 dshTokenWait）。
 func captureDshSessionWithin(dsh *DshManager, wait time.Duration) {
 	gen := dsh.SessionGen()
-	if tok := dsh.WaitToken(wait); tok != "" {
+	tok := dsh.WaitToken(wait)
+	// 反代的 EnsureAuthProbe 可能在等待期间用保留的旧 cookie 探测成功并落了定
+	// （见 WaitToken）：本代凭据已可用，不必再兑换 token / 打「没等到 token」的警告。
+	if dsh.SessionSettled() {
+		return
+	}
+	if tok != "" {
 		// 用 token 访问一次带 token 的地址，从 Set-Cookie 换取 dsh 会话 cookie，
 		// 供反代转发时携带（访问不带 token 的 dsh 地址）。成功时不输出日志。
 		if err := dsh.ExchangeToken(); err != nil {
@@ -322,17 +331,23 @@ func captureDshSessionWithin(dsh *DshManager, wait time.Duration) {
 
 	// 没有可用 token：先看上一代留下的 cookie 是否仍然有效（dsh 每次启动会重新
 	// 打印 token，但签名密钥是持久的，cookie 不随重启失效）。
+	// 从来没有存过 cookie 时不能走「探测」—— ProbeAuth 会直接判无效而不发请求，
+	// 日志里若写成「dsh 拒绝了旧凭据」会误导排查（第一次启动本来就没有）。
 	// 探测结果是三态：只有明确的 401 才算「凭据不可用」；404/5xx/连接错误说明 dsh
 	// 还没服务到这条路由（插件还在加载），不能据此判定失败。
-	switch dsh.ProbeAuth(dshAuthProbeTimeout) {
-	case authProbeValid:
-		logInfo("[dsh] existing dsh session cookie is still valid")
-		dsh.markSessionSettledGen(gen)
-		return
-	case authProbeInvalid:
-		logWarn("[dsh] dsh rejected the stored session cookie (http 401)")
-	default:
-		logWarn("[dsh] dsh session probe was inconclusive, will retry in the background")
+	if dsh.AuthCookie() == "" {
+		logWarn("[dsh] no stored dsh session cookie; waiting for the access token")
+	} else {
+		switch dsh.ProbeAuth(dshAuthProbeTimeout) {
+		case authProbeValid:
+			logInfo("[dsh] existing dsh session cookie is still valid")
+			dsh.markSessionSettledGen(gen)
+			return
+		case authProbeInvalid:
+			logWarn("[dsh] dsh rejected the stored session cookie (http 401)")
+		default:
+			logWarn("[dsh] dsh session probe was inconclusive, will retry in the background")
+		}
 	}
 
 	if !dsh.Running() {

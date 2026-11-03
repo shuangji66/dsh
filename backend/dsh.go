@@ -177,11 +177,19 @@ func (m *DshManager) Token() string {
 // WaitToken blocks until a token is captured from the dsh startup log or the
 // timeout elapses. It returns the token (possibly empty on timeout or if dsh
 // has exited).
+//
+// 等待也会在「本代凭据已被别的路径落定」时提前结束：反代的 EnsureAuthProbe
+// 会拿上一代保留的会话 cookie 反复探测，成功即落定 —— 那种情况下不必再等日志里
+// 的 token（慢设备上它可能晚 20 秒才打印）。调用方用 SessionSettled 判断是不是
+// 这一种，不要把空 token 误报成「没等到 token」。
 func (m *DshManager) WaitToken(timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if tok := m.Token(); tok != "" {
 			return tok
+		}
+		if m.SessionSettled() {
+			break
 		}
 		// 若 dsh 进程已退出，不再等待。
 		if !m.Running() {
@@ -237,9 +245,10 @@ func (m *DshManager) SessionSettled() bool {
 	return m.sessionReadyGen >= m.sessionGen
 }
 
-// SessionAuthFailed 报告本代是否已确认「拿不到 dsh 会话凭据」（首次等待超时且
-// 上一次留下的 cookie 也被 dsh 拒绝）。它只影响等待页的文案：反代不会因此放行，
-// 后台补偿（StartAuthRepair）仍会继续尝试，直到超时或 dsh 重启。
+// SessionAuthFailed 报告本代是否已确认「拿不到 dsh 会话凭据」：首次等待窗口内
+// 没有 token，保留的 cookie 也没能通过探测（被 401 拒绝、从未存过、或探测无结论）。
+// 它只影响等待页的文案：反代不会因此放行，后台补偿（StartAuthRepair）仍会继续
+// 尝试，直到超时或 dsh 重启。
 func (m *DshManager) SessionAuthFailed() bool {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
@@ -274,6 +283,13 @@ func (m *DshManager) cancelAuthRepair() {
 // 永久停在等待页，用户重启 dsh 也只会重来一遍同样的窗口。
 func (m *DshManager) StartAuthRepair(gen int) {
 	m.sessionMu.Lock()
+	// 调用方刚标记完失败，但中间可能已经换了一代（Stop/Start）：迟到的补偿只会在
+	// 第一轮等完退避后自行退出，不如在这里就拦掉，避免它把取消通道换成一条没人
+	// 需要的新通道。
+	if gen != m.sessionGen {
+		m.sessionMu.Unlock()
+		return
+	}
 	if m.authRepairCancel != nil {
 		close(m.authRepairCancel)
 	}
@@ -353,8 +369,13 @@ const (
 // ProbeAuth 用当前保存的 dsh 会话 cookie 请求一次 dsh 根路径，判断凭据是否仍然有效。
 //
 // 判据只有三种：401 = 明确未授权；303/200 = 授权有效；其它（连接错误、404、5xx）
-// = 未知。dsh 的 authorizeIndex 对有效 cookie + GET / 回 303（location "./"），
-// 未授权回 401；插件尚未加载完时路由可能还没挂上，所以不能把 404 当成失败。
+// = 未知。dsh 的 authorizeIndex 对**有效 cookie + 不带 token 的 GET /** 直接放行
+// 首页（200），未授权回 401；303 只在地址带 ?token= 时出现（探测不带 token，正常
+// 看不到，这里仍按有效处理以免上游行为变化被误判成失败）。插件尚未加载完时路由
+// 可能还没挂上，所以不能把 404 当成失败。
+//
+// 没有保存过 cookie 时直接返回 authProbeInvalid 且**不发请求**：调用方据此走
+// 「等新 token」的路径，不要把它当成「dsh 拒绝了旧凭据」（日志里要区分两者）。
 func (m *DshManager) ProbeAuth(timeout time.Duration) authProbeResult {
 	m.authMu.RLock()
 	ck := m.authCookie
@@ -1236,8 +1257,9 @@ func (m *DshManager) Start() error {
 	// 每次启动都重置 token（上一代的一次性 token 已随进程消失），但**保留会话
 	// cookie**：dsh 的 dsh-auth-* 是用持久签名密钥签发的，跨重启仍然有效（见
 	// ProbeAuth）—— 插件市场自重启、node-pty 重启这类场景本来就不需要新 token，
-	// 清掉它等于把唯一一条「不用等日志」的路堵死。是否真的可用由探测决定：端口
-	// 变了或 cookie 过期都会得到 401，探测不会误放行。
+	// 清掉它等于把唯一一条「不用等日志」的路堵死。Stop 也刻意不清它（见
+	// forgetDshProcessLocked），否则重启路径又会把这条路断掉。是否真的可用由探测
+	// 决定：端口变了或 cookie 过期都会得到 401，探测不会误放行。
 	// 同时递增启动代号（反代据此判定「本代凭据尚未落定」），并取消上一代可能还在
 	// 跑的凭据补偿、清掉探测节流让新代能立刻探。
 	m.tokenMu.Lock()
@@ -1290,6 +1312,10 @@ func (m *DshManager) Stop() error {
 	// 停掉后台的凭据补偿：进程都没了，它只会在下一轮 Running() 处自行退出，
 	// 但显式取消更快，也避免它在 Stop 期间反复探测。
 	m.cancelAuthRepair()
+	// 停止也是一代的结束：递增启动代号，让仍在飞行中的 captureDshSession /
+	// repairSession（例如正卡在一次 1.5 秒探测里）无法在 Stop 之后把上一代标成
+	// 「凭据已落定」。下一次 Start 会再递增一次（见 Start）；多这一次不影响语义。
+	m.bumpSessionGen()
 
 	var trackedCmd *exec.Cmd
 	tracked := 0
@@ -1307,7 +1333,7 @@ func (m *DshManager) Stop() error {
 	if target <= 0 {
 		// 既没有受管 dsh 也没有实时 dsh：无需停止（保持原行为，避免误杀其他进程），
 		// 但必须把受管状态收尾：dsh 自行退出（崩溃/被 kill/自重启没拉起）时它可能
-		// 仍是未回收的僵尸，而 m.cmd 与凭据都还挂着 —— 不清理的话 Start() 会一直以
+		// 仍是未回收的僵尸，而 m.cmd 与 token 都还挂着 —— 不清理的话 Start() 会一直以
 		// 「already running」拒绝启动，用户只能重启控制台。
 		if trackedCmd != nil {
 			m.reapCmd(trackedCmd)
@@ -1357,15 +1383,19 @@ func (m *DshManager) Stop() error {
 	return nil
 }
 
-// forgetDshProcessLocked 忘掉受管的 dsh 进程：清空访问 token、会话 cookie 与
-// m.cmd（调用方必须持有 m.mu）。Stop 的两条返回路径共用它，避免「终端里 dsh 自己
-// 退出后 Stop 只清了 PID 文件、m.cmd 仍挂着」的半清理状态。
+// forgetDshProcessLocked 忘掉受管的 dsh 进程：清空一次性访问 token 与 m.cmd
+// （调用方必须持有 m.mu）。Stop 的两条返回路径共用它，避免「终端里 dsh 自己退出后
+// Stop 只清了 PID 文件、m.cmd 仍挂着」的半清理状态。
+//
+// **会话 cookie 刻意不清**：dsh 的 dsh-auth-* 用持久签名密钥签发（密钥存在 dsh
+// 的 credentials 里），只要 DSH_HOME 与端口不变，Stop/Start、换版本、node-pty 重启
+// 之后它依然有效。保留它，下一次启动就能先用 ProbeAuth 验证并立刻放行，不必干等
+// 新 token（慢设备上 token 可能晚于 dshTokenWait 才打印）。有效性由探测决定：
+// 端口变了 / 密钥换了 / 过期都会得到 401，绝不会拿一条没验过的 cookie 放行。
 func (m *DshManager) forgetDshProcessLocked() {
 	m.tokenMu.Lock()
 	m.token = ""
 	m.tokenMu.Unlock()
-	// 清空会话 cookie：避免把已失效的旧凭据继续用于反代转发。
-	m.setAuthCookie("")
 	m.cmd = nil
 }
 

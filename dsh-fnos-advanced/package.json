@@ -36,7 +36,7 @@
     "file-picker",
     "attachments"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "shuangji66",
   "repository": {
     "type": "git",

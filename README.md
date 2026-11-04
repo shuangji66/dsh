@@ -1001,6 +1001,6 @@ PATH，不能用来解析「当前选中的版本」。
 
 ## 许可
 
-[MIT](LICENSE) © 2026 shuangji66
+[Apache-2.0](LICENSE) © 2026 shuangji66
 
 更多设计背景与说明见 [`genesis-DESIGN.md`](genesis-DESIGN.md)。

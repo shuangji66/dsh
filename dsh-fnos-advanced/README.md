@@ -562,4 +562,4 @@ npm view dsh-fnos-advanced version
 
 ## License
 
-MIT
+Apache-2.0

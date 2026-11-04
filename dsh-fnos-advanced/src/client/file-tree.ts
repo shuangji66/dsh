@@ -6,11 +6,15 @@
  * 0.2.0-rc.2 and 0.2.1-rc.2. 0.2.2-alpha.3 wrapped the row's main button in a
  * `div` (`<li><div><button>…</button><div class="accessory"/></div></li>`), so
  * the button lookup accepts both shapes. The control sits outside the row
- * <button> so a click never opens/toggles the file itself. The menu itself is
- * shared with the slot-rendered surfaces and lives in `path-menu.ts`.
+ * <button> so a click never opens/toggles the file itself. Since dsh 0.2.2 the
+ * click opens the same native context menu as right-clicking the row (see
+ * `native-menu.ts`); older releases and rows without a session id fall back to
+ * the plugin menu in `path-menu.ts`.
  */
 import { FILE_ACTION_ATTR, FILE_ACTION_SVG } from './constants.ts';
 import { t } from './i18n.ts';
+import { pathMenuTarget } from './menu-target.ts';
+import { openNativePathMenu } from './native-menu.ts';
 import { togglePathMenu } from './path-menu.ts';
 
 /** Add / maintain the row control across the current file tree. */
@@ -81,10 +85,17 @@ function injectFileAction(row: HTMLElement): void {
   action.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    togglePathMenu(action, {
-      path: row.getAttribute('data-files-path') || '',
-      entry: row.getAttribute('data-files-entry') || '',
-    });
+    const path = row.getAttribute('data-files-path') || '';
+    const entry = row.getAttribute('data-files-entry') || '';
+    // 0.2.2+ renders a native context menu for these rows; open that same
+    // popup from our button so both entry points always show the same options.
+    const sessionId = row.closest('[data-sidebar-right-session]')
+      ?.getAttribute('data-sidebar-right-session') || '';
+    const paneId = row.closest('[data-files-navigator]')
+      ?.getAttribute('data-files-navigator') || '';
+    const target = pathMenuTarget(entry, path, sessionId, paneId);
+    if (target && openNativePathMenu(action, target)) return;
+    togglePathMenu(action, { path, entry });
   });
 
   row.appendChild(action);

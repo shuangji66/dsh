@@ -1,10 +1,13 @@
 /**
- * The shared "fnOS actions" menu for one path.
+ * The plugin's own "fnOS actions" menu for one path.
  *
- * The same menu is used by the file tree, the delivery cards, the change-review
- * tab and the document preview, so it lives here instead of inside the file-tree
- * scanner. Anchors are plain elements: the file tree injects its button into
- * dsh's markup, while slot-rendered buttons hand their own React node in.
+ * dsh 0.2.2+ has a shared native context menu and `native-menu.ts` opens that
+ * instead; this menu remains the fallback for older releases (and surfaces that
+ * cannot supply a session id). The same fallback is used by the file tree, the
+ * delivery cards, the change-review tab and the document preview, so it lives
+ * here instead of inside the file-tree scanner. Anchors are plain elements: the
+ * file tree injects its button into dsh's markup, while slot-rendered buttons
+ * hand their own React node in.
  */
 import { quotePathToComposer } from './composer.ts';
 import { LOG_PREFIX } from './constants.ts';
@@ -152,7 +155,8 @@ async function runPathAction(action: FileRowAction, path: string, entry: string)
   }
 }
 
-async function openPathInFnos(path: string, isDirectory: boolean): Promise<void> {
+/** Open a path with fnOS (files in their default app, folders in the manager). */
+export async function openPathInFnos(path: string, isDirectory: boolean): Promise<void> {
   const sdk = getSdk();
   try { await sdk.ready(); } catch { /* fall through to the host call */ }
 
@@ -170,7 +174,7 @@ async function openPathInFnos(path: string, isDirectory: boolean): Promise<void>
 }
 
 /** Show fnOS's own details sheet (size, permissions, location). */
-async function showPathDetails(path: string): Promise<void> {
+export async function showPathDetails(path: string): Promise<void> {
   const sdk = getSdk();
   try { await sdk.ready(); } catch { /* fall through to the host call */ }
   if (typeof sdk.showFileDetails !== 'function') {

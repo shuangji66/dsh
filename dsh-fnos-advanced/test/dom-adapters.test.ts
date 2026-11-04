@@ -24,3 +24,36 @@ test('the file-tree action finds the 0.2.2 row wrapper as well as the old direct
   const style = await read('style.ts');
   assert.match(style, /\.dsh-fnos-file-row > div > button:first-child/);
 });
+
+test('the file-tree menu reuses the native popup before falling back', async () => {
+  const source = await read('file-tree.ts');
+  assert.match(source, /pathMenuTarget\(/);
+  assert.match(source, /data-sidebar-right-session/);
+  assert.match(source, /data-files-navigator/);
+  assert.match(source, /openNativePathMenu\(action, target\)/);
+  assert.match(source, /togglePathMenu\(action, \{ path, entry \}\)/);
+});
+
+test('slot entries use the same native popup when the session is known', async () => {
+  const source = await read('slot-actions.tsx');
+  assert.match(source, /sessionIdOf\(props, anchor\)/);
+  assert.match(source, /openNativePathMenu\(anchor, target\)/);
+  assert.match(source, /togglePathMenu\(anchor, \{ path, entry: 'file' \}\)/);
+});
+
+test('the native menu adapter re-wires reveal and copy rows', async () => {
+  const source = await read('workspace-menu.ts');
+  assert.match(source, /activeNativeTarget\(\)/);
+  assert.match(source, /data-context-menu/);
+  assert.match(source, /adaptCopyItem\(menu, native\.path\)/);
+  assert.match(source, /openPathInFileManager\(id\)/);
+  assert.match(source, /copyText\(current\)/);
+});
+
+test('native contributions are registered for both file and directory targets', async () => {
+  const source = await read('native-menu.ts');
+  assert.match(source, /target: 'file' \| 'directory'/);
+  assert.match(source, /register\('directory'\)/);
+  assert.match(source, /register\('file'\)/);
+  assert.match(source, /order: 300/);
+});

@@ -40,6 +40,7 @@ import {
   resolveHostLanguage,
   setHostLanguageResolver,
 } from './i18n.ts';
+import { connectNativeContextMenus } from './native-menu.ts';
 import { isDuplicateWorkspacePath } from './picker.ts';
 import { pickPathsDirect } from './picker-flow.ts';
 import { closePathMenu } from './path-menu.ts';
@@ -82,6 +83,7 @@ export function apply(ctx: ClientContext): void {
   registerPathActionSlots(ctx);
   registerSessionCwd(ctx);
   registerWorkspacePaths(ctx);
+  connectNativeContextMenus(ctx);
 }
 
 /** Install the DOM scanners once; a second call returns the existing disposer. */

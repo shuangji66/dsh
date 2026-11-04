@@ -3150,6 +3150,37 @@ function composerFlow(input, button) {
   };
 }
 
+// src/client/menu-target.ts
+function contextFromRowKey(key) {
+  const value = typeof key === "string" ? key : "";
+  if (value.startsWith("workspace:")) {
+    const id = value.slice("workspace:".length);
+    return id ? { kind: "workspace", id } : null;
+  }
+  if (value.startsWith("session:")) {
+    const id = value.slice("session:".length);
+    return id ? { kind: "session", id } : null;
+  }
+  return null;
+}
+function pathMenuTarget(entryType, path, sessionId, paneId) {
+  if (entryType !== "file" && entryType !== "directory") return null;
+  if (!path || !sessionId) return null;
+  const target = { kind: entryType, sessionId, path };
+  if (entryType === "file" && paneId) target.paneId = paneId;
+  return target;
+}
+function activePathTarget(value) {
+  if (!value || typeof value !== "object") return null;
+  const kind = value.kind;
+  const target = value.value;
+  if (kind !== "file" && kind !== "directory") return null;
+  if (!target || typeof target !== "object") return null;
+  const path = target.path;
+  if (typeof path !== "string" || !path) return null;
+  return { kind, path };
+}
+
 // src/client/file-actions.ts
 function fileRowActions(entryType, host) {
   if (entryType !== "file" && entryType !== "directory") return [];
@@ -3157,6 +3188,15 @@ function fileRowActions(entryType, host) {
   if (host) actions.push("open", "details");
   if (entryType === "file") actions.push("quote");
   actions.push("copy");
+  return actions;
+}
+function nativeFileActions(entryType, host, revealAdapted) {
+  if (entryType !== "file" && entryType !== "directory") return [];
+  if (!host) return entryType === "file" ? ["quote"] : [];
+  const actions = [];
+  if (entryType === "file" || !revealAdapted) actions.push("open");
+  actions.push("details");
+  if (entryType === "file") actions.push("quote");
   return actions;
 }
 
@@ -3315,6 +3355,110 @@ async function copyPathToClipboard(path) {
   showToast(ok ? t("已复制路径") : t("复制失败，请手动复制"));
 }
 
+// src/client/native-menu.ts
+var service = null;
+function connectNativeContextMenus(ctx) {
+  const inject = ctx?.inject;
+  if (typeof inject !== "function") return;
+  inject(["contextMenus"], (scope) => {
+    const menus = scope.contextMenus;
+    if (!menus || typeof menus.register !== "function" || typeof menus.open !== "function") return;
+    service = menus;
+    const install2 = () => {
+      const disposers = [];
+      const register = (target) => {
+        try {
+          disposers.push(menus.register({
+            id: `dsh-fnos-advanced.${target}`,
+            target,
+            order: 300,
+            resolve: (input, signal) => {
+              signal.throwIfAborted();
+              const path = typeof input?.path === "string" ? input.path : "";
+              return path ? actionsFor(target, path) : [];
+            }
+          }));
+        } catch (error) {
+          console.warn(LOG_PREFIX, "native context menu registration failed", target, error);
+        }
+      };
+      register("directory");
+      register("file");
+      return () => {
+        for (const dispose of disposers.splice(0)) {
+          try {
+            dispose();
+          } catch {
+          }
+        }
+        if (service === menus) service = null;
+      };
+    };
+    if (typeof scope.effect === "function") {
+      scope.effect(install2, "dsh-fnos-advanced: native context menu");
+    } else {
+      install2();
+    }
+  });
+}
+function openNativePathMenu(anchor, target) {
+  const menus = service;
+  if (!menus || typeof menus.open !== "function") return false;
+  try {
+    const rect = anchor.getBoundingClientRect();
+    const value = target.kind === "file" ? {
+      sessionId: target.sessionId,
+      path: target.path,
+      ...target.paneId ? { paneId: target.paneId } : {}
+    } : { sessionId: target.sessionId, path: target.path };
+    menus.open({ kind: target.kind, value }, { x: rect.left, y: rect.bottom + 2 });
+    return true;
+  } catch (error) {
+    console.warn(LOG_PREFIX, "native context menu open failed", error);
+    return false;
+  }
+}
+function activeNativeTarget() {
+  const menus = service;
+  if (!menus?.active?.getSnapshot) return null;
+  try {
+    return activePathTarget(menus.active.getSnapshot());
+  } catch {
+    return null;
+  }
+}
+function canAdaptNativeReveal() {
+  return Boolean(service?.active?.getSnapshot);
+}
+function actionsFor(kind, path) {
+  const host = isFnosHost();
+  const revealAdapted = canAdaptNativeReveal();
+  return nativeFileActions(kind, host, revealAdapted).map((action) => actionFor(action, kind, path));
+}
+function actionFor(action, kind, path) {
+  if (action === "open") {
+    return {
+      id: "open",
+      label: t("在飞牛中打开"),
+      failureLabel: t("在飞牛中打开失败，当前宿主可能不支持该操作。"),
+      run: () => openPathInFnos(path, kind === "directory")
+    };
+  }
+  if (action === "details") {
+    return {
+      id: "details",
+      label: t("文件详情"),
+      failureLabel: t("无法显示文件详情，当前宿主可能不支持该操作。"),
+      run: () => showPathDetails(path)
+    };
+  }
+  return {
+    id: "quote",
+    label: t("引用到对话"),
+    run: () => quotePathToComposer(path)
+  };
+}
+
 // src/client/file-tree.ts
 function scanFileTree() {
   for (const row of document.querySelectorAll("[data-files-entry][data-files-path]")) {
@@ -3367,10 +3511,13 @@ function injectFileAction(row) {
   action.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    togglePathMenu(action, {
-      path: row.getAttribute("data-files-path") || "",
-      entry: row.getAttribute("data-files-entry") || ""
-    });
+    const path = row.getAttribute("data-files-path") || "";
+    const entry = row.getAttribute("data-files-entry") || "";
+    const sessionId = row.closest("[data-sidebar-right-session]")?.getAttribute("data-sidebar-right-session") || "";
+    const paneId = row.closest("[data-files-navigator]")?.getAttribute("data-files-navigator") || "";
+    const target = pathMenuTarget(entry, path, sessionId, paneId);
+    if (target && openNativePathMenu(action, target)) return;
+    togglePathMenu(action, { path, entry });
   });
   row.appendChild(action);
 }
@@ -3420,21 +3567,7 @@ function injectPickItem(template) {
 var React2 = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.8";
-
-// src/client/menu-target.ts
-function contextFromRowKey(key) {
-  const value = typeof key === "string" ? key : "";
-  if (value.startsWith("workspace:")) {
-    const id = value.slice("workspace:".length);
-    return id ? { kind: "workspace", id } : null;
-  }
-  if (value.startsWith("session:")) {
-    const id = value.slice("session:".length);
-    return id ? { kind: "session", id } : null;
-  }
-  return null;
-}
+var VERSION = "0.6.9";
 
 // src/client/slot-actions.tsx
 var React = __toESM(require("react"), 1);
@@ -3483,6 +3616,9 @@ function FnosPathAction(props) {
       showToast(t("无法确定文件路径"));
       return;
     }
+    const sessionId = sessionIdOf(props, anchor);
+    const target = pathMenuTarget("file", path, sessionId);
+    if (target && openNativePathMenu(anchor, target)) return;
     togglePathMenu(anchor, { path, entry: "file" });
   };
   return /* @__PURE__ */ React.createElement(
@@ -3549,6 +3685,8 @@ function noteWorkspaceRowClick(row) {
 function scanContextMenus() {
   for (const menu of document.querySelectorAll('[role="menu"]')) {
     if (!isVisible(menu)) continue;
+    if (menu.getAttribute("data-menu-phase") === "exit") continue;
+    const native = menu.hasAttribute("data-context-menu") ? activeNativeTarget() : null;
     const target = findMenuTarget(menu);
     const isWorkspace = target?.kind === "workspace" || isWorkspaceActionsMenu(menu);
     let workspaceId = "";
@@ -3558,8 +3696,9 @@ function scanContextMenus() {
         injectOpenDirItem(menu, workspaceId);
       }
     }
-    const revealTarget = target ?? (workspaceId ? { kind: "workspace", id: workspaceId } : null);
+    const revealTarget = native ?? target ?? (workspaceId ? { kind: "workspace", id: workspaceId } : null);
     adaptRevealItem(menu, revealTarget);
+    if (native) adaptCopyItem(menu, native.path);
   }
 }
 function freshWorkspaceId() {
@@ -3590,6 +3729,36 @@ function findRevealItem(menu) {
   }
   return null;
 }
+var COPY_ICON = "#dsw-icon-copy-outline-regular";
+var COPY_LABEL_RE = /^(?:Copy(?: (?:folder|file))? path|复制(?:文件夹|文件)?路径)$/i;
+var copyHandlers = /* @__PURE__ */ new WeakMap();
+function findCopyItem(menu) {
+  for (const button of menu.querySelectorAll('button[role="menuitem"]')) {
+    if (button.querySelector(`use[href="${COPY_ICON}"]`)) return button;
+    if (COPY_LABEL_RE.test((button.textContent || "").trim())) return button;
+  }
+  return null;
+}
+function adaptCopyItem(menu, path) {
+  if (!path) return;
+  const button = findCopyItem(menu);
+  if (!button) return;
+  button.dataset.dshFnosCopyPath = path;
+  if (copyHandlers.has(button)) return;
+  const handler = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const current = button.dataset.dshFnosCopyPath || "";
+    if (!current) return;
+    closeMenu();
+    void copyText(current).then((ok) => {
+      showToast(ok ? t("已复制路径") : t("复制失败，请手动复制"));
+    });
+  };
+  copyHandlers.set(button, handler);
+  button.addEventListener("click", handler);
+  button.dataset.dshFnosCopyBound = "1";
+}
 function adaptRevealItem(menu, target) {
   if (!target || !isFnosHost()) return;
   const button = findRevealItem(menu);
@@ -3598,11 +3767,13 @@ function adaptRevealItem(menu, target) {
   const wasDisabled = button.disabled || button.getAttribute("aria-disabled") === "true";
   if (!wasDisabled && !bound) return;
   if (target.kind === "session" && !sessionCwd(target.id)) return;
+  const value = target.kind === "workspace" || target.kind === "session" ? target.id : target.path;
+  if (!value) return;
   if (button.disabled) button.disabled = false;
   if (button.getAttribute("aria-disabled") === "true") button.removeAttribute("aria-disabled");
   button.setAttribute(REVEAL_ITEM_ATTR, "1");
   button.dataset.dshFnosRevealKind = target.kind;
-  button.dataset.dshFnosRevealId = target.id;
+  button.dataset.dshFnosRevealId = value;
   if (bound) return;
   button.dataset.dshFnosRevealBound = "1";
   const handler = (event) => {
@@ -3613,6 +3784,7 @@ function adaptRevealItem(menu, target) {
     closeMenu();
     if (kind === "workspace") void openWorkspaceDirectory(id);
     else if (kind === "session") void openSessionDirectory(id);
+    else if (kind === "file" || kind === "directory") void openPathInFileManager(id);
   };
   revealHandlers.set(button, handler);
   button.addEventListener("click", handler);
@@ -3627,6 +3799,13 @@ function resetRevealItems() {
     delete button.dataset.dshFnosRevealBound;
     delete button.dataset.dshFnosRevealKind;
     delete button.dataset.dshFnosRevealId;
+  }
+  for (const button of document.querySelectorAll("[data-dsh-fnos-copy-bound]")) {
+    const handler = copyHandlers.get(button);
+    if (handler) button.removeEventListener("click", handler);
+    copyHandlers.delete(button);
+    delete button.dataset.dshFnosCopyBound;
+    delete button.dataset.dshFnosCopyPath;
   }
 }
 function injectOpenDirItem(menu, workspaceId) {
@@ -4993,6 +5172,7 @@ function apply(ctx) {
   registerPathActionSlots(ctx);
   registerSessionCwd(ctx);
   registerWorkspacePaths(ctx);
+  connectNativeContextMenus(ctx);
 }
 function install() {
   if (installedDispose) return installedDispose;

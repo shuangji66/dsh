@@ -46,10 +46,43 @@ export interface SlotsServiceLike {
   ): unknown;
 }
 
+/** One action contributed to dsh's native context menu. */
+export interface NativeMenuActionLike {
+  id: string;
+  label: string;
+  disabled?: boolean;
+  failureLabel?: string;
+  run?: () => void | Promise<void>;
+}
+
+/**
+ * dsh 0.2.2's `contextMenus` service, typed structurally.
+ *
+ * Only the members this plugin uses are declared: register file/directory
+ * contributions, open the shared popup for an explicit target, and read the
+ * captured target of the open popup (used to re-wire native reveal/copy rows).
+ */
+export interface NativeContextMenusLike {
+  register(input: {
+    id: string;
+    target: 'file' | 'directory';
+    order: number;
+    resolve(
+      target: { sessionId?: unknown; path?: unknown },
+      signal: AbortSignal,
+    ): readonly NativeMenuActionLike[] | Promise<readonly NativeMenuActionLike[]>;
+  }): Disposer;
+  open(target: unknown, point: { x: number; y: number }): void;
+  active?: {
+    getSnapshot?(): unknown;
+  };
+}
+
 export interface ClientScope extends EffectScope {
   workspaces?: WorkspacesServiceLike;
   sessions?: SessionsServiceLike;
   slots?: SlotsServiceLike;
+  contextMenus?: NativeContextMenusLike;
 }
 
 export interface ClientContext extends EffectScope {

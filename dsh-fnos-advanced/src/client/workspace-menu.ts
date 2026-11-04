@@ -1,16 +1,20 @@
 /**
- * Workspace and Session context menus.
+ * Workspace, Session and native file context menus.
  *
  * dsh renders a workspace row's "more" menu with localized labels ("Rename",
  * "Delete workspace", …). The plugin's workspace rows are clones of the first
  * existing item so they inherit its styling without CSS-module class names.
  *
- * Both menus also carry dsh's native "Show in folder" row. dsh disables it on
- * this host because its `open-in-app` plugin found no desktop file manager;
- * inside fnOS the fnOS bridge can open the folder instead, so the existing row
- * is enabled and re-wired in place (rather than adding a second, duplicate
- * item). The menu's owner is read from the `aria-controls` bridge dsh's Menu
- * primitive publishes, which survives UI language changes.
+ * Both menu families also carry dsh's native "Show in folder" row. dsh disables
+ * it on this host because its `open-in-app` plugin found no desktop file
+ * manager; inside fnOS the fnOS bridge can open the folder instead, so the
+ * existing row is enabled and re-wired in place (rather than adding a second,
+ * duplicate item). For dsh 0.2.2's native file menu the same row is matched via
+ * the `contextMenus.active` target and opened with `openFileManager`.
+ *
+ * Workspace/session ownership is read from the `aria-controls` bridge dsh's
+ * Menu primitive publishes; the native file target comes from the context-menu
+ * service, which survives UI language changes for both.
  */
 import {
   buildAuthUrl,
@@ -30,10 +34,11 @@ import {
   REAUTH_DIR_ATTR,
   REVEAL_ITEM_ATTR,
 } from './constants.ts';
-import { closePopup, isVisible, randomId, showToast } from './dom.ts';
+import { closePopup, copyText, isVisible, randomId, showToast } from './dom.ts';
 import { isFnosAppEmbedded } from './env.ts';
 import { t, translateError } from './i18n.ts';
-import { contextFromRowKey, type ContextMenuTarget } from './menu-target.ts';
+import { contextFromRowKey, type ActivePathTarget, type ContextMenuTarget } from './menu-target.ts';
+import { activeNativeTarget } from './native-menu.ts';
 import {
   checkWorkspaceHealth,
   loadConfig,
@@ -70,11 +75,19 @@ export function noteWorkspaceRowClick(row: Element): void {
   if (target?.kind === 'workspace') lastWorkspaceMenu = { id: target.id, at: Date.now() };
 }
 
-/** Augment the visible workspace / session menus. */
+/** One visible menu's captured target: workspace/session or file/directory. */
+type RevealTarget = ContextMenuTarget | ActivePathTarget;
+
+/** Augment the visible workspace / session / native file menus. */
 export function scanContextMenus(): void {
   for (const menu of document.querySelectorAll('[role="menu"]')) {
     if (!isVisible(menu)) continue;
+    // During a replacement dsh keeps the outgoing menu for a short fade.
+    if (menu.getAttribute('data-menu-phase') === 'exit') continue;
 
+    // The native popup (0.2.2+) publishes its captured target through the
+    // contextMenus service; workspace/session menus still use aria-controls.
+    const native = menu.hasAttribute('data-context-menu') ? activeNativeTarget() : null;
     const target = findMenuTarget(menu);
     const isWorkspace = target?.kind === 'workspace' || isWorkspaceActionsMenu(menu);
     let workspaceId = '';
@@ -87,8 +100,11 @@ export function scanContextMenus(): void {
 
     // Older dsh has no aria-controls bridge; the clicked workspace row still
     // identifies the menu, and its reveal row must be adapted the same way.
-    const revealTarget = target ?? (workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null);
+    const revealTarget: RevealTarget | null = native
+      ?? target
+      ?? (workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null);
     adaptRevealItem(menu, revealTarget);
+    if (native) adaptCopyItem(menu, native.path);
   }
 }
 
@@ -134,6 +150,47 @@ function findRevealItem(menu: Element): HTMLButtonElement | null {
   return null;
 }
 
+/** dsh's native "Copy path" row, identified by its stable icon. */
+const COPY_ICON = '#dsw-icon-copy-outline-regular';
+const COPY_LABEL_RE = /^(?:Copy(?: (?:folder|file))? path|复制(?:文件夹|文件)?路径)$/i;
+const copyHandlers = new WeakMap<HTMLButtonElement, EventListener>();
+
+function findCopyItem(menu: Element): HTMLButtonElement | null {
+  for (const button of menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')) {
+    if (button.querySelector(`use[href="${COPY_ICON}"]`)) return button;
+    if (COPY_LABEL_RE.test((button.textContent || '').trim())) return button;
+  }
+  return null;
+}
+
+/**
+ * Route dsh's native "Copy path" through the plugin's clipboard helper.
+ *
+ * `open-in-app` writes with `navigator.clipboard` directly; the console is
+ * often served over plain HTTP where that API is missing. The plugin already
+ * has an execCommand fallback, so the shared menu keeps working there.
+ */
+function adaptCopyItem(menu: Element, path: string): void {
+  if (!path) return;
+  const button = findCopyItem(menu);
+  if (!button) return;
+  button.dataset.dshFnosCopyPath = path;
+  if (copyHandlers.has(button)) return;
+  const handler: EventListener = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const current = button.dataset.dshFnosCopyPath || '';
+    if (!current) return;
+    closeMenu();
+    void copyText(current).then((ok) => {
+      showToast(ok ? t('已复制路径') : t('复制失败，请手动复制'));
+    });
+  };
+  copyHandlers.set(button, handler);
+  button.addEventListener('click', handler);
+  button.dataset.dshFnosCopyBound = '1';
+}
+
 /**
  * Enable dsh's disabled reveal row and open the folder through the fnOS bridge.
  *
@@ -142,7 +199,7 @@ function findRevealItem(menu: Element): HTMLButtonElement | null {
  * The row is only touched while fnOS reports a host bridge; a session row also
  * needs a known cwd, otherwise it stays disabled.
  */
-function adaptRevealItem(menu: Element, target: ContextMenuTarget | null): void {
+function adaptRevealItem(menu: Element, target: RevealTarget | null): void {
   if (!target || !isFnosHost()) return;
   const button = findRevealItem(menu);
   if (!button) return;
@@ -152,12 +209,15 @@ function adaptRevealItem(menu: Element, target: ContextMenuTarget | null): void 
   if (!wasDisabled && !bound) return;
   if (target.kind === 'session' && !sessionCwd(target.id)) return;
 
+  const value = target.kind === 'workspace' || target.kind === 'session' ? target.id : target.path;
+  if (!value) return;
+
   // React may re-apply disabled on a re-render; keep the row enabled.
   if (button.disabled) button.disabled = false;
   if (button.getAttribute('aria-disabled') === 'true') button.removeAttribute('aria-disabled');
   button.setAttribute(REVEAL_ITEM_ATTR, '1');
   button.dataset.dshFnosRevealKind = target.kind;
-  button.dataset.dshFnosRevealId = target.id;
+  button.dataset.dshFnosRevealId = value;
 
   if (bound) return;
   button.dataset.dshFnosRevealBound = '1';
@@ -169,12 +229,13 @@ function adaptRevealItem(menu: Element, target: ContextMenuTarget | null): void 
     closeMenu();
     if (kind === 'workspace') void openWorkspaceDirectory(id);
     else if (kind === 'session') void openSessionDirectory(id);
+    else if (kind === 'file' || kind === 'directory') void openPathInFileManager(id);
   };
   revealHandlers.set(button, handler);
   button.addEventListener('click', handler);
 }
 
-/** Restore every native reveal row the plugin touched (plugin unload). */
+/** Restore every native menu row the plugin touched (plugin unload). */
 export function resetRevealItems(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>(`[${REVEAL_ITEM_ATTR}]`)) {
     const handler = revealHandlers.get(button);
@@ -185,6 +246,13 @@ export function resetRevealItems(): void {
     delete button.dataset.dshFnosRevealBound;
     delete button.dataset.dshFnosRevealKind;
     delete button.dataset.dshFnosRevealId;
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-dsh-fnos-copy-bound]')) {
+    const handler = copyHandlers.get(button);
+    if (handler) button.removeEventListener('click', handler);
+    copyHandlers.delete(button);
+    delete button.dataset.dshFnosCopyBound;
+    delete button.dataset.dshFnosCopyPath;
   }
 }
 

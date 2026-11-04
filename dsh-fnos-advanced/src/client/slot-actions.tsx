@@ -13,6 +13,8 @@ import * as React from 'react';
 import { SLOT_ACTION_ATTR, FILE_ACTION_SVG } from './constants.ts';
 import { showToast } from './dom.ts';
 import { resolveAbsolutePath } from './files.ts';
+import { pathMenuTarget } from './menu-target.ts';
+import { openNativePathMenu } from './native-menu.ts';
 import { closePathMenu, togglePathMenu } from './path-menu.ts';
 import { onLanguageChange, t } from './i18n.ts';
 import type { ClientContext } from './context.ts';
@@ -99,6 +101,9 @@ export function FnosPathAction(props: SlotActionProps): React.ReactElement {
       showToast(t('无法确定文件路径'));
       return;
     }
+    const sessionId = sessionIdOf(props, anchor);
+    const target = pathMenuTarget('file', path, sessionId);
+    if (target && openNativePathMenu(anchor, target)) return;
     togglePathMenu(anchor, { path, entry: 'file' });
   };
 

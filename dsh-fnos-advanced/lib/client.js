@@ -3420,7 +3420,7 @@ function injectPickItem(template) {
 var React2 = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.7";
+var VERSION = "0.6.8";
 
 // src/client/menu-target.ts
 function contextFromRowKey(key) {

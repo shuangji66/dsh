@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   fileExtension,
   fileNameForPath,
+  folderOfPath,
   imageMimeForPath,
   isImagePath,
   resolveAbsolutePath,
@@ -60,4 +61,17 @@ test('resolves review paths against the session cwd', () => {
   assert.equal(resolveAbsolutePath('', 'src/a.ts'), '');
   assert.equal(resolveAbsolutePath(undefined, 'src/a.ts'), '');
   assert.equal(resolveAbsolutePath('/vol1/work', ''), '');
+});
+
+test('derives the containing folder of a file path', () => {
+  assert.equal(folderOfPath('/vol1/1000/ws/report.csv'), '/vol1/1000/ws');
+  // Trailing separators belong to the folder, not to the entry name.
+  assert.equal(folderOfPath('/vol1/1000/ws/'), '/vol1/1000/ws');
+  assert.equal(folderOfPath('/vol1/1000/ws//'), '/vol1/1000/ws');
+  assert.equal(folderOfPath('/README.md'), '/');
+  assert.equal(folderOfPath('/'), '');
+  // A relative path has no known root: callers must refuse instead of guessing.
+  assert.equal(folderOfPath('README.md'), '');
+  assert.equal(folderOfPath(''), '');
+  assert.equal(folderOfPath(undefined), '');
 });

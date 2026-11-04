@@ -40,7 +40,7 @@ import {
   resolveHostLanguage,
   setHostLanguageResolver,
 } from './i18n.ts';
-import { connectNativeContextMenus } from './native-menu.ts';
+import { connectNativeContextMenus, disposeNativeContextMenus } from './native-menu.ts';
 import { isDuplicateWorkspacePath } from './picker.ts';
 import { pickPathsDirect } from './picker-flow.ts';
 import { closePathMenu } from './path-menu.ts';
@@ -151,6 +151,7 @@ export function install(): () => void {
     }
     closePathMenu();
     resetRevealItems();
+    disposeNativeContextMenus();
     for (const node of document.querySelectorAll(
       `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, .dsh-fnos-recent, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`,
     )) {

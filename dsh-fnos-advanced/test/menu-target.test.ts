@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { activePathTarget, contextFromRowKey, pathMenuTarget } from '../src/client/menu-target.ts';
+import {
+  absoluteTargetPath,
+  activePathTarget,
+  contextFromRowKey,
+  pathMenuTarget,
+} from '../src/client/menu-target.ts';
 
 test('reads the workspace and session rows a context menu belongs to', () => {
   assert.deepEqual(contextFromRowKey('workspace:ws-1'), { kind: 'workspace', id: 'ws-1' });
@@ -40,10 +45,19 @@ test('reads the captured path target from the native menu snapshot', () => {
   assert.deepEqual(activePathTarget({ kind: 'file', value: { sessionId: 's', path: '/w/a' } }), {
     kind: 'file',
     path: '/w/a',
+    sessionId: 's',
   });
   assert.deepEqual(activePathTarget({ kind: 'directory', value: { sessionId: 's', path: '/w/a' } }), {
     kind: 'directory',
     path: '/w/a',
+    sessionId: 's',
+  });
+  // The owning session is optional in the target value; a missing one must not
+  // throw (older surfaces publish path-only values).
+  assert.deepEqual(activePathTarget({ kind: 'file', value: { path: '/w/a' } }), {
+    kind: 'file',
+    path: '/w/a',
+    sessionId: '',
   });
 });
 
@@ -52,4 +66,15 @@ test('ignores other native targets and malformed snapshots', () => {
   assert.equal(activePathTarget({ kind: 'workspace', value: { path: '/w' } }), null);
   assert.equal(activePathTarget({ kind: 'file', value: {} }), null);
   assert.equal(activePathTarget({ kind: 'file', value: { path: '' } }), null);
+});
+
+test('resolves captured paths against the owning Session root', () => {
+  const cwdOf = (id: string): string => (id === 's1' ? '/vol1/work' : '');
+  assert.equal(absoluteTargetPath({ path: '/vol1/work/a.txt', sessionId: 's1' }, cwdOf), '/vol1/work/a.txt');
+  assert.equal(absoluteTargetPath({ path: 'src/a.ts', sessionId: 's1' }, cwdOf), '/vol1/work/src/a.ts');
+  assert.equal(absoluteTargetPath({ path: './src/a.ts', sessionId: 's1' }, cwdOf), '/vol1/work/src/a.ts');
+  // An unknown root must not invent one; the raw value is kept (the same
+  // behaviour the plugin's own menu has for a path it cannot resolve).
+  assert.equal(absoluteTargetPath({ path: 'src/a.ts', sessionId: 'missing' }, cwdOf), 'src/a.ts');
+  assert.equal(absoluteTargetPath({ path: '', sessionId: 's1' }, cwdOf), '');
 });

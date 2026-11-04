@@ -34,6 +34,10 @@ export const CHECK_DIR_ATTR = 'data-dsh-fnos-check-dir';
 export const REAUTH_DIR_ATTR = 'data-dsh-fnos-reauth-dir';
 /** Marker on dsh's native "Show in folder" row once fnOS opens it instead. */
 export const REVEAL_ITEM_ATTR = 'data-dsh-fnos-reveal';
+/** Marker on dsh's native "Open in default application" row once fnOS runs it. */
+export const OPEN_ITEM_ATTR = 'data-dsh-fnos-open';
+/** Marker on the plugin's own row that a re-wired native row makes redundant. */
+export const HIDDEN_ITEM_ATTR = 'data-dsh-fnos-hidden';
 
 export const STATUS_CLASS = 'dsh-fnos-advanced-status';
 export const STYLE_ID = 'dsh-fnos-advanced-style';

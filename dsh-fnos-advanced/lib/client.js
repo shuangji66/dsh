@@ -154,6 +154,8 @@ var OPEN_DIR_ATTR = "data-dsh-fnos-open-dir";
 var CHECK_DIR_ATTR = "data-dsh-fnos-check-dir";
 var REAUTH_DIR_ATTR = "data-dsh-fnos-reauth-dir";
 var REVEAL_ITEM_ATTR = "data-dsh-fnos-reveal";
+var OPEN_ITEM_ATTR = "data-dsh-fnos-open";
+var HIDDEN_ITEM_ATTR = "data-dsh-fnos-hidden";
 var STATUS_CLASS = "dsh-fnos-advanced-status";
 var STYLE_ID = "dsh-fnos-advanced-style";
 var POPUP_FEATURES = "popup=yes,width=760,height=680,resizable=yes,scrollbars=yes";
@@ -242,6 +244,7 @@ var EN = Object.freeze({
   "复制路径": "Copy path",
   "在飞牛中打开失败，当前宿主可能不支持该操作。": "Could not open in fnOS; the host may not support it.",
   "无法显示文件详情，当前宿主可能不支持该操作。": "Could not show file details; the host may not support it.",
+  "引用到对话失败，请重试。": "Could not quote the file. Try again.",
   "无法确定文件路径": "Could not determine the file path",
   "没有找到对话输入框，无法引用。": "No composer input to quote into.",
   // Workspace health
@@ -615,6 +618,15 @@ function resolveAbsolutePath(cwd, value) {
   const base = root.replace(/\/+$/, "");
   if (!base.startsWith("/")) return "";
   return `${base}/${text.replace(/^\.\//, "")}`;
+}
+function folderOfPath(value) {
+  const raw = String(value ?? "");
+  const text = raw.replace(/\/+$/, "");
+  if (!text) return "";
+  if (text !== raw) return text;
+  const cut = text.lastIndexOf("/");
+  if (cut < 0) return "";
+  return cut === 0 ? "/" : text.slice(0, cut);
 }
 function fileNameForPath(value) {
   const text = String(value ?? "").replace(/[\\/]+$/, "");
@@ -3178,7 +3190,15 @@ function activePathTarget(value) {
   if (!target || typeof target !== "object") return null;
   const path = target.path;
   if (typeof path !== "string" || !path) return null;
-  return { kind, path };
+  const sessionId = target.sessionId;
+  return { kind, path, sessionId: typeof sessionId === "string" ? sessionId : "" };
+}
+function absoluteTargetPath(target, cwdOf) {
+  const path = target.path;
+  if (!path) return "";
+  if (path.startsWith("/")) return path;
+  const cwd = target.sessionId ? cwdOf(target.sessionId) : "";
+  return resolveAbsolutePath(cwd, path) || path;
 }
 
 // src/client/file-actions.ts
@@ -3319,6 +3339,10 @@ async function runPathAction(action, path, entry) {
   }
 }
 async function openPathInFnos(path, isDirectory) {
+  if (!path.startsWith("/")) {
+    showToast(t("无法确定文件路径"));
+    return;
+  }
   const sdk = getSdk();
   try {
     await sdk.ready();
@@ -3333,7 +3357,7 @@ async function openPathInFnos(path, isDirectory) {
     if (opened === false) throw new Error("openFile is not supported by this host");
   } catch (error) {
     console.warn(LOG_PREFIX, "openFile failed; falling back to the file manager", error);
-    await sdk.openFileManager(path);
+    await sdk.openFileManager(folderOfPath(path));
   }
 }
 async function showPathDetails(path) {
@@ -3355,8 +3379,19 @@ async function copyPathToClipboard(path) {
   showToast(ok ? t("已复制路径") : t("复制失败，请手动复制"));
 }
 
+// src/client/session-cwd.ts
+var sessionCwdOf = () => "";
+function setSessionCwdResolver(resolve) {
+  sessionCwdOf = resolve;
+}
+function sessionCwd(sessionId) {
+  return sessionCwdOf(sessionId);
+}
+
 // src/client/native-menu.ts
 var service = null;
+var registered = false;
+var contributionsDispose = null;
 function connectNativeContextMenus(ctx) {
   const inject = ctx?.inject;
   if (typeof inject !== "function") return;
@@ -3364,8 +3399,10 @@ function connectNativeContextMenus(ctx) {
     const menus = scope.contextMenus;
     if (!menus || typeof menus.register !== "function" || typeof menus.open !== "function") return;
     service = menus;
+    registered = false;
     const install2 = () => {
       const disposers = [];
+      let failed = false;
       const register = (target) => {
         try {
           disposers.push(menus.register({
@@ -3375,15 +3412,27 @@ function connectNativeContextMenus(ctx) {
             resolve: (input, signal) => {
               signal.throwIfAborted();
               const path = typeof input?.path === "string" ? input.path : "";
-              return path ? actionsFor(target, path) : [];
+              if (!path) return [];
+              const sessionId = typeof input?.sessionId === "string" ? input.sessionId : "";
+              return actionsFor(target, absoluteTargetPath({ path, sessionId }, sessionCwd));
             }
           }));
         } catch (error) {
+          failed = true;
           console.warn(LOG_PREFIX, "native context menu registration failed", target, error);
         }
       };
       register("directory");
       register("file");
+      if (failed) {
+        for (const dispose of disposers.splice(0)) {
+          try {
+            dispose();
+          } catch {
+          }
+        }
+      }
+      registered = !failed;
       return () => {
         for (const dispose of disposers.splice(0)) {
           try {
@@ -3391,19 +3440,32 @@ function connectNativeContextMenus(ctx) {
           } catch {
           }
         }
+        registered = false;
         if (service === menus) service = null;
       };
     };
     if (typeof scope.effect === "function") {
       scope.effect(install2, "dsh-fnos-advanced: native context menu");
     } else {
-      install2();
+      contributionsDispose = install2();
     }
   });
 }
+function disposeNativeContextMenus() {
+  const dispose = contributionsDispose;
+  contributionsDispose = null;
+  registered = false;
+  service = null;
+  if (dispose) {
+    try {
+      dispose();
+    } catch {
+    }
+  }
+}
 function openNativePathMenu(anchor, target) {
   const menus = service;
-  if (!menus || typeof menus.open !== "function") return false;
+  if (!menus || !registered || typeof menus.open !== "function") return false;
   try {
     const rect = anchor.getBoundingClientRect();
     const value = target.kind === "file" ? {
@@ -3431,8 +3493,9 @@ function canAdaptNativeReveal() {
   return Boolean(service?.active?.getSnapshot);
 }
 function actionsFor(kind, path) {
+  if (!path) return [];
   const host = isFnosHost();
-  const revealAdapted = canAdaptNativeReveal();
+  const revealAdapted = host && canAdaptNativeReveal();
   return nativeFileActions(kind, host, revealAdapted).map((action) => actionFor(action, kind, path));
 }
 function actionFor(action, kind, path) {
@@ -3455,6 +3518,7 @@ function actionFor(action, kind, path) {
   return {
     id: "quote",
     label: t("引用到对话"),
+    failureLabel: t("引用到对话失败，请重试。"),
     run: () => quotePathToComposer(path)
   };
 }
@@ -3564,118 +3628,87 @@ function injectPickItem(template) {
 }
 
 // src/client/settings-page.tsx
-var React2 = __toESM(require("react"), 1);
+var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.6.9";
+var VERSION = "0.7.1";
 
-// src/client/slot-actions.tsx
-var React = __toESM(require("react"), 1);
-var SLOT_ID = "dsh-fnos-advanced";
-var SLOT_NAMES = [
-  "deliverables.file.actions",
-  "deliverables.review.file.actions",
-  "sidebar.right.tab.document.actions",
-  "sidebar.right.tab.document.unpreviewable"
+// src/client/native-menu-contract.ts
+var REVEAL_ICON = "dsw-icon-folder-open-outline-regular";
+var COPY_ICON = "dsw-icon-copy-outline-regular";
+var REVEAL_LABELS = [
+  "Show in folder",
+  "Show in Finder",
+  "Reveal in folder",
+  "在文件夹显示",
+  "在 Finder 中显示",
+  "在資料夾顯示",
+  "Im Ordner anzeigen",
+  "Im Finder anzeigen",
+  "Afficher dans le dossier",
+  "Afficher dans le Finder",
+  "Mostrar en la carpeta",
+  "Mostrar en Finder",
+  "Mostrar na pasta",
+  "Mostrar no Finder",
+  "フォルダーに表示",
+  "Finder に表示",
+  "Показать в папке",
+  "Показать в Finder",
+  // Legacy spellings kept from earlier dsh releases / zh-TW builds.
+  "Reveal in folder",
+  "在文件夹中显示",
+  "在資料夾中顯示",
+  "フォルダーで表示",
+  "Открыть папку",
+  "Abrir na pasta"
 ];
-var sessionCwdOf = () => "";
-function sessionCwd(sessionId) {
-  return sessionCwdOf(sessionId);
-}
-function sessionIdOf(props, root) {
-  if (typeof props.sessionId === "string" && props.sessionId) return props.sessionId;
-  return root?.closest("[data-sidebar-right-session]")?.getAttribute("data-sidebar-right-session") || "";
-}
-function resolveSlotPath(root, props) {
-  if (typeof props.absolutePath === "string" && props.absolutePath.startsWith("/")) {
-    return props.absolutePath;
-  }
-  const card = root?.closest("[data-presented-file]");
-  const cardPath = card?.querySelector(":scope > button[title]")?.getAttribute("title") || "";
-  if (cardPath) return resolveAbsolutePath(sessionCwd(sessionIdOf(props, root)), cardPath);
-  const review = root?.closest("[data-changes-review]");
-  if (review) {
-    const relative = review.querySelector("[data-review-file]")?.getAttribute("data-review-file") || "";
-    return resolveAbsolutePath(sessionCwd(sessionIdOf(props, review)), relative);
-  }
-  return "";
-}
-function FnosPathAction(props) {
-  const anchorRef = React.useRef(null);
-  const label = t("飞牛操作");
-  const [, forceLanguage] = React.useReducer((value) => value + 1, 0);
-  React.useEffect(() => () => closePathMenu(), []);
-  React.useEffect(() => onLanguageChange(forceLanguage), [forceLanguage]);
-  const onClick = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const anchor = anchorRef.current;
-    if (!anchor) return;
-    const path = resolveSlotPath(anchor, props);
-    if (!path) {
-      showToast(t("无法确定文件路径"));
-      return;
-    }
-    const sessionId = sessionIdOf(props, anchor);
-    const target = pathMenuTarget("file", path, sessionId);
-    if (target && openNativePathMenu(anchor, target)) return;
-    togglePathMenu(anchor, { path, entry: "file" });
-  };
-  return /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      ref: anchorRef,
-      type: "button",
-      className: "dsh-fnos-slot-action",
-      ...{ [SLOT_ACTION_ATTR]: "1" },
-      title: label,
-      "aria-label": label,
-      onMouseDown: (event) => {
-        event.stopPropagation();
-      },
-      onClick,
-      dangerouslySetInnerHTML: { __html: FILE_ACTION_SVG }
-    }
-  );
-}
-function registerPathActionSlots(ctx) {
-  const inject = ctx?.inject;
-  if (typeof inject !== "function") return;
-  inject(["slots"], (scope) => {
-    const slots = scope.slots;
-    if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
-    const install2 = () => {
-      for (const name of SLOT_NAMES) {
-        slots.inject(name, () => slots.register({ name, id: SLOT_ID }, FnosPathAction));
-      }
-    };
-    if (typeof scope.effect === "function") scope.effect(install2, "dsh-fnos-advanced: file actions");
-    else install2();
-  });
-}
-function registerSessionCwd(ctx) {
-  const inject = ctx?.inject;
-  if (typeof inject !== "function") return;
-  inject(["sessions"], (scope) => {
-    const list = scope.sessions?.list;
-    if (!list || typeof list.getSnapshot !== "function") return;
-    sessionCwdOf = (sessionId) => {
-      if (!sessionId) return "";
-      try {
-        const cwd = list.getSnapshot?.()?.byId?.[sessionId]?.cwd;
-        return typeof cwd === "string" ? cwd : "";
-      } catch {
-        return "";
-      }
-    };
-  });
+var COPY_LABELS = [
+  "Copy path",
+  "Copy file path",
+  "Copy folder path",
+  "复制路径",
+  "复制文件路径",
+  "复制文件夹路径",
+  "パスをコピー",
+  "ファイルパスをコピー",
+  "フォルダーパスをコピー",
+  "Pfad kopieren",
+  "Dateipfad kopieren",
+  "Ordnerpfad kopieren",
+  "Copier le chemin",
+  "Copier le chemin du fichier",
+  "Copier le chemin du dossier",
+  "Copiar ruta",
+  "Copiar ruta del archivo",
+  "Copiar ruta de la carpeta",
+  "Copiar caminho",
+  "Copiar caminho do arquivo",
+  "Copiar caminho da pasta",
+  "Копировать путь",
+  "Копировать путь к файлу",
+  "Копировать путь к папке"
+];
+var DEFAULT_APP_LABELS = [
+  "使用默认应用打开",
+  "Open in default application",
+  "既定のアプリで開く",
+  "Abrir en la aplicación predeterminada",
+  "Ouvrir dans l’application par défaut",
+  "In der Standardanwendung öffnen",
+  "Открыть в приложении по умолчанию",
+  "Abrir no aplicativo padrão"
+];
+var REVEAL_LABEL_RE = new RegExp(`^(?:${REVEAL_LABELS.join("|")})$`, "i");
+var COPY_LABEL_RE = new RegExp(`^(?:${COPY_LABELS.join("|")})$`, "i");
+var DEFAULT_APP_LABEL_RE = new RegExp(`^(?:${DEFAULT_APP_LABELS.join("|")})$`, "i");
+function isLiveMenuPhase(phase) {
+  return phase === null || phase === void 0 || phase === "" || phase === "enter";
 }
 
 // src/client/workspace-menu.ts
 var lastWorkspaceMenu = null;
 var MENU_TTL_MS = 5 * 60 * 1e3;
-var REVEAL_ICON = "#dsw-icon-folder-open-outline-regular";
-var REVEAL_LABEL_RE = /^(?:Show in folder|Reveal in folder|在文件夹显示|在文件夹中显示|在資料夾顯示|在資料夾中顯示|Im Ordner anzeigen|Afficher dans le dossier|Mostrar en la carpeta|フォルダーで表示|Открыть папку|Abrir na pasta)$/i;
 var revealHandlers = /* @__PURE__ */ new WeakMap();
 function noteWorkspaceRowClick(row) {
   const key = row.getAttribute("data-row-key") || "";
@@ -3683,10 +3716,11 @@ function noteWorkspaceRowClick(row) {
   if (target?.kind === "workspace") lastWorkspaceMenu = { id: target.id, at: Date.now() };
 }
 function scanContextMenus() {
-  for (const menu of document.querySelectorAll('[role="menu"]')) {
+  for (const menu of document.querySelectorAll('[role="menu"], [data-context-menu]')) {
     if (!isVisible(menu)) continue;
-    if (menu.getAttribute("data-menu-phase") === "exit") continue;
-    const native = menu.hasAttribute("data-context-menu") ? activeNativeTarget() : null;
+    if (!isLiveMenuPhase(menu.getAttribute("data-menu-phase"))) continue;
+    const captured = menu.hasAttribute("data-context-menu") ? activeNativeTarget() : null;
+    const native = captured ? { ...captured, path: absoluteTargetPath(captured, sessionCwd) } : null;
     const target = findMenuTarget(menu);
     const isWorkspace = target?.kind === "workspace" || isWorkspaceActionsMenu(menu);
     let workspaceId = "";
@@ -3698,7 +3732,10 @@ function scanContextMenus() {
     }
     const revealTarget = native ?? target ?? (workspaceId ? { kind: "workspace", id: workspaceId } : null);
     adaptRevealItem(menu, revealTarget);
-    if (native) adaptCopyItem(menu, native.path);
+    if (captured) {
+      adaptCopyItem(menu);
+      adaptOpenItem(menu, native);
+    }
   }
 }
 function freshWorkspaceId() {
@@ -3721,34 +3758,43 @@ function isWorkspaceActionsMenu(menu) {
   const text = (menu.textContent || "").replace(/\s+/g, " ");
   return /Delete workspace|删除工作区|删除工作空间|删除工作區/i.test(text);
 }
+function hasIcon(button, icon) {
+  return Boolean(
+    button.querySelector(`use[href="#${icon}"]`) || button.querySelector(`svg[data-icon="${icon}"]`) || button.querySelector(`[data-icon="${icon}"]`)
+  );
+}
 function findRevealItem(menu) {
   for (const button of menu.querySelectorAll('button[role="menuitem"]')) {
-    if (button.querySelector(`use[href="${REVEAL_ICON}"]`)) return button;
+    if (hasIcon(button, REVEAL_ICON)) return button;
     if (button.querySelector('use[href*="folder-open"]')) return button;
     if (REVEAL_LABEL_RE.test((button.textContent || "").trim())) return button;
   }
   return null;
 }
-var COPY_ICON = "#dsw-icon-copy-outline-regular";
-var COPY_LABEL_RE = /^(?:Copy(?: (?:folder|file))? path|复制(?:文件夹|文件)?路径)$/i;
 var copyHandlers = /* @__PURE__ */ new WeakMap();
 function findCopyItem(menu) {
   for (const button of menu.querySelectorAll('button[role="menuitem"]')) {
-    if (button.querySelector(`use[href="${COPY_ICON}"]`)) return button;
+    if (hasIcon(button, COPY_ICON)) return button;
     if (COPY_LABEL_RE.test((button.textContent || "").trim())) return button;
   }
   return null;
 }
-function adaptCopyItem(menu, path) {
-  if (!path) return;
+function copyPathOf() {
+  const captured = activeNativeTarget();
+  if (!captured) return "";
+  return absoluteTargetPath(captured, sessionCwd);
+}
+function adaptCopyItem(menu) {
   const button = findCopyItem(menu);
   if (!button) return;
+  const path = copyPathOf();
+  if (!path) return;
   button.dataset.dshFnosCopyPath = path;
   if (copyHandlers.has(button)) return;
   const handler = (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const current = button.dataset.dshFnosCopyPath || "";
+    const current = copyPathOf() || button.dataset.dshFnosCopyPath || "";
     if (!current) return;
     closeMenu();
     void copyText(current).then((ok) => {
@@ -3770,7 +3816,10 @@ function adaptRevealItem(menu, target) {
   const value = target.kind === "workspace" || target.kind === "session" ? target.id : target.path;
   if (!value) return;
   if (button.disabled) button.disabled = false;
-  if (button.getAttribute("aria-disabled") === "true") button.removeAttribute("aria-disabled");
+  if (button.getAttribute("aria-disabled") === "true") {
+    button.removeAttribute("aria-disabled");
+    button.dataset.dshFnosRevealAria = "1";
+  }
   button.setAttribute(REVEAL_ITEM_ATTR, "1");
   button.dataset.dshFnosRevealKind = target.kind;
   button.dataset.dshFnosRevealId = value;
@@ -3784,10 +3833,59 @@ function adaptRevealItem(menu, target) {
     closeMenu();
     if (kind === "workspace") void openWorkspaceDirectory(id);
     else if (kind === "session") void openSessionDirectory(id);
-    else if (kind === "file" || kind === "directory") void openPathInFileManager(id);
+    else if (kind === "file") void openPathInFileManager(folderOfPath(id));
+    else if (kind === "directory") void openPathInFileManager(id);
   };
   revealHandlers.set(button, handler);
   button.addEventListener("click", handler);
+}
+function adaptOpenItem(menu, target) {
+  if (!target || target.kind !== "file" || !isFnosHost()) return;
+  const button = findDefaultAppItem(menu);
+  if (!button) return;
+  const path = target.path;
+  if (!path) return;
+  const bound = button.dataset.dshFnosOpenBound === "1";
+  if (button.disabled) button.disabled = false;
+  if (button.getAttribute("aria-disabled") === "true") {
+    button.removeAttribute("aria-disabled");
+    button.dataset.dshFnosOpenAria = "1";
+  }
+  button.setAttribute(OPEN_ITEM_ATTR, "1");
+  button.dataset.dshFnosOpenPath = path;
+  hideRedundantOpenItem(menu);
+  if (bound) return;
+  button.dataset.dshFnosOpenBound = "1";
+  const handler = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const current = button.dataset.dshFnosOpenPath || "";
+    closeMenu();
+    if (current) void openPathInFnos(current, false);
+  };
+  revealHandlers.set(button, handler);
+  button.addEventListener("click", handler);
+}
+function findDefaultAppItem(menu) {
+  for (const button of menu.querySelectorAll('button[role="menuitem"]')) {
+    if (button.hasAttribute(OPEN_ITEM_ATTR)) return button;
+    const disabled = button.disabled || button.getAttribute("aria-disabled") === "true";
+    if (!disabled) continue;
+    if (DEFAULT_APP_LABEL_RE.test((button.textContent || "").trim())) return button;
+  }
+  return null;
+}
+function hideRedundantOpenItem(menu) {
+  const label = t("在飞牛中打开");
+  for (const button of menu.querySelectorAll('button[role="menuitem"]')) {
+    if (button.hasAttribute(OPEN_ITEM_ATTR)) continue;
+    if ((button.textContent || "").trim() !== label) continue;
+    const parent2 = button.parentElement;
+    const ownsOneRow = parent2 !== null && parent2 !== menu && parent2.querySelectorAll('button[role="menuitem"]').length === 1;
+    const row = ownsOneRow ? parent2 : button;
+    row.setAttribute(HIDDEN_ITEM_ATTR, "1");
+    row.classList.add("dsh-fnos-menu-hidden");
+  }
 }
 function resetRevealItems() {
   for (const button of document.querySelectorAll(`[${REVEAL_ITEM_ATTR}]`)) {
@@ -3796,9 +3894,26 @@ function resetRevealItems() {
     revealHandlers.delete(button);
     button.disabled = true;
     button.removeAttribute(REVEAL_ITEM_ATTR);
+    if (button.dataset.dshFnosRevealAria === "1") button.setAttribute("aria-disabled", "true");
+    delete button.dataset.dshFnosRevealAria;
     delete button.dataset.dshFnosRevealBound;
     delete button.dataset.dshFnosRevealKind;
     delete button.dataset.dshFnosRevealId;
+  }
+  for (const button of document.querySelectorAll(`[${OPEN_ITEM_ATTR}]`)) {
+    const handler = revealHandlers.get(button);
+    if (handler) button.removeEventListener("click", handler);
+    revealHandlers.delete(button);
+    button.disabled = true;
+    button.removeAttribute(OPEN_ITEM_ATTR);
+    if (button.dataset.dshFnosOpenAria === "1") button.setAttribute("aria-disabled", "true");
+    delete button.dataset.dshFnosOpenAria;
+    delete button.dataset.dshFnosOpenBound;
+    delete button.dataset.dshFnosOpenPath;
+  }
+  for (const row of document.querySelectorAll(`[${HIDDEN_ITEM_ATTR}]`)) {
+    row.classList.remove("dsh-fnos-menu-hidden");
+    row.removeAttribute(HIDDEN_ITEM_ATTR);
   }
   for (const button of document.querySelectorAll("[data-dsh-fnos-copy-bound]")) {
     const handler = copyHandlers.get(button);
@@ -3867,6 +3982,10 @@ function closeMenu() {
   }
 }
 async function openPathInFileManager(path) {
+  if (!path.startsWith("/")) {
+    showToast(t("无法确定文件路径"));
+    return;
+  }
   const sdk = getSdk();
   try {
     await sdk.ready();
@@ -4022,7 +4141,7 @@ var smallButtonStyle = {
 };
 function SettingsSlot(props) {
   if (props && props.view === "summary") return settingsSummary();
-  return /* @__PURE__ */ React2.createElement(SettingsPage, null);
+  return /* @__PURE__ */ React.createElement(SettingsPage, null);
 }
 function settingsSummary() {
   const settings = getCachedSettings();
@@ -4030,14 +4149,14 @@ function settingsSummary() {
   return t("反代 {proxy} · 内网 {lan}", { proxy, lan: settings.lanTarget });
 }
 function CollapsibleSection({ title, description, defaultOpen, children }) {
-  const [open, setOpen] = React2.useState(defaultOpen !== false);
-  return /* @__PURE__ */ React2.createElement("section", { style: {
+  const [open, setOpen] = React.useState(defaultOpen !== false);
+  return /* @__PURE__ */ React.createElement("section", { style: {
     display: "flex",
     flexDirection: "column",
     gap: 8,
     paddingTop: 10,
     borderTop: "1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.22))"
-  } }, /* @__PURE__ */ React2.createElement(
+  } }, /* @__PURE__ */ React.createElement(
     "button",
     {
       type: "button",
@@ -4059,33 +4178,33 @@ function CollapsibleSection({ title, description, defaultOpen, children }) {
         cursor: "pointer"
       }
     },
-    /* @__PURE__ */ React2.createElement("span", { style: { fontSize: 14, fontWeight: 600 } }, title),
-    /* @__PURE__ */ React2.createElement("span", { "aria-hidden": true, style: {
+    /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 600 } }, title),
+    /* @__PURE__ */ React.createElement("span", { "aria-hidden": true, style: {
       color: "var(--dsw-alias-label-tertiary, #888)",
       fontSize: 14,
       transform: open ? "rotate(90deg)" : "none",
       transition: "transform .12s ease"
     } }, "›")
-  ), description ? /* @__PURE__ */ React2.createElement("p", { style: { ...hintStyle, display: open ? "block" : "none" } }, description) : null, /* @__PURE__ */ React2.createElement("div", { style: { display: open ? "block" : "none" } }, children));
+  ), description ? /* @__PURE__ */ React.createElement("p", { style: { ...hintStyle, display: open ? "block" : "none" } }, description) : null, /* @__PURE__ */ React.createElement("div", { style: { display: open ? "block" : "none" } }, children));
 }
 function SettingsPage() {
-  const [loading, setLoading] = React2.useState(true);
-  const [saving, setSaving] = React2.useState(false);
-  const [settings, setSettings] = React2.useState(() => ({ ...DEFAULT_SETTINGS }));
-  const [message, setMessage] = React2.useState("");
-  const [error, setError] = React2.useState("");
-  const [embedded, setEmbedded] = React2.useState(false);
-  const [gatewayAccess, setGatewayAccess] = React2.useState(/^\/app(?:\/|$)/.test(window.location.pathname));
-  const [hostState2, setHostState] = React2.useState("unknown");
-  const [hostVersion, setHostVersion] = React2.useState("");
-  const [language, setLanguage] = React2.useState(getLanguagePreference());
-  const [, setLanguageVersion] = React2.useState(0);
-  React2.useEffect(() => {
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [settings, setSettings] = React.useState(() => ({ ...DEFAULT_SETTINGS }));
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [embedded, setEmbedded] = React.useState(false);
+  const [gatewayAccess, setGatewayAccess] = React.useState(/^\/app(?:\/|$)/.test(window.location.pathname));
+  const [hostState2, setHostState] = React.useState("unknown");
+  const [hostVersion, setHostVersion] = React.useState("");
+  const [language, setLanguage] = React.useState(getLanguagePreference());
+  const [, setLanguageVersion] = React.useState(0);
+  React.useEffect(() => {
     const unsubscribe = onLanguageChange(() => setLanguageVersion((value) => value + 1));
     if (getLanguagePreference() === "system") void resolveHostLanguage();
     return unsubscribe;
   }, []);
-  React2.useEffect(() => {
+  React.useEffect(() => {
     let alive = true;
     loadSettings(true).then((loaded2) => {
       if (!alive) return;
@@ -4156,7 +4275,7 @@ function SettingsPage() {
     opacity: disabled ? 0.6 : 1
   };
   const accessNote = isFnosApp() ? t("当前运行在飞牛 App 内：目录授权打开平台的网页授权页，文件详情/在飞牛中打开仍走宿主桥接。") : embedded ? t("当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。") : gatewayAccess ? t("当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。") : t("当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。");
-  return /* @__PURE__ */ React2.createElement("div", { style: {
+  return /* @__PURE__ */ React.createElement("div", { style: {
     display: "flex",
     flexDirection: "column",
     gap: 14,
@@ -4164,14 +4283,14 @@ function SettingsPage() {
     maxWidth: 640,
     color: "var(--dsw-alias-label-primary, inherit)",
     fontSize: 14
-  } }, /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } }, /* @__PURE__ */ React2.createElement("div", { style: { fontSize: 15, fontWeight: 600 } }, t("飞牛目录授权")), /* @__PURE__ */ React2.createElement("p", { style: hintStyle }, t("配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。"))), /* @__PURE__ */ React2.createElement(
+  } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, fontWeight: 600 } }, t("飞牛目录授权")), /* @__PURE__ */ React.createElement("p", { style: hintStyle }, t("配置非网关访问时使用的飞牛授权入口；设置保存在当前 dsh 数据目录。"))), /* @__PURE__ */ React.createElement(
     CollapsibleSection,
     {
       title: t("连接与授权"),
       description: t("配置反代/内网授权入口、界面语言和图片读取。"),
       defaultOpen: true
     },
-    /* @__PURE__ */ React2.createElement("label", { style: labelStyle }, /* @__PURE__ */ React2.createElement("span", null, t("反代飞牛地址")), /* @__PURE__ */ React2.createElement(
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("反代飞牛地址")), /* @__PURE__ */ React.createElement(
       "input",
       {
         type: "text",
@@ -4183,8 +4302,8 @@ function SettingsPage() {
         disabled,
         style: inputStyle
       }
-    ), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("填协议 + 域名[:端口]，不要带路径；留空表示未配置。"))),
-    /* @__PURE__ */ React2.createElement("label", { style: labelStyle }, /* @__PURE__ */ React2.createElement("span", null, t("飞牛内网地址 / 端口")), /* @__PURE__ */ React2.createElement(
+    ), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("填协议 + 域名[:端口]，不要带路径；留空表示未配置。"))),
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("飞牛内网地址 / 端口")), /* @__PURE__ */ React.createElement(
       "input",
       {
         type: "text",
@@ -4196,9 +4315,9 @@ function SettingsPage() {
         disabled,
         style: inputStyle
       }
-    ), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("只填端口时使用当前访问主机的地址；默认 5666。"))),
-    /* @__PURE__ */ React2.createElement("label", { style: labelStyle }, /* @__PURE__ */ React2.createElement("span", null, t("非网关访问时的授权入口")), /* @__PURE__ */ React2.createElement("select", { value: settings.authMode, onChange: update("authMode"), disabled, style: inputStyle }, /* @__PURE__ */ React2.createElement("option", { value: "ask" }, t("每次询问（推荐）")), /* @__PURE__ */ React2.createElement("option", { value: "proxy" }, t("优先使用反代地址")), /* @__PURE__ */ React2.createElement("option", { value: "lan" }, t("优先使用内网地址")))),
-    /* @__PURE__ */ React2.createElement("label", { style: labelStyle }, /* @__PURE__ */ React2.createElement("span", null, t("界面语言")), /* @__PURE__ */ React2.createElement(
+    ), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("只填端口时使用当前访问主机的地址；默认 5666。"))),
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("非网关访问时的授权入口")), /* @__PURE__ */ React.createElement("select", { value: settings.authMode, onChange: update("authMode"), disabled, style: inputStyle }, /* @__PURE__ */ React.createElement("option", { value: "ask" }, t("每次询问（推荐）")), /* @__PURE__ */ React.createElement("option", { value: "proxy" }, t("优先使用反代地址")), /* @__PURE__ */ React.createElement("option", { value: "lan" }, t("优先使用内网地址")))),
+    /* @__PURE__ */ React.createElement("label", { style: labelStyle }, /* @__PURE__ */ React.createElement("span", null, t("界面语言")), /* @__PURE__ */ React.createElement(
       "select",
       {
         value: language,
@@ -4212,11 +4331,11 @@ function SettingsPage() {
         disabled,
         style: inputStyle
       },
-      /* @__PURE__ */ React2.createElement("option", { value: "system" }, t("跟随系统")),
-      /* @__PURE__ */ React2.createElement("option", { value: "zh" }, t("中文")),
-      /* @__PURE__ */ React2.createElement("option", { value: "en" }, "English")
+      /* @__PURE__ */ React.createElement("option", { value: "system" }, t("跟随系统")),
+      /* @__PURE__ */ React.createElement("option", { value: "zh" }, t("中文")),
+      /* @__PURE__ */ React.createElement("option", { value: "en" }, "English")
     )),
-    /* @__PURE__ */ React2.createElement("label", { style: { ...labelStyle, flexDirection: "row", alignItems: "flex-start", gap: 8 } }, /* @__PURE__ */ React2.createElement(
+    /* @__PURE__ */ React.createElement("label", { style: { ...labelStyle, flexDirection: "row", alignItems: "flex-start", gap: 8 } }, /* @__PURE__ */ React.createElement(
       "input",
       {
         type: "checkbox",
@@ -4230,26 +4349,26 @@ function SettingsPage() {
         disabled,
         style: { marginTop: 3 }
       }
-    ), /* @__PURE__ */ React2.createElement("span", { style: { display: "flex", flexDirection: "column", gap: 4 } }, /* @__PURE__ */ React2.createElement("span", null, t("从飞牛选择图片时读取图片内容")), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。")))),
-    /* @__PURE__ */ React2.createElement("p", { style: hintStyle }, accessNote),
-    hostWarning ? /* @__PURE__ */ React2.createElement("p", { style: errorHintStyle }, hostWarning) : null,
-    /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } }, /* @__PURE__ */ React2.createElement("button", { type: "button", onClick: save, disabled, style: buttonStyle }, saving ? t("保存中…") : t("保存")), loading ? /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("读取设置…")) : null, message ? /* @__PURE__ */ React2.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-state-success-primary, #188038)" } }, message) : null, error ? /* @__PURE__ */ React2.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #d93025)" } }, error) : null)
-  ), /* @__PURE__ */ React2.createElement(
+    ), /* @__PURE__ */ React.createElement("span", { style: { display: "flex", flexDirection: "column", gap: 4 } }, /* @__PURE__ */ React.createElement("span", null, t("从飞牛选择图片时读取图片内容")), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("图片需要字节才能被模型「看到」；关闭后图片也只生成路径引用。仅支持 PNG/JPEG/WebP/GIF，宿主只读取你选中的文件。")))),
+    /* @__PURE__ */ React.createElement("p", { style: hintStyle }, accessNote),
+    hostWarning ? /* @__PURE__ */ React.createElement("p", { style: errorHintStyle }, hostWarning) : null,
+    /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: save, disabled, style: buttonStyle }, saving ? t("保存中…") : t("保存")), loading ? /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("读取设置…")) : null, message ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-state-success-primary, #188038)" } }, message) : null, error ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #d93025)" } }, error) : null)
+  ), /* @__PURE__ */ React.createElement(
     CollapsibleSection,
     {
       title: t("工作区目录权限"),
       description: t("检查 dsh 工作区目录的读写权限。飞牛 ACL 记录损坏或目录移动后，dsh 会读不到这些目录。"),
       defaultOpen: true
     },
-    /* @__PURE__ */ React2.createElement(WorkspaceHealthSection, { disabled })
-  ), /* @__PURE__ */ React2.createElement(
+    /* @__PURE__ */ React.createElement(WorkspaceHealthSection, { disabled })
+  ), /* @__PURE__ */ React.createElement(
     CollapsibleSection,
     {
       title: t("诊断"),
       description: t("检查 dsh 版本、DOM 锚点和飞牛地址连通性。"),
       defaultOpen: false
     },
-    /* @__PURE__ */ React2.createElement(
+    /* @__PURE__ */ React.createElement(
       DiagnosticsSection,
       {
         settings,
@@ -4262,16 +4381,16 @@ function SettingsPage() {
   ));
 }
 function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embedded, gatewayAccess }) {
-  const [proxyStatus, setProxyStatus] = React2.useState(null);
-  const [lanStatus, setLanStatus] = React2.useState(null);
-  const [copyMessage, setCopyMessage] = React2.useState(null);
-  const [health, setHealth] = React2.useState(null);
-  const [tick, setTick] = React2.useState(0);
-  const [appName, setAppName] = React2.useState("Harness");
-  const loadHealth = React2.useCallback(() => {
+  const [proxyStatus, setProxyStatus] = React.useState(null);
+  const [lanStatus, setLanStatus] = React.useState(null);
+  const [copyMessage, setCopyMessage] = React.useState(null);
+  const [health, setHealth] = React.useState(null);
+  const [tick, setTick] = React.useState(0);
+  const [appName, setAppName] = React.useState("Harness");
+  const loadHealth = React.useCallback(() => {
     fetchPluginHealth().then((data) => setHealth(data)).catch(() => setHealth(null));
   }, []);
-  React2.useEffect(() => {
+  React.useEffect(() => {
     let alive = true;
     loadConfig().then((config) => {
       if (alive && config.appName) setAppName(config.appName);
@@ -4363,13 +4482,13 @@ function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embe
     const ok = await copyText(lines.join("\n"));
     setCopyMessage(Boolean(ok));
   };
-  return /* @__PURE__ */ React2.createElement("div", { key: `diagnostics-${tick}`, style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React2.createElement("div", { style: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 12 } }, /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("宿主")), /* @__PURE__ */ React2.createElement("span", null, `${hostVersion || "?"} · ${hostStateText}`), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("客户端")), /* @__PURE__ */ React2.createElement("span", null, VERSION), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("运行环境")), /* @__PURE__ */ React2.createElement("span", null, runtime), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("图片读取")), /* @__PURE__ */ React2.createElement("span", null, imageReadText), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("对话输入框")), /* @__PURE__ */ React2.createElement("span", null, anchorText(composerAnchor)), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("文件树")), /* @__PURE__ */ React2.createElement("span", null, anchorText(fileTreeAnchor)), /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("工作区体检")), /* @__PURE__ */ React2.createElement("span", null, workspaceHealthTextValue)), /* @__PURE__ */ React2.createElement("div", { style: hintStyle }, t("对话输入框与文件树只在对话页存在，这里显示最近一次在对应页面的检测结果。")), /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React2.createElement("button", { type: "button", onClick: () => {
+  return /* @__PURE__ */ React.createElement("div", { key: `diagnostics-${tick}`, style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 12 } }, /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("宿主")), /* @__PURE__ */ React.createElement("span", null, `${hostVersion || "?"} · ${hostStateText}`), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("客户端")), /* @__PURE__ */ React.createElement("span", null, VERSION), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("运行环境")), /* @__PURE__ */ React.createElement("span", null, runtime), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("图片读取")), /* @__PURE__ */ React.createElement("span", null, imageReadText), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("对话输入框")), /* @__PURE__ */ React.createElement("span", null, anchorText(composerAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("文件树")), /* @__PURE__ */ React.createElement("span", null, anchorText(fileTreeAnchor)), /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("工作区体检")), /* @__PURE__ */ React.createElement("span", null, workspaceHealthTextValue)), /* @__PURE__ */ React.createElement("div", { style: hintStyle }, t("对话输入框与文件树只在对话页存在，这里显示最近一次在对应页面的检测结果。")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
     void testAddress("proxy");
-  }, style: smallButtonStyle }, t("测试反代地址")), proxyStatus ? /* @__PURE__ */ React2.createElement("span", { style: statusStyle(proxyStatus) }, proxyStatus.pending ? t("测试中…") : statusText(proxyStatus)) : null, /* @__PURE__ */ React2.createElement("button", { type: "button", onClick: () => {
+  }, style: smallButtonStyle }, t("测试反代地址")), proxyStatus ? /* @__PURE__ */ React.createElement("span", { style: statusStyle(proxyStatus) }, proxyStatus.pending ? t("测试中…") : statusText(proxyStatus)) : null, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
     void testAddress("lan");
-  }, style: smallButtonStyle }, t("测试内网地址")), lanStatus ? /* @__PURE__ */ React2.createElement("span", { style: statusStyle(lanStatus) }, lanStatus.pending ? t("测试中…") : statusText(lanStatus)) : null), /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, /* @__PURE__ */ React2.createElement("button", { type: "button", onClick: () => {
+  }, style: smallButtonStyle }, t("测试内网地址")), lanStatus ? /* @__PURE__ */ React.createElement("span", { style: statusStyle(lanStatus) }, lanStatus.pending ? t("测试中…") : statusText(lanStatus)) : null), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: () => {
     void copyDiagnostics();
-  }, style: smallButtonStyle }, t("复制诊断信息")), /* @__PURE__ */ React2.createElement(
+  }, style: smallButtonStyle }, t("复制诊断信息")), /* @__PURE__ */ React.createElement(
     "button",
     {
       type: "button",
@@ -4384,12 +4503,12 @@ function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embe
       style: smallButtonStyle
     },
     t("重新检测")
-  ), copyMessage !== null ? /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, copyMessage ? t("诊断信息已复制") : t("复制失败")) : null));
+  ), copyMessage !== null ? /* @__PURE__ */ React.createElement("span", { style: hintStyle }, copyMessage ? t("诊断信息已复制") : t("复制失败")) : null));
 }
 function WorkspaceHealthSection({ disabled }) {
-  const [results, setResults] = React2.useState([]);
-  const [loading, setLoading] = React2.useState(false);
-  const [error, setError] = React2.useState("");
+  const [results, setResults] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
   const check = async () => {
     setLoading(true);
     setError("");
@@ -4430,7 +4549,7 @@ function WorkspaceHealthSection({ disabled }) {
     padding: "8px 0",
     borderTop: "1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.2))"
   };
-  return /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React2.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, /* @__PURE__ */ React2.createElement(
+  return /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, paddingTop: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement(
     "button",
     {
       type: "button",
@@ -4441,7 +4560,7 @@ function WorkspaceHealthSection({ disabled }) {
       style: buttonStyle
     },
     loading ? t("检查中…") : t("检查全部工作区")
-  ), results.length ? /* @__PURE__ */ React2.createElement("span", { style: hintStyle }, t("共 {count} 个", { count: results.length })) : null, error ? /* @__PURE__ */ React2.createElement("span", { style: errorHintStyle }, error) : null, results.length || error ? /* @__PURE__ */ React2.createElement(
+  ), results.length ? /* @__PURE__ */ React.createElement("span", { style: hintStyle }, t("共 {count} 个", { count: results.length })) : null, error ? /* @__PURE__ */ React.createElement("span", { style: errorHintStyle }, error) : null, results.length || error ? /* @__PURE__ */ React.createElement(
     "button",
     {
       type: "button",
@@ -4453,24 +4572,24 @@ function WorkspaceHealthSection({ disabled }) {
       style: buttonStyle
     },
     t("清除结果")
-  ) : null), results.length ? /* @__PURE__ */ React2.createElement("div", null, results.map((result) => {
+  ) : null), results.length ? /* @__PURE__ */ React.createElement("div", null, results.map((result) => {
     const healthy = result.exists && result.readable && result.writable;
-    return /* @__PURE__ */ React2.createElement("div", { key: result.id, style: rowStyle }, /* @__PURE__ */ React2.createElement("div", { style: { minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: 2 } }, /* @__PURE__ */ React2.createElement("span", { style: {
+    return /* @__PURE__ */ React.createElement("div", { key: result.id, style: rowStyle }, /* @__PURE__ */ React.createElement("div", { style: { minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: 2 } }, /* @__PURE__ */ React.createElement("span", { style: {
       fontSize: 13,
       fontWeight: 500,
       overflow: "hidden",
       textOverflow: "ellipsis",
       whiteSpace: "nowrap"
-    } }, result.title || result.id), /* @__PURE__ */ React2.createElement("span", { style: {
+    } }, result.title || result.id), /* @__PURE__ */ React.createElement("span", { style: {
       ...hintStyle,
       overflow: "hidden",
       textOverflow: "ellipsis",
       whiteSpace: "nowrap"
-    }, title: result.path }, result.path)), /* @__PURE__ */ React2.createElement("span", { style: {
+    }, title: result.path }, result.path)), /* @__PURE__ */ React.createElement("span", { style: {
       flex: "none",
       fontSize: 12,
       color: healthy ? "var(--dsw-alias-state-success-primary, #188038)" : "var(--dsw-alias-state-error-primary, #d93025)"
-    } }, workspaceHealthText(result)), /* @__PURE__ */ React2.createElement(
+    } }, workspaceHealthText(result)), /* @__PURE__ */ React.createElement(
       "button",
       {
         type: "button",
@@ -4500,6 +4619,105 @@ function registerSettingsSlot(ctx) {
     } else {
       install2();
     }
+  });
+}
+
+// src/client/slot-actions.tsx
+var React2 = __toESM(require("react"), 1);
+var SLOT_ID = "dsh-fnos-advanced";
+var SLOT_NAMES = [
+  "deliverables.file.actions",
+  "deliverables.review.file.actions",
+  "sidebar.right.tab.document.actions",
+  "sidebar.right.tab.document.unpreviewable"
+];
+function sessionIdOf(props, root) {
+  if (typeof props.sessionId === "string" && props.sessionId) return props.sessionId;
+  return root?.closest("[data-sidebar-right-session]")?.getAttribute("data-sidebar-right-session") || "";
+}
+function resolveSlotPath(root, props) {
+  if (typeof props.absolutePath === "string" && props.absolutePath.startsWith("/")) {
+    return props.absolutePath;
+  }
+  const card = root?.closest("[data-presented-file]");
+  const cardPath = card?.querySelector(":scope > button[title]")?.getAttribute("title") || "";
+  if (cardPath) return resolveAbsolutePath(sessionCwd(sessionIdOf(props, root)), cardPath);
+  const review = root?.closest("[data-changes-review]");
+  if (review) {
+    const relative = review.querySelector("[data-review-file]")?.getAttribute("data-review-file") || "";
+    return resolveAbsolutePath(sessionCwd(sessionIdOf(props, review)), relative);
+  }
+  return "";
+}
+function FnosPathAction(props) {
+  const anchorRef = React2.useRef(null);
+  const label = t("飞牛操作");
+  const [, forceLanguage] = React2.useReducer((value) => value + 1, 0);
+  React2.useEffect(() => () => closePathMenu(), []);
+  React2.useEffect(() => onLanguageChange(forceLanguage), [forceLanguage]);
+  const onClick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const anchor = anchorRef.current;
+    if (!anchor) return;
+    const path = resolveSlotPath(anchor, props);
+    if (!path) {
+      showToast(t("无法确定文件路径"));
+      return;
+    }
+    const sessionId = sessionIdOf(props, anchor);
+    const paneId = anchor.closest("[data-dockkit-pane]")?.getAttribute("data-dockkit-pane") || "";
+    const target = pathMenuTarget("file", path, sessionId, paneId);
+    if (target && openNativePathMenu(anchor, target)) return;
+    togglePathMenu(anchor, { path, entry: "file" });
+  };
+  return /* @__PURE__ */ React2.createElement(
+    "button",
+    {
+      ref: anchorRef,
+      type: "button",
+      className: "dsh-fnos-slot-action",
+      ...{ [SLOT_ACTION_ATTR]: "1" },
+      title: label,
+      "aria-label": label,
+      onMouseDown: (event) => {
+        event.stopPropagation();
+      },
+      onClick,
+      dangerouslySetInnerHTML: { __html: FILE_ACTION_SVG }
+    }
+  );
+}
+function registerPathActionSlots(ctx) {
+  const inject = ctx?.inject;
+  if (typeof inject !== "function") return;
+  inject(["slots"], (scope) => {
+    const slots = scope.slots;
+    if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") return;
+    const install2 = () => {
+      for (const name of SLOT_NAMES) {
+        slots.inject(name, () => slots.register({ name, id: SLOT_ID }, FnosPathAction));
+      }
+    };
+    if (typeof scope.effect === "function") scope.effect(install2, "dsh-fnos-advanced: file actions");
+    else install2();
+  });
+}
+function registerSessionCwd(ctx) {
+  const inject = ctx?.inject;
+  if (typeof inject !== "function") return;
+  inject(["sessions"], (scope) => {
+    const list = scope.sessions?.list;
+    if (!list || typeof list.getSnapshot !== "function") return;
+    setSessionCwdResolver((sessionId) => {
+      if (!sessionId) return "";
+      try {
+        const cwd = list.getSnapshot?.()?.byId?.[sessionId]?.cwd;
+        return typeof cwd === "string" ? cwd : "";
+      } catch {
+        return "";
+      }
+    });
   });
 }
 
@@ -4779,6 +4997,11 @@ var STYLE_TEXT = `
     align-items: center;
     color: var(--dsw-alias-label-secondary, #666);
     font-size: 12px;
+  }
+  /* The plugin's own "在飞牛中打开" row, once dsh's native row does the same job.
+     Hidden by class (not removed) so dsh's React tree keeps its node. */
+  .dsh-fnos-menu-hidden {
+    display: none !important;
   }
   .dsh-fnos-advanced-toast {
     position: fixed;
@@ -5225,6 +5448,7 @@ function install() {
     }
     closePathMenu();
     resetRevealItems();
+    disposeNativeContextMenus();
     for (const node of document.querySelectorAll(
       `[${BUTTON_ATTR}], [${PICK_ITEM_ATTR}], .${STATUS_CLASS}, .dsh-fnos-recent, [data-dsh-fnos-open-dir], [data-dsh-fnos-check-dir], [data-dsh-fnos-reauth-dir]`
     )) {

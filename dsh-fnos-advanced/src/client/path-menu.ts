@@ -13,6 +13,7 @@ import { quotePathToComposer } from './composer.ts';
 import { LOG_PREFIX } from './constants.ts';
 import { copyText, showToast } from './dom.ts';
 import { fileRowActions, type FileRowAction } from './file-actions.ts';
+import { folderOfPath } from './files.ts';
 import { t, translateError, type UiKey } from './i18n.ts';
 import { getSdk, isFnosHost } from './sdk.ts';
 
@@ -155,8 +156,18 @@ async function runPathAction(action: FileRowAction, path: string, entry: string)
   }
 }
 
-/** Open a path with fnOS (files in their default app, folders in the manager). */
+/**
+ * Open a path with fnOS (files in their default app, folders in the manager).
+ *
+ * 文件走 `openFile`（与文件管理器里的「打开方式」一致）；宿主不认时退回文件管理器，
+ * 但 `openFileManager` 只定位**目录**，所以退回时给的是文件所在目录，不是文件本身
+ * —— 把文件路径递过去会落在错误的位置。
+ */
 export async function openPathInFnos(path: string, isDirectory: boolean): Promise<void> {
+  if (!path.startsWith('/')) {
+    showToast(t('无法确定文件路径'));
+    return;
+  }
   const sdk = getSdk();
   try { await sdk.ready(); } catch { /* fall through to the host call */ }
 
@@ -169,7 +180,7 @@ export async function openPathInFnos(path: string, isDirectory: boolean): Promis
     if (opened === false) throw new Error('openFile is not supported by this host');
   } catch (error) {
     console.warn(LOG_PREFIX, 'openFile failed; falling back to the file manager', error);
-    await sdk.openFileManager(path);
+    await sdk.openFileManager(folderOfPath(path));
   }
 }
 

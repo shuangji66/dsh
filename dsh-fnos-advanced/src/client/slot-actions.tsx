@@ -17,6 +17,7 @@ import { pathMenuTarget } from './menu-target.ts';
 import { openNativePathMenu } from './native-menu.ts';
 import { closePathMenu, togglePathMenu } from './path-menu.ts';
 import { onLanguageChange, t } from './i18n.ts';
+import { sessionCwd, setSessionCwdResolver } from './session-cwd.ts';
 import type { ClientContext } from './context.ts';
 
 /** Slot id used for every entry this plugin registers. */
@@ -37,19 +38,6 @@ interface SlotActionProps {
   sessionId?: unknown;
   /** Opaque event coordinates for delivery / review entries. */
   actionUrl?: unknown;
-}
-
-/**
- * Session cwd lookup, installed from the live `sessions` client service.
- *
- * Kept module-level (instead of a React hook) so the component also works in
- * slots that do not forward the standard `useSessions` hook.
- */
-let sessionCwdOf: (sessionId: string) => string = () => '';
-
-/** The Session workspace root, resolved from the live `sessions` service. */
-export function sessionCwd(sessionId: string): string {
-  return sessionCwdOf(sessionId);
 }
 
 /** Session owning the slot entry: the standard prop, else the sidebar container. */
@@ -102,7 +90,8 @@ export function FnosPathAction(props: SlotActionProps): React.ReactElement {
       return;
     }
     const sessionId = sessionIdOf(props, anchor);
-    const target = pathMenuTarget('file', path, sessionId);
+    const paneId = anchor.closest('[data-dockkit-pane]')?.getAttribute('data-dockkit-pane') || '';
+    const target = pathMenuTarget('file', path, sessionId, paneId);
     if (target && openNativePathMenu(anchor, target)) return;
     togglePathMenu(anchor, { path, entry: 'file' });
   };
@@ -154,7 +143,9 @@ export function registerSessionCwd(ctx: ClientContext): void {
   inject(['sessions'], (scope) => {
     const list = scope.sessions?.list;
     if (!list || typeof list.getSnapshot !== 'function') return;
-    sessionCwdOf = (sessionId: string): string => {
+    // Kept module-level (instead of a React hook) so the component also works
+    // in slots that do not forward the standard `useSessions` hook.
+    setSessionCwdResolver((sessionId: string): string => {
       if (!sessionId) return '';
       try {
         const cwd = list.getSnapshot?.()?.byId?.[sessionId]?.cwd;
@@ -162,6 +153,6 @@ export function registerSessionCwd(ctx: ClientContext): void {
       } catch {
         return '';
       }
-    };
+    });
   });
 }

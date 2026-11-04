@@ -284,6 +284,11 @@ const STYLE_TEXT = `
     color: var(--dsw-alias-label-secondary, #666);
     font-size: 12px;
   }
+  /* The plugin's own "在飞牛中打开" row, once dsh's native row does the same job.
+     Hidden by class (not removed) so dsh's React tree keeps its node. */
+  .dsh-fnos-menu-hidden {
+    display: none !important;
+  }
   .dsh-fnos-advanced-toast {
     position: fixed;
     left: 50%;

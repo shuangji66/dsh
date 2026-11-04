@@ -133,9 +133,10 @@ dsh plugin --profile web add /absolute/path/to/dsh-fnos-advanced
 
 | 动作 | 行为 |
 | --- | --- |
-| 在文件夹显示（插件接管） | dsh 在飞牛宿主里会因为检测不到桌面文件管理器而置灰；插件在**飞牛桌面 / App 图标直连 dsh** 时把它接管为飞牛文件管理器（文件按所在目录打开）。控制台内嵌 dsh 与普通浏览器仍按 dsh 原样显示为不可用 |
-| 复制文件夹路径 / 复制路径（插件接管） | 复制绝对路径；原生实现只走 `navigator.clipboard`，插件改为复用 `execCommand` 兜底，HTTP 反代下也能复制 |
-| 在飞牛中打开 | 文件调用 `openFile` 用默认应用打开；目录在旧版插件菜单里调用 `openFileManager`，0.2.2 原生菜单里由上面的「在文件夹显示」接管负责。只在有宿主桥接的入口显示（飞牛桌面 / App 图标直连 dsh；控制台内嵌 dsh 与普通浏览器不显示） |
+| 在文件夹显示（插件接管） | dsh 在飞牛宿主里会因为检测不到桌面文件管理器而置灰；插件在**飞牛桌面 / App 图标直连 dsh** 时把它接管为飞牛文件管理器：**打开的是文件所在目录**（`openFileManager` 只定位目录，直接递文件路径会落到错误的位置）。控制台内嵌 dsh 与普通浏览器仍按 dsh 原样显示为不可用 |
+| 使用默认应用打开（插件接管） | dsh 只有在**它自己那台机器**上解析出桌面应用时才给这一行动作，飞牛上没有桌面，所以一直是灰的；插件在**飞牛桌面 / App 图标直连 dsh** 时接管它，改走飞牛的 `openFile`（与文件管理器里的「打开方式」一致）。接管成功后插件自己那行「在飞牛中打开」会被隐藏，菜单里只留这一条 |
+| 复制文件夹路径 / 复制路径（插件接管） | 复制**绝对路径**（捕获目标若是工作区相对路径，先用该会话的 cwd 补全）；原生实现只走 `navigator.clipboard`，插件改为复用 `execCommand` 兜底，HTTP 反代下也能复制 |
+| 在飞牛中打开 | 文件调用 `openFile` 用默认应用打开；目录在旧版插件菜单里调用 `openFileManager`，0.2.2 原生菜单里由上面的「在文件夹显示」接管负责。只在有宿主桥接的入口显示（飞牛桌面 / App 图标直连 dsh；控制台内嵌 dsh 与普通浏览器不显示）；**0.2.2 原生菜单里一旦「使用默认应用打开」被接管成功，这一行就不再出现**（同一个动作不留两份） |
 | 文件详情 | 调用飞牛的 `showFileDetails` 详情面板（大小、权限、位置）；只在有宿主桥接的入口显示（同上） |
 | 引用到对话 | 把该文件作为 `@路径` 芯片插入当前对话草稿（图片会按设置读取字节上传；目录不提供此项） |
 
@@ -346,10 +347,24 @@ DSH_FNOS_AUTH_BASE=https://fnos.example:5666 dsh web
   `file` / `directory` 目标注册 `order: 300` 的贡献项；点击「⋯」时用行上的
   `data-sidebar-right-session` + `data-files-navigator` + `data-files-path` 构造与右键
   完全相同的 target，再调 `contextMenus.open`。原生菜单打开后，插件按
-  `contextMenus.active` 的捕获目标接管两行原生动作：fnOS 宿主里启用「在文件夹显示」并
-  改走 `openFileManager`，所有环境里把「复制路径」改走插件的 `copyText` 兜底。
-  旧版 dsh 没有该服务时，`openNativePathMenu` 返回 false，继续用
-  `src/client/path-menu.ts` 的本地菜单。
+  `contextMenus.active` 的捕获目标接管三行原生动作：fnOS 宿主里启用「在文件夹显示」
+  （给 `openFileManager` 的是**文件所在目录**）与「使用默认应用打开」（改走飞牛的
+  `openFile`），所有环境里把「复制路径」改走插件的 `copyText` 兜底。接管成功后插件自己
+  的「在飞牛中打开」行按 class 隐藏（`display: none`，不摘节点 —— 那个节点属于 dsh 的
+  React 树），所以宿主里不会出现两条一模一样的「打开」。
+  三个实现细节（0.7.0 起有回归测试守卫）：
+  - **只处理活动菜单**：dsh 0.2.2 的 `data-menu-phase` 只有 `enter` / `dismiss` /
+    `replace` 三种值（见它的菜单 CSS），后两种是淡出/替换中的旧菜单，仍带着上一份
+    行内容且 `pointer-events: none`，插件跳过它们，避免把旧路径绑到新菜单上；
+  - **两行原生动作靠图标 + 本地化标签识别**（`native-menu-contract.ts`）：图标是
+    `<svg data-icon="dsw-icon-…"><use href="#…">`，标签覆盖 dsh 0.2.2 的八种界面语言；
+    dsh 改标签会先让测试失败，而不是让某一语言的「在文件夹显示」悄悄不再被接管；
+  - **捕获目标先补成绝对路径**：文件树给的是绝对路径，聊天引用/审查行给的是工作区
+    相对路径，`absoluteTargetPath` 用 `sessions` 服务的 cwd 补全；补不出来时保留原值
+    （与插件自己的菜单口径一致）。
+  旧版 dsh 没有该服务、或贡献项注册失败（热重载留下的重复 id）时，`openNativePathMenu`
+  返回 false，继续用 `src/client/path-menu.ts` 的本地菜单 —— **不会**出现「原生菜单打开
+  了但没有插件动作」的半残状态。
 - 交付卡片 / 变更审查 / 文档预览的入口经 `ctx.slots.inject(name, () =>
   ctx.slots.register({ name, id }, Component))` 注册（与 dsh 自带 `open-in-app` 同一形状），
   用共享 `react` 渲染一个 24px 的「⋯」按钮。0.2.2 起 slot 里的按钮也优先打开同一份
@@ -518,6 +533,14 @@ npm view dsh-fnos-advanced version
   文件管理器），插件不会在浏览器里伪造这个能力；要启用它请在飞牛桌面 / App 内直连 dsh。
   原生菜单的其余选项（在侧边栏打开、浮窗、默认应用等）随 dsh 版本与目标类型变化，
   插件不复制、也不改写它们。
+- 插件只接管原生菜单的三行（在文件夹显示 / 使用默认应用打开 / 复制路径）：
+  `data-menu-phase` 不是 `enter` 的菜单（正在淡出或替换）一律跳过；菜单项按图标
+  （`dsw-icon-folder-open-outline-regular` / `dsw-icon-copy-outline-regular`）加本地化
+  标签识别（「使用默认应用打开」没有稳定图标 —— 它和「在浮窗中打开」共用右上箭头 ——
+  因此只按标签 + **禁用态**识别），dsh 若改了图标或新增语言，请同步
+  `src/client/native-menu-contract.ts`（测试会先失败）。
+- 原生菜单里的路径一律先补成绝对路径再交给宿主：补不出来时提示「无法确定文件路径」，
+  不会把相对路径递过去（飞牛会把它当成「我的文件」下的路径，打开一个不存在的位置）。
 - 交付卡片 / 变更审查 / 文档预览的「⋯」依赖 dsh 0.2.1-rc.4 的文件动作 slot 与
   `data-presented-file` / `data-review-file` 锚点；旧版 dsh 或 dsh 改版后入口可能不出现，
   文件树与选择器不受影响。变更审查页若拿不到会话 cwd（`sessions` 服务不可用），

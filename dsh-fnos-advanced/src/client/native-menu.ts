@@ -17,11 +17,21 @@ import { LOG_PREFIX } from './constants.ts';
 import type { ClientContext, NativeContextMenusLike, NativeMenuActionLike } from './context.ts';
 import { nativeFileActions, type NativeFileAction } from './file-actions.ts';
 import { t } from './i18n.ts';
-import { activePathTarget, type ActivePathTarget, type PathMenuTarget } from './menu-target.ts';
+import {
+  absoluteTargetPath,
+  activePathTarget,
+  type ActivePathTarget,
+  type PathMenuTarget,
+} from './menu-target.ts';
 import { openPathInFnos, showPathDetails } from './path-menu.ts';
 import { isFnosHost } from './sdk.ts';
+import { sessionCwd } from './session-cwd.ts';
 
 let service: NativeContextMenusLike | null = null;
+/** Whether both contributions registered; false falls back to the plugin menu. */
+let registered = false;
+/** Disposer used only when the host scope has no `effect` (older Cordis). */
+let contributionsDispose: (() => void) | null = null;
 
 /** The service may arrive after the plugin's first scan; it is optional. */
 export function connectNativeContextMenus(ctx: ClientContext): void {
@@ -32,9 +42,11 @@ export function connectNativeContextMenus(ctx: ClientContext): void {
     const menus = scope.contextMenus;
     if (!menus || typeof menus.register !== 'function' || typeof menus.open !== 'function') return;
     service = menus;
+    registered = false;
 
     const install = (): (() => void) => {
       const disposers: Array<() => void> = [];
+      let failed = false;
       const register = (target: 'file' | 'directory'): void => {
         try {
           disposers.push(menus.register({
@@ -44,21 +56,36 @@ export function connectNativeContextMenus(ctx: ClientContext): void {
             resolve: (input, signal) => {
               signal.throwIfAborted();
               const path = typeof input?.path === 'string' ? input.path : '';
-              return path ? actionsFor(target, path) : [];
+              if (!path) return [];
+              // dsh publishes absolute paths from the file tree, but other
+              // surfaces (chat references, review rows) use workspace-relative
+              // ones; "open in fnOS" and the details sheet need absolute paths.
+              const sessionId = typeof input?.sessionId === 'string' ? input.sessionId : '';
+              return actionsFor(target, absoluteTargetPath({ path, sessionId }, sessionCwd));
             },
           }));
         } catch (error) {
-          // A duplicate id after a hot reload must not take the plugin down;
-          // the injected "⋯" button falls back to the local menu.
+          // A duplicate id after a hot reload must not leave the "⋯" button
+          // opening a native menu without the plugin's actions.
+          failed = true;
           console.warn(LOG_PREFIX, 'native context menu registration failed', target, error);
         }
       };
       register('directory');
       register('file');
+      if (failed) {
+        // Half a contribution is worse than none: the "⋯" button would open a
+        // native menu that is missing actions the plugin's own menu still has.
+        for (const dispose of disposers.splice(0)) {
+          try { dispose(); } catch { /* ignore */ }
+        }
+      }
+      registered = !failed;
       return () => {
         for (const dispose of disposers.splice(0)) {
           try { dispose(); } catch { /* ignore */ }
         }
+        registered = false;
         if (service === menus) service = null;
       };
     };
@@ -66,9 +93,26 @@ export function connectNativeContextMenus(ctx: ClientContext): void {
     if (typeof scope.effect === 'function') {
       scope.effect(install, 'dsh-fnos-advanced: native context menu');
     } else {
-      install();
+      contributionsDispose = install();
     }
   });
+}
+
+/**
+ * Drop the native contributions (plugin unload).
+ *
+ * The injected scope normally owns this; the fallback path (hosts without
+ * `scope.effect`) needs an explicit call so a reload cannot leave a stale
+ * registration behind.
+ */
+export function disposeNativeContextMenus(): void {
+  const dispose = contributionsDispose;
+  contributionsDispose = null;
+  registered = false;
+  service = null;
+  if (dispose) {
+    try { dispose(); } catch { /* ignore */ }
+  }
 }
 
 /**
@@ -79,7 +123,7 @@ export function connectNativeContextMenus(ctx: ClientContext): void {
  */
 export function openNativePathMenu(anchor: HTMLElement, target: PathMenuTarget): boolean {
   const menus = service;
-  if (!menus || typeof menus.open !== 'function') return false;
+  if (!menus || !registered || typeof menus.open !== 'function') return false;
   try {
     const rect = anchor.getBoundingClientRect();
     const value = target.kind === 'file'
@@ -121,8 +165,11 @@ export function canAdaptNativeReveal(): boolean {
 
 /** Build the actions for one native contribution; resolved when the menu opens. */
 function actionsFor(kind: 'file' | 'directory', path: string): NativeMenuActionLike[] {
+  if (!path) return [];
   const host = isFnosHost();
-  const revealAdapted = canAdaptNativeReveal();
+  // The reveal adapter only runs in a fnOS host; elsewhere the native row stays
+  // as dsh rendered it and a directory keeps its own "open" action.
+  const revealAdapted = host && canAdaptNativeReveal();
   return nativeFileActions(kind, host, revealAdapted).map((action) => actionFor(action, kind, path));
 }
 
@@ -150,6 +197,7 @@ function actionFor(
   return {
     id: 'quote',
     label: t('引用到对话'),
+    failureLabel: t('引用到对话失败，请重试。'),
     run: () => quotePathToComposer(path),
   };
 }

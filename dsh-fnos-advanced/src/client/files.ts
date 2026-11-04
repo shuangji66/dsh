@@ -81,6 +81,27 @@ export function resolveAbsolutePath(cwd: unknown, value: unknown): string {
   return `${base}/${text.replace(/^\.\//, '')}`;
 }
 
+/**
+ * Folder that contains one absolute path ("reveal in folder" target).
+ *
+ * fnOS's `openFileManager(path)` 打开文件管理器并**定位到指定路径**，它认的是目录：
+ * 把文件路径原样传进去，文件管理器只能落在一个不存在的位置（实测会停在
+ * 「我的文件」根或该文件本身），这正是「在文件夹显示」打开错地方的原因。所以凡是
+ * 「显示所在文件夹」都要先过这里。`/` 保持 `/`，没有斜杠的相对路径返回空串
+ * （调用方据此拒绝而不是猜一个根）。
+ */
+export function folderOfPath(value: unknown): string {
+  const raw = String(value ?? '');
+  const text = raw.replace(/\/+$/, '');
+  // `/` (or an empty value) has no folder to open.
+  if (!text) return '';
+  // A trailing separator already names a folder: keep it instead of stepping up.
+  if (text !== raw) return text;
+  const cut = text.lastIndexOf('/');
+  if (cut < 0) return '';
+  return cut === 0 ? '/' : text.slice(0, cut);
+}
+
 /** Base name used for the `File` object (and therefore the attachment label). */
 export function fileNameForPath(value: unknown): string {
   const text = String(value ?? '').replace(/[\\/]+$/, '');

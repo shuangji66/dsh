@@ -90,6 +90,7 @@ export const EN = Object.freeze({
   '复制路径': 'Copy path',
   '在飞牛中打开失败，当前宿主可能不支持该操作。': 'Could not open in fnOS; the host may not support it.',
   '无法显示文件详情，当前宿主可能不支持该操作。': 'Could not show file details; the host may not support it.',
+  '引用到对话失败，请重试。': 'Could not quote the file. Try again.',
   '无法确定文件路径': 'Could not determine the file path',
   '没有找到对话输入框，无法引用。': 'No composer input to quote into.',
 

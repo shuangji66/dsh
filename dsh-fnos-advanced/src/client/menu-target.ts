@@ -7,6 +7,8 @@
  * come from the row's `data-*` anchors. Both shapes are pure data so the DOM
  * scanners can share one menu adapter.
  */
+import { resolveAbsolutePath } from './files.ts';
+
 export type ContextMenuKind = 'workspace' | 'session';
 
 export type ContextMenuTarget =
@@ -22,10 +24,17 @@ export interface PathMenuTarget {
   paneId?: string;
 }
 
-/** The path half of a captured native target (file / directory only). */
+/**
+ * The path half of a captured native target (file / directory only).
+ *
+ * `path` is the raw target value: dsh's own triggers pass absolute paths from
+ * the file tree, but other surfaces (chat references, review rows) publish
+ * workspace-relative paths, so the owner session is kept for resolution.
+ */
 export interface ActivePathTarget {
   kind: 'file' | 'directory';
   path: string;
+  sessionId: string;
 }
 
 /** Parse a row key (`workspace:<id>` / `session:<id>`) into a menu target. */
@@ -70,5 +79,25 @@ export function activePathTarget(value: unknown): ActivePathTarget | null {
   if (!target || typeof target !== 'object') return null;
   const path = (target as { path?: unknown }).path;
   if (typeof path !== 'string' || !path) return null;
-  return { kind, path };
+  const sessionId = (target as { sessionId?: unknown }).sessionId;
+  return { kind, path, sessionId: typeof sessionId === 'string' ? sessionId : '' };
+}
+
+/**
+ * Absolute path for one captured target.
+ *
+ * "Open in fnOS" and the clipboard always need an absolute path; dsh publishes
+ * workspace-relative paths on some surfaces. A relative path whose Session root
+ * is unknown keeps the raw value (the same behaviour the plugin's own menu has)
+ * instead of guessing a root.
+ */
+export function absoluteTargetPath(
+  target: { path: string; sessionId?: string },
+  cwdOf: (sessionId: string) => string,
+): string {
+  const path = target.path;
+  if (!path) return '';
+  if (path.startsWith('/')) return path;
+  const cwd = target.sessionId ? cwdOf(target.sessionId) : '';
+  return resolveAbsolutePath(cwd, path) || path;
 }

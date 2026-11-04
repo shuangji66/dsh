@@ -10,7 +10,14 @@
  * manager; inside fnOS the fnOS bridge can open the folder instead, so the
  * existing row is enabled and re-wired in place (rather than adding a second,
  * duplicate item). For dsh 0.2.2's native file menu the same row is matched via
- * the `contextMenus.active` target and opened with `openFileManager`.
+ * the `contextMenus.active` target and opened with `openFileManager` — always
+ * with the **containing folder**, since that call navigates to a directory.
+ *
+ * The file menu's "Open in default application" row gets the same treatment:
+ * dsh greys it out because the NAS has no desktop application associations,
+ * while fnOS's own `openFile` is exactly "open with the default app". Once the
+ * native row is live the plugin's own "在飞牛中打开" row is hidden, so the menu
+ * carries one action instead of two identical ones.
  *
  * Workspace/session ownership is read from the `aria-controls` bridge dsh's
  * Menu primitive publishes; the native file target comes from the context-menu
@@ -29,16 +36,33 @@ import { isAuthCancelled } from './cancel.ts';
 import {
   CHECK_DIR_ATTR,
   FOLDER_OPEN_SVG,
+  HIDDEN_ITEM_ATTR,
   LOG_PREFIX,
   OPEN_DIR_ATTR,
+  OPEN_ITEM_ATTR,
   REAUTH_DIR_ATTR,
   REVEAL_ITEM_ATTR,
 } from './constants.ts';
 import { closePopup, copyText, isVisible, randomId, showToast } from './dom.ts';
 import { isFnosAppEmbedded } from './env.ts';
+import { folderOfPath } from './files.ts';
 import { t, translateError } from './i18n.ts';
-import { contextFromRowKey, type ActivePathTarget, type ContextMenuTarget } from './menu-target.ts';
+import {
+  absoluteTargetPath,
+  contextFromRowKey,
+  type ActivePathTarget,
+  type ContextMenuTarget,
+} from './menu-target.ts';
 import { activeNativeTarget } from './native-menu.ts';
+import { openPathInFnos } from './path-menu.ts';
+import {
+  COPY_ICON,
+  COPY_LABEL_RE,
+  DEFAULT_APP_LABEL_RE,
+  REVEAL_ICON,
+  REVEAL_LABEL_RE,
+  isLiveMenuPhase,
+} from './native-menu-contract.ts';
 import {
   checkWorkspaceHealth,
   loadConfig,
@@ -49,7 +73,7 @@ import {
   workspaceHealthText,
 } from './plugin-api.ts';
 import { getSdk, isFnosHost } from './sdk.ts';
-import { sessionCwd } from './slot-actions.tsx';
+import { sessionCwd } from './session-cwd.ts';
 
 interface WorkspaceMenuContext {
   id: string;
@@ -60,10 +84,6 @@ interface WorkspaceMenuContext {
 let lastWorkspaceMenu: WorkspaceMenuContext | null = null;
 
 const MENU_TTL_MS = 5 * 60 * 1000;
-
-/** dsh's folder-open icon identifies the native reveal row across languages. */
-const REVEAL_ICON = '#dsw-icon-folder-open-outline-regular';
-const REVEAL_LABEL_RE = /^(?:Show in folder|Reveal in folder|在文件夹显示|在文件夹中显示|在資料夾顯示|在資料夾中顯示|Im Ordner anzeigen|Afficher dans le dossier|Mostrar en la carpeta|フォルダーで表示|Открыть папку|Abrir na pasta)$/i;
 
 /** Bound native click handlers, so unload can restore the row's disabled state. */
 const revealHandlers = new WeakMap<HTMLButtonElement, EventListener>();
@@ -80,14 +100,21 @@ type RevealTarget = ContextMenuTarget | ActivePathTarget;
 
 /** Augment the visible workspace / session / native file menus. */
 export function scanContextMenus(): void {
-  for (const menu of document.querySelectorAll('[role="menu"]')) {
+  // The native popup carries `data-context-menu` on its `role="menu"` element
+  // while it is open (dsh 0.2.2); older menus only have the role.
+  for (const menu of document.querySelectorAll('[role="menu"], [data-context-menu]')) {
     if (!isVisible(menu)) continue;
-    // During a replacement dsh keeps the outgoing menu for a short fade.
-    if (menu.getAttribute('data-menu-phase') === 'exit') continue;
+    // dsh 0.2.2 phases are `enter` / `dismiss` / `replace` (see the menu CSS).
+    // A dismissing or replacing menu is fading out with `pointer-events: none`
+    // and still carries the outgoing items, so only the live phase is augmented.
+    if (!isLiveMenuPhase(menu.getAttribute('data-menu-phase'))) continue;
 
     // The native popup (0.2.2+) publishes its captured target through the
     // contextMenus service; workspace/session menus still use aria-controls.
-    const native = menu.hasAttribute('data-context-menu') ? activeNativeTarget() : null;
+    const captured = menu.hasAttribute('data-context-menu') ? activeNativeTarget() : null;
+    const native = captured
+      ? { ...captured, path: absoluteTargetPath(captured, sessionCwd) }
+      : null;
     const target = findMenuTarget(menu);
     const isWorkspace = target?.kind === 'workspace' || isWorkspaceActionsMenu(menu);
     let workspaceId = '';
@@ -104,7 +131,11 @@ export function scanContextMenus(): void {
       ?? target
       ?? (workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null);
     adaptRevealItem(menu, revealTarget);
-    if (native) adaptCopyItem(menu, native.path);
+    if (captured) {
+      adaptCopyItem(menu);
+      // The default-app row only exists in dsh's native file menu.
+      adaptOpenItem(menu, native);
+    }
   }
 }
 
@@ -139,10 +170,19 @@ function isWorkspaceActionsMenu(menu: Element): boolean {
   return /Delete workspace|删除工作区|删除工作空间|删除工作區/i.test(text);
 }
 
+/** Whether one menu row carries dsh's icon (sprite `<use>` or `data-icon`). */
+function hasIcon(button: Element, icon: string): boolean {
+  return Boolean(
+    button.querySelector(`use[href="#${icon}"]`)
+    || button.querySelector(`svg[data-icon="${icon}"]`)
+    || button.querySelector(`[data-icon="${icon}"]`),
+  );
+}
+
 /** dsh's native "Show in folder" row, identified by its stable icon. */
 function findRevealItem(menu: Element): HTMLButtonElement | null {
   for (const button of menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')) {
-    if (button.querySelector(`use[href="${REVEAL_ICON}"]`)) return button;
+    if (hasIcon(button, REVEAL_ICON)) return button;
     // Future icon names keep the same family suffix; the row is unique.
     if (button.querySelector('use[href*="folder-open"]')) return button;
     if (REVEAL_LABEL_RE.test((button.textContent || '').trim())) return button;
@@ -150,17 +190,21 @@ function findRevealItem(menu: Element): HTMLButtonElement | null {
   return null;
 }
 
-/** dsh's native "Copy path" row, identified by its stable icon. */
-const COPY_ICON = '#dsw-icon-copy-outline-regular';
-const COPY_LABEL_RE = /^(?:Copy(?: (?:folder|file))? path|复制(?:文件夹|文件)?路径)$/i;
 const copyHandlers = new WeakMap<HTMLButtonElement, EventListener>();
 
 function findCopyItem(menu: Element): HTMLButtonElement | null {
   for (const button of menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')) {
-    if (button.querySelector(`use[href="${COPY_ICON}"]`)) return button;
+    if (hasIcon(button, COPY_ICON)) return button;
     if (COPY_LABEL_RE.test((button.textContent || '').trim())) return button;
   }
   return null;
+}
+
+/** Absolute path of the captured native target, or an empty string. */
+function copyPathOf(): string {
+  const captured = activeNativeTarget();
+  if (!captured) return '';
+  return absoluteTargetPath(captured, sessionCwd);
 }
 
 /**
@@ -168,18 +212,23 @@ function findCopyItem(menu: Element): HTMLButtonElement | null {
  *
  * `open-in-app` writes with `navigator.clipboard` directly; the console is
  * often served over plain HTTP where that API is missing. The plugin already
- * has an execCommand fallback, so the shared menu keeps working there.
+ * has an execCommand fallback, so the shared menu keeps working there. The
+ * copied text is dsh's own absolute path (dsh resolves it through its API;
+ * the plugin resolves workspace-relative targets against the Session cwd).
  */
-function adaptCopyItem(menu: Element, path: string): void {
-  if (!path) return;
+function adaptCopyItem(menu: Element): void {
   const button = findCopyItem(menu);
   if (!button) return;
+  const path = copyPathOf();
+  if (!path) return;
   button.dataset.dshFnosCopyPath = path;
   if (copyHandlers.has(button)) return;
   const handler: EventListener = (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const current = button.dataset.dshFnosCopyPath || '';
+    // Read the live snapshot first: React reuses the same button node for the
+    // same action id in the next menu, so the dataset can lag one scan behind.
+    const current = copyPathOf() || button.dataset.dshFnosCopyPath || '';
     if (!current) return;
     closeMenu();
     void copyText(current).then((ok) => {
@@ -214,7 +263,11 @@ function adaptRevealItem(menu: Element, target: RevealTarget | null): void {
 
   // React may re-apply disabled on a re-render; keep the row enabled.
   if (button.disabled) button.disabled = false;
-  if (button.getAttribute('aria-disabled') === 'true') button.removeAttribute('aria-disabled');
+  if (button.getAttribute('aria-disabled') === 'true') {
+    button.removeAttribute('aria-disabled');
+    // Remember that the row was disabled so unload can restore it verbatim.
+    button.dataset.dshFnosRevealAria = '1';
+  }
   button.setAttribute(REVEAL_ITEM_ATTR, '1');
   button.dataset.dshFnosRevealKind = target.kind;
   button.dataset.dshFnosRevealId = value;
@@ -229,10 +282,93 @@ function adaptRevealItem(menu: Element, target: RevealTarget | null): void {
     closeMenu();
     if (kind === 'workspace') void openWorkspaceDirectory(id);
     else if (kind === 'session') void openSessionDirectory(id);
-    else if (kind === 'file' || kind === 'directory') void openPathInFileManager(id);
+    // 「显示所在文件夹」= 打开文件管理器并定位到**目录**：`openFileManager` 只认目录，
+    // 把文件路径原样递过去会落到错误的位置。
+    else if (kind === 'file') void openPathInFileManager(folderOfPath(id));
+    else if (kind === 'directory') void openPathInFileManager(id);
   };
   revealHandlers.set(button, handler);
   button.addEventListener('click', handler);
+}
+
+/**
+ * Take over dsh's disabled "Open in default application" row.
+ *
+ * On the NAS dsh never resolves a desktop application, so the row ships without
+ * a `run` and disabled — but fnOS's own `openFile` *is* "open with the default
+ * app", which is why the plugin used to add a separate "在飞牛中打开" row for
+ * files. Enabling dsh's row instead keeps one action with dsh's own label, and
+ * the plugin's duplicate row is hidden by {@link hideRedundantOpenItem}.
+ *
+ * Only the disabled `menu.defaultApp` row is touched: an enabled row carries a
+ * resolved application (`open.title`, "Open with …") and belongs to dsh.
+ */
+function adaptOpenItem(menu: Element, target: RevealTarget | null): void {
+  if (!target || target.kind !== 'file' || !isFnosHost()) return;
+  const button = findDefaultAppItem(menu);
+  if (!button) return;
+  const path = target.path;
+  if (!path) return;
+
+  const bound = button.dataset.dshFnosOpenBound === '1';
+  // React may re-apply disabled on a re-render; keep the row enabled.
+  if (button.disabled) button.disabled = false;
+  if (button.getAttribute('aria-disabled') === 'true') {
+    button.removeAttribute('aria-disabled');
+    button.dataset.dshFnosOpenAria = '1';
+  }
+  button.setAttribute(OPEN_ITEM_ATTR, '1');
+  button.dataset.dshFnosOpenPath = path;
+  hideRedundantOpenItem(menu);
+  if (bound) return;
+
+  button.dataset.dshFnosOpenBound = '1';
+  const handler: EventListener = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // Read the live snapshot first: React reuses the same button node for the
+    // same action id in the next menu, so the dataset can lag one scan behind.
+    const current = button.dataset.dshFnosOpenPath || '';
+    closeMenu();
+    if (current) void openPathInFnos(current, false);
+  };
+  revealHandlers.set(button, handler);
+  button.addEventListener('click', handler);
+}
+
+/** dsh's "Open in default application" row, matched while it is still disabled. */
+function findDefaultAppItem(menu: Element): HTMLButtonElement | null {
+  for (const button of menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')) {
+    if (button.hasAttribute(OPEN_ITEM_ATTR)) return button;
+    const disabled = button.disabled || button.getAttribute('aria-disabled') === 'true';
+    if (!disabled) continue;
+    if (DEFAULT_APP_LABEL_RE.test((button.textContent || '').trim())) return button;
+  }
+  return null;
+}
+
+/**
+ * Hide the plugin's own "在飞牛中打开" row once dsh's row does the same job.
+ *
+ * It is hidden (not removed): the node belongs to dsh's React tree, and taking
+ * it out from under React is what used to break the whole overlay. The row is
+ * only marked when the native takeover actually happened, so a dsh that stops
+ * rendering that row still leaves the user a working action.
+ */
+function hideRedundantOpenItem(menu: Element): void {
+  const label = t('在飞牛中打开');
+  for (const button of menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')) {
+    if (button.hasAttribute(OPEN_ITEM_ATTR)) continue;
+    if ((button.textContent || '').trim() !== label) continue;
+    // dsh renders one `<div><button role="menuitem">…</button></div>` per row;
+    // hide that wrapper, but never a container that holds other rows too.
+    const parent = button.parentElement;
+    const ownsOneRow = parent !== null && parent !== menu
+      && parent.querySelectorAll('button[role="menuitem"]').length === 1;
+    const row = ownsOneRow ? parent : button;
+    row.setAttribute(HIDDEN_ITEM_ATTR, '1');
+    row.classList.add('dsh-fnos-menu-hidden');
+  }
 }
 
 /** Restore every native menu row the plugin touched (plugin unload). */
@@ -243,9 +379,26 @@ export function resetRevealItems(): void {
     revealHandlers.delete(button);
     button.disabled = true;
     button.removeAttribute(REVEAL_ITEM_ATTR);
+    if (button.dataset.dshFnosRevealAria === '1') button.setAttribute('aria-disabled', 'true');
+    delete button.dataset.dshFnosRevealAria;
     delete button.dataset.dshFnosRevealBound;
     delete button.dataset.dshFnosRevealKind;
     delete button.dataset.dshFnosRevealId;
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>(`[${OPEN_ITEM_ATTR}]`)) {
+    const handler = revealHandlers.get(button);
+    if (handler) button.removeEventListener('click', handler);
+    revealHandlers.delete(button);
+    button.disabled = true;
+    button.removeAttribute(OPEN_ITEM_ATTR);
+    if (button.dataset.dshFnosOpenAria === '1') button.setAttribute('aria-disabled', 'true');
+    delete button.dataset.dshFnosOpenAria;
+    delete button.dataset.dshFnosOpenBound;
+    delete button.dataset.dshFnosOpenPath;
+  }
+  for (const row of document.querySelectorAll<HTMLElement>(`[${HIDDEN_ITEM_ATTR}]`)) {
+    row.classList.remove('dsh-fnos-menu-hidden');
+    row.removeAttribute(HIDDEN_ITEM_ATTR);
   }
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-dsh-fnos-copy-bound]')) {
     const handler = copyHandlers.get(button);
@@ -346,8 +499,19 @@ function closeMenu(): void {
   } catch { /* React also closes the menu on the next real outside click */ }
 }
 
-/** Hand one absolute path to the fnOS file manager (host environments only). */
+/**
+ * Hand one **absolute folder** path to the fnOS file manager.
+ *
+ * `openFileManager` navigates to a directory; a file path (or a relative one,
+ * which the host would resolve against the fnOS home) opens the wrong place.
+ * Callers pass `folderOfPath(...)` for files and refuse the empty result here
+ * instead of guessing a root.
+ */
 async function openPathInFileManager(path: string): Promise<void> {
+  if (!path.startsWith('/')) {
+    showToast(t('无法确定文件路径'));
+    return;
+  }
   const sdk = getSdk();
   try { await sdk.ready(); } catch { /* fall through to the bridge call */ }
   try {

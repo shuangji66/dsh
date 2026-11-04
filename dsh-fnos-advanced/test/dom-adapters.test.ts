@@ -65,6 +65,20 @@ test('the reveal row opens the containing folder, never the file itself', async 
   assert.match(source, /无法确定文件路径/);
 });
 
+test('no file path is ever handed to the fnOS file manager', async () => {
+  // `openFileManager` navigates to a directory; every call in the fallback menu
+  // must go through `folderOfPath`, including the "host has no openFile" branch.
+  const source = await read('path-menu.ts');
+  // Only the directory branch may pass the path through; both file fallbacks
+  // (no `openFile` on this host, and a failed `openFile`) get the folder.
+  const calls = source.match(/openFileManager\(((?:[^()]|\([^()]*\))*)\)/g) ?? [];
+  assert.deepEqual(calls, [
+    'openFileManager(path)',
+    'openFileManager(folderOfPath(path))',
+    'openFileManager(folderOfPath(path))',
+  ]);
+});
+
 test('the default-app row is taken over instead of duplicated', async () => {
   const source = await read('workspace-menu.ts');
   assert.match(source, /adaptOpenItem\(menu, native\)/);

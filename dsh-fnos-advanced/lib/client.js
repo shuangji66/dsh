@@ -3348,8 +3348,12 @@ async function openPathInFnos(path, isDirectory) {
     await sdk.ready();
   } catch {
   }
-  if (isDirectory || typeof sdk.openFile !== "function") {
+  if (isDirectory) {
     await sdk.openFileManager(path);
+    return;
+  }
+  if (typeof sdk.openFile !== "function") {
+    await sdk.openFileManager(folderOfPath(path));
     return;
   }
   try {
@@ -3631,7 +3635,7 @@ function injectPickItem(template) {
 var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.7.1";
+var VERSION = "0.7.2";
 
 // src/client/native-menu-contract.ts
 var REVEAL_ICON = "dsw-icon-folder-open-outline-regular";

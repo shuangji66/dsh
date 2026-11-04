@@ -171,8 +171,13 @@ export async function openPathInFnos(path: string, isDirectory: boolean): Promis
   const sdk = getSdk();
   try { await sdk.ready(); } catch { /* fall through to the host call */ }
 
-  if (isDirectory || typeof sdk.openFile !== 'function') {
+  if (isDirectory) {
     await sdk.openFileManager(path);
+    return;
+  }
+  if (typeof sdk.openFile !== 'function') {
+    // 老宿主没有 openFile：退回文件管理器，同样只能给目录。
+    await sdk.openFileManager(folderOfPath(path));
     return;
   }
   try {

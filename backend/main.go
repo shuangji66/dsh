@@ -162,6 +162,9 @@ func main() {
 	// 自定义环境变量（dsh-env.json）与快捷指令/账号库共用同一把主密钥；crypt 可能为 nil，
 	// buildEnv 会跳过注入并记 WARN（见 dsh_env.go / dsh.go）。
 	dsh.crypt = crypt
+	// 清掉上次「写一半」留下的 dsh-env.json.*.tmp（进程被杀/掉电才会有，见 sweepDshEnvTemps）。
+	// 放在任何保存之前：运行期不能扫，否则可能删掉并发保存正在写的临时文件。
+	sweepDshEnvTemps(dshEnvPath(&renv))
 	// 一次性迁移：把旧版本留在磁盘上的**明文**命令内容加密（见 migrateQuickCmdsAtStartup）。
 	// 放在这里而不是等用户打开弹窗：前端只在弹窗打开时才加载列表，用户几个月不点它，
 	// 明文就会一直躺在磁盘上。失败只记日志、不拦住启动。

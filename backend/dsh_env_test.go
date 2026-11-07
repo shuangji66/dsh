@@ -158,6 +158,13 @@ func TestNormalizeDshEnvVars(t *testing.T) {
 		{name: "bad char", in: []DshEnvVar{{Name: "FOO-BAR", Value: "x"}}, wantErr: "err_dsh_env_name_invalid"},
 		{name: "reserved", in: []DshEnvVar{{Name: "PATH", Value: "x"}}, wantErr: "err_dsh_env_name_reserved"},
 		{name: "reserved case", in: []DshEnvVar{{Name: "dsh_home", Value: "x"}}, wantErr: "err_dsh_env_name_reserved"},
+		// 前缀保留：DSH_SUBPROCESS_* 是 dsh 自己下发给工具 shell 的通道。
+		{name: "reserved prefix", in: []DshEnvVar{{Name: "DSH_SUBPROCESS_FOO", Value: "x"}}, wantErr: "err_dsh_env_name_reserved"},
+		{name: "reserved prefix case", in: []DshEnvVar{{Name: "dsh_subprocess_foo", Value: "x"}}, wantErr: "err_dsh_env_name_reserved"},
+		// 平台/控制台的部署事实：改它会让插件与控制台看到两套目录/应用名。
+		{name: "reserved trim", in: []DshEnvVar{{Name: "TRIM_APPNAME", Value: "x"}}, wantErr: "err_dsh_env_name_reserved"},
+		{name: "reserved trim case", in: []DshEnvVar{{Name: "trim_pkgvar", Value: "x"}}, wantErr: "err_dsh_env_name_reserved"},
+		{name: "reserved data dir", in: []DshEnvVar{{Name: "HARNESS_DATA_DIR", Value: "x"}}, wantErr: "err_dsh_env_name_reserved"},
 		{name: "duplicate", in: []DshEnvVar{{Name: "FOO", Value: "x"}, {Name: "FOO", Value: "y"}}, wantErr: "err_dsh_env_duplicate"},
 		{name: "nul", in: []DshEnvVar{{Name: "FOO", Value: "a\x00b"}}, wantErr: "err_dsh_env_value_invalid"},
 	}
@@ -337,5 +344,142 @@ func TestDshEnvHandlers(t *testing.T) {
 	m.handleGetDshEnv(getRec, getReq)
 	if getRec.Code != http.StatusInternalServerError {
 		t.Fatalf("损坏文件 GET status = %d, want 500", getRec.Code)
+	}
+}
+
+// 保存接口对「没带 variables 字段」必须报错：只有**显式**传空数组才是「清空整表」，
+// 否则一个 `{}` 就能把用户的变量表删掉（saveDshEnv 对空表会直接删文件）。
+func TestSaveDshEnvRequiresVariablesField(t *testing.T) {
+	crypt := testCryptor(t)
+	path := dshEnvTestPath(t)
+	m := &AdminMux{renv: &RuntimeEnv{DshEnvFile: path}, crypt: crypt}
+
+	// 先放一份真实数据，确认它不会被下面的畸形请求删掉。
+	if err := saveDshEnv(path, crypt, []DshEnvVar{{Name: "FOO", Value: "bar"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, body := range []string{`{}`, `{"variables":null}`} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/dsh-env", strings.NewReader(body))
+		m.handleSaveDshEnv(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d, want 400", body, rec.Code)
+		}
+		var errBody struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+			t.Fatal(err)
+		}
+		if errBody.Code != "err_dsh_env_variables_missing" {
+			t.Fatalf("body %s code = %q, want err_dsh_env_variables_missing", body, errBody.Code)
+		}
+	}
+	if vars, err := loadDshEnv(path, crypt); err != nil || len(vars) != 1 {
+		t.Fatalf("畸形请求后变量表被改动：%#v, %v", vars, err)
+	}
+
+	// 空数组才是「清空」。
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/dsh-env", strings.NewReader(`{"variables":[]}`))
+	m.handleSaveDshEnv(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("空数组 status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("空数组应删掉变量文件，stat err=%v", err)
+	}
+}
+
+// 启动时的临时文件清扫：只删 <文件名>.*.tmp，不碰最终文件，也不碰别的临时文件。
+func TestSweepDshEnvTemps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, dshEnvFileName)
+	stale := []string{
+		filepath.Join(dir, dshEnvFileName+".123.tmp"),
+		filepath.Join(dir, dshEnvFileName+".456.tmp"),
+	}
+	keep := filepath.Join(dir, "quickcmds.json.789.tmp")
+	for _, p := range append([]string{path, keep}, stale...) {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sweepDshEnvTemps(path)
+
+	for _, p := range stale {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("残留临时文件未被清掉：%s", p)
+		}
+	}
+	for _, p := range []string{path, keep} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("不该删的文件被删了：%s (%v)", p, err)
+		}
+	}
+
+	// 目录不存在 / 没有残留时不能报错（启动路径上无条件调用）。
+	sweepDshEnvTemps(filepath.Join(t.TempDir(), "missing", dshEnvFileName))
+}
+
+// 设置页把「自定义环境变量」从关切到开时要先读一遍变量文件：读不出来就整次拒绝保存，
+// 否则开关会显示为「已开启」，而 dsh 启动时静默跳过全部变量。
+func TestSaveSettingsRejectsEnableWhenEnvFileUnreadable(t *testing.T) {
+	prev := GetConfig()
+	t.Cleanup(func() { initConfig(&prev) })
+
+	cfg := defaultConfig()
+	cfg.DshMemLimit = 2048
+	cfg.DshMemAuto = true
+	cfg.DshEnvEnabled = false
+	initConfig(&cfg)
+
+	envPath := dshEnvTestPath(t)
+	renv := &RuntimeEnv{
+		ConfigFile: filepath.Join(t.TempDir(), "config.json"),
+		DshEnvFile: envPath,
+	}
+	m := &AdminMux{renv: renv, dsh: newTestDshManager(t.TempDir(), ""), boot: newBootState(), crypt: testCryptor(t)}
+
+	save := func(mutate func(*AppConfig)) (int, string) {
+		t.Helper()
+		next := GetConfig()
+		mutate(&next)
+		body, err := json.Marshal(map[string]interface{}{"config": next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		m.handleSaveSettings(rec, httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(string(body))))
+		var out struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out.Code
+	}
+
+	// 文件损坏：拒绝保存，开关保持关闭。
+	if err := os.WriteFile(envPath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, errCode := save(func(c *AppConfig) { c.DshEnvEnabled = true })
+	if code != http.StatusInternalServerError || errCode != "err_dsh_env_load_failed" {
+		t.Fatalf("损坏文件的保存 = %d/%q, want 500/err_dsh_env_load_failed", code, errCode)
+	}
+	if GetConfig().DshEnvEnabled {
+		t.Fatalf("被拒绝后开关不应变成开启")
+	}
+
+	// 文件可读：允许打开开关，并落盘。
+	if err := os.Remove(envPath); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := save(func(c *AppConfig) { c.DshEnvEnabled = true }); code != http.StatusOK {
+		t.Fatalf("文件缺失（= 空表）时保存状态 = %d, want 200", code)
+	}
+	if !GetConfig().DshEnvEnabled {
+		t.Fatalf("保存成功后开关应为开启")
 	}
 }

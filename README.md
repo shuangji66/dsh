@@ -221,7 +221,7 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `HARNESS_ADMIN_BASEURL` | 前端资源 baseurl 前缀 | `$TRIM_APPDEST` |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
 | `HARNESS_DSH_DIAG` | 设为 `1`/`true`/`yes` 时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
-| `HARNESS_MASTER_KEY` | 落盘加密的**主密钥**（32 字节 base64 或 hex）：加密 `quickcmds.json` 的命令内容与 `dsh-accounts.json` 账号库。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
+| `HARNESS_MASTER_KEY` | 落盘加密的**主密钥**（32 字节 base64 或 hex）：加密 `quickcmds.json` 的命令内容、`dsh-env.json` 的自定义环境变量与 `dsh-accounts.json` 账号库。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
 | `DSH_HOME` | dsh 的**数据根**（dsh 自己的解析规则：`$DSH_HOME` > `~/.dsh`；平台启动脚本会注入）。控制台只按它定位凭据文件 `<DSH_HOME>/.credentials.yaml` —— 位置写错会让登录「写入成功但 dsh 不认」；其余 `<HOME>/.dsh/...`（profiles、备份）仍按 `HOME` 拼 | `<HOME>/.dsh` |
 | `PROXY_PORT` | **已废弃**：反代监听端口改为设置页配置项（`config.json` 的 `proxyPort`，默认 `3079`），此环境变量不再生效 | — |
 | `dsh_port` / `TARGET_PORT` | dsh web 端口 | `13080` |
@@ -245,7 +245,7 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `<数据目录>/quickcmds.json` | 终端快捷指令持久化文件（0600；命令内容是密文，名称/是否自动回车仍是明文） |
 | `<数据目录>/dsh-accounts.json` | 控制台的 **DeepSeek 账号库**（0600；整份列表是一个密文信封，多账号的 token 都在里面） |
 | `<数据目录>/dsh-env.json` | 设置页「自定义环境变量」（0600；变量名明文、变量值逐条密文，主密钥同上） |
-| `<数据目录>/master.key` | **落盘加密的主密钥**（0600，缺失时自动生成）：`quickcmds.json` 的命令内容与 `dsh-accounts.json` 都是它加密的；删掉它 = 这两份密文再也解不开（想避免密钥与密文同放，用 `HARNESS_MASTER_KEY` 注入） |
+| `<数据目录>/master.key` | **落盘加密的主密钥**（0600，缺失时自动生成）：`quickcmds.json` 的命令内容、`dsh-env.json` 的环境变量值与 `dsh-accounts.json` 都是它加密的；删掉它 = 这三份密文再也解不开（想避免密钥与密文同放，用 `HARNESS_MASTER_KEY` 注入） |
 | `<数据目录>/terminal-sessions/` | 终端会话历史临时镜像（停止时整目录清除） |
 | `<数据目录>/backup/` | dsh 数据备份包（`dsh-data-*`，用户主动创建）；老版本自我更新遗留的 `pending/` 在启动时自动清理 |
 | `<数据目录>/server/<版本>/` | 每个已安装的 dsh 版本（`npm install --prefix` 装出来的目录，可用版本就在 `node_modules/.bin/dsh`） |
@@ -290,7 +290,8 @@ dsh 进程还会拿到 **`DSH_AGENTS_HOME=$HOME/.agents`**（共享 agent 配置
 变量值逐条加密落盘，主密钥与快捷指令/账号库同一把）。弹窗里的「保存」只负责把变量表落盘，**还要点设置页
 的「保存配置」并重启 dsh** 才会由 `buildEnv` 注入 dsh 进程。变量名必须是 POSIX 标识符，且不能
 是控制台保留名（`PATH` / `HOME` / `SHELL` / `DSH_HOME` / `DSH_AGENTS_HOME` / `DSH_WEB_URL` /
-`NODE_OPTIONS` / 代理变量等，完整名单由后端下发）。
+`NODE_OPTIONS` / 代理变量 / `TRIM_APPNAME`、`TRIM_PKGVAR`、`TRIM_APPDEST` /
+`HARNESS_DATA_DIR` / `HARNESS_MASTER_KEY` / `DSH_SUBPROCESS_*` 前缀等，完整名单由后端下发）。
 
 node 堆内存上限（`dshMemLimit`，设置页「node 堆内存上限」）在**手动设置**
 （`dshMemAuto` 关闭）时有两档阈值：低于 **800 MB** 输入框下黄字提醒（仍可保存），

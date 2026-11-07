@@ -21,26 +21,34 @@
   /* 语义色（浅色模式）：base 用于填充、圆点、边框等**非文本**元素，
      *-ink 用于文字与图标。取值参考 Ant Design error / Apple 增强对比度浅色
      （red #E9152D、yellow #A16A00、green #008932）与常见 success green
-     （#16A34A），比上一版（#CC0000 / #C2410C / #0B7A3B）更亮、饱和度更高，
-     放在白底上不发闷。
+     （#16A34A），再按下面「10% 色底」那条约束压深约 6%；整体仍比上一版
+     （#CC0000 / #C2410C / #0B7A3B）更亮、饱和度更高，放在白底上不发闷。
 
-     白底对比度：success-ink 4.54、warning-ink 4.59、danger-ink 4.56；
+     白底对比度：success-ink 5.09、warning-ink 5.22、danger-ink 5.36；
      三个 base 分别为 3.30 / 4.59 / 4.08，都 ≥ 3:1，适合图标、圆点与色块。
      实心填充 + 白字的场合（Toast、启动按钮）要用 *-ink，不能直接用 base：
      base 的 #16A34A / #F5222D 配白字只有 3.3 / 4.1:1。
 
-     警告的 base 与 ink 取同一个 #A16A00（另一候选 #BB5C21 偏橙，做描边时与金色
-     文字不同调；#A16A00 作边框也有 4.59:1，不需要再分两档）。
+     文字色还要在**自己的 10% 色底**上过 4.5（状态胶囊 `bg-success/10`、
+     错误提示框 `bg-danger/10` 都是这种组合）。10% 绿底会把对比度从白底的
+     4.54 压到 4.07，所以三个 *-ink 比「刚过白底 AA」的那一档再压深约 6%：
+     现在 success 4.56 / warning 4.60 / danger 4.61，白底则升到 5.0 以上。
+     上一版曾在注释里把 3.7–4.4 当作「为观感刻意接受的边界值」，但那会让 12px
+     的胶囊文字明确低于 WCAG AA —— 这组值在保留色相与亮度的前提下把这一档补上了。
 
-     取舍：这组值在白底刚过 AA，在 #FAFAFA 页面底和 10% 色底（状态胶囊、
-     错误提示框）上会降到约 3.7–4.4:1。这是为了更鲜明的观感刻意选的边界值；
-     若要求色底也严格 ≥4.5，需要把 *-ink 再压深 10%–20%（会接近上一版的灰调）。 */
+     已知边界（深色主题，本次未动）：`html.dark` 的 danger-ink 仍是 #EF4444，
+     在 `bg-danger/10` 上约 4.36:1、在卡片上 4.79:1；要让深色的错误胶囊也严格
+     过 AA，得另立一个「实心填充用」的亮红（白字压在 #EF4444 上只有 3.76:1），
+     属于另一轮配色调整，别只把 danger-ink 调亮 —— 那会把 Toast 的白字压到 3:1 以下。
+
+     警告的 base 仍是 #A16A00（作边框在白底 4.59:1），ink 单独取深一档的
+     #956200：base 直接当色底上的文字只有 4.05，差一点。两者肉眼几乎同色。 */
   --color-success: #16A34A;
   --color-warning: #A16A00;
   --color-danger: #F5222D;
-  --color-success-ink: #008932;
-  --color-warning-ink: #A16A00;
-  --color-danger-ink: #E9152D;
+  --color-success-ink: #00802E;
+  --color-warning-ink: #956200;
+  --color-danger-ink: #D41227;
   /* 中性层：背景 / 表面 / 边框 / 文本 */
   --color-bg: #FAFAFA;
   --color-surface: #FFFFFF;
@@ -394,7 +402,8 @@ html, body {
   }
 
   /* 警告按钮：橙字橙框（同危险按钮结构，仅颜色不同）。边框用 --color-warning：
-     浅色下是深金 #A16A00（白底 4.59:1），深色下由 html.dark 换回亮黄 #F59E0B。 */
+     浅色下是深金 #A16A00（白底 4.59:1），深色下由 html.dark 换回亮黄 #F59E0B；
+     文字用再深一档的 --color-warning-ink #956200（见上面的色底约束）。 */
   .g-btn-warning {
     @apply inline-flex items-center justify-center gap-2 bg-transparent
       border border-warning text-warning-ink

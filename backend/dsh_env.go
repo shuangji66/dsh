@@ -77,6 +77,13 @@ func dshEnvAADField(name string) string { return "dsh-env:" + name }
 var dshEnvReservedNames = map[string]struct{}{
 	// 控制台按启动事实计算
 	"PATH": {}, "HOME": {}, "SHELL": {}, "PNPM_HOME": {},
+	// 平台 / 控制台的部署事实（TRIM_*、数据目录、主密钥）。buildEnv 从 os.Environ() 起手，
+	// 这些值本来就在 dsh 环境里；允许用户改写只会让「控制台看到的」和「插件看到的」变成
+	// 两套 —— 例如增强插件的宿主侧按 process.env.TRIM_APPNAME 认应用名
+	// （见 dsh-fnos-advanced 的 host/routes.ts），填错的表现是目录授权/工作区请求全线失败，
+	// 而设置页没有任何提示。
+	"TRIM_APPNAME": {}, "TRIM_PKGVAR": {}, "TRIM_APPDEST": {},
+	"HARNESS_DATA_DIR": {}, "HARNESS_MASTER_KEY": {},
 	// node 运行时（乱填会让 dsh 直接起不来）
 	"NODE_OPTIONS": {}, "NODE_PATH": {}, "NODE_TLS_REJECT_UNAUTHORIZED": {},
 	// dsh 数据根 / 身份
@@ -95,8 +102,13 @@ var dshEnvReservedNames = map[string]struct{}{
 	"JAVA_TOOL_OPTIONS": {}, "_JAVA_OPTIONS": {}, "JDK_JAVA_OPTIONS": {},
 }
 
-// dshEnvReservedPrefixes 是保留前缀（目前已无实际条目，留给将来成组的内部变量）。
-var dshEnvReservedPrefixes = []string{}
+// dshEnvReservedPrefixes 是保留前缀：成组的内部变量按前缀挡，免得 dsh 每加一个新名字
+// 就要回来补一条。
+var dshEnvReservedPrefixes = []string{
+	// dsh 自己下发给工具 shell 的子进程通道（RUNNER / CONTROL 已逐条列出，这里覆盖将来
+	// 可能出现的同族名字）。AGENTS.md 一直写着「DSH_SUBPROCESS_*」，代码此前是逐条挡的。
+	"DSH_SUBPROCESS_",
+}
 
 // dshEnvPath resolves the persistence file path: 已解析的运行时路径优先，
 // 否则退回统一数据目录下的 dsh-env.json（与 quickCmdsPath 同一套兜底写法）。
@@ -277,6 +289,39 @@ func writeDshEnvFile(path string, data []byte) error {
 	return nil
 }
 
+// sweepDshEnvTemps 删除「写一半就断电」留下的临时文件（<文件名>.<随机串>.tmp）。
+//
+// writeDshEnvFile 用唯一临时文件 + rename 落盘（两个标签页同时保存不会互相踩），代价是
+// 进程被杀/掉电时会留下临时文件。它不会被任何读取路径碰到（loadDshEnv 只认最终文件名），
+// 但会在数据目录里长期堆积，内容还是同一条变量的密文。由 main 在启动时清一次 ——
+// **只在启动时做**：运行期清扫可能删掉另一个并发保存正在写的那个临时文件。
+func sweepDshEnvTemps(path string) {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	// 用前缀+后缀匹配而不是 filepath.Glob：数据目录的实际路径里可能带 `[`、`*` 这类
+	// glob 元字符（如某些挂载点），拼进模式会变成另一个模式或直接报错。
+	prefix := filepath.Base(path) + "."
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) || !strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			removed++
+		}
+	}
+	// 只在真删了东西时记一行：这是「上次没写干净」的状态变化，不是每次启动的例行日志。
+	if removed > 0 {
+		logInfo("[dsh-env] removed %d stale temp files", removed)
+	}
+}
+
 // handleGetDshEnv 返回明文列表 + 保留名单（前端据此做即时校验）。
 func (m *AdminMux) handleGetDshEnv(w http.ResponseWriter, r *http.Request) {
 	path := dshEnvPath(m.renv)
@@ -300,8 +345,11 @@ func (m *AdminMux) handleGetDshEnv(w http.ResponseWriter, r *http.Request) {
 // handleSaveDshEnv 校验并整表保存自定义环境变量。
 func (m *AdminMux) handleSaveDshEnv(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxDshEnvBody)
+	// 指针：**「没带 variables 字段」与「传了空数组」是两回事**。前者是调用方写错了，
+	// 后者才是「清空整张表」。都当成 nil 的话，一个 `{}` 就能把用户的变量表删掉
+	// （saveDshEnv 对空表会直接删文件），没有任何回滚余地。
 	var req struct {
-		Variables []DshEnvVar `json:"variables"`
+		Variables *[]DshEnvVar `json:"variables"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -312,7 +360,12 @@ func (m *AdminMux) handleSaveDshEnv(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	vars, err := normalizeDshEnvVars(req.Variables)
+	if req.Variables == nil {
+		writeErrU(w, http.StatusBadRequest, "err_dsh_env_variables_missing",
+			"请求缺少 variables 字段（清空变量表请传空数组）")
+		return
+	}
+	vars, err := normalizeDshEnvVars(*req.Variables)
 	if err != nil {
 		writeErrFrom(w, err, http.StatusBadRequest)
 		return

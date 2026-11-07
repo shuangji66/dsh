@@ -121,11 +121,16 @@ export const useSettingsStore = defineStore('settings', () => {
         // 开关从没保存过（prevEnv 为 null）时不凭空提示，与代理那一套同一取舍。
         const prevEnv = appliedDshEnvEnabled.value
         const envToggleChanged = prevEnv !== null && prevEnv !== submitted.dshEnvEnabled
+        // 两条都改了要合成一句：toast 是单条展示，弹两条会互相顶掉，用户只看到后一条，
+        // 会以为另一项已经生效。
         const envRestart =
           envToggleChanged || (dshEnvDirty.value && submitted.dshEnvEnabled)
-        if (status.value?.running && envRestart) {
+        const needsRestart = !!status.value?.running
+        if (needsRestart && envRestart && proxyChanged) {
+          toast.show(t('saved_env_proxy_restart'), 'info', 5000)
+        } else if (needsRestart && envRestart) {
           toast.show(t('saved_env_restart'), 'info', 5000)
-        } else if (status.value?.running && proxyChanged) {
+        } else if (needsRestart && proxyChanged) {
           toast.show(t('saved_proxy_restart'), 'info', 5000)
         } else {
           toast.show(t('saved'), 'success')

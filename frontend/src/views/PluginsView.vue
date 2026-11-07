@@ -5,7 +5,8 @@ import { usePluginsStore } from '@/stores/plugins'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { uiErrText, uiText, useI18n, type I18nKey } from '@/composables/useI18n'
-import { api, type PluginInfo } from '@/serverapi'
+import { api } from '@/serverapi'
+import { countByFilter, filterPlugins, type FilterCounts, type PluginFilter } from '@/utils/pluginFilter'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -21,13 +22,8 @@ const { t } = useI18n()
 
 // --- 顶栏下的分类筛选 + 实时搜索（纯前端过滤已拉取的列表，不再跑 dsh 命令）---
 //
-// 分类口径与卡片上的状态标记一致：
-//   - 已停用 = 声明了 dsh.bundle 但不在 dsh.profile.bundles 里（PluginInfo.disabled）；
-//   - 已启用 = 其余全部。普通依赖（没有 dsh.bundle）后端根本不给 disabled 字段，它没有
-//     「停用」这个状态；把它排除在「已启用」之外，会让筛选看起来像弄丢了插件。
-// 搜索匹配插件名（npm 包名，即卡片上显示的那个名字）：列表接口只下发 name / version，
-// 没有独立的「显示名称」字段，所以两者今天就是同一个值。
-type PluginFilter = 'all' | 'enabled' | 'disabled'
+// 口径（什么算「已停用」、搜索匹配哪个字段）在 utils/pluginFilter.ts，那里有回归测试；
+// 这里只负责状态与渲染。
 const pluginFilter = ref<PluginFilter>('all')
 const pluginFilters: { value: PluginFilter; label: I18nKey }[] = [
   { value: 'all', label: 'plugin_filter_all' },
@@ -35,13 +31,6 @@ const pluginFilters: { value: PluginFilter; label: I18nKey }[] = [
   { value: 'disabled', label: 'plugin_status_disabled' }
 ]
 const pluginQuery = ref('')
-
-type FilterCounts = Record<PluginFilter, number>
-function countByFilter(list: PluginInfo[]): FilterCounts {
-  let disabled = 0
-  for (const p of list) if (p.disabled) disabled += 1
-  return { all: list.length, enabled: list.length - disabled, disabled }
-}
 
 // 计数只在「列表加载结束」的时刻更新：启停 / 卸载 / 重置后的重拉会先清空 store 里的
 // plugins 再置 loading（那条 dsh 命令要 1~3 秒）。直接按当前列表算计数，三个按钮和
@@ -69,14 +58,9 @@ watch(showSearch, (show) => {
   if (!show) pluginQuery.value = ''
 })
 
-const visiblePlugins = computed(() => {
-  const q = pluginQuery.value.trim().toLowerCase()
-  return plugins.value.filter((p) => {
-    if (pluginFilter.value === 'enabled' && p.disabled) return false
-    if (pluginFilter.value === 'disabled' && !p.disabled) return false
-    return !q || p.name.toLowerCase().includes(q)
-  })
-})
+const visiblePlugins = computed(() =>
+  filterPlugins(plugins.value, pluginFilter.value, pluginQuery.value)
+)
 
 // 卸载/重置插件的确认弹窗状态
 const uninstallDialogVisible = ref(false)
@@ -341,7 +325,9 @@ onBeforeUnmount(() => {
           @click="pluginFilter = f.value"
         >
           {{ t(f.label) }}
-          <span class="tabular-nums opacity-70">{{ filterCounts[f.value] }}</span>
+          <!-- 计数不要再叠 opacity：选中态是白字压在 brand 底上（4.47:1，已是这种底色的
+               上限），再降 70% 不透明度就掉到约 3.0:1，12px 文本低于 AA 4.5。 -->
+          <span class="tabular-nums">{{ filterCounts[f.value] }}</span>
         </button>
       </div>
       <!-- 搜索框：宽屏固定 224px 贴右；窄屏用 flex-1 + min-w-48 —— 这一行放得下就

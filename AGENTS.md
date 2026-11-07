@@ -77,10 +77,16 @@
 - `dsh_env.go` — 设置页「运行环境 → 自定义环境变量」：数据目录下的 `dsh-env.json`
   **变量名明文、变量值逐条 AES-256-GCM 密文**（与 quickcmds / 账号库同一把主密钥），
   接口收发明文、只在落盘这一层加密（变量名不加密：它是给人排查的标签）。
-  保存接口校验变量名（POSIX 标识符）并拒绝保留名单（`PATH`/`HOME`/`SHELL`/`DSH_HOME`/
-  `NODE_OPTIONS`/代理名/`DSH_SUBPROCESS_*` 等）；`DshManager.buildEnv` 只在
+  保存接口校验变量名（POSIX 标识符）并拒绝保留名单/前缀（`PATH`/`HOME`/`SHELL`/`DSH_HOME`/
+  `NODE_OPTIONS`/代理名/`TRIM_APPNAME`/`TRIM_PKGVAR`/`TRIM_APPDEST`/`HARNESS_DATA_DIR`/
+  `HARNESS_MASTER_KEY`/`DSH_SUBPROCESS_*` 等；前缀表在 `dshEnvReservedPrefixes`）；
+  `DshManager.buildEnv` 只在
   `AppConfig.DshEnvEnabled` 打开时解密注入，且托管变量在其后用 `set()` 覆盖。开关由设置页
   的「保存配置」落盘，变量表由弹窗自己的接口落盘；两者都要**重启 dsh** 才生效。
+  **保存接口把「没带 `variables` 字段」与「传空数组」分开**：前者 400、后者才是清空整表
+  （`saveDshEnv` 对空表直接删文件，不能给一个 `{}` 就删掉用户的变量）。写盘用唯一临时文件
+  + rename，崩溃残留的 `dsh-env.json.*.tmp` 由启动时的 `sweepDshEnvTemps` 清掉（运行期不清：
+  会误删另一个并发保存正在写的那个）。
 - `admin.go` — Admin mux（Unix socket）：`buildHandler()` 里一个大的 `switch` 分发
   所有 `/api/*` 路由；`spaHandler` 提供内嵌前端。
 - `dsh.go` — `DshManager`：进程生命周期；`effectivePID`/`findDshPid` 处理**装插件自重启**

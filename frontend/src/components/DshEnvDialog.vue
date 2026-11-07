@@ -18,9 +18,15 @@ const { t } = useI18n()
 const toast = useToastStore()
 
 // 变量名/值长度上限与后端 dsh_env.go 的 maxDshEnvNameLen / maxDshEnvValueLen 一致。
+// 变量名只允许 ASCII 标识符，字符数 == 字节数；变量值可以是任意文本，后端按**字节**算，
+// 所以这里也按字节算（否则 5000 个汉字前端放行、点保存后端 400）。
 const NAME_MAX = 128
 const VALUE_MAX = 8 << 10
 const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+const encoder = new TextEncoder()
+function valueBytes(s: string): number {
+  return encoder.encode(s).length
+}
 
 const open = ref(props.visible)
 // 注意：不能带 immediate —— 回调会在下面那些 ref 初始化之前执行（load 访问它们会 TDZ）。
@@ -137,7 +143,7 @@ function validate(): boolean {
       continue
     }
     seen.add(name)
-    if (row.value.length > VALUE_MAX) {
+    if (valueBytes(row.value) > VALUE_MAX) {
       rowErrors.value[row.key] = t('dsh_env_value_too_long', { max: VALUE_MAX })
       ok = false
       continue
@@ -252,13 +258,15 @@ async function save() {
                   </div>
                   <div class="flex-[1.4] min-w-0">
                     <label class="block text-xs text-ink-faint dark:text-[#8A8A92] mb-1">{{ t('dsh_env_value') }}</label>
+                    <!-- 刻意不写 maxlength：它按 UTF-16 码元截断，和后端的字节上限对不上，
+                         而且被静默截短的往往是 token —— 用户不会发现少了几个字符。
+                         超长由 validate() 按字节判断，给行内错误。 -->
                     <input
                       v-model="row.value"
                       type="text"
                       class="g-input font-mono text-sm"
                       :placeholder="t('dsh_env_value')"
                       :aria-label="t('dsh_env_value')"
-                      :maxlength="VALUE_MAX"
                       autocomplete="off"
                       spellcheck="false"
                     />

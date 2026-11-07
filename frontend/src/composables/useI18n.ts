@@ -167,6 +167,7 @@ const zh = {
   saved_proxy_restart: '配置已保存，代理设置已变更，请重启 dsh 服务使配置生效',
   saved_mem_restart: '配置已保存，堆内存上限已变更，请重启 dsh 服务使配置生效',
   saved_env_restart: '配置已保存，自定义环境变量已变更，请重启 dsh 服务使配置生效',
+  saved_env_proxy_restart: '配置已保存，自定义环境变量与代理设置已变更，请重启 dsh 服务使配置生效',
   settings_toggle_saved: '切换成功',
   // 密码强度校验（与后端 auth.go 的 safePunctStr 保持一致）
   pwd_too_short: '密码长度不足 8 位',
@@ -405,6 +406,7 @@ const zh = {
   err_dsh_env_value_invalid: '变量 {name} 的值包含非法字符',
   err_dsh_env_load_failed: '加载自定义环境变量失败：{detail}',
   err_dsh_env_save_failed: '保存自定义环境变量失败：{detail}',
+  err_dsh_env_variables_missing: '请求缺少 variables 字段（清空变量表请传空数组）',
   qc_delete_confirm_title: '删除快捷指令',
   qc_delete_confirm_msg: '确定要删除快捷指令「{name}」吗？',
   qc_not_connected: '终端未连接，无法执行',
@@ -777,6 +779,7 @@ const en: Record<keyof typeof zh, string> = {
   saved_proxy_restart: 'Saved. Proxy changed — restart dsh to apply.',
   saved_mem_restart: 'Saved. Heap limit changed — restart dsh to apply.',
   saved_env_restart: 'Saved. Custom environment variables changed — restart dsh to apply.',
+  saved_env_proxy_restart: 'Saved. Custom environment variables and proxy changed — restart dsh to apply.',
   settings_toggle_saved: 'Switched successfully',
   // Password strength validation (consistent with backend auth.go safePunctStr)
   pwd_too_short: 'Password must be at least 8 characters',
@@ -1008,6 +1011,7 @@ const en: Record<keyof typeof zh, string> = {
   err_dsh_env_value_invalid: 'The value of {name} contains an invalid character',
   err_dsh_env_load_failed: 'Failed to load custom environment variables: {detail}',
   err_dsh_env_save_failed: 'Failed to save custom environment variables: {detail}',
+  err_dsh_env_variables_missing: 'The request is missing the variables field (send an empty array to clear the table)',
   qc_delete_confirm_title: 'Delete Quick Command',
   qc_delete_confirm_msg: 'Delete quick command "{name}"?',
   qc_not_connected: 'Terminal not connected, cannot run',

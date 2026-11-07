@@ -157,8 +157,11 @@ func main() {
 	// 都会明确报错，绝不退化成写明文（见 quickcmds.go / accountvault.go）。
 	crypt, cryptErr := loadCryptor(masterKeyPath(&renv), renv.MasterKey)
 	if cryptErr != nil {
-		logError("[secrets] master key unavailable: %v - saving quick commands and the account vault will fail", cryptErr)
+		logError("[secrets] master key unavailable: %v - saving quick commands, custom dsh environment variables, and the account vault will fail", cryptErr)
 	}
+	// 自定义环境变量（dsh-env.json）与快捷指令/账号库共用同一把主密钥；crypt 可能为 nil，
+	// buildEnv 会跳过注入并记 WARN（见 dsh_env.go / dsh.go）。
+	dsh.crypt = crypt
 	// 一次性迁移：把旧版本留在磁盘上的**明文**命令内容加密（见 migrateQuickCmdsAtStartup）。
 	// 放在这里而不是等用户打开弹窗：前端只在弹窗打开时才加载列表，用户几个月不点它，
 	// 明文就会一直躺在磁盘上。失败只记日志、不拦住启动。

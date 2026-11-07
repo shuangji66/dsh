@@ -13,9 +13,10 @@ import (
 	"strings"
 )
 
-// secret.go —— 落盘加密（AES-256-GCM）与主密钥管理。当前两处用到它：
+// secret.go —— 落盘加密（AES-256-GCM）与主密钥管理。当前三处用到它：
 //
 //   - 快捷指令的「命令内容」（quickcmds.go，逐条一个信封，名称/开关仍是明文）；
+//   - 设置页的**自定义环境变量**（dsh_env.go，变量名明文、变量值逐条一个信封）；
 //   - 控制台的 **DeepSeek 账号库**（accountvault.go，整份文档一个信封）。
 //
 // 参考实现：terminal / webssh 两个项目的同名文件（`secret.go` / `internal/secret`）。

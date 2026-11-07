@@ -71,6 +71,9 @@ export interface AppConfig {
   // （见 runtime.nodeHeapLimitMB），不再写死 2048。
   dshMemLimit: number
   dshMemAuto: boolean
+  // 「自定义环境变量」开关（默认关闭）：打开后把 dsh-env.json 里的变量注入 dsh 进程。
+  // 变量值加密落盘（见后端 dsh_env.go）；保存配置后仍需重启 dsh 才生效。
+  dshEnvEnabled: boolean
   // 浏览器兼容模式：修正 dsh 客户端只适配 V8 的原生函数格式判断，
   // 供 Firefox/Zen/Safari 等非 V8 内核正常加载会话历史。默认关闭。
   browserCompat: boolean
@@ -116,6 +119,22 @@ export interface PluginInfo {
   disabled?: boolean
   // 该插件被启用后是否需要重启 dsh 服务才能生效（客户端插件/带原生依赖）
   needsRestart?: boolean
+}
+
+// 设置页 → 运行环境 → 自定义环境变量（值由后端加密落盘，接口收发明文）
+export interface DshEnvVar {
+  name: string
+  value: string
+}
+
+export interface DshEnvPayload {
+  ok: boolean
+  path: string
+  variables: DshEnvVar[]
+  // 控制台保留的变量名/前缀（后端是唯一权威，前端只用它们做即时校验）
+  reserved: string[]
+  reservedPrefixes: string[]
+  max: number
 }
 
 // 终端页：用户自定义快捷指令（持久化到后端文件）
@@ -406,6 +425,13 @@ export const api = {
     request<{ ok: boolean; locked: boolean; config: AppConfig }>('/api/settings', {
       method: 'POST',
       body: JSON.stringify({ config })
+    }),
+  // 设置页 → 运行环境 → 自定义环境变量：列表（明文，仅管理界面可见）与整表保存
+  dshEnv: () => request<DshEnvPayload>('/api/dsh-env'),
+  saveDshEnv: (variables: DshEnvVar[]) =>
+    request<{ ok: boolean; path: string; variables: DshEnvVar[] }>('/api/dsh-env', {
+      method: 'POST',
+      body: JSON.stringify({ variables })
     }),
   dshStart: () => request<DshStatus>('/api/dsh/start', { method: 'POST' }),
   dshStop: () => request<DshStatus>('/api/dsh/stop', { method: 'POST' }),

@@ -32,7 +32,8 @@ type AdminMux struct {
 	// boot 是启动阶段状态机：反代用它决定等待页/放行，设置页切换反代端口时
 	// 重建监听也要复用它（见 rebindProxyPort）。
 	boot *bootState
-	// crypt 是快捷指令命令内容的落盘加密器（AES-256-GCM，见 secret.go）。
+	// crypt 是快捷指令命令内容、自定义环境变量（dsh-env.json）与账号库的落盘加密器
+	// （AES-256-GCM，见 secret.go）。
 	// **可能为 nil**：主密钥读不到/解不出时进程照常启动（控制台是这个 NAS 的带外访问
 	// 入口，不该为一条快捷指令把整个控制台停掉），但写路径一律拒绝，绝不退化成写明文。
 	crypt *cryptor
@@ -535,6 +536,16 @@ func (m *AdminMux) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if req.Config.ProxyPort == effDshPort {
 		writeErrU(w, http.StatusBadRequest, "err_port_same", "反代端口不能与 dsh 端口相同")
 		return
+	}
+	// 自定义环境变量：从「关」切到「开」时先把变量文件读一遍。读不出来就整次拒绝 ——
+	// 否则保存会成功、dsh 启动时却静默跳过（用户只看到开关是开的、变量没生效）。
+	// 放在 rebindProxyPort 之前：拒绝保存时不能已经把反代端口换掉了。
+	if req.Config.DshEnvEnabled && !GetConfig().DshEnvEnabled {
+		if _, err := loadDshEnv(dshEnvPath(m.renv), m.crypt); err != nil {
+			writeErrU(w, http.StatusInternalServerError, "err_dsh_env_load_failed",
+				"加载自定义环境变量失败：%s", "detail", err.Error())
+			return
+		}
 	}
 	// 反代端口变动需要即时重绑监听（反代是本进程自己的监听，不像 dsh 端口那样必须
 	// 停 dsh 才能改）。绑定失败直接拒绝保存，此时配置与旧监听都保持原样。
@@ -1263,6 +1274,10 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleGetSettings(w, r)
 		case p == "/api/settings" && r.Method == http.MethodPost:
 			m.handleSaveSettings(w, r)
+		case p == "/api/dsh-env" && r.Method == http.MethodGet:
+			m.handleGetDshEnv(w, r)
+		case p == "/api/dsh-env" && r.Method == http.MethodPost:
+			m.handleSaveDshEnv(w, r)
 		case p == "/api/dsh/start" && r.Method == http.MethodPost:
 			m.handleDshStart(w, r)
 		case p == "/api/dsh/stop" && r.Method == http.MethodPost:

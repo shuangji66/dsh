@@ -74,6 +74,13 @@
   `minDshMemLimitMB`（500）会让整次保存被拒（`handleSaveSettings`）；前端同阈值
   （`stores/settings.ts` 的 `MEM_LIMIT_MIN_MB`）红字提示并在 `save()` 里拦截，
   <800 只黄字提醒、不拦。自动设置不受该限制。
+- `dsh_env.go` — 设置页「运行环境 → 自定义环境变量」：数据目录下的 `dsh-env.json`
+  **变量名明文、变量值逐条 AES-256-GCM 密文**（与 quickcmds / 账号库同一把主密钥），
+  接口收发明文、只在落盘这一层加密（变量名不加密：它是给人排查的标签）。
+  保存接口校验变量名（POSIX 标识符）并拒绝保留名单（`PATH`/`HOME`/`SHELL`/`DSH_HOME`/
+  `NODE_OPTIONS`/代理名/`DSH_SUBPROCESS_*` 等）；`DshManager.buildEnv` 只在
+  `AppConfig.DshEnvEnabled` 打开时解密注入，且托管变量在其后用 `set()` 覆盖。开关由设置页
+  的「保存配置」落盘，变量表由弹窗自己的接口落盘；两者都要**重启 dsh** 才生效。
 - `admin.go` — Admin mux（Unix socket）：`buildHandler()` 里一个大的 `switch` 分发
   所有 `/api/*` 路由；`spaHandler` 提供内嵌前端。
 - `dsh.go` — `DshManager`：进程生命周期；`effectivePID`/`findDshPid` 处理**装插件自重启**
@@ -259,8 +266,9 @@
     备份的人不该顺手读到；名称是给人看的标签，加密它反而让文件没法排查）。**加密只在落盘这
     一层**：接口收发的始终是明文 `content`，前端不需要知道这件事。
   - 密钥在 `secret.go`：AES-256-GCM，主密钥取 `HARNESS_MASTER_KEY`（外部注入，32 字节
-    base64/hex）或数据目录下的 `master.key`（自动生成 0600）。**主密钥不可用时进程照常启动，
-    但写路径一律拒绝**（绝不退化成写明文），见 `AdminMux.crypt` 可为 nil 的语义。
+    base64/hex）或数据目录下的 `master.key`（自动生成 0600）；快捷指令、`dsh-env.json` 与
+    账号库共用。**主密钥不可用时进程照常启动，但写路径一律拒绝**（绝不退化成写明文），
+    见 `AdminMux.crypt` 可为 nil 的语义。
   - **旧明文文件会被主动迁移**（读时就地加密重写 + 启动时再迁一次
     `migrateQuickCmdsAtStartup`）：前端只在打开弹窗时才加载列表，光靠读时迁移兜不住「用户
     几个月没点过它」。迁移不了（空内容/加密失败）就换成**加密后的**占位文案并关掉 `auto`；

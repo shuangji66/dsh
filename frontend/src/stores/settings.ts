@@ -25,6 +25,7 @@ export const useSettingsStore = defineStore('settings', () => {
     // 这里不再预置一个写死的 2048。load() 后即被后端下发的配置覆盖。
     dshMemLimit: 0,
     dshMemAuto: true,
+    dshEnvEnabled: false,
     browserCompat: false
   })
   const runtime = ref<RuntimeInfo | null>(null)
@@ -37,9 +38,19 @@ export const useSettingsStore = defineStore('settings', () => {
   // 同一个对象、必然相等，「代理设置已变更 → 请重启」的提示（saved_proxy_restart）恒不出现。
   // 只有与「已保存生效的值」比较才能判出本次保存是否真的改了代理设置。
   const appliedProxy = ref<{ enabled: boolean; addr: string } | null>(null)
+  // 「上次保存生效」的自定义环境变量开关快照（同上：只有与已保存值比较才判得出变化）
+  const appliedDshEnvEnabled = ref<boolean | null>(null)
 
   function markApplied(cfg: AppConfig) {
     appliedProxy.value = { enabled: cfg.proxyEnabled, addr: cfg.proxyAddr }
+    appliedDshEnvEnabled.value = cfg.dshEnvEnabled
+  }
+
+  // 弹窗保存过变量表（变量表不在整份 config 里，单独落盘）。设置页保存时据此补一条
+  // 「环境变量已变更 → 重启 dsh」的提示。只在保存成功后清掉。
+  const dshEnvDirty = ref(false)
+  function markDshEnvDirty() {
+    dshEnvDirty.value = true
   }
 
   // savedSeq 每次**成功**保存后自增（含设置页那些「即时保存」的开关 —— 它们提交的同样是
@@ -106,12 +117,23 @@ export const useSettingsStore = defineStore('settings', () => {
         const proxyChanged =
           !!prev &&
           (prev.enabled !== submitted.proxyEnabled || prev.addr !== submitted.proxyAddr)
-        if (status.value?.running && proxyChanged) {
+        // 自定义环境变量：开关变化一定要重启；变量表变化只在开关打开时才算「会生效」。
+        // 开关从没保存过（prevEnv 为 null）时不凭空提示，与代理那一套同一取舍。
+        const prevEnv = appliedDshEnvEnabled.value
+        const envToggleChanged = prevEnv !== null && prevEnv !== submitted.dshEnvEnabled
+        const envRestart =
+          envToggleChanged || (dshEnvDirty.value && submitted.dshEnvEnabled)
+        if (status.value?.running && envRestart) {
+          toast.show(t('saved_env_restart'), 'info', 5000)
+        } else if (status.value?.running && proxyChanged) {
           toast.show(t('saved_proxy_restart'), 'info', 5000)
         } else {
           toast.show(t('saved'), 'success')
         }
       }
+      // 不论是否由调用方自己弹 toast，这次保存都已经把变量表的开关/内容写下去了；
+      // 下一次「保存配置」不该再重复报「环境变量已变更」。
+      dshEnvDirty.value = false
       await load()
       savedSeq.value++
       return true
@@ -164,5 +186,20 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  return { config, runtime, status, locked, loading, memLimitLevel, savedSeq, load, save, startDsh, stopDsh, restartDsh }
+  return {
+    config,
+    runtime,
+    status,
+    locked,
+    loading,
+    memLimitLevel,
+    savedSeq,
+    dshEnvDirty,
+    markDshEnvDirty,
+    load,
+    save,
+    startDsh,
+    stopDsh,
+    restartDsh
+  }
 })

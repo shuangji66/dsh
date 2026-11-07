@@ -43,6 +43,10 @@ type AppConfig struct {
 	// DshMemAuto 为 true（默认）时由系统 node 自动分配内存，不传 NODE_OPTIONS。
 	DshMemLimit int  `json:"dshMemLimit"`
 	DshMemAuto  bool `json:"dshMemAuto"`
+	// DshEnvEnabled 是设置页「运行环境」卡片里的「自定义环境变量」开关（默认关闭）。
+	// 打开后 DshManager.buildEnv 会把数据目录下 dsh-env.json 里的变量注入 dsh 进程；
+	// 变量值加密落盘（见 dsh_env.go）。保存配置后仍需重启 dsh 才生效。
+	DshEnvEnabled bool `json:"dshEnvEnabled"`
 	// DshVersion 是**当前选中的 dsh 服务版本**，即 `${TRIM_PKGVAR}/server/<版本>`
 	// 的那个目录名（如 "0.2.0-rc.2"）。空串表示未选中任何版本：控制台版本行显示
 	// 「未安装」，dsh 也无法启动（见 server.go）。
@@ -113,6 +117,9 @@ type RuntimeEnv struct {
 	Lang          string
 	QuickCmdsFile string // 终端快捷指令持久化文件路径（DataDir/quickcmds.json）
 	SessionDir    string // 终端会话临时镜像目录（DataDir/terminal-sessions，停止时整目录清除）
+	// DshEnvFile 是设置页「自定义环境变量」的持久化文件（DataDir/dsh-env.json：
+	// 变量名明文，变量值逐条 AES-256-GCM 密文，见 dsh_env.go）。
+	DshEnvFile string
 	// MasterKey / MasterKeyFile：快捷指令「命令内容」加密用的主密钥（见 secret.go）。
 	// MasterKey 来自 HARNESS_MASTER_KEY（外部注入，优先），它不是路径而是密钥本身——
 	// 「不让密钥与密文同放」靠它；MasterKeyFile 恒为 DataDir/master.key（缺失时自动生成 0600），
@@ -190,6 +197,7 @@ func loadRuntimeEnv() RuntimeEnv {
 		Lang:          os.Getenv("TRIM_SYS_LANGUAGE"),
 		QuickCmdsFile: quickCmdsFile,
 		SessionDir:    sessionDir,
+		DshEnvFile:    filepath.Join(dataDir, dshEnvFileName),
 		// 主密钥：优先 HARNESS_MASTER_KEY（外部注入的 32 字节 base64/hex），
 		// 否则用数据目录里的 master.key（缺失时自动生成 0600）。
 		MasterKey:     os.Getenv("HARNESS_MASTER_KEY"),

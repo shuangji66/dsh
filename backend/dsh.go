@@ -23,10 +23,14 @@ import (
 // DshManager owns the dsh process lifecycle. Started dsh keeps the ports that
 // were active at launch-time; changing them requires a full stop first.
 type DshManager struct {
-	mu          sync.Mutex
-	cmd         *exec.Cmd
-	startedAt   time.Time
-	renv        *RuntimeEnv
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	startedAt time.Time
+	renv      *RuntimeEnv
+	// crypt 是「自定义环境变量」文件的解密器（见 dsh_env.go），由 main 在
+	// loadCryptor 之后注入。**可能为 nil**：主密钥不可用时进程照常启动，
+	// buildEnv 跳过自定义变量并记一条 WARN，绝不退化成读明文。
+	crypt       *cryptor
 	logf        logFunc // 带等级的日志出口（测试注入静默实现）
 	statsMu     sync.Mutex
 	lastCpu     float64 // 最近一次采样的 CPU 使用率（%）
@@ -1123,8 +1127,8 @@ func (m *DshManager) Stats() (float64, int64) {
 	return m.lastCpu, m.lastMemory
 }
 
-// buildEnv constructs the child environment, capturing PATH/HOME/PNPM_HOME plus
-// proxy and dsh-specific variables.
+// buildEnv constructs the child environment, capturing PATH/HOME/SHELL/PNPM_HOME
+// plus proxy and dsh-specific variables.
 func (m *DshManager) buildEnv() []string {
 	cfg := GetConfig()
 	env := os.Environ()
@@ -1145,6 +1149,23 @@ func (m *DshManager) buildEnv() []string {
 		}
 		if !found {
 			env = append(env, k+v)
+		}
+	}
+
+	// 设置页「自定义环境变量」：开关打开时读变量文件（值已加密）并注入。保留名在保存接口已被
+	// 拒绝，这里再挡一道 —— 手工改过的文件也不该覆盖控制台管理的变量。
+	// 放在 PATH/HOME/SHELL 等托管变量之前：后面的 set() 会原位覆盖，托管值永远最后生效。
+	if cfg.DshEnvEnabled {
+		if vars, err := loadDshEnv(dshEnvPath(m.renv), m.crypt); err != nil {
+			logWarn("[dsh-env] failed to load custom environment variables: %v", err)
+		} else {
+			for _, v := range vars {
+				if !dshEnvNameRe.MatchString(v.Name) || isDshEnvReserved(v.Name) || strings.IndexByte(v.Value, 0) >= 0 {
+					logWarn("[dsh-env] ignoring invalid or reserved variable name %q", v.Name)
+					continue
+				}
+				set(v.Name+"=", v.Value)
+			}
 		}
 	}
 
@@ -1170,6 +1191,15 @@ func (m *DshManager) buildEnv() []string {
 		set("HOME=", h)
 		set("DSH_AGENTS_HOME=", agentsHomeDir(h))
 	}
+	// SHELL 固定为 /bin/bash，不继承平台给服务账号设的 /usr/sbin/nologin。
+	// dsh 的内置终端按 process.env.SHELL 解析默认 shell（见
+	// @deepseek-ai/dsh-subprocess-local 的 terminalEnvironment，再由
+	// dsh-api-terminal-controller 的 resolveShell 取用）；平台以服务账号启动
+	// 控制台时 SHELL 是 nologin，dsh 的终端页会直接跑成 "This account is
+	// currently not available."。控制台自己的终端早已固定 /bin/bash（见
+	// terminal.go 的 terminalEnv），这里让 dsh 与它保持一致。
+	// SHELL 不在 dsh 的凭据清洗名单里，所以工具子进程也会正常继承它。
+	set("SHELL=", "/bin/bash")
 	if m.renv.PnpmHome != "" {
 		set("PNPM_HOME=", m.renv.PnpmHome)
 	}

@@ -6,6 +6,7 @@ import { useToastStore } from '@/stores/toast'
 import { useI18n, setLocale } from '@/composables/useI18n'
 import { useTheme } from '@/composables/useTheme'
 import PageHeader from '@/components/PageHeader.vue'
+import DshEnvDialog from '@/components/DshEnvDialog.vue'
 import { icons } from '@/utils/icons'
 
 // 设置页的字段分**两类**，动之前先看清属于哪一类（新增字段时同样要归到某一类）：
@@ -24,6 +25,8 @@ import { icons } from '@/utils/icons'
 //    · dsh 端口（dshPort）—— 保存后落盘；dsh 运行中时该输入框禁用（后端保存时保留旧值）
 //    · 反代监听端口（proxyPort）—— 保存时**即时重绑**监听（绑定失败则整次拒绝保存）
 //    · node 堆内存上限（dshMemLimit）—— 保存后落盘；重启 dsh 生效
+//    · 自定义环境变量开关（dshEnvEnabled）—— 保存后落盘；重启 dsh 生效
+//      （变量表本身由弹窗单独加密落盘，见 DshEnvDialog；开关只决定要不要注入）
 //    · 访问密码（password）—— 保存后落盘；下次登录校验用新密码
 //    · 登录有效期（authTTLHours）—— 保存后落盘；立即影响后续签发/校验
 //    这一类统一走 onPendingChange()：改动后在标题栏显示「未保存」，并弹一次「保存后生效」。
@@ -37,6 +40,20 @@ const toast = useToastStore()
 const { t } = useI18n()
 const { themeMode, setTheme } = useTheme()
 const { locale } = useI18n()
+
+// 「自定义环境变量」弹窗：变量表单独落盘（变量值加密），开关走设置页的「保存配置」
+const envDialogOpen = ref(false)
+function onDshEnvSaved() {
+  store.markDshEnvDirty()
+  if (!config.value.dshEnvEnabled) {
+    // 变量表已落盘，但开关没开 —— 提醒用户还要打开开关并保存
+    toast.show(t('dsh_env_saved_enable'), 'info', 6000)
+  } else if (store.status?.running) {
+    toast.show(t('dsh_env_saved_apply'), 'info', 6000)
+  } else {
+    toast.show(t('dsh_env_saved_plain'), 'success')
+  }
+}
 
 // npm 镜像源选项：value 必须与后端 npmMirrors 的 Slug 一致（server.go）。
 // 默认阿里云；官方源只有用户主动选中时才会被使用。
@@ -214,7 +231,7 @@ async function onAuthToggle() {
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
-    <!-- 五个卡片：端口与兼容 / node 环境 / 登录鉴权 / 代理 / 控制台设置。
+    <!-- 五个卡片：端口与兼容 / 运行环境 / 登录鉴权 / 加速设置 / 控制台设置。
          桌面固定两列（2×2：控制台设置卡片在桌面隐藏），窄屏沿用 .g-card-grid
          的自适应列数（手机为单列）。 -->
     <div class="g-card-grid g-card-grid-2 g-fade-in">
@@ -272,7 +289,7 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ② node 环境：node 堆内存上限（含自动设置）+ npm 镜像源 -->
+      <!-- ② 运行环境：node 堆内存上限（含自动设置）+ 自定义环境变量开关 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_node') }}
@@ -318,14 +335,28 @@ async function onAuthToggle() {
             </div>
           </div>
 
-          <!-- npm 镜像源：dsh 服务与两个受管插件（市场 / 增强插件）的安装、更新与版本检测
-               都使用这里选中的源（只用所选源，失败会提示换源）。改完需点「保存配置」才落盘生效。 -->
-          <div>
-            <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_npm_registry') }}</label>
-            <select v-model="config.npmRegistry" class="g-input" @change="onPendingChange">
-              <option v-for="opt in npmRegistryOptions" :key="opt.value" :value="opt.value">{{ t(opt.label) }}</option>
-            </select>
-            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_npm_registry_hint') }}</p>
+          <!-- 自定义环境变量：开关只决定 buildEnv 要不要注入；变量表由齿轮弹窗单独
+               落盘（变量值加密，见 DshEnvDialog）。改完需点「保存配置」并重启 dsh 才生效。 -->
+          <div class="pt-4 border-t border-line dark:border-[#2A2A32]">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_dsh_env') }}</span>
+              <div class="flex items-center gap-2 shrink-0">
+                <button
+                  class="g-btn-secondary !h-8 !w-8 !p-0"
+                  :title="t('settings_dsh_env_edit')"
+                  :aria-label="t('settings_dsh_env_edit')"
+                  @click="envDialogOpen = true"
+                >
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+                <label class="relative inline-flex items-center cursor-pointer select-none flex-shrink-0">
+                  <input type="checkbox" v-model="config.dshEnvEnabled" class="sr-only peer" :aria-label="t('settings_dsh_env')" @change="onPendingChange">
+                  <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
+                  <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
+                </label>
+              </div>
+            </div>
+            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_dsh_env_hint') }}</p>
           </div>
         </div>
       </section>
@@ -393,7 +424,7 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ④ 代理：「代理dsh」开关 + 代理地址（开启时显示）。
+      <!-- ④ 加速设置：「代理dsh」开关 + 代理地址（开启时显示）+ npm 镜像源。
            位置在「登录鉴权」之后（用户指定的卡片顺序）。 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
@@ -416,6 +447,17 @@ async function onAuthToggle() {
           <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_proxy_addr') }}</label>
           <input v-model="config.proxyAddr" :placeholder="t('settings_proxy_addr')" class="g-input" autocomplete="off" @change="onPendingChange" />
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_hint') }}</p>
+        </div>
+
+        <!-- npm 镜像源：dsh 服务与两个受管插件（市场 / 增强插件）的安装、更新与版本检测
+             都使用这里选中的源（只用所选源，失败会提示换源）。改完需点「保存配置」才落盘生效。
+             它和代理无关，所以不放在 v-if="config.proxyEnabled" 里面。 -->
+        <div class="mt-4">
+          <label class="block text-sm text-ink-soft dark:text-[#A6A6AD] mb-1.5">{{ t('settings_npm_registry') }}</label>
+          <select v-model="config.npmRegistry" class="g-input" @change="onPendingChange">
+            <option v-for="opt in npmRegistryOptions" :key="opt.value" :value="opt.value">{{ t(opt.label) }}</option>
+          </select>
+          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_npm_registry_hint') }}</p>
         </div>
       </section>
 
@@ -447,5 +489,8 @@ async function onAuthToggle() {
         </div>
       </section>
     </div>
+
+    <!-- 自定义环境变量弹窗：变量表由它自己落盘（变量值加密）；开关仍走设置页的「保存配置」 -->
+    <DshEnvDialog v-model:visible="envDialogOpen" @saved="onDshEnvSaved" />
   </div>
 </template>

@@ -116,6 +116,7 @@
 │   ├── market.go            # 受管插件（dshmarket / dsh-fnos-advanced）：检测 / 安装 / 更新 / 卸载
 │   ├── install.go           # node-pty 自动安装
 │   ├── quickcmds.go         # 终端快捷指令持久化 API（命令内容加密落盘 + 旧明文迁移）
+│   ├── dsh_env.go           # 自定义环境变量：校验 / 落盘（变量值加密，dsh-env.json）/ buildEnv 注入
 │   ├── secret.go            # 命令内容加密：AES-256-GCM 信封 + 主密钥（master.key / HARNESS_MASTER_KEY）
 │   ├── visitors.go          # 访客跟踪 / 踢出 / SSE
 │   ├── sse.go               # Server-Sent Events 推送
@@ -243,6 +244,7 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | `<数据目录>/session.key` | 会话 cookie 签名密钥（0600，跨重启保住登录态） |
 | `<数据目录>/quickcmds.json` | 终端快捷指令持久化文件（0600；命令内容是密文，名称/是否自动回车仍是明文） |
 | `<数据目录>/dsh-accounts.json` | 控制台的 **DeepSeek 账号库**（0600；整份列表是一个密文信封，多账号的 token 都在里面） |
+| `<数据目录>/dsh-env.json` | 设置页「自定义环境变量」（0600；变量名明文、变量值逐条密文，主密钥同上） |
 | `<数据目录>/master.key` | **落盘加密的主密钥**（0600，缺失时自动生成）：`quickcmds.json` 的命令内容与 `dsh-accounts.json` 都是它加密的；删掉它 = 这两份密文再也解不开（想避免密钥与密文同放，用 `HARNESS_MASTER_KEY` 注入） |
 | `<数据目录>/terminal-sessions/` | 终端会话历史临时镜像（停止时整目录清除） |
 | `<数据目录>/backup/` | dsh 数据备份包（`dsh-data-*`，用户主动创建）；老版本自我更新遗留的 `pending/` 在启动时自动清理 |
@@ -258,24 +260,37 @@ dsh 进程还会拿到 **`DSH_AGENTS_HOME=$HOME/.agents`**（共享 agent 配置
 `os.homedir()` 兜底而跑到平台共享目录之外；目录本身由**控制台启动时检测并创建**
 （`ensureAgentsHome`，创建成功不记日志），dsh 启动时不会自建。
 
+`buildEnv` 还把 **`SHELL` 固定为 `/bin/bash`**，不继承平台给服务账号设的
+`/usr/sbin/nologin`：dsh 的内置终端按 `process.env.SHELL` 解析默认 shell
+（`@deepseek-ai/dsh-subprocess-local` 的 `terminalEnvironment` →
+`dsh-api-terminal-controller` 的 `resolveShell`），继承 nologin 会让 dsh 的终端页
+直接跑成 "This account is currently not available."。控制台自己的终端同样固定
+`/bin/bash`（见 `terminal.go` 的 `terminalEnv`），两边保持一致。
+
 运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、
 `proxyAddr`、`npmRegistry`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、
-`dshMemAuto`、`dshVersion`、`browserCompat`。其中 `dshVersion` 是
+`dshMemAuto`、`dshEnvEnabled`、`dshVersion`、`browserCompat`。其中 `dshVersion` 是
 **当前选中的 dsh 版本**（即 `${TRIM_PKGVAR}/server/` 下的目录名，空 = 未安装），由概览页的
 版本列表写入，设置页不暴露；`npmRegistry` 是设置页「npm 镜像源」的取值（`aliyun` /
 `tencent` / `huawei` / `npmjs`，默认 `aliyun`），dsh 服务与两个受管插件的安装/更新/版本检测
 都只用它。控制台只使用平台通过环境变量（`PATH`）提供的 **node24**，
 不再检测或切换 node 版本（`nodeVersion` 配置项已移除）。
 
-代理卡片只有一个开关：
+「加速设置」卡片有两项：
 
 - **代理dsh**（`proxyEnabled`，默认关闭）—— 只影响 dsh 进程自身的出网：开启时给 dsh
   下发 `http_proxy` / `https_proxy`（大小写与 `all_proxy` 一组，见 `dsh.go` 的 `buildEnv`），
   保存后需**重启 dsh** 才生效。控制台自身的版本检测、dsh 版本安装与插件安装都不走它。
+- **npm 镜像源**（`npmRegistry`，默认阿里云）—— dsh 服务与两个受管插件（市场 / 增强插件）的
+  安装、更新和版本检测都**只用所选源**，失败会报错并提示换源；它需要点「保存配置」才落盘生效
+  （npm 安装不走代理，所以这一项与上面的代理开关无关）。
 
-「node 环境」卡片里还有「**npm 镜像源**」下拉（`npmRegistry`，默认阿里云）：dsh 服务与两个
-受管插件（市场 / 增强插件）的安装、更新和版本检测都**只用所选源**，失败会报错并提示换源；
-它需要点「保存配置」才落盘生效（npm 安装不走代理）。
+「运行环境」卡片里是 node 堆内存上限与「**自定义环境变量**」开关（`dshEnvEnabled`，默认关闭）。
+开关右侧的齿轮打开编辑弹窗；变量表保存在 `<数据目录>/dsh-env.json`（变量名明文便于排查，
+变量值逐条加密落盘，主密钥与快捷指令/账号库同一把）。弹窗里的「保存」只负责把变量表落盘，**还要点设置页
+的「保存配置」并重启 dsh** 才会由 `buildEnv` 注入 dsh 进程。变量名必须是 POSIX 标识符，且不能
+是控制台保留名（`PATH` / `HOME` / `SHELL` / `DSH_HOME` / `DSH_AGENTS_HOME` / `DSH_WEB_URL` /
+`NODE_OPTIONS` / 代理变量等，完整名单由后端下发）。
 
 node 堆内存上限（`dshMemLimit`，设置页「node 堆内存上限」）在**手动设置**
 （`dshMemAuto` 关闭）时有两档阈值：低于 **800 MB** 输入框下黄字提醒（仍可保存），

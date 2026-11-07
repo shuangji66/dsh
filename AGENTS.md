@@ -98,6 +98,11 @@
   转发给 dsh（dsh 只认 `/`、`/api`、`/plugins`；其 0.1.7-alpha.1 起前端全走文档
   相对路径，靠 `<base href="./">` 自动拼出 `<prefix>/api`）。挂载换算集中在
   `proxyMount`（`strip`/`join`/`dir`/`joinURI`）。
+  已知边界：若 `ui/config` 里保留第二个可见 entry（如 `Harness.dsh`），飞牛 App 会用
+  独立原生 WebView 打开它（UA 与请求栈都和控制台入口不同），短 token 不会被 portal
+  的 `/app/token` 续期；几小时后首次导航会在 `trim_http_cgi` 处得到
+  `200 + 13 字节 "invalid token"` —— 请求到不了 `app.sock`，控制台无法拦截。dsh 经
+  控制台的「标签页进入」同源 iframe 打开时复用控制台入口的 token，不受影响。
 - `terminal.go` — WebSocket + `creack/pty` 的交互式 bash。前端连 `/terminal`（`?id=` 为空
   则新建，非空则挂载既有会话：回放历史文件 + `\x1b]ready\x07` 后进入实时流），浏览器断开
   **只解挂载不杀会话**（会话继续运行并写历史临时文件）。**一个会话同时只有一个操作端

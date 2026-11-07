@@ -343,6 +343,14 @@ fpk 的 `ui/config` 里两个 entry 都指同一入口（示例）：
 }
 ```
 
+已知边界：若 `ui/config` 里保留第二个可见 entry（如上面的 `Harness.dsh`），飞牛 App
+会用独立的原生 WebView 打开它（从网关日志看 UA 与请求栈都与控制台入口不同），它缓存
+的网关短 token 不会像默认入口那样被 portal 的 `/app/token` 续期；几小时后第一次导航
+仍会被 `trim_http_cgi` 以 `200 + 13 字节 "invalid token"` 拒绝 —— 请求到不了
+`app.sock`，控制台无法拦截或重试。清 App 缓存 / 重新登录能让 App 重新取 token，但过
+一段时间仍会复现。dsh 经控制台的「标签页进入」打开时（同源 iframe）复用控制台入口的
+token，不走这条路径。
+
 **为什么这样就成立**：dsh 0.1.7-alpha.1 起其前端产物全部使用**文档相对路径**
 （`dsh-host-frontend-static` 注入 `<base href="./">`，插件 bundle 引用、`/api`
 RPC、HMR 的 SSE、流 mux 的 WebSocket 都是去前导斜杠的相对形式）。页面在

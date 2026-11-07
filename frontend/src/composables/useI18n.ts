@@ -299,6 +299,11 @@ const zh = {
   plugin_reset: '重置',
   plugin_loading: '加载中…',
   plugin_empty: '暂无插件',
+  // 插件页顶栏下的分类筛选与实时搜索（搜索匹配卡片上显示的插件名）
+  plugin_filter_all: '全部',
+  plugin_filter_group: '按启停状态筛选插件',
+  plugin_search_placeholder: '搜索插件名',
+  plugin_search_empty: '没有符合条件的插件',
   plugin_uninstall: '卸载',
   // 插件名点击复制（版本号刻意不可复制）
   plugin_copy_name: '点击复制插件名称',
@@ -901,6 +906,11 @@ const en: Record<keyof typeof zh, string> = {
   plugin_reset: 'Reset',
   plugin_loading: 'Loading…',
   plugin_empty: 'No plugins',
+  // Category filter + live search below the plugins page header
+  plugin_filter_all: 'All',
+  plugin_filter_group: 'Filter plugins by status',
+  plugin_search_placeholder: 'Search plugin name',
+  plugin_search_empty: 'No matching plugins',
   plugin_uninstall: 'Uninstall',
   plugin_copy_name: 'Click to copy the plugin name',
   plugin_name_copied: 'Plugin name copied',

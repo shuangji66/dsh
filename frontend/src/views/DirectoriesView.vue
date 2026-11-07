@@ -8,7 +8,7 @@ import { useDshBackup } from '@/composables/useDshBackup'
 import { uiErrText, useI18n } from '@/composables/useI18n'
 import { api } from '@/serverapi'
 import { trimAppReady } from '@/utils/trimApp'
-import { isFnosApp } from '@/utils/fnosApp'
+import { fnosAppNeedsWebDirectoryAuth } from '@/utils/fnosApp'
 import {
   buildFnosAuthURL,
   fnosAuthReturnURL,
@@ -32,10 +32,10 @@ const { t } = useI18n()
 // 只观察备份是否在跑（页头小转圈）；进度/结果在 BackupDialog 内部。
 const { running: backupRunning, sync: syncBackup } = useDshBackup()
 
-// 飞牛 App 内置 WebView 的目录授权走「独立 Web」那条路（见 openPicker）：
-// App 的宿主桥接 pickUserFile 在 iOS 1.37.x 上会按共享授权处理并报鉴权异常，
-// 而平台的网页授权页（/app-auth/pick-user-file）在 App 内可用 —— 同窗口跳过去，
-// 选完目录由平台整页跳回本页（结果参数由 handleFnosAuthReturn 解析）。
+// 飞牛 App 内置 WebView 的目录授权按版本分流（见 openPicker）：
+// 1.38.0 之前 App 的宿主桥接 pickUserFile 会按共享授权处理并报鉴权异常，改走平台的
+// 网页授权页（同窗口跳过去，选完由平台整页跳回本页，结果参数由 handleFnosAuthReturn
+// 解析）；1.38.0 起官方修复，直接用原生选择器。
 
 // 宿主 SDK（@trimjs/web-app）是 utils/trimApp.ts 里的单例，且在页面加载时（main.ts）
 // 就已开始握手 —— 不能在这里 new：宿主桌面的握手监听只保留 60 秒，等本页挂载再握手，
@@ -152,7 +152,7 @@ function handleAuthCallback(event: MessageEvent) {
   toast.show(t('directory_auth_updated'), 'success')
 }
 
-// 飞牛 App：把内置 WebView 当作「独立 Web」，打开平台的目录授权页。
+// 飞牛 App（1.38.0 之前）：把内置 WebView 当作「独立 Web」，打开平台的目录授权页。
 // 授权完成后平台整页跳回本页，结果由 onMounted 里的 handleFnosAuthReturn 消费。
 async function startFnosAppAuth() {
   let appName = settings.runtime?.appName || ''
@@ -179,9 +179,11 @@ async function startFnosAppAuth() {
 }
 
 async function openPicker() {
-  // 飞牛 App 内置 WebView：官方桥接的 pickUserFile 在 iOS App 上会按「应用共享授权」
+  // 飞牛 App（1.38.0 之前或版本未知）：官方桥接的 pickUserFile 会按「应用共享授权」
   // 处理并报应用鉴权异常（个人目录授权不可用），改走平台的网页授权通路。
-  if (isFnosApp()) {
+  // 1.38.0 起官方已修复，继续走下面的原生选择器（App 内 SDK 的 isWeb 为 false，
+  // 不会命中 isStandaloneWeb 的网页授权分支）。
+  if (fnosAppNeedsWebDirectoryAuth()) {
     await startFnosAppAuth()
     return
   }

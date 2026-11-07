@@ -3,6 +3,8 @@
 // 背景：飞牛 App 内置 WebView 里，官方 SDK（@trimjs/web-app）的 pickUserFile 走
 // Flutter 宿主桥接。iOS App 1.37.x 实测该桥接会按「应用共享授权」处理，个人目录
 // 授权报应用鉴权异常（errcode 1003103），与桌面浏览器/独立 Web 的表现不同。
+// 1.38.0 起官方修复了该问题，本通路只服务更早或版本未知的 App（分流见
+// utils/fnosApp.ts 的 fnosAppNeedsWebDirectoryAuth）。
 //
 // 平台另有一条与桌面浏览器完全相同的纯网页授权通路：
 //

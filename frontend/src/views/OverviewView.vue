@@ -7,6 +7,8 @@ import { api, sseUrl, type Visitor, type DshStatus } from '@/serverapi'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useEventStream } from '@/composables/useEventStream'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import { useWideLayout } from '@/composables/useMobileLayout'
+import { useAccountCardVisible } from '@/composables/useAccountCardVisible'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import UpdateSection from '@/components/UpdateSection.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -136,6 +138,15 @@ const deleting = ref<string | null>(null)
 // dsh 是否在运行：状态未知（status 尚未拉到）时按「运行中」渲染，与旧版按钮逻辑一致
 // （旧版只在 running === false 时显示「启动」）。
 const running = computed(() => status.value?.running !== false)
+
+// 「DeepSeek 账号」卡片：桌面端（>=md）恒显示，移动端才受设置页的开关控制。
+// 判据用 useWideLayout()（就是 md 断点，与侧边栏 `hidden md:flex`、设置页那张
+// `md:hidden` 的控制台设置卡片严格互补），不另写宽度数值。
+// 注意这里是**卸载**卡片（v-if）而不是用 CSS 藏起来：卡片挂载时会拉一次账号快照，
+// 藏起来的卡片没必要继续请求后端。登录状态与账号数据都在 Pinia/后端，不受影响。
+const wideLayout = useWideLayout()
+const accountCardVisible = useAccountCardVisible()
+const showAccountCard = computed(() => wideLayout.value || accountCardVisible.value)
 
 // 停止/重启的二次确认弹窗：无论是否忙碌，每次点击都先弹窗确认
 const lifecycleAction = ref<'stop' | 'restart' | null>(null)
@@ -411,8 +422,9 @@ onBeforeUnmount(() => {
       <!-- ② 三个版本：dsh 服务 / 插件市场 / 增强插件（控制台自身只能走 fpk 升级） -->
       <UpdateSection />
 
-      <!-- ③ DeepSeek 官方账号：头像 / 余额 / 多账号管理（登录弹窗在卡片内部） -->
-      <AccountCard />
+      <!-- ③ DeepSeek 官方账号：头像 / 余额 / 多账号管理（登录弹窗在卡片内部）。
+           移动端可在设置页关掉这张卡片（桌面端恒显示，见上面的 showAccountCard）。 -->
+      <AccountCard v-if="showAccountCard" />
 
       <!-- ④ 登录列表：卡片自身负责排序、桌面端限高与来源标记 -->
       <VisitorsCard

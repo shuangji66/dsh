@@ -5,6 +5,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { useI18n, setLocale } from '@/composables/useI18n'
 import { useTheme } from '@/composables/useTheme'
+import { useAccountCardVisible, setAccountCardVisible } from '@/composables/useAccountCardVisible'
 import PageHeader from '@/components/PageHeader.vue'
 import DshEnvDialog from '@/components/DshEnvDialog.vue'
 import AboutDialog from '@/components/AboutDialog.vue'
@@ -78,6 +79,14 @@ function onThemeChange() {
 function onLanguageChange() {
   setLocale(locale.value)
 }
+
+// 「显示 DeepSeek 账号卡片」：只影响移动端概览页的显示（桌面端恒显示），
+// 不改登录状态、也不落后端 —— 写入 localStorage，见 useAccountCardVisible。
+const accountCardVisible = useAccountCardVisible()
+const showAccountCard = computed({
+  get: () => accountCardVisible.value,
+  set: (v: boolean) => setAccountCardVisible(v)
+})
 
 // 安全标点：与后端 auth.go 的 safePunctStr 保持一致
 const SAFE_PUNCT = new Set('.,-_:/@%^=+~')
@@ -466,10 +475,12 @@ async function onAuthToggle() {
         </div>
       </section>
 
-      <!-- ⑤ 控制台设置：主题 / 语言（仅存浏览器 localStorage）。
+      <!-- ⑤ 控制台设置：主题 / 语言 / 显示 DeepSeek 账号卡片（都只存浏览器 localStorage）。
            只在移动端（<md，左侧边栏被隐藏时）显示：桌面端的主题/语言入口在侧边栏底部，
-           这里再摆一份是重复的。断点与侧边栏的 `hidden md:flex` 严格互补，别改用
-           useMobileLayout —— 那是「触屏/窄视口」判据，iPad 横屏会同时出现侧边栏和本卡片。 -->
+           这里再摆一份是重复的；「显示 DeepSeek 账号卡片」本身也只对移动端有意义
+           （桌面端恒显示该卡片，见 OverviewView）。断点与侧边栏的 `hidden md:flex`
+           严格互补，别改用 useMobileLayout —— 那是「触屏/窄视口」判据，iPad 横屏会同时
+           出现侧边栏和本卡片。 -->
       <section class="g-card g-card-hover p-5 flex flex-col md:hidden">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('console_title') }}
@@ -490,6 +501,24 @@ async function onAuthToggle() {
               <option value="zh">{{ t('lang_zh') }}</option>
               <option value="en">{{ t('lang_en') }}</option>
             </select>
+          </div>
+          <!-- 概览页「DeepSeek 账号」卡片的显隐（只作用于移动端；桌面端恒显示）。
+               与主题/语言同类：只写 localStorage、即时生效，不经过「保存配置」。 -->
+          <div>
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('console_show_account_card') }}</span>
+              <label class="relative inline-flex items-center cursor-pointer select-none flex-shrink-0">
+                <input
+                  v-model="showAccountCard"
+                  type="checkbox"
+                  class="sr-only peer"
+                  :aria-label="t('console_show_account_card')"
+                >
+                <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
+                <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
+              </label>
+            </div>
+            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('console_show_account_card_hint') }}</p>
           </div>
         </div>
       </section>

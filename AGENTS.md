@@ -323,7 +323,7 @@
   （把 `.g-dialog-title` 自带的 `pr-11` 让给外层容器，否则图标会被推到 X 底下），图标不套
   `g-btn-*`。各目标的外链仓库地址**只有一份**，在 `constants/repos.ts`
   （`repoSlugs` / `repoURL`）—— dsh 在 `ServerVersionsDialog`、插件市场与增强插件共用
-  `ManagedPluginDialog`，概览页「关于」弹窗也用它，地址别再各写一份。新增弹窗时记得
+  `ManagedPluginDialog`，设置页「关于」弹窗也用它，地址别再各写一份。新增弹窗时记得
   一起挂上图标。
   **「更新日志」弹窗**（`components/ReleaseNotesDialog.vue`，**只有 dsh 版本列表在用**；
   插件市场的日志内联在更新弹窗里，不走这个组件）：把版本号做成**带下划线的

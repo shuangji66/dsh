@@ -7,7 +7,7 @@ import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
 import { repoSlugs, repoURL } from '@/constants/repos'
 
-// 概览页「关于」弹窗：只读信息面板，没有任何可执行动作。
+// 设置页「关于」弹窗（标题栏「保存配置」左侧的按钮打开）：只读信息面板，没有任何可执行动作。
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ (e: 'update:visible', v: boolean): void }>()
 

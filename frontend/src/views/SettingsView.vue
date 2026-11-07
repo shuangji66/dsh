@@ -7,6 +7,7 @@ import { useI18n, setLocale } from '@/composables/useI18n'
 import { useTheme } from '@/composables/useTheme'
 import PageHeader from '@/components/PageHeader.vue'
 import DshEnvDialog from '@/components/DshEnvDialog.vue'
+import AboutDialog from '@/components/AboutDialog.vue'
 import { icons } from '@/utils/icons'
 
 // 设置页的字段分**两类**，动之前先看清属于哪一类（新增字段时同样要归到某一类）：
@@ -54,6 +55,9 @@ function onDshEnvSaved() {
     toast.show(t('dsh_env_saved_plain'), 'success')
   }
 }
+
+// 「关于」弹窗（标题栏「保存配置」左侧的按钮打开）：只读信息面板，与设置项无关
+const aboutVisible = ref(false)
 
 // npm 镜像源选项：value 必须与后端 npmMirrors 的 Slug 一致（server.go）。
 // 默认阿里云；官方源只有用户主动选中时才会被使用。
@@ -224,10 +228,11 @@ async function onAuthToggle() {
 
 <template>
   <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
-    <!-- 页头（图标 + 标题 + 未保存标记 + 保存按钮；标题栏按钮统一样式：小一号字号 + 细边框 + 不填充底色） -->
+    <!-- 页头（图标 + 标题 + 未保存标记 + 关于 + 保存按钮；标题栏按钮统一样式：小一号字号 + 细边框 + 不填充底色） -->
     <PageHeader sticky class="mb-3" :title="t('settings_title')" :icon="icons.settings">
       <!-- ② 类字段（需点保存才生效）改动后的常驻标记：toast 只停几秒，这个留到保存成功 -->
       <span v-if="unsaved" class="text-xs text-warning-ink flex-shrink-0">{{ t('settings_unsaved') }}</span>
+      <button class="g-btn-secondary h-8 px-3 text-xs" @click="aboutVisible = true">{{ t('about') }}</button>
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
@@ -492,5 +497,8 @@ async function onAuthToggle() {
 
     <!-- 自定义环境变量弹窗：变量表由它自己落盘（变量值加密）；开关仍走设置页的「保存配置」 -->
     <DshEnvDialog v-model:visible="envDialogOpen" @saved="onDshEnvSaved" />
+
+    <!-- 关于弹窗 -->
+    <AboutDialog v-model:visible="aboutVisible" />
   </div>
 </template>

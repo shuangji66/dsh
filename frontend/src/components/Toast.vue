@@ -5,9 +5,11 @@ import { computed } from 'vue'
 const toast = useToastStore()
 
 const typeClass = computed(() => {
+  // 实心色底 + 白字：用 *-ink（浅色下比 base 更深，白字稳过 4.5:1）；
+  // 深色下 *-ink 与 base 同值，观感不变。
   switch (toast.type) {
-    case 'success': return 'bg-success'
-    case 'error': return 'bg-danger'
+    case 'success': return 'bg-success-ink'
+    case 'error': return 'bg-danger-ink'
     default: return 'bg-brand'
   }
 })

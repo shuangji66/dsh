@@ -408,11 +408,15 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- 启停操作：两列栅格，每个按钮的宽度与小面板一致（整行正好与上面的面板行同宽） -->
+        <!-- 启停操作：两列栅格，每个按钮的宽度与小面板一致（整行正好与上面的面板行同宽）。
+             停止时只剩「启动」，仍占第一列 —— 不要改成单列或 flex 撑满，否则按钮会被拉长；
+             「重启」对已停进程无意义，running === false 时隐藏。 -->
         <div class="grid grid-cols-2 gap-3 mt-auto">
-          <button v-if="!running" class="g-btn-primary !h-9 !text-sm bg-success hover:bg-success/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
+          <!-- 启动按钮是实心绿底 + 白字：用 success-ink（浅色下 base 的 #16A34A
+               配白字只有 3.3:1），深色下 success-ink 就是原来的 #10B981。 -->
+          <button v-if="!running" class="g-btn-primary !h-9 !text-sm bg-success-ink hover:bg-success-ink/90" :disabled="loading" @click="store.startDsh()">{{ t('dsh_start') }}</button>
           <button v-else class="g-btn-danger !h-9 !text-sm" :disabled="loading" @click="openLifecycleConfirm('stop')">{{ t('dsh_stop') }}</button>
-          <button class="g-btn-warning !h-9 !text-sm" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
+          <button v-if="running" class="g-btn-warning !h-9 !text-sm" :disabled="loading" @click="openLifecycleConfirm('restart')">{{ t('dsh_restart') }}</button>
         </div>
       </section>
 

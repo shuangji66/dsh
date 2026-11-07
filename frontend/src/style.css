@@ -18,23 +18,29 @@
   --color-brand: #6366F1;
   --color-brand-hover: #4F46E5;
   --color-brand-soft: rgba(99, 102, 241, 0.12);
-  /* 语义色 */
-  --color-success: #10B981;
-  /* 警告色在浅色下取深一档的琥珀（#D97706）：按钮边框是「非文本 UI」，
-     亮黄 #F59E0B 放在白底上只有 2.15:1（低于 3:1），加深后既保住黄色调
-     又让轮廓清楚。深色主题在 html.dark 里换回 #F59E0B（深底上亮黄才够亮）。 */
-  --color-warning: #D97706;
-  --color-danger: #EF4444;
-  /* 语义色的**文字**版本：浅色主题下上面的亮色放在白底上对比度只有 2.1–2.5:1，
-     不满足 WCAG AA（正文/小字 4.5:1）。填充、圆点、边框继续用亮色 token，
-     只有文字用 *-ink；深色主题在下面的 .dark 里把 *-ink 换回亮色。
+  /* 语义色（浅色模式）：base 用于填充、圆点、边框等**非文本**元素，
+     *-ink 用于文字与图标。取值参考 Ant Design error / Apple 增强对比度浅色
+     （red #E9152D、yellow #A16A00、green #008932）与常见 success green
+     （#16A34A），比上一版（#CC0000 / #C2410C / #0B7A3B）更亮、饱和度更高，
+     放在白底上不发闷。
 
-     取值口径：同色相下挑 chroma（饱和度）尽量高的一档，同时保证在白底、
-     #FAFAFA 页面底和 bg-black/[0.03] 浅灰面板上都 ≥ 4.5:1。原来的 700 系
-     （#047857 / #B45309 / #B91C1C）对比够但灰调重，浅色模式看起来发闷。 */
-  --color-success-ink: #0B7A3B;
-  --color-warning-ink: #C2410C;
-  --color-danger-ink: #CC0000;
+     白底对比度：success-ink 4.54、warning-ink 4.59、danger-ink 4.56；
+     三个 base 分别为 3.30 / 4.59 / 4.08，都 ≥ 3:1，适合图标、圆点与色块。
+     实心填充 + 白字的场合（Toast、启动按钮）要用 *-ink，不能直接用 base：
+     base 的 #16A34A / #F5222D 配白字只有 3.3 / 4.1:1。
+
+     警告的 base 与 ink 取同一个 #A16A00（另一候选 #BB5C21 偏橙，做描边时与金色
+     文字不同调；#A16A00 作边框也有 4.59:1，不需要再分两档）。
+
+     取舍：这组值在白底刚过 AA，在 #FAFAFA 页面底和 10% 色底（状态胶囊、
+     错误提示框）上会降到约 3.7–4.4:1。这是为了更鲜明的观感刻意选的边界值；
+     若要求色底也严格 ≥4.5，需要把 *-ink 再压深 10%–20%（会接近上一版的灰调）。 */
+  --color-success: #16A34A;
+  --color-warning: #A16A00;
+  --color-danger: #F5222D;
+  --color-success-ink: #008932;
+  --color-warning-ink: #A16A00;
+  --color-danger-ink: #E9152D;
   /* 中性层：背景 / 表面 / 边框 / 文本 */
   --color-bg: #FAFAFA;
   --color-surface: #FFFFFF;
@@ -72,11 +78,13 @@
 
 /* 深色主题的 token 覆盖：同一批类名（text-ink-faint / text-success-ink …）在两种主题下
    各自满足对比度，调用处不用再逐条写 dark: 变体。深色背景是 #16161B（卡片）/ #0B0B0F（页面），
-   这里的亮色值在两者上都在 5:1 以上。--color-warning 也在这里换回亮黄：浅色下的 #D97706
-   是给白底边框用的深一档琥珀，放到深色背景上会发闷。 */
+   这里的亮色值在两者上都在 5:1 以上。三个 base 也在这里换回原来的亮色 —— 浅色那组是为
+   白底挑的深值，直接套到深底上会发闷；深色主题的观感与上一版完全一致。 */
 html.dark {
   --color-ink-faint: #8A8A92;
+  --color-success: #10B981;
   --color-warning: #F59E0B;
+  --color-danger: #EF4444;
   --color-success-ink: #10B981;
   --color-warning-ink: #F59E0B;
   --color-danger-ink: #EF4444;
@@ -386,7 +394,7 @@ html, body {
   }
 
   /* 警告按钮：橙字橙框（同危险按钮结构，仅颜色不同）。边框用 --color-warning：
-     浅色下是深一档的琥珀 #D97706，深色下由 html.dark 换回亮黄 #F59E0B。 */
+     浅色下是深金 #A16A00（白底 4.59:1），深色下由 html.dark 换回亮黄 #F59E0B。 */
   .g-btn-warning {
     @apply inline-flex items-center justify-center gap-2 bg-transparent
       border border-warning text-warning-ink

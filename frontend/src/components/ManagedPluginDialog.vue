@@ -137,13 +137,22 @@ useDialogA11y(() => props.visible, panel, { onClose: close })
           <template v-else>
             <!-- 已安装：版本对照 -->
             <div v-if="installed" class="space-y-2">
-              <div class="flex items-center justify-between">
-                <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_local_ver') }}</span>
-                <span class="font-mono text-sm font-semibold text-ink dark:text-white">{{ status.localVersion }}</span>
+              <!-- 版本号可能很长（本地开发装的是 `link:../../…` 这类路径，见概览页版本行）：
+                   标签不参与挤压（shrink-0），版本号单行截断省略、绝不撑破弹窗；
+                   完整值放 title，悬停可见。 -->
+              <div class="flex items-center justify-between gap-3">
+                <span class="shrink-0 text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_local_ver') }}</span>
+                <span
+                  class="min-w-0 truncate text-right font-mono text-sm font-semibold text-ink dark:text-white"
+                  :title="status.localVersion"
+                >{{ status.localVersion }}</span>
               </div>
-              <div class="flex items-center justify-between">
-                <span class="text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_latest_ver') }}</span>
-                <span class="font-mono text-sm font-semibold text-ink dark:text-white">{{ latest || '—' }}</span>
+              <div class="flex items-center justify-between gap-3">
+                <span class="shrink-0 text-sm text-ink-soft dark:text-[#A6A6AD]">{{ t('update_latest_ver') }}</span>
+                <span
+                  class="min-w-0 truncate text-right font-mono text-sm font-semibold text-ink dark:text-white"
+                  :title="latest || '—'"
+                >{{ latest || '—' }}</span>
               </div>
               <!-- 增强插件安装后的下一步：设置页（授权入口）在插件页的「已安装插件」列表里。
                    放在 v-if="installed" 块内，避免打断后面的 v-else-if / v-else 链。 -->

@@ -390,8 +390,15 @@ onMounted(() => {
         <div class="flex items-center gap-3 min-w-0">
           <!-- 版本号：点击打开 dsh 版本列表（下载 / 删除 / 切换）。「未安装」时同样
                可点 —— 那正是用户需要去装一个版本的入口。 -->
-          <button class="relative font-mono text-sm font-semibold text-ink dark:text-white underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50" @click="openDialog('dsh')">
-            {{ versionLabel('dsh') }}
+          <!-- 版本号可能很长（例如本地开发装的 `link:../../…/dsh-fnos-advanced`）：一律
+               单行截断省略、绝不撑出卡片。min-w-0 让按钮能被压缩，内层 span 负责截断；
+               红点留在按钮外侧的间隙里，不参与截断（否则会被 overflow 裁掉）。 -->
+          <button
+            class="relative min-w-0 text-left font-mono text-sm font-semibold text-ink dark:text-white underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50"
+            :title="versionLabel('dsh')"
+            @click="openDialog('dsh')"
+          >
+            <span class="block truncate">{{ versionLabel('dsh') }}</span>
             <span v-if="hasUpdateDot('dsh')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <!-- 检查更新：与 dsh 回退图标成对（见 CheckUpdateButton.vue） -->
@@ -406,10 +413,11 @@ onMounted(() => {
           <!-- 版本号：点击打开市场弹窗（未安装 → 安装最新版；已安装 → 更新 / 卸载）。
                dsh 未就绪时查不到装没装，显示「—」（见 versionLabel）—— 那不是「未安装」。 -->
           <button
-            class="relative font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50 text-ink dark:text-white"
+            class="relative min-w-0 text-left font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50 text-ink dark:text-white"
+            :title="versionLabel('market')"
             @click="openDialog('market')"
           >
-            {{ versionLabel('market') }}
+            <span class="block truncate">{{ versionLabel('market') }}</span>
             <span v-if="hasUpdateDot('market')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <CheckUpdateButton :checking="checking.market" :label="t('update_check')" @check="doCheck('market')" />
@@ -422,10 +430,11 @@ onMounted(() => {
         <span class="text-xs text-ink-soft dark:text-[#A6A6AD]">{{ t('update_advanced_ver') }}</span>
         <div class="flex items-center gap-3 min-w-0">
           <button
-            class="relative font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50 text-ink dark:text-white"
+            class="relative min-w-0 text-left font-mono text-sm font-semibold underline underline-offset-4 decoration-ink-soft/50 dark:decoration-[#A6A6AD]/50 text-ink dark:text-white"
+            :title="versionLabel('advanced')"
             @click="openDialog('advanced')"
           >
-            {{ versionLabel('advanced') }}
+            <span class="block truncate">{{ versionLabel('advanced') }}</span>
             <span v-if="hasUpdateDot('advanced')" class="absolute -top-1.5 -right-2.5 h-2.5 w-2.5 rounded-full bg-[#EF4444] shadow"></span>
           </button>
           <CheckUpdateButton :checking="checking.advanced" :label="t('update_check')" @check="doCheck('advanced')" />

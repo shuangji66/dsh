@@ -31,7 +31,13 @@ import {
   type SettingsHostState,
   type WorkspaceHealthRow,
 } from './plugin-api.ts';
-import { isFnosApp, isFnosAppEmbedded } from './env.ts';
+import {
+  FNOS_APP_NATIVE_DIRECTORY_FIX,
+  fnosAppVersion,
+  isFnosApp,
+  isFnosAppAtLeast,
+  isFnosAppEmbedded,
+} from './env.ts';
 import { getSdk, isFnosHost } from './sdk.ts';
 import { authorizeWorkspacePath } from './workspace-menu.ts';
 
@@ -253,10 +259,18 @@ function SettingsPage(): React.ReactElement {
     opacity: disabled ? 0.6 : 1,
   };
 
-  // 三档要分开说：App 内的目录授权**已经**改走网页授权（0.6.1+），桌面的宿主仍然直接
-  // 调原生选择器；把两者混成一句会让诊断页给出与实际行为相反的结论。
+  // 三档要分开说：App 内的目录授权按入口与版本分流（图标直连 + 1.38.0 起走原生
+  // 选择器；控制台内嵌 dsh 没有宿主桥接、更早或版本未知仍走网页授权）；桌面的宿主
+  // 仍然直接调原生选择器。
+  const appVersion = isFnosApp() ? fnosAppVersion() : null;
+  const appEmbedded = isFnosAppEmbedded();
+  const appNativeDirectory = !appEmbedded && isFnosAppAtLeast(FNOS_APP_NATIVE_DIRECTORY_FIX);
   const accessNote = isFnosApp()
-    ? t('当前运行在飞牛 App 内：目录授权打开平台的网页授权页，文件详情/在飞牛中打开仍走宿主桥接。')
+    ? appEmbedded
+      ? t('当前运行在飞牛 App 的控制台内嵌 dsh：没有可用的宿主桥接，目录授权与重新授权都打开平台的网页授权页。')
+      : appNativeDirectory
+        ? t('当前运行在飞牛 App {version}：目录授权直接调用飞牛原生选择器，不再打开网页授权。', { version: appVersion || '?' })
+        : t('当前运行在飞牛 App：目录授权打开平台的网页授权页（原生目录选择器自 1.38.0 起才可用），文件详情/在飞牛中打开仍走宿主桥接。')
     : embedded
       ? t('当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。')
       : gatewayAccess
@@ -511,8 +525,10 @@ function DiagnosticsSection({ settings, hostVersion, hostState, embedded, gatewa
 
   // 运行环境要按「有没有可用宿主桥接」说，而不是「在不在 iframe 里」：
   // 控制台内嵌 dsh 在桌面浏览器与 App 里都没有宿主桥接（见 isFnosHost）。
+  // App 版本一并带出：目录授权走原生还是网页授权就取决于它（1.38.0 分界）。
+  const appVersion = isFnosApp() ? fnosAppVersion() : null;
   const runtime = isFnosApp()
-    ? t('飞牛 App')
+    ? (appVersion ? `${t('飞牛 App')} ${appVersion}` : t('飞牛 App'))
     : embedded ? t('飞牛桌面') : gatewayAccess ? t('飞牛网关') : t('普通浏览器');
   const hostStateText = hostState === 'ok'
     ? t('正常')

@@ -9,10 +9,11 @@
  * Whether the current WebView is the fnOS mobile app.
  *
  * The app UA carries `FNAppType/iOS` (or `.../Android`); desktop browsers and
- * the fnOS desktop iframe do not. The app's native `pickUserFile` bridge is
- * broken for personal folders (it applies shared-folder authorization and
- * fails with E_APP_AUTH), so the directory picker must use the web auth page
- * there.
+ * the fnOS desktop iframe do not. Before 1.38.0 the app's native `pickUserFile`
+ * bridge is broken for personal folders (it applies shared-folder
+ * authorization and fails with E_APP_AUTH), so the directory picker has to use
+ * the web auth page there; newer builds use the native picker (see
+ * {@link fnosAppNeedsWebDirectoryAuth}).
  *
  * This only answers "is this the app WebView". Whether the **host bridge** is
  * usable also depends on the entry: the icon entry is a top-level dsh page and
@@ -23,6 +24,58 @@
 export function isFnosApp(userAgent?: string): boolean {
   const ua = userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent || '' : '');
   return /FNAppType\//.test(ua);
+}
+
+/**
+ * First fnOS App release whose native `pickUserFile` handles personal folders.
+ *
+ * Before it the bridge applies shared-folder authorization and fails with
+ * E_APP_AUTH, so the directory flow goes through the fnOS web authorization
+ * page instead.
+ */
+export const FNOS_APP_NATIVE_DIRECTORY_FIX = '1.38.0';
+
+/**
+ * The fnOS App version from the WebView UA (`FNAppVer/1.37.3`), or null when
+ * the page is not running inside the app or the UA omits the token.
+ */
+export function fnosAppVersion(userAgent?: string): string | null {
+  const ua = userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent || '' : '');
+  const match = /FNAppVer\/(\d+(?:\.\d+)*)/.exec(ua);
+  return match ? match[1] : null;
+}
+
+/**
+ * Whether the fnOS App is at least `version`.
+ *
+ * Numeric dotted compare, so `1.38` equals `1.38.0` and `1.37.10` is older
+ * than `1.38.0`. A missing/unparsable version answers `false`: callers use
+ * this to decide whether a fix is present, and guessing "yes" would run the
+ * broken path.
+ */
+export function isFnosAppAtLeast(version: string, userAgent?: string): boolean {
+  const current = fnosAppVersion(userAgent);
+  if (!current) return false;
+  const left = current.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const right = version.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) {
+    const a = left[i] ?? 0;
+    const b = right[i] ?? 0;
+    if (a !== b) return a > b;
+  }
+  return true;
+}
+
+/**
+ * Whether the directory flow still needs the fnOS web authorization page in
+ * this App build.
+ *
+ * Only answers the App branch: the console-embedded dsh has no host bridge at
+ * any version and always uses the web page (see `usesWebPicker`).
+ */
+export function fnosAppNeedsWebDirectoryAuth(userAgent?: string): boolean {
+  return isFnosApp(userAgent) && !isFnosAppAtLeast(FNOS_APP_NATIVE_DIRECTORY_FIX, userAgent);
 }
 
 /**

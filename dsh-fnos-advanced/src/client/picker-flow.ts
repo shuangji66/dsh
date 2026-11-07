@@ -20,7 +20,7 @@ import {
 import { isAuthCancelled, isPickerCancelled } from './cancel.ts';
 import { LOG_PREFIX, POPUP_FEATURES } from './constants.ts';
 import { closePopup, randomId, writePopupLoading } from './dom.ts';
-import { isConsoleEmbeddedDsh, isFnosApp } from './env.ts';
+import { fnosAppNeedsWebDirectoryAuth, isConsoleEmbeddedDsh, isFnosApp } from './env.ts';
 import type { PickFlow } from './flow.ts';
 import { t, translateError } from './i18n.ts';
 import { pickerParams } from './picker.ts';
@@ -46,12 +46,15 @@ interface DirectPickResult {
  * - The console's embedded dsh (dsh inside the console page's iframe) has no
  *   usable host bridge at all, so
  *   both file and directory picks are browser-like — even inside the fnOS App.
- * - The fnOS App icon entry (direct dsh) keeps the native picker for files;
- *   only the directory flow is switched, because the app's native pickUserFile
- *   applies shared-folder authorization and fails for personal folders.
+ * - The fnOS App icon entry (direct dsh) keeps the native picker for files.
+ *   The directory flow used to be switched too, because the app's native
+ *   pickUserFile applied shared-folder authorization and failed for personal
+ *   folders; 1.38.0 fixes that, so only older/unknown app builds keep the
+ *   workaround (see `fnosAppNeedsWebDirectoryAuth`).
  */
 function usesWebPicker(flow: PickFlow): boolean {
-  return isConsoleEmbeddedDsh() || (isFnosApp() && flow.directory === true);
+  if (isConsoleEmbeddedDsh()) return true;
+  return flow.directory === true && fnosAppNeedsWebDirectoryAuth();
 }
 
 /**
@@ -151,10 +154,11 @@ export async function finishPick(flow: PickFlow, paths: string[]): Promise<void>
 
 /**
  * In fnOS desktop the official SDK can open the native picker directly through
- * the host bridge. The console's embedded dsh has no usable bridge, and the
- * fnOS App's pickUserFile bridge applies shared-folder authorization (fails
- * for personal folders), so those flows use the web authorization page. Other
- * bridge features (file details / open / re-authorize) are unaffected.
+ * the host bridge. The console's embedded dsh has no usable bridge; before
+ * 1.38.0 the fnOS App's pickUserFile bridge also applies shared-folder
+ * authorization (fails for personal folders), so those flows use the web
+ * authorization page. Other bridge features (file details / open /
+ * re-authorize) are unaffected.
  */
 export async function pickPathsDirect(flow: PickFlow): Promise<DirectPickResult> {
   if (usesWebPicker(flow)) return { handled: false };

@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isConsoleEmbeddedDsh, isConsoleEmbeddedPath, isFnosApp } from '../src/client/env.ts';
+import {
+  FNOS_APP_NATIVE_DIRECTORY_FIX,
+  fnosAppNeedsWebDirectoryAuth,
+  fnosAppVersion,
+  isConsoleEmbeddedDsh,
+  isConsoleEmbeddedPath,
+  isFnosApp,
+  isFnosAppAtLeast,
+} from '../src/client/env.ts';
+
+const appUa = (version: string) => 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) '
+  + 'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 '
+  + `FNOS/1.2.1010 FNAppType/iOS FNAppVer/${version}`;
 
 test('recognizes the fnOS app WebView on iOS and Android', () => {
   assert.equal(isFnosApp(
@@ -17,6 +29,36 @@ test('plain browsers and the fnOS desktop iframe are not the app WebView', () =>
   assert.equal(isFnosApp('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15'), false);
   assert.equal(isFnosApp(''), false);
   assert.equal(isFnosApp('Mozilla/5.0 (iPhone) FNOS/1.2.0800 Mobile/15E148'), false);
+});
+
+test('reads the app version from the WebView UA', () => {
+  assert.equal(fnosAppVersion(appUa('1.37.3')), '1.37.3');
+  assert.equal(fnosAppVersion('Mozilla/5.0 (Linux; Android 15) FNAppType/Android FNAppVer/1.38'), '1.38');
+  assert.equal(fnosAppVersion('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'), null);
+  assert.equal(fnosAppVersion('Mozilla/5.0 FNAppType/iOS'), null);
+});
+
+test('compares app versions numerically, not as strings', () => {
+  // 1.37.10 比 1.38.0 老（字符串比较会得出相反结论）。
+  assert.equal(isFnosAppAtLeast('1.38.0', appUa('1.37.10')), false);
+  assert.equal(isFnosAppAtLeast('1.38.0', appUa('1.37.3')), false);
+  assert.equal(isFnosAppAtLeast('1.38.0', appUa('1.38')), true);
+  assert.equal(isFnosAppAtLeast('1.38.0', appUa('1.38.0')), true);
+  assert.equal(isFnosAppAtLeast('1.38.0', appUa('1.38.0.1')), true);
+  assert.equal(isFnosAppAtLeast('1.38.0', appUa('1.39.0')), true);
+  // 没有版本号就不是「够新」：调用方据此决定要不要走修复后的路径。
+  assert.equal(isFnosAppAtLeast('1.38.0', 'Mozilla/5.0 (Macintosh)'), false);
+});
+
+test('keeps the web directory workaround only for app builds before 1.38.0', () => {
+  assert.equal(FNOS_APP_NATIVE_DIRECTORY_FIX, '1.38.0');
+  assert.equal(fnosAppNeedsWebDirectoryAuth(appUa('1.37.3')), true);
+  assert.equal(fnosAppNeedsWebDirectoryAuth(appUa('1.38.0')), false);
+  assert.equal(fnosAppNeedsWebDirectoryAuth(appUa('1.38.1')), false);
+  // 不是 App：走桌面/浏览器分支，与这个兼容开关无关。
+  assert.equal(fnosAppNeedsWebDirectoryAuth('Mozilla/5.0 (Macintosh)'), false);
+  // App 但 UA 里没有版本号：保守走网页授权，绝不尝试可能坏掉的原生选择器。
+  assert.equal(fnosAppNeedsWebDirectoryAuth('Mozilla/5.0 FNAppType/iOS'), true);
 });
 
 test('recognizes the console-embedded dsh by its parent page, not by the mount path', () => {

@@ -345,7 +345,9 @@ var EN = Object.freeze({
   "无法读取宿主设置接口，请确认 dsh 运行正常。": "Could not read the host settings API. Check that dsh is running.",
   "保存失败（HTTP {status}）": "Save failed (HTTP {status})",
   "当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。": "Running inside fnOS desktop/app: the native picker is used; no web authorization popup.",
-  "当前运行在飞牛 App 内：目录授权打开平台的网页授权页，文件详情/在飞牛中打开仍走宿主桥接。": "Running inside the fnOS app: folder authorization opens the platform web page; file details / open-in-fnOS still use the host bridge.",
+  "当前运行在飞牛 App {version}：目录授权直接调用飞牛原生选择器，不再打开网页授权。": "Running inside the fnOS app {version}: folder authorization uses the native picker; no web page is opened.",
+  "当前运行在飞牛 App 的控制台内嵌 dsh：没有可用的宿主桥接，目录授权与重新授权都打开平台的网页授权页。": "Running in the console-embedded dsh inside the fnOS app: no host bridge is available, so folder authorization and re-authorization open the platform web page.",
+  "当前运行在飞牛 App：目录授权打开平台的网页授权页（原生目录选择器自 1.38.0 起才可用），文件详情/在飞牛中打开仍走宿主桥接。": "Running inside the fnOS app: folder authorization opens the platform web page (the native directory picker works from 1.38.0); file details / open-in-fnOS still use the host bridge.",
   "当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。": "Accessed through the fnOS gateway: the same origin is used for authorization; no entry chooser.",
   "当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。": "Not accessed through the fnOS gateway: with both proxy and LAN configured, choosing a folder asks which entry to use.",
   "反代 {proxy} · 内网 {lan}": "Proxy {proxy} · LAN {lan}",
@@ -2529,6 +2531,28 @@ function isFnosApp(userAgent) {
   const ua = userAgent ?? (typeof navigator !== "undefined" ? navigator.userAgent || "" : "");
   return /FNAppType\//.test(ua);
 }
+var FNOS_APP_NATIVE_DIRECTORY_FIX = "1.38.0";
+function fnosAppVersion(userAgent) {
+  const ua = userAgent ?? (typeof navigator !== "undefined" ? navigator.userAgent || "" : "");
+  const match = /FNAppVer\/(\d+(?:\.\d+)*)/.exec(ua);
+  return match ? match[1] : null;
+}
+function isFnosAppAtLeast(version, userAgent) {
+  const current = fnosAppVersion(userAgent);
+  if (!current) return false;
+  const left = current.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const right = version.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let i2 = 0; i2 < length; i2 += 1) {
+    const a2 = left[i2] ?? 0;
+    const b2 = right[i2] ?? 0;
+    if (a2 !== b2) return a2 > b2;
+  }
+  return true;
+}
+function fnosAppNeedsWebDirectoryAuth(userAgent) {
+  return isFnosApp(userAgent) && !isFnosAppAtLeast(FNOS_APP_NATIVE_DIRECTORY_FIX, userAgent);
+}
 function consoleBaseOf(pathname) {
   const match = /^(.*?)\/dsh(?:\/|$)/.exec(pathname);
   return match ? match[1] : null;
@@ -2853,7 +2877,8 @@ function isDuplicateWorkspacePath(candidate, workspacePaths2) {
 
 // src/client/picker-flow.ts
 function usesWebPicker(flow) {
-  return isConsoleEmbeddedDsh() || isFnosApp() && flow.directory === true;
+  if (isConsoleEmbeddedDsh()) return true;
+  return flow.directory === true && fnosAppNeedsWebDirectoryAuth();
 }
 function usesAuthFrame() {
   return isFnosApp();
@@ -3635,7 +3660,7 @@ function injectPickItem(template) {
 var React = __toESM(require("react"), 1);
 
 // src/version.ts
-var VERSION = "0.7.2";
+var VERSION = "0.7.3";
 
 // src/client/native-menu-contract.ts
 var REVEAL_ICON = "dsw-icon-folder-open-outline-regular";
@@ -4278,7 +4303,10 @@ function SettingsPage() {
     cursor: disabled ? "default" : "pointer",
     opacity: disabled ? 0.6 : 1
   };
-  const accessNote = isFnosApp() ? t("当前运行在飞牛 App 内：目录授权打开平台的网页授权页，文件详情/在飞牛中打开仍走宿主桥接。") : embedded ? t("当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。") : gatewayAccess ? t("当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。") : t("当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。");
+  const appVersion = isFnosApp() ? fnosAppVersion() : null;
+  const appEmbedded = isFnosAppEmbedded();
+  const appNativeDirectory = !appEmbedded && isFnosAppAtLeast(FNOS_APP_NATIVE_DIRECTORY_FIX);
+  const accessNote = isFnosApp() ? appEmbedded ? t("当前运行在飞牛 App 的控制台内嵌 dsh：没有可用的宿主桥接，目录授权与重新授权都打开平台的网页授权页。") : appNativeDirectory ? t("当前运行在飞牛 App {version}：目录授权直接调用飞牛原生选择器，不再打开网页授权。", { version: appVersion || "?" }) : t("当前运行在飞牛 App：目录授权打开平台的网页授权页（原生目录选择器自 1.38.0 起才可用），文件详情/在飞牛中打开仍走宿主桥接。") : embedded ? t("当前运行在飞牛桌面/宿主内：会直接调用飞牛目录选择器，不打开网页授权。") : gatewayAccess ? t("当前通过飞牛网关访问：直接使用当前同源地址授权，不会弹出入口选择。") : t("当前不是通过飞牛网关访问：同时配置反代与内网地址后，点击「选择飞牛目录」会让你选择授权入口。");
   return /* @__PURE__ */ React.createElement("div", { style: {
     display: "flex",
     flexDirection: "column",
@@ -4463,7 +4491,8 @@ function DiagnosticsSection({ settings, hostVersion, hostState: hostState2, embe
       if (timer) window.clearTimeout(timer);
     }
   };
-  const runtime = isFnosApp() ? t("飞牛 App") : embedded ? t("飞牛桌面") : gatewayAccess ? t("飞牛网关") : t("普通浏览器");
+  const appVersion = isFnosApp() ? fnosAppVersion() : null;
+  const runtime = isFnosApp() ? appVersion ? `${t("飞牛 App")} ${appVersion}` : t("飞牛 App") : embedded ? t("飞牛桌面") : gatewayAccess ? t("飞牛网关") : t("普通浏览器");
   const hostStateText = hostState2 === "ok" ? t("正常") : hostState2 === "missing" ? t("缺失（需重启 dsh）") : hostState2 === "error" ? t("读取失败") : t("未检测");
   const imageReadText = health && health.features ? health.features.imageRead ? t("开") : t("关") : t("未检测");
   const workspaceHealthTextValue = health && health.features ? health.features.workspaceHealth ? t("可用") : t("不可用") : t("未检测");

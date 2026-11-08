@@ -21,8 +21,9 @@
   并改写 `./assets/...` 前缀。
 - 前端资源路径应基于 `document.baseURI` 解析（见 `frontend/src/serverapi/index.ts`
   的 `runtimeBase()`），不要依赖构建时的相对 `BASE_URL`。
-- `Makefile` 与 `build.sh` 等价；两者都先把前端 `dist` 拷入 `backend/embed`，再
-  `go clean -cache` 后构建 Go 二进制。**Go 缓存默认放项目本地**（`.gocache` / `.gopath`，
+- `Makefile` 与 `build.sh` 走同一条构建流水线（前端 `dist` → `backend/embed` →
+  `go clean -cache` → 构建 Go 二进制）；注意 `build.sh` 的 dev 构建也带 `-s -w`，
+  与 `make` 的非 stripped 默认不同。**Go 缓存默认放项目本地**（`.gocache` / `.gopath`，
   可用环境变量覆盖）。
 - **终端功能可在编译期整体剔除**：`TERMINAL=0 make`（或 `make noterminal`）/
   `TERMINAL=0 ./build.sh`，或 `./build-noterminal.sh`（一次交叉编译 linux/amd64 +
@@ -48,7 +49,7 @@
 - `main.go` — 入口。顺序：解析环境 → 建日志 → 写 PID → 查 socket 占用 → 读配置 →
   校验密码 → 起 Admin socket → **起反代**（早于 dsh：先监听、先鉴权，未就绪给等待页）
   → 起 dsh（非 `HARNESS_AUTOSTART=0`；**先查有没有选中的 dsh 版本**，没有就进
-  `not-installed` 而不是报「启动失败」）→ 换 Cookie → 装 node-pty → 标记就绪 → 等信号退出。
+  `not-installed` 而不是报「启动失败」）→ 换 Cookie → 校正 node-pty → 标记就绪 → 等信号退出。
 - `logging.go` — **唯一的日志出口**：`logInfo` / `logWarn` / `logError` 三个等级
   （`[INFO]` 白 / `[WARN]` 黄 / `[ERROR]` 红），行格式
   `[Harness] <时间> [LEVEL] message`；终端（stdout 是 TTY）额外用 ANSI 着色，日志文件
@@ -58,7 +59,8 @@
   `[dsh]`（dsh 服务）/ `[market]`（插件市场）/ `[advanced]`（增强插件
   dsh-fnos-advanced），见 `updateLogTag` —— 新增加更新步骤时不要再用通用的
   `[update]`，否则升级日志又会混在一起。
-- `boot.go` — 启动阶段状态机（`starting/auth/deps/ready/failed/disabled/not-installed`）
+- `boot.go` — 启动阶段状态机
+  （`starting/auth/deps/ready/failed/disabled/not-installed/stopped/auth-failed`）
   + `proxyState`。反代据此决定等待页显示什么、能否放行；阶段由 `main.go` 推进。
   `not-installed` 表示「本机没有选中的 dsh 版本」，等待页据此提示去概览页下载 + 切换
   （`userActionPhase` 是「需要用户动手」的唯一判定入口，新增阶段时一起改）。
@@ -94,8 +96,9 @@
   `tokenScanner` 从 dsh 日志捕获 `?token=`；`ExchangeToken` 换 `dsh-auth-*` Cookie；
   `SessionSettled`/`markSessionSettled` 记录「本代凭据是否已换取完成」（反代放行门禁）。
 - `proxy.go` — 反向代理，转发时**携带 dsh 会话 Cookie**；`ServeHTTP` 里顺序是
-  「剥挂载前缀 → 鉴权路由 → 就绪状态 `/_ready` → 鉴权 → 等待页/转发」，放行判定只在
-  `reverseProxy.state()` 一处；等待页（`waitingPageHTML`）轮询 `/_ready` 并自动跳转。
+  「剥挂载前缀 → 鉴权路由 → WebSocket → 计算状态 → 登录鉴权 → 账号回调 →
+  `/_ready` → 等待页/转发」，放行判定只在 `reverseProxy.state()` 一处；
+  等待页（`waitingPageHTML`）轮询 `/_ready` 并自动跳转。
   反代有**两种挂载**：TCP `proxyPort`（配置项，默认 `3079`）是根挂载（历史行为）；
   控制台 admin socket 上的 `<AdminBaseURL>/dsh`（默认 `/app/Harness/dsh`）是子路径挂载
   （`AdminMux.dshUI`）——平台网关只看到控制台这一个入口前缀
@@ -210,8 +213,8 @@
      本身也只列最近这些版本）。`Lookup` 的 `loaded` 标志才是「命中不了就是没有」的依据
      （只按 map 命中判会把未知版本反复重查），拉取失败**不置 loaded、也不写缓存**，所以重试
      仍能拿到内容。
-  2. **受管插件**（`market.go` 的 `refreshPluginStatus`，市场与增强插件同一套）：与 harness
-     **完全同一套** —— 只取「要装的那一版」（镜像源上的最新版）的正文，按 tag
+  2. **受管插件**（`market.go` 的 `refreshPluginStatus`，市场与增强插件同一套）：
+     只取「要装的那一版」（镜像源上的最新版）的正文，按 tag
      `v<版本>` / `dsh-fnos-advanced-v<版本>`（`marketReleaseTag` / `advancedReleaseTag`）
      **单次请求**，写进 `UpdateStatus.ReleaseNotes` 随状态一起推送；**没有索引、没有单独的
      接口、也没有「点版本号才显示」**（前端把它内联在更新弹窗里）。
@@ -221,9 +224,10 @@
   混成一句会让用户白等或白点。dsh 的正文是**中英双语**（`<h3 id="cn-…">` / `<h3 id="en-…">`
   两段），`splitBilingualNotes` 按**锚点 id** 切分（不按标题文字：那是会变的展示文本），
   英文段落缺失时留空、由前端按界面语言回退中文；dsh 正文统一用 `stripHTMLToText` 压成纯文本
-  （前端 `whitespace-pre-wrap` 直出，不解析 HTML），而 harness / 市场那份是**原样 Markdown**
+  （前端 `whitespace-pre-wrap` 直出，不解析 HTML），而受管插件那份是**原样 Markdown**
   （前端 `MarkdownText` 渲染）。回归测试见 `backend/release_notes_test.go`。
-- `install.go` — 自动安装并 patch `node-pty`（等待 `$HOME/.dsh/profiles/web` 目录）。
+- `install.go` — 固定 `node-pty` 版本并清理旧 patch（等待 pnpm 与
+  `$HOME/.dsh/profiles/web` 就绪；只有发现旧 patch 时才 `pnpm install`）。
 - `account.go` — **DeepSeek 官方账号：登录/退出都在控制台侧完成**。平台只认 loopback 回调
   （见「常见的坑」），dsh 自带入口在本部署不可用，所以控制台自己跑：
   `auth_init`（自持 PKCE+state）→ 浏览器授权 → 回收 code（loopback 来源自动落到
@@ -237,7 +241,7 @@
   **写入后与退出登录（删记录）后都必须轮询等它认账**（`accountWaitDshState` /
   `accountVerifyStored` / `accountWaitSignedOut`，5s / 250ms），否则登录会被误判成失败
   并回滚、退出登录会让界面停在「已登录」；前端的退出/切换/移除都再用一次短轮询确认快照
-  （`confirmSnapshot`，最多 5×400ms），不等用户手动刷新。
+  （`waitFor`，最多 5×400ms），不等用户手动刷新。
   回调路径同时挂在 admin 线（`buildHandler`）与反代线
   （`reverseProxy.account`，放在就绪门禁之前）—— **路径必须是 `/oauth/callback`**（平台
   在授权那一步只认它，见「常见的坑」），且反代线自留它会遮蔽 dsh 自己的账号回调路由
@@ -316,7 +320,8 @@
   `useWideLayout` 平板档）与 `composables/useKeypadPage.ts`（模块级共享的当前页）。
 - i18n（`useI18n.ts`）只存 localStorage，不随设置持久化到后端。
 - **弹窗统一结构**：右上角关闭一律用 `components/DialogCloseButton.vue`（内部是
-  `.g-dialog-close`，绝对定位 `right-3/top-3` 的 X 图标），标题用 `.g-dialog-title`
+  `.g-dialog-close`，绝对定位 `right-3/top-6` 的 X 图标；`QuickCmdsDialog` 因标题栏结构
+  特殊传 `top-3`，其余弹窗不要覆盖），标题用 `.g-dialog-title`
   （自带 `pr-11` 给 X 让位），底部操作行用 `.g-dialog-actions`；弹窗里的动作按钮一律
   「带边框 + 不填充底色 + 同档字号」—— 普通操作用 `g-btn-secondary`、危险操作用
   `g-btn-danger`、警告用 `g-btn-warning`，**不要在弹窗里用 `g-btn-primary`**（填充色）或
@@ -471,7 +476,7 @@
      npm 包（`server.go`），受管插件由 `dsh plugin add`（`market.go`）。旧版本的
      `server-*` 压缩包与 `.tar.xz` 解码通路已整体删除（`extractTarXz` /
      `github.com/ulikunitz/xz` 都不在了，设备上不再需要 `xz-utils`）；
-     `server-build.yaml` 只是留着未动，**新版控制台不读它**。
+     `server-build.yaml` / `build.yml` 这两个 CI workflow 也已删除。
    - **本地备份恒为 `.tar.gz`**（`tgzDir` / `tgzDirAs`），解压走 `extractTarGz`
      （`extractArchive` 只是唯一入口）。不要把备份改成别的格式。
 12. **dsh 版本安装 / 插件市场安装的三条硬约束（改这两条链路前必读）** ——
@@ -482,7 +487,7 @@
      dsh 安装用 `--fetch-timeout=5000 --fetch-retries=0`（单请求 5 秒拿不到响应即失败）；
      插件市场的**安装/更新**（`add`）用 `--registry=<所选源>`。**`remove` 绝对不能带
      `--registry`** —— pnpm 的 remove 没有这个选项，带上会以 `Unknown option: 'registry'`
-     失败，而错误信息还会误导成「镜像源都失败了」；卸载走 `runMarketPluginCmdOnce`
+     失败，而错误信息还会误导成「镜像源都失败了」；卸载走 `runPluginCmdOnceFor`
      （执行一次、不带 registry）。镜像源的持久化与校验在 `config.go` /
      `handleSaveSettings`（`npmRegistry` 字段），回归测试见 `backend/npm_registry_test.go`。
    - **镜像源一律用英文 slug 标识**（`npmMirror.Slug`：aliyun / tencent / huawei / npmjs，
@@ -501,7 +506,8 @@
    - **版本列表 / 市场本地检测是「缓存优先」，不要顺手加回 TTL 或改成每次都查**：
      `refreshVersions(force)` 与 `detectPluginLocal(force)` 在 `force=false` 时只要有缓存就
      直接返回（不联网、不起子进程）；刷新的入口只有「弹窗里的刷新」「后台自动检测 / 手动检查」
-     与「市场装/卸完成」三处（另加「设置页保存了新镜像源」时会异步重拉一次版本列表）。
+     与「市场装/卸完成」三处（另加「设置页保存了新镜像源」时会异步跑一次完整检测，
+     同时重拉版本列表与受管插件的最新版）。
      这两个查询一个要打一次所选镜像源、一个要起 1~3 秒的
      `dsh plugin list` 子进程，被状态重算/页面打开这些高频场合反复触发过。
      受管插件本地检测有两个**刻意**的例外（见上面 `market.go` 那条）：检测**失败**的结果不写进
@@ -651,9 +657,10 @@
   3. **dsh 侧不需要 baseurl**：0.1.7-alpha.1 起其前端全走文档相对路径（`<base href="./">`），
      浏览器自己拼出 `<prefix>/api`；不要试图去改写 dsh 的产物，也不要为了“兼容子路径”
      给 dsh 传前缀参数。此机制的前提是 **dsh ≥ 0.1.7-alpha.1**，更早版本在子路径下必然 404。
-- **`PROFILE_TEMPLATES.web.bundles` 注入已成历史** —— 旧流程在 `server-build.yaml` 的 CI 里
-  把 `dshmarket` 塞进 server 包的 `dependencies` 与 profile 模板；现在 dsh 是控制台原样装的
-  官方 npm 包，**不再有任何注入**，市场就是一个普通 profile 插件（装它 = `dsh plugin add`）。
+- **`PROFILE_TEMPLATES.web.bundles` 注入已成历史** —— 旧流程在（已删除的）
+  `server-build.yaml` CI 里把 `dshmarket` 塞进 server 包的 `dependencies` 与 profile
+  模板；现在 dsh 是控制台原样装的官方 npm 包，**不再有任何注入**，市场就是一个普通
+  profile 插件（装它 = `dsh plugin add`）。
   别再把「市场由 server 包提供」当成前提 —— 老设备上 profile 里可能还留着 `dshmarket` 在
   `dsh.profile.bundles` 里但没有依赖，那种状态在控制台里就是「未安装」，装上依赖即可。
 - **dsh 0.2.1 把 host 服务 `webRuntime` 改名成 `webStartup`，老第三方插件会「静默挂起」** ——
@@ -720,9 +727,10 @@
        `DshManager.RunPluginCommand`（它顺带清陈旧锁）。曾经市场的 add 直接调
        `runDshCmdTimeout` 绕过它，于是忙守卫对「控制台正在装市场」完全瞎；回归测试见
        `backend/plugin_cmd_entry_test.go`（含一条源码守卫）。
-     - 唯一例外是概览页的「停止/重启 dsh」按钮：那是用户的即时意图，**不挡**；改为在确认
-       弹窗里提示 —— 弹窗打开时查 `GET /api/dsh/busy`（`AdminMux.dshBusySnapshot()`），
-       有插件操作在跑就显示风险提示。这个端点刻意不塞进高频轮询的 `/api/dsh/status`。
+     - 例外是概览页的「停止/重启 dsh」与插件页的「重启生效」按钮：那是用户的即时意图，
+       **不挡**；改为在确认弹窗里提示 —— 弹窗打开时查 `GET /api/dsh/busy`
+       （`AdminMux.dshBusySnapshot()`），有插件操作在跑就显示风险提示。这个端点刻意不塞进
+       高频轮询的 `/api/dsh/status`。
   3. **「dsh 装在哪」只有两个入口**（`server.go` 顶部的两个函数）：`serverRootFor(renv)`
      给出 `${数据目录}/server`，`versionDirFor/versionBinDirFor/versionDshBinFor` 给出某个
      版本的目录与可执行文件。`DshManager`（PATH 注入、启动）与 `ServerManager`
@@ -877,7 +885,7 @@
 make dev              # 开发构建
 make release V=1.0.1  # release 构建 + 版本号
 make clean            # 清理产物
-./build.sh            # 等价脚本
+./build.sh            # 同一流水线的替代脚本（dev 也 strip）
 
 cd frontend && npm run dev      # 仅前端热更（配合后端调试）
 cd frontend && npm run build    # 前端构建
@@ -892,6 +900,7 @@ cd frontend && npm run build    # 前端构建
 - [ ] 涉及 dsh 进程时是否用 `effectivePID()`？
 - [ ] 前端改动是否已重新构建并验证 URL？
 - [ ] 新增 Pinia store / composable 是否遵循现有结构？
-- [ ] 版本号改动是否经 `-ldflags` / `build.sh release V=...` 注入，而非改代码常量？
+- [ ] 版本号改动是否经 `-ldflags` / `make release V=...`（或 `./build.sh release 1.0.1`）
+      注入，而非改代码常量？
 - [ ] 新增的用户可见文案是否走「后端 code + 前端 i18n 两条译文」（见规则 13）？界面是用
       `uiText` / `uiErrText` 渲染的，而不是直接拼 `st.error`？

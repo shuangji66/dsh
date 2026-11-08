@@ -27,7 +27,7 @@
 - **移动端模型 / 推理等级菜单** — 反代注入：修复 iPhone（WKWebView）上「模型 / 推理等级
   菜单能打开、点选项却毫无反应」；随「浏览器兼容模式」开关、只对触屏设备生效，桌面行为不变。
   （见下文「移动端模型 / 推理等级菜单（iOS）」一节）
-- **登录鉴权** — 密码校验（≥8 位、大小写字母/数字/符号组合）、会话 Cookie、TTL
+- **登录鉴权** — 密码校验（≥8 位，含字母/数字/标点）、会话 Cookie、TTL
   有效期，以及访客管理（在线访客列表 / 踢出，SSE 实时推送）。**飞牛网关访问**
   （平台网关注入 `X-Trim-*` 身份头）跳过鉴权，端口访问照旧需要登录
   （见下文「飞牛网关访问」一节）。
@@ -40,9 +40,10 @@
   不处理触摸，控制台自己把手指位移换算成行数），长按终端粘贴剪贴板；软键盘弹起时终端区
   与辅助键条一起贴到键盘上沿，拖终端不会把整页带着上滚。
 - **目录授权** — 授权/查看已共享目录（主目录固定为应用自己的 shares 目录，不可切换）。
-  飞牛 App 内置 WebView 不走宿主 `pickUserFile` 桥接（iOS App 上会按共享授权处理并报
-  鉴权异常），而是把 WebView 当作独立 Web，同窗口打开平台的网页授权页
-  `/app-auth/pick-user-file`，完成后由平台跳回本页。
+  飞牛 App **1.38.0 之前**（或读不到 App 版本）的内置 WebView 不走宿主 `pickUserFile`
+  桥接（会按共享授权处理并报鉴权异常），而是把 WebView 当作独立 Web，同窗口打开平台的
+  网页授权页 `/app-auth/pick-user-file`，完成后由平台跳回本页；1.38.0 起官方修复了
+  原生选择器，直接用宿主选择目录。
 - **插件管理** — 列出 / 启用 / 停用 / 卸载 / 重置 dsh web profile 的插件依赖（插件名点击即复制）；
   启停按官方 dsh 的 `dsh.profile.bundles` 选择（停用保留依赖，不写插件市场的
   `.dsh-market/state.json`），只有声明了 `dsh.bundle` 的包才给开关；启用前过官方的兼容性
@@ -79,7 +80,9 @@
   **控制台自身不提供就地自我更新**：升级只走 fpk 安装包（见下文「控制台版本与升级方式」）。
   另有 dsh 数据备份 / 恢复（目录页）：备份在服务端异步执行，弹窗显示进度、可取消，
   关掉弹窗不会终止备份（见下文「dsh 数据备份」一节）。
-- **node-pty 自动安装** — 主进程启动后自动补齐 `node-pty` 预构建文件与 patch。
+- **node-pty 自动校正** — 主进程启动后确保 profile 的 `pnpm-workspace.yaml` 把
+  `node-pty` 固定到 `1.2.0-beta.15`，并清理旧的 patch 产物（只有发现旧 patch 时才
+  `pnpm install` 并重启 dsh）。
 
 ---
 
@@ -100,7 +103,7 @@
 ```
 .
 ├── Makefile                 # make dev / release / clean（前端→embed→Go 单二进制）
-├── build.sh                 # 等价构建脚本
+├── build.sh                 # 同一流水线的构建脚本（dev 也 strip）
 ├── backend/                 # Go 后端
 │   ├── main.go              # 入口：runtime env、日志、启动反代、启动 dsh、优雅退出
 │   ├── boot.go              # 启动阶段状态机（等待页文案 / 反代放行门禁的输入）
@@ -111,13 +114,13 @@
 │   ├── dsh.go               # DshManager：dsh 进程生命周期 / token 交换 / 状态 / 插件
 │   ├── proxy.go             # 反向代理（携带 dsh 会话 Cookie）+ 等待页 / /_ready
 │   ├── terminal.go          # WebSocket 交互式 PTY 终端（会话单挂载点）
-│   ├── update.go            # 更新管理（harness 版本检测、下载通路/续传/校验、数据备份）
+│   ├── update.go            # 更新检测（dsh / 插件市场 / 增强插件）+ dsh 数据备份/恢复
 │   ├── server.go            # dsh 服务多版本：镜像源列表 / npm 安装 / 取消 / 删除 / 切换
 │   ├── market.go            # 受管插件（dshmarket / dsh-fnos-advanced）：检测 / 安装 / 更新 / 卸载
-│   ├── install.go           # node-pty 自动安装
+│   ├── install.go           # node-pty 版本固定与旧 patch 清理
 │   ├── quickcmds.go         # 终端快捷指令持久化 API（命令内容加密落盘 + 旧明文迁移）
 │   ├── dsh_env.go           # 自定义环境变量：校验 / 落盘（变量值加密，dsh-env.json）/ buildEnv 注入
-│   ├── secret.go            # 命令内容加密：AES-256-GCM 信封 + 主密钥（master.key / HARNESS_MASTER_KEY）
+│   ├── secret.go            # 落盘加密：AES-256-GCM 信封 + 主密钥（master.key / HARNESS_MASTER_KEY）
 │   ├── visitors.go          # 访客跟踪 / 踢出 / SSE
 │   ├── sse.go               # Server-Sent Events 推送
 │   └── fnos.go              # fnOS open-gateway 客户端（路径转换等）
@@ -138,14 +141,14 @@
 
 ## 构建
 
-> 前置：Go ≥ 1.26、Node.js ≥ 24。
+> 前置：Go ≥ 1.27、Node.js ≥ 24。
 
 构建会把前端 `dist` 拷入 `backend/embed`，再用 `//go:embed` 把静态资源打进行内嵌进
 Go 二进制，最终生成**单文件自包含**的 `backend/harness`。
 
 ```bash
-# 开发构建（默认，非 stripped）
-make            # 或 ./build.sh
+# 开发构建（make 默认非 stripped）
+make
 
 # Release 构建（strip + 外部链接），可指定版本号
 make release V=1.0.1
@@ -154,7 +157,8 @@ make release V=1.0.1
 make clean
 ```
 
-两种方式等价；`build.sh` 额外内置了 `nodejs` 的 PATH 与版本号参数：
+两者走同一条流水线（前端 `dist` → `embed` → Go 二进制），都内置 node24 的 PATH、都支持
+覆盖版本号。注意 `make` 的 dev 默认不 strip，而 `./build.sh` 的 dev 也带 `-s -w`。
 
 ```bash
 ./build.sh               # dev
@@ -181,13 +185,15 @@ TERMINAL=0 ./build.sh            # build.sh 同样认这个开关
 产物为 `dist/harness-amd64` 与 `dist/harness-arm64`；第一个参数可换输出目录，
 `VERSION=1.0.1` 可覆盖版本号。
 
-GitHub Actions（`.github/workflows/`）提供 CI 构建：
+GitHub Actions（`.github/workflows/`）现在只剩两项：
 
-- `build.yml` — 手动触发，交叉编译 `amd64` / `arm64` 的 harness 二进制。
-- `server-build.yaml` — 每 8 小时自动从 `@deepseek-ai/dsh` 打包 server 并发 Release。
-  **新形态下控制台已不再使用这些包**（dsh 服务改由控制台从 npm 镜像源
-  `npm install`，见「dsh 服务的多版本管理」）；该 workflow 目前保留未动，仅供旧版控制台
-  或人工取用。**新版控制台升级 dsh 不会再碰它。**
+- `frontend-check.yaml` — 前端 push / PR 时跑 typecheck、lint、单测，并分别用默认参数与
+  `VITE_TERMINAL=0` 构建一次（后者断言 xterm 没有进包）。
+- `dsh-fnos-advanced-publish.yaml` — 手动把增强插件发布到 npm。
+
+控制台二进制与 dsh server 包都不再由 CI 构建：旧的 `build.yml` / `server-build.yaml`
+已删除；升级只走 fpk（见「控制台版本与升级方式」），dsh 由控制台从 npm 镜像源安装
+（见「dsh 服务的多版本管理」）。
 
 > 控制台不再下载、也不再生成任何「更新包」发布资产（自我更新已整体移除）。
 >
@@ -196,8 +202,8 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 ### 归档解压：只有 gzip 一条通路
 
 控制台现在只需要解 `.tar.gz`：`dsh-data-*` 数据备份（`extractTarGz`）。tar 遍历、
-路径越界与软链逃逸防护都在 `extractTar` 里（`extractArchive` 保留为唯一入口，
-当前等价于 `extractTarGz`）。
+路径越界与软链逃逸防护都在 `extractTar` 里。恢复路径直接调用 `extractTarGz`；
+`extractArchive` 只是等价包装（当前没有调用者）。
 
 > 旧版本为 dsh server 的 `.tar.xz` 发布资产准备过「外部 `xz` 优先、纯 Go 兜底」两条
 > 解码通路；随着 server 压缩包这条链路整体移除，xz 相关代码与依赖已经删除
@@ -218,7 +224,7 @@ GitHub Actions（`.github/workflows/`）提供 CI 构建：
 | --- | --- | --- |
 | `HARNESS_DATA_DIR` | **统一的后端数据目录**：日志、PID、配置、会话密钥、终端会话镜像与 dsh 数据备份全部在其下派生（见下表）。单独的路径环境变量已移除 —— 要换位置只改这一个 | `$TRIM_PKGVAR`（缺失时退到当前工作目录） |
 | `HARNESS_ADMIN_SOCK` | Admin Unix socket 路径 | `$TRIM_APPDEST/app.sock` |
-| `HARNESS_ADMIN_BASEURL` | 前端资源 baseurl 前缀 | `$TRIM_APPDEST` |
+| `HARNESS_ADMIN_BASEURL` | 前端资源 baseurl 前缀 | `/app/Harness` |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
 | `HARNESS_DSH_DIAG` | 设为 `1`/`true`/`yes` 时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
 | `HARNESS_MASTER_KEY` | 落盘加密的**主密钥**（32 字节 base64 或 hex）：加密 `quickcmds.json` 的命令内容、`dsh-env.json` 的自定义环境变量与 `dsh-accounts.json` 账号库。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
@@ -400,7 +406,7 @@ dsh 的 `loginOrigin()` 与平台一样只认 loopback，于是「点登录不�
 | ② 打开平台授权页并完成授权 | 浏览器（用户点一下） |
 | ③ 回收 `?code=&state=`：loopback 来源会自动落到 `/oauth/callback`；否则把地址栏那条地址粘回控制台 | 控制台（admin 线与反代线共用同一个 handler） |
 | ④ `POST auth_exchange` 换 token（校 state、单次有效、10 分钟过期） | 控制台 |
-| ⑤ 按 dsh 的格式写入 `<dsh home>/.dsh/.credentials.yaml`：`deepseek-account-platform/default` 的 grant + `device` 记录 | 控制台 |
+| ⑤ 按 dsh 的格式写入 `<DSH_HOME>/.credentials.yaml`（未设置时为 `$HOME/.dsh/.credentials.yaml`）：`deepseek-account-platform/default` 的 grant + `device` 记录 | 控制台 |
 | ⑥ 用 dsh 自己的 `account/getState` / `getProfile` / `getBalance` 核验并展示状态 | 控制台 → dsh |
 
 要点：
@@ -548,8 +554,8 @@ popstate 派发到控制台的 window。注意这个长度是**组件挂载时**
 
 ## 浏览器兼容模式（`browserCompat`）
 
-**用途** — 一处开关、一处**只影响触屏 iOS（WebKit）** 的兼容修复，默认**关闭**，在设置页
-「node 堆内存上限」与「启用登录鉴权」之间切换；桌面与 Chromium 内核（Chrome / Edge）开启无副作用：
+**用途** — 一处开关、一处**只影响触屏 iOS（WebKit）** 的兼容修复，默认**关闭**，位于设置页
+「端口与兼容」卡片（dsh / 反代端口之后）；桌面与 Chromium 内核（Chrome / Edge）开启无副作用：
 
 - **iPhone 上模型 / 推理等级菜单点选项没反应** —— WKWebView 在菜单内搬家焦点时
   `focusout` 的 `relatedTarget` 为 null，触发上游守卫误关菜单（见下文
@@ -569,47 +575,21 @@ popstate 派发到控制台的 window。注意这个长度是**组件挂载时**
 harness 改写）无关 —— 那条缓存约束只在反代**改写 bundle 字节**的年代才存在，现在已是历史。
 页面可用 `window.__DSH_MODEL_MENU_FOCUS_GUARD__ === true` 确认守卫已武装。
 
-### 已经移除的两处反代注入
+### 已移除的历史注入（别再期待反代改写 JS）
 
-两处都随 dsh 上游的变化失去目标，留着只会让人误判「兼容模式到底还在补什么」：
+反代曾经还做过两件事，都随 dsh 上游的变化失去了目标，已整体移除：
 
-1. **bundle 里的 V8-only 原生函数格式判断改写**（原「浏览器兼容模式」第 1 项）。dsh 客户端
-   曾用精确字符串比较判断「这是不是本 realm 的原生构造器」：
+1. **改写 bundle 里的 V8-only 原生函数格式判断**。旧版 dsh 客户端用精确字符串比较判断
+   「是不是本 realm 的原生构造器」，非 V8 引擎（Firefox / WebKit）上该比较恒为 `false`，
+   会把普通对象误判成「非本 realm 原生原型」，表现为「载入历史…」一直转圈。上游现已改成
+   引擎无关的比较（两端都取自当前引擎），原锚点在 0.2.x 的客户端产物里零命中，改写已删除。
+2. **会话自愈探针**（旧 `sessionWatchdogInit`）—— 针对旧版 `ClientSessions.followCurrent()`
+   没有重试路径的补偿。新版 dsh 已删除 `current` 字段与 `followCurrent()`，改由视图层
+   `sessions.retain(target, { source: "mainView" })` 打开事件窗口，探针的入口条件不再成立。
 
-   ```js
-   Function.prototype.toString.call(constructor) === `function ${name}() { [native code] }`
-   ```
-
-   非 V8 引擎把原生函数源码格式化为**多行**（实测 Firefox 156 与 WebKit 均为
-   `"function Object() {\n    [native code]\n}"`），该比较恒为 `false` → 普通对象被判为
-   「非本 realm 原生原型」→ `snapshotJsonValue` 返回 `undefined` → 客户端抛
-   `TypeError: Assistant stream raw chunk must be a lossless JSON object`，历史渲染在首条消息
-   前中止；而它是普通 `TypeError` 而非 `RemoteError`，dsh 不会归类为可重试的远端失败，
-   `openState` 永久停在 `"loading"`（必须刷新页面或切换会话才能恢复）。触发条件是
-   「**流式进行中刷新**」：该校验（`expandAssistantStream`）只在处理
-   `assistantStream.activeAttempt.stream` 时执行，已完成的历史不走这条路，所以在 Chromium 上
-   难以复现。
-
-   **上游现在把该判断改成了引擎无关的形式**：
-
-   ```js
-   Function.prototype.toString.call(constructor) === Function.prototype.toString.call(name === "Array" ? Array : Object)
-   ```
-
-   （比较两端都取自当前引擎，格式自然一致；见 `dsh-api-session-controller` /
-   `dsh-experimental-session-inspector` 的 `client.js`）。原来那个字面量锚点在 0.2.x 的**客户端**
-   产物里零命中（0.2.0-rc.2 / 0.2.1-alpha.4 / 0.2.1-alpha.5 实测均无；带该字面量的只剩服务端
-   产物），而这类改写以「锚点未命中即原样返回」为前提，于是长期静默空转 —— 已整体删除。
-   **今后若又在非 V8 浏览器上看到「载入历史…」，不要再指望反代这层改写**，需要重新定位
-   （方向是 dsh 客户端报错与上游产物，而不是网关 / 代理）。
-
-2. **会话自愈探针**（旧 `sessionWatchdogInit`）—— 针对 dsh `ClientSessions.followCurrent()`
-   只在 `current !== watched` 时打开事件窗口、`open()` 失败便无重试路径的缺陷。新版 dsh 已重构
-   该机制：`sessions.list` 快照不再有 `current` 字段、`followCurrent()` 方法已被删除，改由视图层
-   显式 `sessions.retain(target, { source: "mainView" })` 打开窗口 —— 探针的入口条件恒不成立，
-   只剩一个空转定时器，故已移除。
-
-两处的完整来龙去脉见 `backend/proxy.go` 中「转发路径上不再改写 JS 产物」那段说明。
+**今后若又在非 V8 浏览器上看到「载入历史…」，不要再指望反代这层改写**，需要从 dsh
+客户端的报错与上游产物定位（不是网关 / 代理）。来龙去脉见 `backend/proxy.go` 中
+「转发路径上不再改写 JS 产物」那段说明。
 
 ---
 
@@ -669,8 +649,9 @@ const onBlur = (event) => {
 - 只在触屏设备上武装（`navigator.maxTouchPoints` / `ontouchstart`），桌面行为与官方 dsh 完全一致。
 
 生效方式是 **HTML 注入**（不是改写 bundle 字节），HTML 每次刷新都回源，因此**普通刷新即生效**，
-不受 dsh 插件 bundle 的 `immutable` 强缓存影响（这点与开关里第 1 项不同）。页面可用
-`window.__DSH_MODEL_MENU_FOCUS_GUARD__ === true` 确认守卫已武装（开关关闭时该标记不会出现）。
+不受 dsh 插件 bundle 的 `immutable` 强缓存影响。页面可用
+`window.__DSH_MODEL_MENU_FOCUS_GUARD__ === true` 确认守卫已武装：触屏设备上该标记恒等于
+开关状态（开关关闭时为 `false`），非触屏设备不赋值。
 
 ### 真机诊断（默认关闭）
 
@@ -709,7 +690,7 @@ const onBlur = (event) => {
 ## 插件市场（dshmarket）的安装与更新
 
 **形态变了**：过去 dshmarket 是被 CI 写进 dsh server 包 `dependencies` 的「内置 bundle」
-（见 `.github/workflows/server-build.yaml`），控制台做的是「就地把 server 目录里那份
+（那套 `server-build.yaml` 已删除），控制台做的是「就地把 server 目录里那份
 dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm install` 官方包，
 **里面不含任何预置插件市场**，于是市场退化成一个再普通不过的 profile 插件，四个动作
 全部经 dsh 自己的插件命令完成（`backend/market.go`）：
@@ -723,7 +704,7 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
 
 - **安装/更新**的镜像源与 dsh 版本安装完全一致：**只用设置页选中的那一个源**（默认阿里云，
   可选腾讯云 / 华为云 / 官方源），不自动换源，失败就报错并提示去设置页换源。**卸载不涉及 registry**：
-  `remove` 走「执行一次」的通路（`runMarketPluginCmdOnce`），失败就把 dsh/pnpm 的原话
+  `remove` 走「执行一次」的通路（`runPluginCmdOnceFor`），失败就把 dsh/pnpm 的原话
   报出来，不会甩锅给镜像源。
 - **未安装是正常状态**：检测**确实查到了**、只是没装时，概览页版本行显示「未安装」，
   点开弹窗即可**安装最新版本** —— 「未安装 → 装上最新版」这条路径只有控制台能提供
@@ -752,7 +733,8 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
   移动的标签，可能滞后（发了新版忘了挪标签）、可能指向另一条线（稳定线 / 预览线），
   镜像源同步时也可能只更新了版本集合而没更新标签。因此检测与安装都按版本号排序取最高
   （`newestVersion`），安装命令带**精确版本号**（`add dshmarket@<该版本>`，不是 `@latest`）。
-  副产物：某个镜像源还没同步到这一版时，那次尝试会失败并自动换下一个镜像源。
+  副产物：某个镜像源还没同步到这一版时，那次尝试会失败并提示去设置页换源 ——
+  控制台**不会**自动换下一个源。
   （dsh 服务版本行也是同一套语义：红点只看**版本号大小** —— 版本列表里最高的一版比当前
   选中的高就亮，不区分 `dist-tags`；列表里仍标注 latest / alpha / next，但标签不参与判定，
   见 `server.go` 的 `refreshDshStatus`。）
@@ -775,8 +757,8 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
 - 控制台自己的插件命令（插件页、市场弹窗）→ 查 `DshManager.PluginCmdRunning()`。
 
 市场不回答（没装市场 / dsh 已经坏了）时视为「不忙」，所以恢复 dsh 数据这类抢修操作
-不会被挡住。**唯一例外**是概览页的「停止 / 重启 dsh 服务」按钮 —— 那是用户明确的即时
-意图，弹窗打开时查一次 `GET /api/dsh/busy` 并显示风险提示，由用户决定。
+不会被挡住。**例外**是概览页的「停止 / 重启 dsh 服务」与插件页的「重启生效」按钮 ——
+那是用户明确的即时意图，弹窗打开时查一次 `GET /api/dsh/busy` 并显示风险提示，由用户决定。
 
 ## 备份包的留存规则
 
@@ -808,8 +790,8 @@ dshmarket 换成 npm 最新版」。现在 dsh 由控制台从镜像源 `npm ins
   状态 —— 重开弹窗时先拉一次快照再续上轮询，落定即停，不留长期计时器。
 - 取消是**取消**而不是失败：走 `errBackupCancelled` 哨兵错误，只记 INFO、不记 ERROR，
   也不把半成品留在 `backup/` 里（半个包比没有更糟）。
-- 备份要读整个 `~/.dsh`，因此与「恢复数据 / 安装更新 / 回滚」共用一把 `applying` 互斥
-  （双向）：备份进行中恢复被拒，更新进行中备份被拒。
+- 备份要读整个 `~/.dsh`，因此与「恢复数据 / 受管插件的安装卸载」共用一把 `applying`
+  互斥（双向）：备份进行中恢复被拒，插件操作进行中备份被拒。
 - 打包**只有一份实现**：`tgzDirAsProgress`（`tgzDirAs` 是它的 `prog=nil` 包装）。
   进度按块汇报、每块检查一次取消 —— 大文件也能被及时取消。
 
@@ -826,7 +808,7 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 
 | 环节 | 做法 |
 | --- | --- |
-| 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.2.0-rc.1` 之前的所有版本**（新版控制台锚定 0.2.0-rc.1 及更新版本；更早的 dsh 前端也不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**「有更新」的红点/「最新版本」取列表里版本号最高的一版**，标签只作展示、不参与判定（`refreshDshStatus`）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」与后台自动检测 / 手动「检查更新」会重拉（见下） |
+| 版本列表 | 镜像源的 packument（`/@deepseek-ai%2fdsh`），**隐藏 `0.2.0-rc.1` 之前的所有版本**（新版控制台锚定 0.2.0-rc.1 及更新版本；更早的 dsh 前端也不走文档相对路径，在控制台的子路径挂载下必然 404），并标注 `dist-tags`（latest / alpha / next…）。**「有更新」的红点/「最新版本」取列表里版本号最高的一版**，标签只作展示、不参与判定（`refreshDshStatus`）。**列表缓存到下一次刷新为止**：打开弹窗、切页面、状态轮询一律吃缓存（不联网），只有弹窗里的「刷新」、后台自动检测 / 手动「检查更新」以及设置页保存新镜像源后（会跑一次完整检测）会重拉（见下） |
 | 镜像源 | **设置页选中的那一个源**（默认阿里云）：阿里云 `registry.npmmirror.com` / 腾讯云 `mirrors.cloud.tencent.com/npm` / 华为云 `repo.huaweicloud.com/repository/npm` / 官方源 `registry.npmjs.org`；**只用所选源，不自动换源** |
 | 失败处理 | `npm install --fetch-timeout=5000 --fetch-retries=0`：任意一次 HTTP 请求 5 秒拿不到响应即失败；同一个源**不重试**，直接报错并提示去设置页切换镜像源 |
 | 安装命令 | `npm install --prefix <版本目录> @deepseek-ai/dsh@<版本> --save-exact --registry=<镜像源>`，用 `PATH` 中 node24 自带的 npm；缓存在 `<数据目录>/npm-cache`（不写用户的 HOME） |
@@ -849,9 +831,10 @@ ${TRIM_PKGVAR}/server/<版本>/node_modules/.bin/dsh
 
 | 触发 | dsh 版本列表 | 市场本地检测 / 最新版 |
 | --- | --- | --- |
-| 打开弹窗 / 切页面 / 状态轮询 / 诊断接口 | 吃缓存（缓存为空时才拉一次） | 吃缓存（缓存为空时才查一次） |
+| 打开弹窗 / 切页面 / 状态轮询 / 诊断接口 | 只读缓存（不联网；为空就显示空列表） | 吃缓存（缓存为空时才查一次） |
 | 弹窗里的「刷新」按钮 | **强制重拉** | —（市场弹窗没有刷新按钮，改由下面的检测刷新） |
 | 后台自动检测（每小时）/ 手动「检查更新」 | **强制重拉** | **强制重查**（本地版本 + 镜像源最新版） |
+| 设置页保存新的 npm 镜像源 | **强制重拉**（异步） | **强制重查**（本地版本 + 新源最新版） |
 | 安装/卸载市场之后 | — | **强制重查**（本机版本确实变了） |
 
 失败时**保留上一份缓存**（旧列表/旧版本号仍然可用），只把错误写进状态与弹窗提示，
@@ -873,7 +856,7 @@ PATH，不能用来解析「当前选中的版本」。
 > 并一路上溯到 `/`，而 fnOS 把 `/vol1` 与 `/vol1/@appshare` 设为 mode 000（仅由 trim_acl
 > 授予穿越），应用读不了这些祖先目录 → `EACCES`。补丁把这段上溯包进 try/catch，遇到
 > `EACCES` / `EPERM` 即停止上溯（不可读的祖先本就无法 fsync）。过去它由 CI 打在预构建包里
-> （`server-build.yaml`），现在 dsh 由控制台自己 `npm install`，因此必须在安装后由控制台
+> （那套 workflow 已删除），现在 dsh 由控制台自己 `npm install`，因此必须在安装后由控制台
 > 补上（`server.go` 的 `patchAttachmentFsync`：幂等、带锚点校验，锚点缺失时只记 WARN
 > 不阻塞安装）。
 
@@ -918,7 +901,7 @@ PATH，不能用来解析「当前选中的版本」。
    DeepSeek Harness 服务就绪」，并按 **1.5 秒**轮询 `GET /_ready`
    （JSON：`{phase, ready, detail}`）——换取凭据、安装 node-pty 等内部阶段不对外展示。
 3. `/_ready` 报告 `ready=true` 时，页面立即 `location.replace` 跳到真正的 dsh 界面
-   （不再靠整页刷新撞时机）；无 JS 客户端仍有 10 秒 `<meta refresh>` 兜底。
+   （不再靠整页刷新撞时机）；无 JS 客户端仍有 10 秒 `Refresh` 响应头兜底。
 
 放行（把请求转发给 dsh）**只有一个判定入口**：`reverseProxy.state()`，三个条件全部满足
 才放行，等待页与 `/_ready` 的返回值都来自同一处，避免“轮询说就绪 → 跳转 → 又是等待页”
@@ -928,7 +911,7 @@ PATH，不能用来解析「当前选中的版本」。
 | --- | --- | --- |
 | 启动流水线已收尾 | 不在 `starting / auth / deps` 阶段（收尾可能重启 dsh，提前放行会让界面随即失效） | `starting` / `auth` / `deps`（页面统一显示「等待服务就绪」） |
 | dsh 端口已监听 | 配置的 `dshPort` 可连（反代的上游） | 进程在 → `starting`；进程不在 → `stopped` |
-| 本代凭据已落定 | `DshManager.SessionSettled()`：本代 dsh 的 `dsh-auth-*` Cookie 已换取（或确认无需凭据） | `auth` |
+| 本代凭据已落定 | `DshManager.SessionSettled()`：本代 dsh 的 `dsh-auth-*` Cookie 确实可用 | 未落定 → `auth`；确认拿不到 → `auth-failed` |
 
 `phase` 取值（`/_ready` 原样返回，便于排查；页面只区分「等待中」与「需要动手」两类）：
 
@@ -938,17 +921,18 @@ PATH，不能用来解析「当前选中的版本」。
 - 需要用户动手（页面停转并给出对应指引）：`stopped`（dsh 未在运行）、`failed`
   （`dsh.Start()` 失败，`detail` 为原因）、`disabled`（`HARNESS_AUTOSTART=0`）、
   `not-installed`（本机没有任何已选中的 dsh 版本，`detail` 给出安装目录与下一步：
-  去概览页下载 + 切换）。
+  去概览页下载 + 切换）、`auth-failed`（端口已通但没拿到可用凭据，后台继续补偿）。
 - 等待超过 **30 秒**才出现“可能需要排查”的黄色提示（旧版固定在 10 秒后就报
   「启动失败」，属误报）。
 
 改动这块时注意：
 
 - 凡是**启动或重启 dsh** 的路径，都必须经 `captureDshSession` 换取凭据（它会调用
-  `markSessionSettled`）。漏掉就不会标记落定，反代会一直停在等待页。
+  `markSessionSettledGen`）。漏掉就不会标记落定，反代会一直停在等待页。
   `DshManager.Start()` 每次都会递增启动代号，使上一代凭据立即失效。
-- 旧版 dsh 不打印 token（`WaitToken` 空等 15 秒超时）时同样算“落定”，最坏多显示
-  15 秒等待页，不会永久卡住；反代随后可以不带 Cookie 转发（既有行为）。
+- `WaitToken` 最多等 **20 秒**。等不到 token 时先探测上一代保留的会话 cookie；仍不可用
+  就标记 `auth-failed` 并启动后台补偿（继续等 token，最长 5 分钟），**不会**把用户
+  放行到没有凭据的 dsh（那只会看到 401）。
 - WebSocket 升级同样有门禁：未登录 → `401`；凭据未落定 → `503`；端口未就绪时保留
   10 秒容忍窗口（dsh 市场一键自重启期间客户端已在界面上，等它回来比立刻断开友好）。
 
@@ -963,20 +947,21 @@ PATH，不能用来解析「当前选中的版本」。
    `dsh web --no-open --port <port>`（除非 `HARNESS_AUTOSTART=0`）。
 2. **凭据交换** — 从 dsh 日志扫描一次性访问 token（`?token=`），用它访问一次
    dsh 地址，从 `Set-Cookie` 换取 `dsh-auth-*` 会话 Cookie，并标记本代凭据已落定
-   （`markSessionSettled`，反代据此放行）。
+   （`markSessionSettledGen`，反代据此放行）。
 3. **放行** — 三条件齐备（流水线收尾 + 端口就绪 + 凭据落定）后，反代携带该 Cookie
    把 dsh 反代到配置的反代端口；等待页轮询到 `ready` 即自动跳转。详见上文
    「启动期间的等待页与放行门禁」。
-4. **node-pty** — 等待 `$HOME/.dsh/profiles/web` 目录生成后安装并 patch node-pty
-   （仍在放行门禁内：此阶段即使端口已通也不放行）。
+4. **node-pty** — 等待 pnpm 与 `$HOME/.dsh/profiles/web` 就绪后校正 node-pty
+   （在 `pnpm-workspace.yaml` 里固定版本、清理旧 patch 产物；只有发现旧 patch 时才
+   `pnpm install` 并重启 dsh。仍在放行门禁内：此阶段即使端口已通也不放行）。
 5. **版本与更新** — 两条链路的形态不同（控制台自身只能换 fpk，见上文
    「控制台版本与升级方式」）：
    - **dsh 服务（多版本）**：从 npm 镜像源 `npm install --prefix <数据目录>/server/<版本>`
      官方包，可同时装多个版本并切换；下载可取消（清安装目录 + npm 缓存），安装成功可删除，
      未安装任何版本时控制台显示「未安装」、反代等待页显示「尚未安装 dsh 服务」。
      详见上文「dsh 服务的多版本管理」。**没有压缩包备份 / 回滚**：旧版本目录留着就是回退。
-   - **插件市场**：`dsh plugin --profile web add dshmarket@<最新版本号>` /
-     `remove dshmarket`（使用设置页选中的镜像源；安装带精确版本号，不用 `@latest` 标签），
+   - **插件市场**：`dsh plugin --profile web add dshmarket@<最新版本号> --registry=<所选源>` /
+     `remove dshmarket`（不带 registry；安装带精确版本号，不用 `@latest` 标签），
      未安装时控制台可装上最新版；安装/卸载成功后重启 dsh 让新 bundle 生效。
      详见上文「插件市场（dshmarket）的安装与更新」。同样没有备份 / 回滚。
 6. **退出** — 收到 `SIGINT/SIGTERM/SIGQUIT` 或 `stopCh` 后停止 dsh、移除 socket。
@@ -986,8 +971,11 @@ PATH，不能用来解析「当前选中的版本」。
 ## 常见问题排查
 
 - **Admin socket 已被占用** — 说明已有实例在运行，主进程会直接退出。
-- **鉴权未启用** — 未设置 `password` 或密码强度校验失败时后端会打印警告，任何人可访问。
-- **反代不带凭据** — 旧版 dsh 或日志未就绪导致未捕获 token 时，反代将不带 Cookie。
+- **鉴权未启用** — 只有未设置 `password`（或关闭鉴权开关）时后端才打印「任何人可访问」的
+  警告；密码强度不合规只会记一条 ERROR，该密码仍用于登录鉴权。
+- **反代停在「无法获取 dsh 访问凭据」** — 首次等待窗口（20 秒）内没拿到可用 token，上一代
+  会话 cookie 也探测不通；控制台会在后台继续重试（最长 5 分钟），等待页停在 `auth-failed`。
+  可重启 dsh 或查看日志；不会再放行到没有凭据的 dsh。
 - **控制台启动期间打开反代地址只看到等待页** — 正常：dsh 还没就绪。页面只显示
   「正在等待 DeepSeek Harness 服务就绪」，就绪后自动跳转（内部阶段不对外展示）；等待
   超过 30 秒会出现“可能需要排查”的提示。若一直停在那里，去控制台看日志与概览页的 dsh
@@ -1026,5 +1014,3 @@ PATH，不能用来解析「当前选中的版本」。
 ## 许可
 
 [Apache-2.0](LICENSE) © 2026 shuangji66
-
-更多设计背景与说明见 [`genesis-DESIGN.md`](genesis-DESIGN.md)。

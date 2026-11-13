@@ -15,7 +15,6 @@ import { icons } from '@/utils/icons'
 //
 // ① 即时保存 —— 改动/增删立刻 store.save() 落盘，不需要点「保存配置」：
 //    · 「代理dsh」开关 —— 重启 dsh 生效（代理是 dsh 启动时下发的环境变量）
-//    · 「浏览器兼容模式」开关 —— 刷新页面生效
 //    · 「自动设置」（堆内存）开关 —— 重启 dsh 生效
 //    · 「启用登录鉴权」开关 —— 立即生效
 //    · 控制台设置（主题/语言）—— 只写浏览器 localStorage，连后端都不过
@@ -211,13 +210,6 @@ const memLimit = computed<number | string>({
   }
 })
 
-// 浏览器兼容模式：即时保存。开关状态由反代注入到 HTML（window.__DSH_BROWSER_COMPAT__），
-// 守卫在页面加载阶段武装，因此提示用户刷新页面即可生效（无需重启 dsh）。
-async function onBrowserCompatToggle() {
-  if (!(await store.save(false))) return
-  toast.show(t('settings_browser_compat_saved'), 'success', 5000)
-}
-
 // 鉴权登录开关：即时保存。开启前先做前端密码强度校验（i18n 提示，失败回滚开关）；
 // 关闭鉴权时不校验密码，允许直接关闭。
 async function onAuthToggle() {
@@ -245,11 +237,11 @@ async function onAuthToggle() {
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="loading" @click="submit()">{{ t('settings_save') }}</button>
     </PageHeader>
 
-    <!-- 五个卡片：端口与兼容 / 运行环境 / 登录鉴权 / 加速设置 / 控制台设置。
+    <!-- 五个卡片：端口 / 运行环境 / 登录鉴权 / 加速设置 / 控制台设置。
          桌面固定两列（2×2：控制台设置卡片在桌面隐藏），窄屏沿用 .g-card-grid
          的自适应列数（手机为单列）。 -->
     <div class="g-card-grid g-card-grid-2 g-fade-in">
-      <!-- ① 端口与兼容：dsh 端口 / 反代监听端口 / 浏览器兼容模式 -->
+      <!-- ① 端口：dsh 端口 / 反代监听端口 -->
       <section class="g-card g-card-hover p-5 flex flex-col">
         <h2 class="font-display text-base font-semibold text-ink dark:text-white pb-3 mb-4 border-b border-line dark:border-[#2A2A32]">
           {{ t('settings_card_port') }}
@@ -284,21 +276,6 @@ async function onAuthToggle() {
               @change="onPendingChange"
             />
             <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ t('settings_proxy_port_hint') }}</p>
-          </div>
-
-          <!-- 浏览器兼容模式（开关）：只修复 iPhone 上模型/推理等级菜单点选项没反应（原 Firefox/Safari 会话历史那项已随 dsh 上游自修而移除） -->
-          <div>
-            <div class="flex items-center justify-between gap-3">
-              <span class="text-sm font-medium text-ink dark:text-[#EDEDF0]">{{ t('settings_browser_compat') }}</span>
-              <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
-                <input type="checkbox" v-model="config.browserCompat" class="sr-only peer" @change="onBrowserCompatToggle">
-                <span class="w-11 h-6 bg-[#E8E8EC] dark:bg-[#2A2A32] rounded-full peer peer-checked:bg-brand transition-colors"></span>
-                <span class="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5"></span>
-              </label>
-            </div>
-            <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">
-              {{ t('settings_browser_compat_hint') }}
-            </p>
           </div>
         </div>
       </section>

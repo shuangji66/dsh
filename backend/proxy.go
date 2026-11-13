@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -217,257 +216,30 @@ const bootstrapScript = `(function () {
     }
   } catch (_e) {}
 
-  // 6. 触屏：模型 / 推理等级菜单不再被「焦点搬家」误关（iOS 上菜单内选项点了没反应的根因）
+  // 6. 触屏模型菜单的失焦守卫**已移除**（dsh 0.2.0-rc.1 起）
   //
-  //    dsh 0.1.7 的模型座位（conversation.input.model，即「模型 · 推理等级」两级菜单）自己
-  //    实现了菜单，并在根节点上挂了 onBlur：
-  //      if (event.relatedTarget instanceof Node && (rootRef.contains(rel) || menuRef.contains(rel))) return;
-  //      close();
-  //    （见 dsh-client-ui-model-selection 的 ModelSelect）。它假定「失焦目标一定是个 Node」
-  //    并且这个 Node 一定落在 root / menu 里 —— 桌面成立：点选项时焦点落到那个选项上，
-  //    relatedTarget 就是它，守卫放行，菜单留着，click 正常派发给选项。
+  //    dsh 的模型座位（conversation.input.model）曾在根节点用 onBlur 关菜单，守卫写成
+  //    if (event.relatedTarget instanceof Node && (root 或 menu 包含它)) return; close()。
+  //    iOS WebKit 在菜单内按钮之间搬家焦点时 relatedTarget 是 null（真机实测），守卫越过
+  //    return 直接 close()，菜单在 mousedown 与 click 之间被卸载 —— 选项的 click 没有目标、
+  //    不发 session/selectModel，表现为「菜单能开、一进二级面板点选项毫无反应」。反代曾因此
+  //    把该菜单内部的 focusout 拦在捕获阶段，并随设置页的「浏览器兼容模式」开关一起武装。
   //
-  //    iOS WebKit 不成立：菜单内按钮之间的焦点搬家，focusout 的 relatedTarget 是 null
-  //    （真机实测：菜单里已聚焦的选项 focusout 事件 relatedTarget === null）。守卫于是越过
-  //    return 直接 close()，菜单在 mousedown 之后、click 之前被卸载 —— 选项的 click 没有
-  //    目标、React 的 onClick 不跑，也就永远不会发出 session/selectModel。现象正是：
-  //    「菜单能开、根面板（模型 / 推理等级 两行）点得动、一进二级面板点选项就毫无反应」，
-  //    而桌面鼠标点击正常（桌面 relatedTarget 是那个选项）。
-  //
-  //    修法：触屏上把「模型座位自己那个菜单内部」的 focusout 在捕获阶段拦掉传播 —— React 的
-  //    委托监听挂在更低的容器上，拦在最外层就让它收不到这次失焦，菜单不会被误关，随后的
-  //    click 正常落到选项上。
-  //
-  //    与设置页的「浏览器兼容模式」（AppConfig.BrowserCompat）共用一个开关：和上面第 1 处
-  //    原生函数判断一样，它只为受影响的引擎补兼容（这里只在触屏 + iOS 类 WebKit 上有作用），
-  //    开关关闭时整段不生效 —— 未开启该开关的 iPhone 用户仍会看到菜单点不动，设置页提示
-  //    里已说明这一点。边界刻意收窄：
-  //      * 只认模型座位（[data-slot="conversation.input.model"]）且菜单确实开着
-  //        （aria-expanded="true"），菜单用触发器的 aria-controls 精确定位（规范属性，
-  //        不依赖 dsh 的样式哈希）；命令 / 权限 / 会话行等其他菜单一律不碰；
-  //      * 只拦 target 在该菜单内的 focusout：编辑面与菜单以外的失焦照旧（点外部关菜单走的是
-  //        mousedown，不受影响）；
-  //      * 只在触屏设备上挂监听，且监听内每次现读「浏览器兼容模式」开关（关闭时直接放行）；
-  //        桌面（无触摸）与未开开关的用户行为与官方 dsh 完全一致。
-  try {
-    var touchPrimaryForMenu = (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in window;
-    if (touchPrimaryForMenu) {
-      document.addEventListener("focusout", function (event) {
-        // 开关在运行时读：注入脚本与开关标记的先后顺序无关（生产里两者同在一个 <head> 注入块，
-        // 开关标记在前；这里再兜一层，测试与手工注入也就不用关心顺序）。
-        if (window.__DSH_BROWSER_COMPAT__ !== true) return;
-        var node = event.target;
-        if (!node || typeof node.closest !== "function") return;
-        var seat = document.querySelector('[data-slot="conversation.input.model"] button[aria-haspopup="menu"]');
-        if (!seat || seat.getAttribute("aria-expanded") !== "true") return;
-        var menu = document.getElementById(seat.getAttribute("aria-controls") || "");
-        if (menu !== null && menu.contains(node)) event.stopPropagation();
-      }, true);
-      window.__DSH_MODEL_MENU_FOCUS_GUARD__ = window.__DSH_BROWSER_COMPAT__ === true;
-    }
-  } catch (_e) {}
+  //    上游现已根修：ModelSelect 的根节点在 onMouseDown 里对落在 button 上的事件
+  //    preventDefault()（WebKit 因此不再于 click 前搬走焦点，也就不会产生 relatedTarget
+  //    为 null 的 focusout）。该修法在 0.2.0-rc.1（控制台的 dshMinVersion）及之后所有版本
+  //    的产物里都在，注入失去目标，连同 AppConfig.BrowserCompat 开关整体移除 —— 真机实测：
+  //    关掉开关后 iPhone 上模型 / 推理等级菜单一切正常。
 
-  // 调试标记：页面加载后可用 window.__DSH_OPEN_IN_APP_BLOCKED__ 确认 open-in-app 屏蔽生效、
-  // window.__DSH_MODEL_MENU_FOCUS_GUARD__ 确认触屏模型菜单的失焦守卫已武装（它随「浏览器兼容模式」开关，开关关闭时该标记不会出现）。
+  // 调试标记：页面加载后可用 window.__DSH_OPEN_IN_APP_BLOCKED__ 确认 open-in-app 屏蔽生效。
   try { window.__DSH_OPEN_IN_APP_BLOCKED__ = true; } catch (_e) {}
 })();`
 
-// dshDiagScript 是**移动端诊断打点**（默认关闭；排查「iPhone 上模型 / 推理等级菜单点了没反应」
-// 这类只在真机出现的问题时用，它本身不修任何东西）。
-//
-// 开关（任一满足即注入，见 dshDiagEnabled）：
-//   - 环境变量 HARNESS_DSH_DIAG=1：进程级开启，适合长时间盯守；
-//   - dsh 页面 URL 带 ?dsh-diag=1：只对这次访问开启（例如手机上用 Safari 打开
-//     https://<网关>/app/Harness/dsh/?dsh-diag=1）。
-//
-// 为什么用「URL 路径打点」而不新开后端接口：反代把 <prefix>/dsh-diag/<事件>/<分片>/<数据>
-// 当作挂载内路径转发给 dsh（dsh 回 404，无副作用），而平台网关 / nginx 会把完整请求行写进
-// access.log（/usr/trim/nginx/logs/access.log），于是不需要任何额外接口就能把一个真机客户端
-// 的现场取回来。解读工具见 .tools/dsh-diag/（README + read-diag.py）。
-//
-// 事件：s=状态快照与 10s 心跳（视口 / 座位 disabled / 座位中心命中谁 / 编辑面是否可编辑 /
-// 菜单矩形 / 滚动位置）；e=命中模型座位或菜单的指针事件；d=菜单打开期间的 mousedown / click
-// 明细（命中链、命中点元素、被按节点是否仍连接）；m=菜单出现/消失（消失时带最近 10 条事件
-// 尾巴——用来判断「谁把菜单关掉的」）；o=菜单 portal 节点被新建/移除；f=焦点变化（含 trigger
-// 与 relatedTarget，iOS 的关键）；n=座位节点是否被替换；x/r=JS 报错与未处理拒绝。
-const dshDiagScript = `// harness 移动端诊断打点（默认关闭，见 backend/proxy.go 的 dshDiagEnabled）：
-// 由注入脚本把「模型座位与菜单」相关的事件以 URL path 形式打回本站
-// （<prefix>/dsh-diag/<事件>/<分片>/<数据>），dsh 回 404、无副作用，
-// 但会落进平台网关 / nginx 的 access.log；解读工具见 .tools/dsh-diag/。
-(function () {
-  var seq = 0;
-  function send(kind, obj) {
-    try {
-      var data = encodeURIComponent(JSON.stringify(obj));
-      if (!data) return;
-      var chunk = 600, n = Math.ceil(data.length / chunk) || 1;
-      for (var i = 0; i < n; i++) {
-        var url = "dsh-diag/" + kind + "/" + (i + 1) + "-" + n + "/" + data.slice(i * chunk, (i + 1) * chunk);
-        try { if (navigator.sendBeacon) navigator.sendBeacon(url); else { var img = new Image(); img.src = url; } } catch (_e) {}
-      }
-      seq++;
-    } catch (_e) {}
-  }
-  function d(el) {
-    if (el === null || el === undefined) return null;
-    if (!(el instanceof Element)) return "?" + String(el).slice(0, 10);
-    var s = el.tagName + "." + String(el.getAttribute("class") || "").slice(0, 26);
-    var role = el.getAttribute("role");
-    return role ? s + "[" + role + "]" : s;
-  }
-  function q(sel) { return document.querySelector(sel); }
-  function seatBtn() { return q('[data-slot="conversation.input.model"] button'); }
-  function menuEl() { return q('[role="menu"]'); }
-  function grpEl() { return q('[class*="_groups"]'); }
-  function rect(el) { if (!el) return null; var r = el.getBoundingClientRect(); return [r.x | 0, r.y | 0, r.width | 0, r.height | 0]; }
-  function trailPush(type, target, extra) {
-    trail.push({ ty: type, tg: d(target), x: extra || null, t: Date.now() % 10000000 });
-    if (trail.length > 16) trail.shift();
-  }
-  var trail = [];
-  function snap(tag) {
-    var b = seatBtn(), m = menuEl(), g = grpEl(), ed = q("[data-composer-input]"), card = q("[data-composer-card]"), frame = q('[class*="_frame"]'), vv = window.visualViewport;
-    var r = b ? b.getBoundingClientRect() : null;
-    var hit = r && r.width > 0 ? document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) : null;
-    return {
-      tag: tag, t: Date.now() % 10000000, ua: navigator.userAgent.slice(-46),
-      iw: window.innerWidth, ih: window.innerHeight,
-      vv: vv ? [Math.round(vv.height), Math.round(vv.scale * 100) / 100, Math.round(vv.offsetTop)] : null,
-      seat: b ? { dis: !!b.disabled, exp: b.getAttribute("aria-expanded"), r: [r.x | 0, r.y | 0, r.width | 0, r.height | 0], txt: (b.innerText || "").replace(/\s+/g, " ").slice(0, 30) } : null,
-      hit: hit ? [d(hit), d(hit.parentElement)] : null,
-      ed: ed ? [ed.getAttribute("contenteditable"), ed.getAttribute("aria-disabled")] : null,
-      menuR: rect(m), grpScroll: g ? [g.scrollTop | 0, g.scrollHeight | 0, g.clientHeight | 0] : null,
-      menus: document.querySelectorAll('[role="menu"]').length,
-      act: d(document.activeElement), card: !!card, sb: frame ? frame.hasAttribute("data-sidebar-collapsed") : null
-    };
-  }
-  function boot() { send("s", snap("boot")); setInterval(function () { send("s", snap("tick")); }, 10000); }
-  if (document.readyState === "complete") setTimeout(boot, 4000);
-  else window.addEventListener("load", function () { setTimeout(boot, 4000); });
-  document.addEventListener("DOMContentLoaded", function () { send("s", snap("dom")); });
-
-  // ---- all pointer/mouse/click traffic while a menu is open (or just closed) ----
-  var lastClose = 0, menuWasOpen = false;
-  document.addEventListener("pointerdown", function (e) { trailPush("pd", e.target, e.pointerType); }, true);
-  document.addEventListener("mousedown", function (e) {
-    var m = menuEl();
-    trailPush("md", e.target, m ? "menuOpen" : "");
-    if (m) send("d", { k: "mousedown", tgt: d(e.target), chain: [d(e.target.parentElement), d(e.target.parentElement && e.target.parentElement.parentElement), d(e.target.parentElement && e.target.parentElement && e.target.parentElement.parentElement)], inMenu: !!(e.target.closest && e.target.closest('[role="menu"]')), inSeat: !!(e.target.closest && e.target.closest('[data-slot="conversation.input.model"]')), act: d(document.activeElement), pd: e.defaultPrevented, at: Date.now() % 10000000 });
-  }, true);
-  document.addEventListener("mouseup", function (e) { trailPush("mu", e.target); }, true);
-  document.addEventListener("pointercancel", function (e) { trailPush("pcancel", e.target); }, true);
-  document.addEventListener("click", function (e) {
-    var m = document.querySelectorAll('[role="menu"]').length > 0 || (Date.now() % 10000000) - lastClose < 600;
-    if (!m) return;
-    var pt = [e.clientX | 0, e.clientY | 0];
-    var at = document.elementFromPoint(e.clientX, e.clientY);
-    trailPush("cl", e.target);
-    send("d", { k: "click", tgt: d(e.target), chain: [d(e.target.parentElement), d(e.target.parentElement && e.target.parentElement.parentElement)], at: d(at), pt: pt, inMenu: !!(e.target.closest && e.target.closest('[role="menu"]')), mdownTargetAlive: pressedTarget ? (pressedTarget.isConnected === true) : null, pressed: d(pressedTarget), pd: e.defaultPrevented, act: d(document.activeElement), menus: document.querySelectorAll('[role="menu"]').length, t: Date.now() % 10000000 });
-    pressedTarget = null;
-  }, true);
-  var pressedTarget = null;
-  document.addEventListener("mousedown", function (e) { pressedTarget = e.target; }, true);
-
-  // ---- any focus change anywhere (trigger focus is the blind spot of v1) ----
-  document.addEventListener("focusin", function (e) { send("f", { z: "doc", ev: "in", tgt: d(e.target), t: Date.now() % 10000000 }); }, true);
-  document.addEventListener("focusout", function (e) { send("f", { z: "doc", ev: "out", tgt: d(e.target), to: d(e.relatedTarget), t: Date.now() % 10000000 }); }, true);
-  // ---- focus of the seat subtree (trigger) and the editor ----
-  function hookFocus() {
-    var seat = q('[data-slot="conversation.input.model"]');
-    if (seat && !seat.__fhook) {
-      seat.__fhook = 1;
-      seat.addEventListener("focusin", function (e) { send("f", { el: "seat", ev: "in", tgt: d(e.target), t: Date.now() % 10000000 }); }, true);
-      seat.addEventListener("focusout", function (e) { send("f", { el: "seat", ev: "out", to: d(e.relatedTarget), t: Date.now() % 10000000 }); }, true);
-    }
-    var ed = q("[data-composer-input]");
-    if (ed && !ed.__fhook) {
-      ed.__fhook = 1;
-      ed.addEventListener("focusin", function () { send("f", { el: "ed", ev: "in", t: Date.now() % 10000000 }); }, true);
-      ed.addEventListener("focusout", function (e) { send("f", { el: "ed", ev: "out", to: d(e.relatedTarget), t: Date.now() % 10000000 }); }, true);
-    }
-  }
-  setInterval(hookFocus, 800);
-
-  // ---- menu presence + seat node identity (remount detector) ----
-  var lastMenu = null, lastSeatNode = null;
-  setInterval(function () {
-    var open = document.querySelectorAll('[role="menu"]').length > 0;
-    if (open !== lastMenu) {
-      lastMenu = open;
-      if (!open) lastClose = Date.now() % 10000000;
-      send("m", { open: open, menus: document.querySelectorAll('[role="menu"]').length, menuR: rect(menuEl()), grpScroll: (function () { var g = grpEl(); return g ? [g.scrollTop | 0, g.scrollHeight | 0, g.clientHeight | 0] : null; })(), seatTxt: (function () { var b = seatBtn(); return b ? (b.innerText || "").replace(/\s+/g, " ").slice(0, 30) : null; })(), t: Date.now() % 10000000, exp: (function () { var b = seatBtn(); return b ? b.getAttribute("aria-expanded") : null; })(), act: d(document.activeElement), trail: open ? null : trail.slice(-10) });
-    }
-    var seat = q('[data-slot="conversation.input.model"]');
-    if (seat !== lastSeatNode) { send("n", { ev: lastSeatNode === null ? "seat-first" : "seat-node-changed", prev: !!lastSeatNode, t: Date.now() % 10000000 }); lastSeatNode = seat; }
-  }, 200);
-  // ---- portal node identity: does the menu get (re)created / removed right at the tap? ----
-  function observePortal() {
-    if (typeof MutationObserver === "undefined" || !document.body) return;
-    try {
-      var mo = new MutationObserver(function (muts) {
-      muts.forEach(function (mu) {
-        Array.prototype.forEach.call(mu.addedNodes, function (n) {
-          if (n instanceof Element && n.matches && n.matches('[role="menu"], [class*="_7KE1Ra_menu"]')) {
-            send("o", { ev: "menu-add", cls: d(n), t: Date.now() % 10000000, trail: trail.slice(-6) });
-          }
-        });
-        Array.prototype.forEach.call(mu.removedNodes, function (n) {
-          if (n instanceof Element && n.matches && n.matches('[role="menu"], [class*="_7KE1Ra_menu"]')) {
-            send("o", { ev: "menu-remove", cls: d(n), t: Date.now() % 10000000, trail: trail.slice(-8) });
-          }
-        });
-      });
-    });
-      mo.observe(document.body, { childList: true });
-    } catch (_e) {}
-  }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", observePortal);
-  else observePortal();
-  window.addEventListener("error", function (e) { send("x", { m: String(e.message).slice(0, 80), at: String(e.filename).slice(-24) + ":" + e.lineno }); });
-  window.addEventListener("unhandledrejection", function (e) { send("r", { m: String((e.reason && (e.reason.message || e.reason)) || "").slice(0, 80) }); });
-})();`
-
-// browserCompatFlagScript 输出浏览器兼容开关的运行时标记。
-//
-// 为什么把开关放在 HTML 而不是直接改写 bundle 字节：
-// dsh 的插件 bundle 响应带 `Cache-Control: public, max-age=31536000, immutable`，
-// 浏览器对普通刷新（F5）会直接命中磁盘缓存、不再回源，若按开关状态改变 bundle
-// 内容，切换后在旧缓存过期前不会生效（实测 fromCache=true）。
-// 而 HTML 文档每次刷新都会回源（实测 fromCache=false），因此让 bundle 内容保持
-// 与开关无关的恒定形态（缓存安全），把开关状态放在 HTML 里注入为全局标记，
-// 即可做到“切换开关 → 普通刷新 → 立即生效”。
-func browserCompatFlagScript(enabled bool) string {
-	v := "false"
-	if enabled {
-		v = "true"
-	}
-	return "<script>window.__DSH_BROWSER_COMPAT__=" + v + ";</script>"
-}
-
-// dshDiagEnabled 判断这次要不要给 dsh 页面注入移动端诊断打点（默认关闭）：
-// 环境变量 HARNESS_DSH_DIAG（进程级）或页面 URL 的 ?dsh-diag=1（访问级），任一满足即可。
-// 环境变量只认 1/true/yes（大小写与空白容错，语义与 auth.go 的 truthyHeader 一致）：
-// 按习惯写 HARNESS_DSH_DIAG=0 的意图是关闭，旧的「非空即开」会反着来 —— 打开打点、
-// 把界面操作细节写进平台 nginx 的 access.log（见 AGENTS.md 的真机诊断打点一节）。
-// 每次现读环境变量（不缓存），便于测试直接 t.Setenv、运行时改环境也无需重启。
-func dshDiagEnabled(r *http.Request) bool {
-	if truthyHeader(os.Getenv("HARNESS_DSH_DIAG")) {
-		return true
-	}
-	if r == nil || r.URL == nil {
-		return false
-	}
-	v := r.URL.Query().Get("dsh-diag")
-	return v == "1" || v == "true"
-}
-
-func injectIntoHTML(body []byte, diag bool) []byte {
+// injectIntoHTML 把引导脚本注入 dsh 的 index 文档（只改写 HTML，不改写任何 JS 产物；
+// 来龙去脉见下方「转发路径上不再改写 JS 产物」那段说明）。
+func injectIntoHTML(body []byte) []byte {
 	inject := "<style>[data-slot=\"settings.action\"] { display:none !important; }</style>" +
-		browserCompatFlagScript(GetConfig().BrowserCompat) +
 		"<script>" + bootstrapScript + "</script>"
-	if diag {
-		inject += "<script>" + dshDiagScript + "</script>"
-	}
 	s := string(body)
 	idx := strings.Index(strings.ToLower(s), "<head")
 	var pos int
@@ -504,9 +276,9 @@ func injectIntoHTML(body []byte, diag bool) []byte {
 // 带该字面量的只剩服务端产物），而改写以「锚点未命中即原样返回」为前提，于是长期静默空转
 // —— 留着只会让人误以为「浏览器兼容模式」还在替某个引擎打补丁。
 //
-// 反代仍然注入 window.__DSH_BROWSER_COMPAT__（见 browserCompatFlagScript）：开关还管着
-// bootstrapScript 第 6 段的 iOS 模型菜单失焦守卫。将来若真要再改写 bundle 字节，先复核
-// 它的缓存语义（bundle 带一年期 immutable，开关状态因此只能放在每次回源的 HTML 里）。
+// 现在反代注入的只剩 open-in-app 屏蔽等与引擎无关的引导脚本（bootstrapScript）—— 没有任何
+// 按引擎分支的兼容改写，也没有开关状态参与。将来若真要再改写 bundle 字节，先复核它的缓存
+// 语义（bundle 带一年期 immutable，开关状态只能放在每次回源的 HTML 里）。
 
 // waitingPageHTML 是反代在「dsh 尚未就绪」时对外提供的等待页。
 //
@@ -1362,7 +1134,7 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 		return
 	}
 
-	// 只有 HTML 需要改写（注入兼容开关标记 + bootstrapScript + 诊断打点），JS 产物一律
+	// 只有 HTML 需要改写（注入 bootstrapScript），JS 产物一律
 	// 原样透传：反代已不再改写 bundle 字节（原因见上面那段说明），为原样写回而把一份
 	// 几百 KB 的 bundle 读进内存只是白付一次拷贝。
 	isHTML := strings.Contains(ct, "text/html")
@@ -1379,7 +1151,7 @@ func (p *reverseProxy) forward(w http.ResponseWriter, r *http.Request, checker *
 			http.Error(w, "Bad upstream body", http.StatusBadGateway)
 			return
 		}
-		body = injectIntoHTML(body, dshDiagEnabled(r))
+		body = injectIntoHTML(body)
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)

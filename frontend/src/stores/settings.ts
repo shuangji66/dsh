@@ -25,8 +25,7 @@ export const useSettingsStore = defineStore('settings', () => {
     // 这里不再预置一个写死的 2048。load() 后即被后端下发的配置覆盖。
     dshMemLimit: 0,
     dshMemAuto: true,
-    dshEnvEnabled: false,
-    browserCompat: false
+    dshEnvEnabled: false
   })
   const runtime = ref<RuntimeInfo | null>(null)
   const status = ref<DshStatus | null>(null)

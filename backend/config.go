@@ -59,24 +59,14 @@ type AppConfig struct {
 	// 曾经存在的 homeDir 配置项与资源页的「设置为主目录」功能已整体移除 —— 目标目录的
 	// 平台权限模型（飞牛共享目录的 ACL / `system.trim_acl` 扩展属性）会让 dsh 的 profile
 	// 文件对应用用户不可读，插件安装直接崩，风险不可控。
-	// BrowserCompat 为浏览器兼容模式开关，默认关闭。
 	//
-	// 现在只管一处引擎兼容修复（只影响触屏 iOS / WebKit，桌面与 Chromium 开启无副作用）：
-	// iPhone（WKWebView）上「模型 / 推理等级菜单能打开、点选项却毫无反应」—— 见 proxy.go
-	// 注入脚本第 6 段：iOS 在菜单内按钮之间搬家焦点时 focusout 的 relatedTarget 为 null，
-	// 而模型座位的 onBlur 守卫只接受 Node，会把菜单在 mousedown 与 click 之间关掉。该段
-	// 注入读同一个开关，且只在触屏设备上武装。
+	// 历史：曾有过 BrowserCompat（「浏览器兼容模式」）开关，为 iPhone 上「模型 / 推理等级
+	// 菜单点选项没反应」注入一段 focusout 守卫。dsh 上游已在 ModelSelect 的根节点用
+	// `onMouseDown` + `preventDefault()` 保住焦点（WebKit 不再在 click 前搬走焦点，也就
+	// 不再产生 relatedTarget 为 null 的 focusout），该注入的目标消失，开关与注入一并移除
+	// —— 来龙去脉见 proxy.go 中「转发路径上不再改写 JS 产物」那段说明。
 	//
-	// 历史：它曾经还管着一处 bundle 字节改写（非 V8 引擎上「会话历史无法加载」，修法是把
-	// 原生函数格式判断里的空白折叠后再比较）。dsh 上游后来把那处判断改成了引擎无关的形式，
-	// 锚点在 0.2.x 的客户端产物中零命中，改写已整体移除 —— 来龙去脉见 proxy.go 中
-	// 「转发路径上不再改写 JS 产物」那段说明。
-	//
-	// 生效时机：开关状态由 HTML 注入（window.__DSH_BROWSER_COMPAT__，见
-	// browserCompatFlagScript），而 HTML 每次刷新都回源，因此「切换开关 → 普通刷新」即可
-	// 生效 —— 不再涉及 dsh 插件 bundle 的一年期 immutable 缓存（那只是当年改写 bundle
-	// 字节才有的约束）。详见 README「浏览器兼容模式」一节。
-	BrowserCompat bool `json:"browserCompat"`
+	// 旧 config.json 里遗留的 browserCompat 是未知字段，json.Unmarshal 会直接忽略。
 }
 
 // RuntimeEnv 描述进程启动时的环境（环境变量来源，含路径与凭据）。

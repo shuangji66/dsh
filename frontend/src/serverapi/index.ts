@@ -74,9 +74,6 @@ export interface AppConfig {
   // 「自定义环境变量」开关（默认关闭）：打开后把 dsh-env.json 里的变量注入 dsh 进程。
   // 变量值加密落盘（见后端 dsh_env.go）；保存配置后仍需重启 dsh 才生效。
   dshEnvEnabled: boolean
-  // 浏览器兼容模式：修正 dsh 客户端只适配 V8 的原生函数格式判断，
-  // 供 Firefox/Zen/Safari 等非 V8 内核正常加载会话历史。默认关闭。
-  browserCompat: boolean
 }
 
 export interface DshStatus {

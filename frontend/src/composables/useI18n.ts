@@ -89,9 +89,6 @@ const zh = {
   settings_dsh_mem_too_low: '堆内存上限过低，请增大分配',
   settings_dsh_mem_auto: '自动设置',
   settings_dsh_mem_auto_hint: '当前自动分配的堆内存上限，如 dsh 内存占用接近上限，建议手动增大上限避免频繁 GC',
-  settings_browser_compat: '浏览器兼容模式',
-  settings_browser_compat_hint: '使用苹果设备（iOS / WebKit）的用户建议开启：修复模型与推理等级菜单点选项没反应的问题。开启后刷新页面即可生效',
-  settings_browser_compat_saved: '已保存。刷新页面即可生效，无需清除浏览器缓存',
   settings_show_password: '显示密码',
   settings_hide_password: '隐藏密码',
   // 设置页标题栏「关于」按钮 + 弹窗（按钮在「保存配置」左侧）
@@ -119,9 +116,9 @@ const zh = {
   about_feature_console: '主题 / 语言',
   about_credits_pre: '感谢 DeepSeek-V4、DeepSeek Harness 与 ',
   about_credits_suf: ' 提供的技术支持',
-  // 设置页卡片标题（五个卡片：加速设置 / 端口与兼容 / 运行环境 / 登录鉴权 / 控制台设置）
+  // 设置页卡片标题（五个卡片：加速设置 / 端口 / 运行环境 / 登录鉴权 / 控制台设置）
   settings_card_proxy: '加速设置',
-  settings_card_port: '端口与兼容',
+  settings_card_port: '端口',
   settings_card_node: '运行环境',
   settings_card_auth: '登录鉴权',
   // 运行环境卡片：自定义环境变量（开关 + 齿轮打开弹窗）
@@ -702,9 +699,6 @@ const en: Record<keyof typeof zh, string> = {
   settings_dsh_mem_too_low: 'Heap limit is too low — increase it',
   settings_dsh_mem_auto: 'Auto',
   settings_dsh_mem_auto_hint: 'Currently allocated automatically. If dsh memory usage approaches this limit, raise it manually to avoid frequent GC',
-  settings_browser_compat: 'Browser compatibility mode',
-  settings_browser_compat_hint: 'Recommended for Apple devices (iOS / WebKit) — fixes the model / reasoning-effort selector not responding to taps. Reload the page after enabling.',
-  settings_browser_compat_saved: 'Saved. Reload the page to apply; clearing the browser cache is no longer needed.',
   settings_show_password: 'Show password',
   settings_hide_password: 'Hide password',
   // About button in the settings page header + its dialog (button sits left of Save)
@@ -732,9 +726,9 @@ const en: Record<keyof typeof zh, string> = {
   about_feature_console: 'Theme / language',
   about_credits_pre: 'Thanks to DeepSeek-V4, DeepSeek Harness and ',
   about_credits_suf: ' for their technical support',
-  // Settings page card titles (acceleration / ports & compatibility / runtime environment / auth / console)
+  // Settings page card titles (acceleration / ports / runtime environment / auth / console)
   settings_card_proxy: 'Acceleration',
-  settings_card_port: 'Ports & compatibility',
+  settings_card_port: 'Ports',
   settings_card_node: 'Runtime environment',
   settings_card_auth: 'Login authentication',
   // Runtime environment card: custom environment variables (toggle + gear dialog)

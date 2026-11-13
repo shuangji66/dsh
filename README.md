@@ -22,11 +22,6 @@
   **控制台启动的第一刻就监听**：dsh 还没起来时不再“无响应”，而是先给登录页、再给
   带阶段的等待页，dsh 完成启动（含换取凭据、安装依赖）后等待页自动跳转。
   （见下文「启动期间的等待页与放行门禁」一节）
-- **浏览器兼容模式** — 可开关的反代注入，用来武装下一条的 iOS 兼容守卫；默认关闭，
-  桌面与 Chromium 开启无副作用。（见下文「浏览器兼容模式」一节）
-- **移动端模型 / 推理等级菜单** — 反代注入：修复 iPhone（WKWebView）上「模型 / 推理等级
-  菜单能打开、点选项却毫无反应」；随「浏览器兼容模式」开关、只对触屏设备生效，桌面行为不变。
-  （见下文「移动端模型 / 推理等级菜单（iOS）」一节）
 - **登录鉴权** — 密码校验（≥8 位，含字母/数字/标点）、会话 Cookie、TTL
   有效期，以及访客管理（在线访客列表 / 踢出，SSE 实时推送）。**飞牛网关访问**
   （平台网关注入 `X-Trim-*` 身份头）跳过鉴权，端口访问照旧需要登录
@@ -226,7 +221,6 @@ GitHub Actions（`.github/workflows/`）现在只剩两项：
 | `HARNESS_ADMIN_SOCK` | Admin Unix socket 路径 | `$TRIM_APPDEST/app.sock` |
 | `HARNESS_ADMIN_BASEURL` | 前端资源 baseurl 前缀 | `/app/Harness` |
 | `HARNESS_AUTOSTART` | 设为 `0` 时不自动启动 dsh | `1` |
-| `HARNESS_DSH_DIAG` | 设为 `1`/`true`/`yes` 时给 dsh 页面注入**移动端诊断打点**（默认关闭，排查真机问题用；也可用页面 URL 的 `?dsh-diag=1` 只对单次访问开启，见「移动端模型 / 推理等级菜单（iOS）」一节） | 空 |
 | `HARNESS_MASTER_KEY` | 落盘加密的**主密钥**（32 字节 base64 或 hex）：加密 `quickcmds.json` 的命令内容、`dsh-env.json` 的自定义环境变量与 `dsh-accounts.json` 账号库。给了就不再读数据目录里的 `master.key`；**解不出来时直接失败**，不会静默回退到文件。想让数据目录的备份/卷拷贝里没有可用密钥，就由启动脚本注入它 | 空（用 `<数据目录>/master.key`） |
 | `DSH_HOME` | dsh 的**数据根**（dsh 自己的解析规则：`$DSH_HOME` > `~/.dsh`；平台启动脚本会注入）。控制台只按它定位凭据文件 `<DSH_HOME>/.credentials.yaml` —— 位置写错会让登录「写入成功但 dsh 不认」；其余 `<HOME>/.dsh/...`（profiles、备份）仍按 `HOME` 拼 | `<HOME>/.dsh` |
 | `PROXY_PORT` | **已废弃**：反代监听端口改为设置页配置项（`config.json` 的 `proxyPort`，默认 `3079`），此环境变量不再生效 | — |
@@ -275,12 +269,13 @@ dsh 进程还会拿到 **`DSH_AGENTS_HOME=$HOME/.agents`**（共享 agent 配置
 
 运行时配置（`config.json`）字段：`dshPort`、`proxyPort`、`proxyEnabled`、
 `proxyAddr`、`npmRegistry`、`authEnabled`、`password`、`authTTLHours`、`dshMemLimit`、
-`dshMemAuto`、`dshEnvEnabled`、`dshVersion`、`browserCompat`。其中 `dshVersion` 是
+`dshMemAuto`、`dshEnvEnabled`、`dshVersion`。其中 `dshVersion` 是
 **当前选中的 dsh 版本**（即 `${TRIM_PKGVAR}/server/` 下的目录名，空 = 未安装），由概览页的
 版本列表写入，设置页不暴露；`npmRegistry` 是设置页「npm 镜像源」的取值（`aliyun` /
 `tencent` / `huawei` / `npmjs`，默认 `aliyun`），dsh 服务与两个受管插件的安装/更新/版本检测
 都只用它。控制台只使用平台通过环境变量（`PATH`）提供的 **node24**，
-不再检测或切换 node 版本（`nodeVersion` 配置项已移除）。
+不再检测或切换 node 版本（`nodeVersion` 配置项已移除）。旧配置里遗留的 `browserCompat`
+（已移除的「浏览器兼容模式」）现在只是一个未知字段，加载时被忽略。
 
 「加速设置」卡片有两项：
 
@@ -552,32 +547,10 @@ popstate 派发到控制台的 window。注意这个长度是**组件挂载时**
 
 ---
 
-## 浏览器兼容模式（`browserCompat`）
+## 反代对 dsh 产物的改写（已全部移除）
 
-**用途** — 一处开关、一处**只影响触屏 iOS（WebKit）** 的兼容修复，默认**关闭**，位于设置页
-「端口与兼容」卡片（dsh / 反代端口之后）；桌面与 Chromium 内核（Chrome / Edge）开启无副作用：
-
-- **iPhone 上模型 / 推理等级菜单点选项没反应** —— WKWebView 在菜单内搬家焦点时
-  `focusout` 的 `relatedTarget` 为 null，触发上游守卫误关菜单（见下文
-  「移动端模型 / 推理等级菜单（iOS）」一节，该注入只在触屏设备上武装）。
-
-它曾经还管着另一项（**Firefox / Zen / Safari 等非 V8 引擎上「会话历史一直显示『载入历史…』」**），
-该修复已随 dsh 上游的变化从控制台移除 —— 原因见本节末尾。
-
-### 生效时机
-
-开关状态不写进任何资源字节，而是由**每次都回源的 HTML** 注入
-`window.__DSH_BROWSER_COMPAT__`（`browserCompatFlagScript`），`bootstrapScript` 的守卫在页面
-加载阶段读它，所以「**切换开关 → 普通刷新**」即可生效。
-
-这与 dsh 插件资源（`/plugins/??…&rev=<dsh 自己的 rev>`，响应带
-`Cache-Control: public, max-age=31536000, immutable` 且无 `ETag`，`rev` 由 dsh 生成、URL 无法被
-harness 改写）无关 —— 那条缓存约束只在反代**改写 bundle 字节**的年代才存在，现在已是历史。
-页面可用 `window.__DSH_MODEL_MENU_FOCUS_GUARD__ === true` 确认守卫已武装。
-
-### 已移除的历史注入（别再期待反代改写 JS）
-
-反代曾经还做过两件事，都随 dsh 上游的变化失去了目标，已整体移除：
+反代**不再改写任何 JS 产物**：HTML 里注入的只剩与引擎无关的引导脚本（open-in-app 屏蔽）。
+历史上那层「按引擎给 dsh 打补丁」的能力已随上游自修全部拆除，别再把它加回来：
 
 1. **改写 bundle 里的 V8-only 原生函数格式判断**。旧版 dsh 客户端用精确字符串比较判断
    「是不是本 realm 的原生构造器」，非 V8 引擎（Firefox / WebKit）上该比较恒为 `false`，
@@ -586,6 +559,11 @@ harness 改写）无关 —— 那条缓存约束只在反代**改写 bundle 字
 2. **会话自愈探针**（旧 `sessionWatchdogInit`）—— 针对旧版 `ClientSessions.followCurrent()`
    没有重试路径的补偿。新版 dsh 已删除 `current` 字段与 `followCurrent()`，改由视图层
    `sessions.retain(target, { source: "mainView" })` 打开事件窗口，探针的入口条件不再成立。
+3. **触屏模型菜单的 `focusout` 守卫** —— 曾随设置页的「浏览器兼容模式」（`browserCompat`）
+   开关武装。上游在 `ModelSelect` 根节点用 `onMouseDown` + `preventDefault()` 保住了焦点
+   （WebKit 不再在 `click` 前搬走焦点，也就没有 `relatedTarget` 为 null 的 `focusout`），
+   守卫的目标消失；该修法在 `0.2.0-rc.1`（控制台的 `dshMinVersion`）及之后所有版本的产物里
+   都在，注入与开关已整体移除 —— 细节见下一节。
 
 **今后若又在非 V8 浏览器上看到「载入历史…」，不要再指望反代这层改写**，需要从 dsh
 客户端的报错与上游产物定位（不是网关 / 代理）。来龙去脉见 `backend/proxy.go` 中
@@ -593,7 +571,10 @@ harness 改写）无关 —— 那条缓存约束只在反代**改写 bundle 字
 
 ---
 
-## 移动端模型 / 推理等级菜单（iOS）
+## 移动端模型 / 推理等级菜单（iOS，0.2.0-rc.1 起已随上游修复）
+
+> **历史记录**：这个缺陷已由 dsh 上游根修，控制台的兼容注入与「浏览器兼容模式」开关已整体
+> 移除（见上一节第 3 条）。本节保留成因与真机排查方法，供将来复现时参考。
 
 **症状** — iPhone（实测：飞牛 App 的 WKWebView，iOS 18.7，网关子路径访问）上点 composer 的
 模型名：**菜单能打开**、菜单根面板的两行（「模型」「推理等级」）**也点得动**，但一进二级面板
@@ -618,11 +599,12 @@ const onBlur = (event) => {
 就是它、且在 `menuRef` 里 → 守卫放行 → 菜单留着 → `click` 派发给选项 → 选择生效。
 
 **iOS WebKit 不成立**：菜单内按钮之间的焦点搬家，`focusout` 的 `relatedTarget` 是 **null**
-（真机打点实测：菜单里已聚焦的选项 `focusout` 事件 `relatedTarget === null`）。守卫于是越过
+（当时用真机打点实测：菜单里已聚焦的选项 `focusout` 事件 `relatedTarget === null`；该打点
+已随缺陷修复删除）。守卫于是越过
 `return` 直接 `close()`，**菜单在 `mousedown` 之后、`click` 之前被卸载** → 选项的 `click`
 没有目标、React 的 `onClick` 不跑，也就永远不会发出 `session/selectModel`。
 
-真机数据（诊断打点，模型座位内事件）可直接对上：
+真机数据（当时的诊断打点，模型座位内事件）可直接对上：
 
 | 观察 | 数据 |
 | --- | --- |
@@ -635,35 +617,37 @@ const onBlur = (event) => {
 （在菜单内 `mousedown` 时对手上已聚焦的菜单按钮调用 `blur()` —— 程序化 blur 的
 `relatedTarget` 同样是 null），未修复时选项点击 0 次选择、修复后 1 次。
 
-### 修复方式
+### 修复方式（上游根修；控制台不再注入）
 
-`bootstrapScript` 第 6 段（随设置页的**「浏览器兼容模式」**开关 + 触屏判定一起武装）：触屏上把**模型座位自己那个菜单内部**的 `focusout` 在捕获阶段
-拦掉传播——React 的委托监听挂在更低的容器上，拦在最外层就让它收不到这次失焦，菜单不会被
-误关，随后的 `click` 正常落到选项上。边界刻意收窄：
+dsh 上游在 `ModelSelect` 的根节点上补了「保住焦点」这一步（`src/client/ModelSelect.tsx`，
+`0.2.0-rc.1` 起的所有版本都在）：
 
-- 只认模型座位（`[data-slot="conversation.input.model"]`）且菜单确实开着（`aria-expanded="true"`）；
-- 菜单用触发器的 `aria-controls` 定位（规范属性，不依赖 dsh 的样式哈希），命令 / 权限 /
-  会话行等**其他菜单一律不碰**；
-- 只拦 `target` 在该菜单内的 `focusout`：编辑面与菜单以外的失焦照旧（「点菜单外关菜单」走的是
-  `mousedown`，不受影响，实测仍能关闭）；
-- 只在触屏设备上武装（`navigator.maxTouchPoints` / `ontouchstart`），桌面行为与官方 dsh 完全一致。
+```tsx
+onMouseDown={(event) => {
+  // WebKit blurs a focused row before click unless the button's mousedown keeps focus.
+  if (event.target instanceof Element && event.target.closest('button') !== null) event.preventDefault()
+}}
+```
 
-生效方式是 **HTML 注入**（不是改写 bundle 字节），HTML 每次刷新都回源，因此**普通刷新即生效**，
-不受 dsh 插件 bundle 的 `immutable` 强缓存影响。页面可用
-`window.__DSH_MODEL_MENU_FOCUS_GUARD__ === true` 确认守卫已武装：触屏设备上该标记恒等于
-开关状态（开关关闭时为 `false`），非触屏设备不赋值。
+`preventDefault()` 让 WebKit 不在 `mousedown` 时搬走焦点 → 菜单内按钮之间不再产生
+`relatedTarget` 为 null 的 `focusout` → `onBlur` 守卫不会被触发，菜单留到 `click` 落地。
 
-### 真机诊断（默认关闭）
+因此控制台那段「触屏上把模型座位菜单内部的 `focusout` 拦在捕获阶段」的注入**已整体移除**，
+连同它的开关（设置页「浏览器兼容模式」/ `AppConfig.BrowserCompat`）与调试标记
+`window.__DSH_MODEL_MENU_FOCUS_GUARD__`。真机实测：关掉开关后 iPhone 上模型 / 推理等级菜单
+一切正常。将来 dsh 若又改回「按焦点关菜单」，按下面的方法临时取现场（真机打点已随本缺陷
+删除），不要默认把这层注入加回来。
 
-这类只在真机上出现的问题（事件被吞、元素在两次事件之间被卸载）靠"看有没有发出请求"是查不出来的。
-反代内置了一套默认关闭的打点：环境变量 `HARNESS_DSH_DIAG=1`（进程级）或页面 URL 带
-`?dsh-diag=1`（访问级，例如手机上打开 `https://<网关>/app/Harness/dsh/?dsh-diag=1`）即注入。
-它把「模型座位与菜单」相关的指针/焦点/菜单出现消失/座位节点替换/JS 报错，以
-`<prefix>/dsh-diag/<事件>/<分片>/<数据>` 的 **URL path** 形式打回本站（dsh 回 404，无副作用），
-落进平台网关 / nginx 的 `access.log`——不需要新开后端接口就能取回一个真机客户端的现场。
-解读方式与判定要点见 `AGENTS.md`「真机诊断打点」一节。
+### 真机诊断（打点已移除）
 
-### 与移动端页面插件的关系
+这类只在真机上出现的问题（事件被吞、元素在两次事件之间被卸载、focus 语义与桌面不同）靠「看
+有没有发出请求」是查不出来的 —— 当时为此在反代里内建过一套默认关闭的诊断打点
+（`HARNESS_DSH_DIAG` / `?dsh-diag=1`，把模型座位与菜单的现场以 URL path 形式打回
+`/usr/trim/nginx/logs/access.log`）。**它只为这个缺陷而建，已随缺陷修复一并删除**；将来若又
+遇到真机独有的「点了没反应」，按需临时加回同样的手法（URL path 打点 + access.log 还原），不要
+常驻在注入脚本里。
+
+### 与移动端页面插件的关系（当时的排查记录）
 
 **不是** `dsh-web-mobile-fix` / `dsh-web-mobile` 之类插件造成的，证据：
 
@@ -996,9 +980,9 @@ PATH，不能用来解析「当前选中的版本」。
 - **CPU/内存读不到** — dsh 装插件自重启后 PID 变化，后端会自动在 `/proc` 中重新发现。
 - **Firefox / Safari 打开会话只有「载入历史…」（且一直显示「深度求索中…」）** —
   dsh 客户端旧版的原生函数格式判断只适配 V8，**上游现已改成引擎无关的比较**，控制台那层
-  bundle 改写也随之移除（见「浏览器兼容模式」一节）。若仍出现，先确认 dsh 版本是否过旧
-  （新版控制台只允许 0.2.0-rc.1 及更新版本），再按 dsh 客户端的报错定位 —— 不要再指望反代的
-  兼容模式。
+  bundle 改写也随之移除（见「反代对 dsh 产物的改写（已全部移除）」一节）。若仍出现，先确认
+  dsh 版本是否过旧（新版控制台只允许 0.2.0-rc.1 及更新版本），再按 dsh 客户端的报错定位 ——
+  反代已经不再改写任何 JS 产物，别指望它。
 - **改动前端（内嵌 dist）或 dsh 插件资源后刷新看不到变化** — 反代注入走 HTML，每次刷新都
   回源，普通刷新即生效；但 dsh 插件资源带一年期 `immutable` 强缓存且无 `ETag`，普通刷新不回源，
   需清除浏览器缓存或强制刷新；必要时重启 dsh 使其 `rev` 变化。

@@ -4,7 +4,9 @@ import { api, type DshVersionEntry, type ServerVersions } from '@/serverapi'
 import { uiErrText, uiText, useI18n } from '@/composables/useI18n'
 import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { useDialogA11y } from '@/composables/useDialogA11y'
+import { useHideAlphaVersions, setHideAlpha } from '@/composables/useHideAlphaVersions'
 import { useReleaseNotes } from '@/composables/useReleaseNotes'
+import { visibleVersions } from '@/utils/versionFilter'
 import DialogCloseButton from '@/components/DialogCloseButton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import GithubIconLink from '@/components/GithubIconLink.vue'
@@ -39,7 +41,7 @@ const { t } = useI18n()
 
 // 版本行 = 镜像源列表 + 本地独有版本（后端已合并、已过滤、已降序；
 // 停止维护的已装旧版排在最后并带 deprecated 标记）。
-const rows = computed<DshVersionEntry[]>(() => props.status?.versions ?? [])
+const allRows = computed<DshVersionEntry[]>(() => props.status?.versions ?? [])
 
 // 列表里版本号最高的一版（后端算好）：停止维护的旧版行只提供「切到它」这一个切换方向，
 // 永远不给「切到本版本」的入口 —— 切回旧版在后端也会被拒绝（见 server.go 的 Switch）。
@@ -47,13 +49,13 @@ const latestVersion = computed(() => props.status?.latest || '')
 
 // 最新版那一行（用来判断它是否已经装在本地）：没装就没有可切换的目标 —— 那时旧版行
 // 不显示切换按钮，用户先到最新版那行点「下载」，装完再切。
-const latestEntry = computed(() => rows.value.find((r) => r.version === latestVersion.value) ?? null)
+const latestEntry = computed(() => allRows.value.find((r) => r.version === latestVersion.value) ?? null)
 
 // 当前正在使用的版本是不是「停止维护的旧版」：是的话，切换确认弹窗要额外说明
 // 「切走后无法再切回」，因为列表里不会再给这一版切换入口。
 const switchingFromDeprecated = computed(() => {
   const cur = props.status?.selected || ''
-  return cur !== '' && rows.value.some((r) => r.version === cur && r.deprecated)
+  return cur !== '' && allRows.value.some((r) => r.version === cur && r.deprecated)
 })
 
 // 切换确认文案：从停止维护的旧版切走时，多一句「不能切回」的说明。
@@ -73,6 +75,21 @@ const installing = computed(() => {
 function isInstalling(version: string): boolean {
   return installing.value && install.value?.version === version
 }
+
+// 「隐藏alpha」是纯浏览器偏好（localStorage，默认显示）。只藏**本地用不着**的 alpha：
+// 已装 / 使用中 / 正在下载的照旧留在列表里，否则用户看不到自己在跑的那一版、
+// 也没法切走或删掉它；列表里版本号最高的那一版（红点判定基准，见后端 refreshDshStatus）
+// 同样保留，否则「有更新」的红点会指向一个被藏起来的行、连下载入口都没有
+// （规则见 utils/versionFilter.ts，有回归测试）。放在 installing 之后：这里要复用它们。
+const hideAlpha = useHideAlphaVersions()
+const hideAlphaModel = computed({
+  get: () => hideAlpha.value,
+  set: (v: boolean) => setHideAlpha(v),
+})
+
+const rows = computed<DshVersionEntry[]>(() =>
+  visibleVersions(allRows.value, hideAlpha.value, [installing.value ? install.value?.version ?? '' : '', latestVersion.value]),
+)
 
 // 阶段文案：把后端阶段翻成用户看得懂的一句话。
 const installPhaseText = computed(() => {
@@ -180,9 +197,22 @@ const {
           </div>
           <p class="text-xs text-ink-faint dark:text-[#8A8A92] mb-4 leading-relaxed">{{ t('dsh_ver_dialog_desc') }}</p>
 
-          <!-- 版本列表来源（镜像源）与刷新入口 -->
+          <!-- 左：隐藏 alpha（标签在前、圆形勾选在后；纯浏览器偏好，默认显示）；右：刷新入口。
+               版本列表来源那句已去掉 —— 镜像源在设置页可见。 -->
           <div class="flex items-center justify-between gap-3 mb-3">
-            <span class="text-xs text-ink-faint dark:text-[#8A8A92]">{{ t('dsh_ver_source') }}</span>
+            <label
+              class="flex items-center gap-1.5 cursor-pointer select-none text-xs text-ink-faint dark:text-[#8A8A92]"
+              :title="t('dsh_ver_hide_alpha_hint')"
+            >
+              <input v-model="hideAlphaModel" type="checkbox" class="sr-only peer">
+              <span>{{ t('dsh_ver_hide_alpha') }}</span>
+              <span
+                class="w-4 h-4 shrink-0 rounded-full border border-line dark:border-[#3A3A44] flex items-center justify-center text-transparent peer-checked:bg-brand peer-checked:border-brand peer-checked:text-white transition-colors"
+                aria-hidden="true"
+              >
+                <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+              </span>
+            </label>
             <button
               class="g-btn-secondary h-7 px-2.5 text-xs"
               :disabled="loading || installing"
@@ -200,7 +230,7 @@ const {
             {{ t('dsh_ver_loading') }}
           </div>
           <div v-else-if="rows.length === 0" class="py-6 text-center text-sm text-ink-faint dark:text-[#8A8A92]">
-            {{ t('dsh_ver_empty') }}
+            {{ allRows.length > 0 ? t('dsh_ver_hide_alpha_empty') : t('dsh_ver_empty') }}
           </div>
 
           <div v-else class="border border-[#E8E8EC] dark:border-[#2A2A32] rounded-lg divide-y divide-[#E8E8EC] dark:divide-[#2A2A32] max-h-80 overflow-auto">

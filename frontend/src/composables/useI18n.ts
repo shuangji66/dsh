@@ -61,7 +61,7 @@ const zh = {
   settings_proxy_addr: '代理地址',
   settings_proxy_hint: '仅支持 http 代理',
   settings_npm_registry: 'npm 镜像源',
-  settings_npm_registry_hint: 'dsh 服务与插件（市场/增强插件）的安装、更新和版本检测都使用该源；只用所选源，失败可在切换后重试',
+  settings_npm_registry_hint: 'dsh 服务与插件的安装、更新和版本检测都使用该源',
   settings_npm_registry_aliyun: '阿里云',
   settings_npm_registry_tencent: '腾讯云',
   settings_npm_registry_huawei: '华为云',
@@ -155,7 +155,7 @@ const zh = {
   console_language: '语言',
   // 移动端概览页「DeepSeek 账号」卡片的显隐（只存本浏览器，不影响登录状态）
   console_show_account_card: '显示 DeepSeek 账号卡片',
-  console_show_account_card_hint: '关闭后仅隐藏移动端概览页的这张卡片，不影响登录状态与账号数据；偏好只保存在本浏览器',
+  console_show_account_card_hint: '关闭后仅隐藏移动端概览页的这张卡片，不影响登录状态与账号数据',
   lang_zh: '中文',
   lang_en: 'English',
   saved: '配置已保存',
@@ -430,8 +430,10 @@ const zh = {
 
   // dsh 服务版本列表（下载 / 删除 / 切换）
   dsh_ver_dialog_title: 'dsh 服务版本',
-  dsh_ver_dialog_desc: '下载任意版本并按需切换。每个版本独立安装在自己的目录里，切换即可换用。',
-  dsh_ver_source: '版本列表来自国内 npm 镜像源',
+  dsh_ver_dialog_desc: '每个版本隔离安装，下载任意版本后切换使用',
+  dsh_ver_hide_alpha: '隐藏alpha',
+  dsh_ver_hide_alpha_hint: '隐藏未安装的 alpha 版本（已安装和正在使用的照旧显示）',
+  dsh_ver_hide_alpha_empty: '当前列表里的版本都是 alpha，已按设置隐藏',
   dsh_ver_refresh: '刷新',
   dsh_ver_refreshing: '刷新中…',
   dsh_ver_loading: '正在获取版本列表…',
@@ -669,7 +671,7 @@ const en: Record<keyof typeof zh, string> = {
   settings_proxy_addr: 'Proxy address',
   settings_proxy_hint: 'http proxies only',
   settings_npm_registry: 'npm registry',
-  settings_npm_registry_hint: 'Used for installing/updating dsh and plugins (market / advanced) and checking their versions. Only the selected registry is used; switch and retry if it fails',
+  settings_npm_registry_hint: 'Used for installing/updating dsh and plugins and checking their versions',
   settings_npm_registry_aliyun: 'Aliyun',
   settings_npm_registry_tencent: 'Tencent Cloud',
   settings_npm_registry_huawei: 'Huawei Cloud',
@@ -762,7 +764,7 @@ const en: Record<keyof typeof zh, string> = {
   console_language: 'Language',
   // Show/hide the mobile overview's DeepSeek account card (this browser only; sign-in state unaffected)
   console_show_account_card: 'Show DeepSeek account card',
-  console_show_account_card_hint: 'Hides this card on the mobile overview only — sign-in state and account data are unaffected; saved in this browser',
+  console_show_account_card_hint: 'Hides this card on the mobile overview only — sign-in state and account data are unaffected',
   lang_zh: '中文',
   lang_en: 'English',
   saved: 'Settings saved',
@@ -1031,8 +1033,10 @@ const en: Record<keyof typeof zh, string> = {
 
   // dsh service versions (download / delete / switch)
   dsh_ver_dialog_title: 'dsh service versions',
-  dsh_ver_dialog_desc: 'Download any version and switch whenever you like. Each version is installed in its own directory and switching swaps it in.',
-  dsh_ver_source: 'Version list comes from the Chinese npm mirrors',
+  dsh_ver_dialog_desc: 'Each version is installed in isolation — download any version and switch to it',
+  dsh_ver_hide_alpha: 'Hide alpha',
+  dsh_ver_hide_alpha_hint: 'Hide alpha versions you have not installed (installed and in-use ones stay visible)',
+  dsh_ver_hide_alpha_empty: 'Every version in this list is alpha; hidden by your setting',
   dsh_ver_refresh: 'Refresh',
   dsh_ver_refreshing: 'Refreshing…',
   dsh_ver_loading: 'Loading version list…',

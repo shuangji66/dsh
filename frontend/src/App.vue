@@ -240,23 +240,30 @@ onMounted(() => {
     </aside>
 
     <!-- ===== 移动端：底部导航栏 (小于 md) =====
-         高度 = 3.5rem 内容高度 + 底部安全区（--bottom-nav-h，与 main / 终端页一致）：
-         box-sizing: border-box 下 padding-bottom 由安全区吃掉，图标仍居中在安全区之上；
+         每项是「图标 + 下方标签」的竖排：标签固定 12px（text-xs），24px 图标 + 2px 间隙
+         + 16px 行高 = 42px，48px 按钮内仍有余量 —— 加标签**不需要**抬高底栏，也就不会
+         牵动 main / 终端页那条 `100dvh - var(--bottom-nav-h)` 算式。
+         box-sizing: border-box 下 padding-bottom 由安全区吃掉，内容仍居中在安全区之上；
          左右安全区（横屏刘海）一并留出，避免图标贴边或被遮挡。
-         **窄屏间距要收紧**：6 个 48px 按钮 + 5×18px gap + 左右 16px 内边距在 375px 屏上
-         会把每个按钮压到 ~42px（320px 屏只剩 33px），低于 44px 的触控建议值。窄屏用
-         gap-2 + 8px 内边距，44px 才放得下；sm 以上（本栏仍显示到 768px）恢复原间距。
+         **宽度用 flex-auto**（不再固定 w-12）：按钮先按内容占位、余量再均分，12px 的
+         英文标签才挤得进 —— 六项文字合计 292px，加 5×4px gap 与左右各 4px 内边距正好
+         320px，等于最窄的机型；375px 上每项还能再分到 ~9px 的余量。标签上的
+         `tracking-tight`（0.025em）就是用字距换这几十像素的，字号仍是 12px。
+         万一某平台字体更宽，`min-w-0` + `truncate` 让超出的那一项以省略号收尾，全名
+         仍在 `title` / `aria-label` 上。
+         间距 gap-1（sm 以上 18px）：再压到 2px 以内六个标签会连成一串，反而更难读。
          bottom 恒为 0：底栏必须稳稳贴底 —— 拖动页面时地址栏伸缩会让视口高度变化，
          一旦拿视口量当偏移量，底栏就会上下乱窜。键盘弹起时整条底栏由 style.css 的
          html[data-kb] 规则隐去，终端页改为贴合键盘（功能键栏落在键盘顶边）。 -->
     <nav
-      class="mobile-bottom-nav flex md:hidden fixed bottom-0 left-0 right-0 bg-surface dark:bg-[#111115] border-t border-line dark:border-[#2A2A32] items-center justify-center z-10 gap-2 sm:gap-[18px]"
-      style="height: var(--bottom-nav-h); padding-left: calc(env(safe-area-inset-left) + 0.5rem); padding-right: calc(env(safe-area-inset-right) + 0.5rem); padding-bottom: env(safe-area-inset-bottom);">
+      class="mobile-bottom-nav flex md:hidden fixed bottom-0 left-0 right-0 bg-surface dark:bg-[#111115] border-t border-line dark:border-[#2A2A32] items-center justify-center z-10 gap-1 sm:gap-[18px]"
+      style="height: var(--bottom-nav-h); padding-left: calc(env(safe-area-inset-left) + 0.25rem); padding-right: calc(env(safe-area-inset-right) + 0.25rem); padding-bottom: env(safe-area-inset-bottom);">
       <button v-for="item in nav" :key="item.name" @click="navigate(item.name)"
-        class="flex flex-col items-center justify-center w-12 h-12 rounded-lg text-xl transition-all duration-200 active:scale-90 cursor-pointer"
+        class="flex flex-auto min-w-0 h-12 flex-col items-center justify-center gap-0.5 rounded-lg transition-all duration-200 active:scale-90 cursor-pointer"
         :class="current === item.name ? 'text-brand scale-105' : 'text-ink-soft dark:text-[#A6A6AD] hover:bg-black/5 dark:hover:bg-white/5'"
         :title="t(item.labelKey)" :aria-label="t(item.labelKey)">
-        <span class="w-6 h-6 inline-block" v-html="icons[item.icon]"></span>
+        <span class="w-6 h-6 inline-block shrink-0" v-html="icons[item.icon]"></span>
+        <span class="w-full text-center text-xs tracking-tight truncate">{{ t(item.labelKey) }}</span>
       </button>
     </nav>
 

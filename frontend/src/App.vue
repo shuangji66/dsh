@@ -152,9 +152,12 @@ onMounted(() => {
     <!-- ===== 桌面端：左侧边栏 (md 及以上) =====
          浮动圆角面板（与页面留出边距），宽度在 w-16 / w-60 之间过渡折叠。
          折叠动效统一走「图标不动、文字用 max-w + opacity 收起」：
-         直接 v-if 掉文字会让宽度骤变、文字闪现，这里改用可过渡的最大宽度。 -->
+         直接 v-if 掉文字会让宽度骤变、文字闪现，这里改用可过渡的最大宽度。
+         上边距刻意是 16px（mt-4，不是 my-3）：子页面外壳用 `pt-3 sm:pt-4`，
+         桌面端顶栏卡片距视口顶 16px，侧栏只在 md+ 出现、读到的正是 pt-4 ——
+         两边取同一个值，两块卡片的顶边才齐平（12px 会差 4px，肉眼一眼能看出）。 -->
     <aside
-      class="hidden md:flex fixed inset-y-0 left-0 my-3 ml-3 bg-surface dark:bg-[#111115] border border-line dark:border-[#2A2A32] rounded-2xl shadow-card flex-col z-10 overflow-hidden transition-all duration-300"
+      class="hidden md:flex fixed inset-y-0 left-0 mt-4 mb-3 ml-3 bg-surface dark:bg-[#111115] border border-line dark:border-[#2A2A32] rounded-2xl shadow-card flex-col z-10 overflow-hidden transition-all duration-300"
       :class="collapsed ? 'w-16' : 'w-60'">
 
       <!-- 顶部：Logo + 标题（整行可点击折叠/展开），右侧箭头仅在展开时出现 -->

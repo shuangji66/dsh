@@ -215,9 +215,6 @@ async function save() {
             </div>
           </div>
 
-          <p class="text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed mt-2">{{ t('dsh_env_desc') }}</p>
-          <p class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1">{{ t('dsh_env_reserved_hint') }}</p>
-
           <div class="mt-4 flex-1 min-h-0 overflow-y-auto pr-1">
             <div v-if="loading" class="text-sm text-ink-soft dark:text-[#8A8A92] text-center py-8">
               {{ t('dsh_env_loading') }}

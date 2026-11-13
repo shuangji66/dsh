@@ -123,12 +123,10 @@ const zh = {
   settings_card_auth: '登录鉴权',
   // 运行环境卡片：自定义环境变量（开关 + 齿轮打开弹窗）
   settings_dsh_env: '自定义环境变量',
-  settings_dsh_env_hint: '为 dsh 进程注入额外环境变量；变量值加密保存，开启后需点「保存配置」并重启 dsh 生效',
+  settings_dsh_env_hint: '为 dsh 进程注入额外环境变量',
   settings_dsh_env_edit: '编辑环境变量',
   // 自定义环境变量弹窗
   dsh_env_title: '自定义环境变量',
-  dsh_env_desc: '这些变量会注入 dsh 进程；变量值加密保存在数据目录。保存后仍需点「保存配置」并重启 dsh 才会生效。',
-  dsh_env_reserved_hint: 'PATH、HOME、SHELL、DSH_HOME 等由控制台管理的变量名不可用。',
   dsh_env_name: '变量名',
   dsh_env_value: '变量值',
   dsh_env_add: '新增变量',
@@ -733,12 +731,10 @@ const en: Record<keyof typeof zh, string> = {
   settings_card_auth: 'Login authentication',
   // Runtime environment card: custom environment variables (toggle + gear dialog)
   settings_dsh_env: 'Custom environment variables',
-  settings_dsh_env_hint: 'Inject extra environment variables into dsh. Values are encrypted at rest; enable, click Save, and restart dsh to apply.',
+  settings_dsh_env_hint: 'Inject extra environment variables into dsh',
   settings_dsh_env_edit: 'Edit environment variables',
   // Custom environment variables dialog
   dsh_env_title: 'Custom environment variables',
-  dsh_env_desc: 'These variables are injected into the dsh process; values are encrypted in the data directory. After saving, click Save on the settings page and restart dsh to apply.',
-  dsh_env_reserved_hint: 'Names managed by the console (PATH, HOME, SHELL, DSH_HOME, …) are reserved.',
   dsh_env_name: 'Name',
   dsh_env_value: 'Value',
   dsh_env_add: 'Add variable',

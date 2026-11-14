@@ -224,6 +224,16 @@
   YAML front matter。前端 `usePluginDetail.ts` 只在打开弹窗时请求（列表不预取）+ 模块级
   临时缓存（key 含语言；失败不缓存），弹窗是只读的 `PluginDetailDialog.vue`（无内容时显示
   「无内容」）。回归测试见 `backend/plugin_detail_test.go`。
+- `plugin_update.go` — 插件卡片的「检查更新」（`GET /api/plugins/update-check?name=`）：
+  按官方插件中心的更新语义挑候选 —— 比已装版本新、非预发布、未废弃、与当前 dsh 版本
+  兼容；已装的是 bundle 时候选也必须声明 `dsh.bundle`；取满足条件的最高版本。只对 profile
+  里记录为 registry 范围/标签的依赖生效（`file:`/`link:`/git/scp 形式直接 400
+  `err_plugin_update_not_registry`），否则镜像源上的同名包可能是另一个东西。版本元数据用
+  镜像源 packument 一次取全（`fetchMirrorPackument`，与市场同一套「只用所选源」规则）。
+  前端在启停状态右侧加图标按钮（检查中转圈），有更新时版本号旁显示「→ 新版本」、卸载
+  左侧出现黄色「安装」；「安装」复用安装任务（`name@version`），成功后由
+  `applyInstallResult` 清掉该卡片的更新标记并重拉列表。回归测试见
+  `backend/plugin_update_test.go`。
 - `release-notes` — **两条链路取日志的路子刻意不同，别混**：
   1. **dsh 版本列表**（`update.go` 的 `notesIndex` + `/api/dsh/versions/notes`）：取上游
      `deepseek-ai/deepseek-harness` 的 GitHub Release 正文（tag `dsh-v<版本>`，见

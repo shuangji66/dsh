@@ -326,6 +326,12 @@ const zh = {
   plugin_detail_open: '查看 {name} 的详情',
   plugin_detail_empty: '无内容',
   plugin_detail_failed: '读取插件详情失败',
+  // 卡片上的「检查更新」按钮与「安装（升级）」黄按钮
+  plugin_check_update: '检查 {name} 的更新',
+  plugin_update_none: '已是最新版本（{version}）',
+  plugin_update_check_failed: '检查更新失败',
+  plugin_update_install: '安装',
+  plugin_update_install_aria: '把 {name} 安装到 {version}',
   // 启停开关（官方 dsh.profile.bundles bundle 层机制）
   plugin_enable: '启用',
   plugin_disable: '停用',
@@ -558,6 +564,8 @@ const zh = {
   err_plugin_install_busy: '有插件操作正在进行，请等它结束后再安装',
   err_plugin_install_failed: '安装失败（镜像源：{mirror}）：{detail}；可在设置页切换 npm 镜像源后重试',
   err_plugin_detail_failed: '读取插件详情失败：{detail}',
+  err_plugin_update_check_failed: '检查更新失败（镜像源：{mirror}）：{detail}',
+  err_plugin_update_not_registry: '该插件不是从 npm 镜像源安装的（{spec}），无法检查版本更新',
   err_need_id: '缺少 id',
   err_uid_missing: '无法获取当前用户 UID',
   err_need_path: '缺少 path',
@@ -972,6 +980,12 @@ const en: Record<keyof typeof zh, string> = {
   plugin_detail_open: 'View details of {name}',
   plugin_detail_empty: 'No content',
   plugin_detail_failed: 'Could not read the plugin details',
+  // "Check update" button and the yellow "Install" (upgrade) button on a card
+  plugin_check_update: 'Check for updates to {name}',
+  plugin_update_none: 'Already up to date ({version})',
+  plugin_update_check_failed: 'Could not check for updates',
+  plugin_update_install: 'Install',
+  plugin_update_install_aria: 'Install {name} {version}',
   // Enable/disable toggle (official dsh.profile.bundles bundle selection)
   plugin_enable: 'Enable',
   plugin_disable: 'Disable',
@@ -1203,6 +1217,8 @@ const en: Record<keyof typeof zh, string> = {
   err_plugin_install_busy: 'A plugin operation is in progress; wait for it to finish before installing',
   err_plugin_install_failed: 'Install failed (registry: {mirror}): {detail}; switch the npm registry in Settings and retry',
   err_plugin_detail_failed: 'Could not read the plugin details: {detail}',
+  err_plugin_update_check_failed: 'Could not check for updates (registry: {mirror}): {detail}',
+  err_plugin_update_not_registry: 'This plugin was not installed from an npm registry ({spec}), so version updates cannot be checked',
   err_need_id: 'Missing id',
   err_uid_missing: 'Cannot determine the current user UID',
   err_need_path: 'Missing path',

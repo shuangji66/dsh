@@ -5,7 +5,7 @@ import { usePluginsStore } from '@/stores/plugins'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { uiErrText, uiText, useI18n, type I18nKey } from '@/composables/useI18n'
-import { api } from '@/serverapi'
+import { api, type PluginInfo } from '@/serverapi'
 import { countByFilter, filterPlugins, type FilterCounts, type PluginFilter } from '@/utils/pluginFilter'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
@@ -123,6 +123,7 @@ async function removePlugin(name: string) {
   try {
     const p = await api.removePlugin(name)
     if (p.ok) {
+      clearUpdateCheck(name)
       // 卸载后清除缓存并重新拉取列表（保持滚动位置）
       await reloadKeepingScroll()
       toast.show(t('plugin_removed', { name: p.removed }), 'success')
@@ -150,6 +151,7 @@ async function resetPlugins() {
     toast.show(uiErrText(e, t('common_op_failed')), 'error')
   } finally {
     resetting.value = false
+    updateChecks.value = {}
     // 重置后清除缓存并重新拉取列表（保持滚动位置）
     await reloadKeepingScroll()
   }
@@ -286,12 +288,78 @@ async function applyInstallResult() {
   consumeInstallResult(pending.seq)
   // 成功才关弹窗：失败时错误要留在弹窗里，用户改完规格可直接重试
   installDialogVisible.value = false
+  // 装的就是这个包（可能是卡片上的「安装」升级）：它的「有新版本」标记已经过期
+  if (pending.status.name) clearUpdateCheck(pending.status.name)
   if (pending.status.restart && pending.status.name) needsRestartPlugin.value = pending.status.name
   await reloadKeepingScroll()
 }
 
 // 结果可能在页面挂载期间落定，也可能在别的页面落定（回到本页时才消费）
 watch(installResult, () => void applyInstallResult(), { immediate: true })
+
+// --- 检查更新（卡片状态右侧的图标按钮）---
+//
+// 与官方插件中心一致：只把「比当前版本新、非预发布、未废弃、与当前 dsh 兼容」的版本当作
+// 候选（判定在 backend/plugin_update.go）。检查是按插件的、异步的：按钮转圈，结果只影响
+// 这张卡片；有更新时版本号右侧显示「→ 新版本」，卸载按钮左侧出现黄色「安装」。
+// 「安装」复用安装任务（dsh plugin add name@version）：先跑插件命令，再按既有流程重拉列表，
+// bundle 会挂出「重启生效」提示条。
+type UpdateCheckState = { status: 'checking' | 'done'; latest?: string; hasUpdate?: boolean }
+
+const updateChecks = ref<Record<string, UpdateCheckState>>({})
+const updatingPlugin = ref<string | null>(null)
+
+function updateState(name: string): UpdateCheckState | undefined {
+  return updateChecks.value[name]
+}
+
+function isCheckingUpdate(name: string): boolean {
+  return updateChecks.value[name]?.status === 'checking'
+}
+
+function hasUpdate(name: string): boolean {
+  return updateChecks.value[name]?.hasUpdate === true
+}
+
+function updateLatest(name: string): string {
+  return updateChecks.value[name]?.latest || ''
+}
+
+// clearUpdateCheck 丢掉某个插件的检查结果（装/卸之后它就过期了）。
+function clearUpdateCheck(name: string) {
+  if (!(name in updateChecks.value)) return
+  const next = { ...updateChecks.value }
+  delete next[name]
+  updateChecks.value = next
+}
+
+async function checkPluginUpdate(name: string) {
+  if (isCheckingUpdate(name)) return
+  updateChecks.value = { ...updateChecks.value, [name]: { status: 'checking' } }
+  try {
+    const r = await api.pluginUpdateCheck(name)
+    updateChecks.value = { ...updateChecks.value, [name]: { status: 'done', latest: r.latest, hasUpdate: r.hasUpdate } }
+    if (!r.hasUpdate) toast.show(t('plugin_update_none', { version: r.current || '' }), 'info', 3000)
+  } catch (e) {
+    // 失败不留「有更新」标记：换源或控制台恢复后重查即可
+    const next = { ...updateChecks.value }
+    delete next[name]
+    updateChecks.value = next
+    toast.show(uiErrText(e, t('plugin_update_check_failed')), 'error', 5000)
+  }
+}
+
+async function installUpdate(p: PluginInfo) {
+  const latest = updateLatest(p.name)
+  if (!latest || installingPlugin.value) return
+  updatingPlugin.value = p.name
+  try {
+    // 更新标记由 applyInstallResult 在安装成功时清掉；失败时保留，用户可直接重试
+    await startPluginInstall(`${p.name}@${latest}`)
+  } finally {
+    updatingPlugin.value = null
+  }
+}
 
 onMounted(() => {
   // 命中缓存则直接使用，避免切换子页面时重复命令拉取
@@ -448,8 +516,14 @@ onBeforeUnmount(() => {
               >
                 <MarqueeText :text="p.name" />
               </button>
-              <!-- 版本号：刻意不可复制、不可点击 -->
-              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ p.version }}</div>
+              <!-- 版本号：刻意不可复制、不可点击；检查到更新时在右侧追加「→ 新版本号」 -->
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span>{{ p.version }}</span>
+                <template v-if="hasUpdate(p.name)">
+                  <span aria-hidden="true">→</span>
+                  <span class="font-medium text-warning-ink dark:text-[#FBBF24]">{{ updateLatest(p.name) }}</span>
+                </template>
+              </div>
             </div>
             <button
               type="button"
@@ -499,13 +573,41 @@ onBeforeUnmount(() => {
             <span v-else class="g-status bg-black/5 text-ink-soft dark:bg-white/10 dark:text-[#A6A6AD]">
               {{ t('plugin_plain_dependency') }}
             </span>
+            <!-- 检查更新：状态右侧的纯图标按钮；检查中换成转圈 -->
             <button
-              class="g-btn-danger h-8 px-3 text-xs ml-auto"
-              :disabled="removingPlugin === p.name || resetting"
-              @click="onUninstallClick(p.name)"
+              type="button"
+              class="g-btn-ghost h-8 w-8 flex-shrink-0 p-0"
+              :aria-label="t('plugin_check_update', { name: p.name })"
+              :title="t('plugin_check_update', { name: p.name })"
+              :disabled="isCheckingUpdate(p.name)"
+              :aria-busy="isCheckingUpdate(p.name)"
+              @click="checkPluginUpdate(p.name)"
             >
-              {{ removingPlugin === p.name ? t('plugin_removing') : t('plugin_uninstall') }}
+              <span
+                v-if="isCheckingUpdate(p.name)"
+                class="w-4 h-4 rounded-full border-2 border-line border-t-brand animate-spin"
+              ></span>
+              <span v-else class="w-4 h-4" v-html="icons.refresh"></span>
             </button>
+            <!-- 右侧动作：有新版本时黄色「安装」出现在卸载左侧 -->
+            <div class="ml-auto flex flex-wrap items-center gap-2">
+              <button
+                v-if="hasUpdate(p.name)"
+                class="g-btn-warning h-8 px-3 text-xs"
+                :disabled="installingPlugin || updatingPlugin === p.name"
+                :aria-label="t('plugin_update_install_aria', { name: p.name, version: updateLatest(p.name) })"
+                @click="installUpdate(p)"
+              >
+                {{ updatingPlugin === p.name ? t('plugin_install_running') : t('plugin_update_install') }}
+              </button>
+              <button
+                class="g-btn-danger h-8 px-3 text-xs"
+                :disabled="removingPlugin === p.name || resetting"
+                @click="onUninstallClick(p.name)"
+              >
+                {{ removingPlugin === p.name ? t('plugin_removing') : t('plugin_uninstall') }}
+              </button>
+            </div>
           </div>
         </div>
       </template>

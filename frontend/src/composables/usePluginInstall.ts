@@ -77,23 +77,27 @@ function handleResult(st: PluginInstallStatus) {
   result.value = { seq: ++resultSeq, status: st }
 }
 
-async function track(seq: number) {
+async function track(seq: number): Promise<PluginInstallStatus | null> {
   const { t } = useI18n()
   const toast = useToastStore()
   try {
     const st = await waitInstallDone(seq)
     if (st) handleResult(st)
+    return st
   } catch (e) {
     const msg = uiErrText(e, t('plugin_install_failed'))
     error.value = msg
     toast.show(msg, 'error', 6000)
+    return null
   } finally {
     if (seq === pollSeq) installing.value = false
   }
 }
 
 // start 提交规格并开始跟踪。校验失败/忙拒绝（400/409）留在弹窗里显示原因，输入不丢。
-async function start(spec: string) {
+// 返回落定状态（失败/被取代时为 null）—— 卡片上的「安装（升级）」按钮据此决定是否清掉
+// 「有新版本」的标记。
+async function start(spec: string): Promise<PluginInstallStatus | null> {
   const seq = ++pollSeq
   const { t } = useI18n()
   const toast = useToastStore()
@@ -106,9 +110,9 @@ async function start(spec: string) {
     if (seq === pollSeq) installing.value = false
     error.value = uiErrText(e, t('plugin_install_failed'))
     toast.show(error.value, 'error', 6000)
-    return
+    return null
   }
-  await track(seq)
+  return await track(seq)
 }
 
 // resume 在页面打开/重新挂载时接上一次还在跑的后台安装；返回是否真的在跑

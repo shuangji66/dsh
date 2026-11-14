@@ -1325,6 +1325,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handleListPlugins(w, r)
 		case p == "/api/plugins/detail" && r.Method == http.MethodGet:
 			m.handlePluginDetail(w, r)
+		case p == "/api/plugins/update-check" && r.Method == http.MethodGet:
+			m.handlePluginUpdateCheck(w, r)
 		case p == "/api/plugins/install" && r.Method == http.MethodPost:
 			m.handleInstallPlugin(w, r)
 		case p == "/api/plugins/install/status" && r.Method == http.MethodGet:

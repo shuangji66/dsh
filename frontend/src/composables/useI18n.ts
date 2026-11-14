@@ -297,7 +297,8 @@ const zh = {
   plugin_empty: '暂无插件',
   // 插件页顶栏下的分类筛选与实时搜索（搜索匹配卡片上显示的插件名）
   plugin_filter_all: '全部',
-  plugin_filter_group: '按启停状态筛选插件',
+  plugin_filter_group: '按状态筛选插件',
+  plugin_filter_updatable: '可更新',
   plugin_search_placeholder: '搜索插件名',
   plugin_search_empty: '没有符合条件的插件',
   plugin_uninstall: '卸载',
@@ -953,6 +954,7 @@ const en: Record<keyof typeof zh, string> = {
   // Category filter + live search below the plugins page header
   plugin_filter_all: 'All',
   plugin_filter_group: 'Filter plugins by status',
+  plugin_filter_updatable: 'Updatable',
   plugin_search_placeholder: 'Search plugin name',
   plugin_search_empty: 'No matching plugins',
   plugin_uninstall: 'Uninstall',

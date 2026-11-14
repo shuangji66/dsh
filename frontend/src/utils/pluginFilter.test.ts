@@ -12,8 +12,20 @@ const list: PluginInfo[] = [
 
 describe('pluginFilter', () => {
   it('counts disabled bundles and keeps plain dependencies under "enabled"', () => {
-    expect(countByFilter(list)).toEqual({ all: 4, enabled: 2, disabled: 2 })
-    expect(countByFilter([])).toEqual({ all: 0, enabled: 0, disabled: 0 })
+    expect(countByFilter(list)).toEqual({ all: 4, enabled: 2, disabled: 2, updatable: 0 })
+    expect(countByFilter([])).toEqual({ all: 0, enabled: 0, disabled: 0, updatable: 0 })
+  })
+
+  // 「可更新」依赖调用方给的判定（手动检查优先于后台缓存），这里用一个假判定验证计数与过滤。
+  it('counts and filters updatable plugins with the injected check', () => {
+    const updatable = (p: PluginInfo) => p.name === 'dshmarket' || p.name === '@scope/plain-dep'
+    expect(countByFilter(list, updatable)).toEqual({ all: 4, enabled: 2, disabled: 2, updatable: 2 })
+    expect(filterPlugins(list, 'updatable', '', updatable).map((p) => p.name)).toEqual([
+      'dshmarket',
+      '@scope/plain-dep'
+    ])
+    expect(filterPlugins(list, 'updatable', 'market', updatable).map((p) => p.name)).toEqual(['dshmarket'])
+    expect(filterPlugins(list, 'updatable', '', () => false)).toEqual([])
   })
 
   it('filters by category', () => {

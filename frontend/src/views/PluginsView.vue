@@ -23,6 +23,41 @@ const settingsStore = useSettingsStore()
 const toast = useToastStore()
 const { t } = useI18n()
 
+// --- 更新状态（手动单卡检查 + 后台定时检测）---
+//
+// 先声明合并视图：下面的「可更新」筛选与计数要用它。具体动作（请求 / 轮询 / 安装）见
+// 文件后面的「检查更新」一节。
+//
+// 与官方插件中心一致：只把「比当前版本新、非预发布、未废弃、与当前 dsh 兼容」的版本当作
+// 候选（判定在 backend/plugin_update.go）。手动检查按插件、异步；后台结果来自每小时的
+// 定时检测（内存缓存，页面轮询）。
+type UpdateCheckState = { status: 'checking' | 'done'; latest?: string; hasUpdate?: boolean }
+
+const updateChecks = ref<Record<string, UpdateCheckState>>({})
+
+// 后台定时检测（每小时）的结果：市场/增强插件之外、其它插件在镜像源上有没有新版本。
+// 页面只轮询这份**内存缓存**（GET /api/plugins/updates，不联网、不起 `dsh plugin list`），
+// 拿到后直接体现在卡片上；手动点单卡检查的结果优先于它。
+const backgroundUpdates = ref<Record<string, PluginUpdateEntry>>({})
+
+// cardUpdates 是模板用的合并视图：单卡手动检查 > 后台定时检测。
+// 后台结论要求 latest 与列表里的已装版本不同，避免装完（缓存尚未刷新）还挂着箭头。
+const cardUpdates = computed(() => {
+  const map: Record<string, { hasUpdate: boolean; latest: string }> = {}
+  for (const p of plugins.value) {
+    const manual = updateChecks.value[p.name]
+    if (manual?.status === 'done') {
+      map[p.name] = { hasUpdate: manual.hasUpdate === true, latest: manual.latest || '' }
+      continue
+    }
+    const bg = backgroundUpdates.value[p.name]
+    map[p.name] = bg?.hasUpdate && bg.latestVersion && bg.latestVersion !== p.version
+      ? { hasUpdate: true, latest: bg.latestVersion }
+      : { hasUpdate: false, latest: '' }
+  }
+  return map
+})
+
 // --- 顶栏下的分类筛选 + 实时搜索（纯前端过滤已拉取的列表，不再跑 dsh 命令）---
 //
 // 口径（什么算「已停用」、搜索匹配哪个字段）在 utils/pluginFilter.ts，那里有回归测试；
@@ -31,18 +66,25 @@ const pluginFilter = ref<PluginFilter>('all')
 const pluginFilters: { value: PluginFilter; label: I18nKey }[] = [
   { value: 'all', label: 'plugin_filter_all' },
   { value: 'enabled', label: 'plugin_status_enabled' },
-  { value: 'disabled', label: 'plugin_status_disabled' }
+  { value: 'disabled', label: 'plugin_status_disabled' },
+  { value: 'updatable', label: 'plugin_filter_updatable' }
 ]
 const pluginQuery = ref('')
 
+// 「可更新」= 这张卡片当前正挂着「有新版本」提示（手动检查结果优先于后台缓存）。
+function isPluginUpdatable(p: PluginInfo): boolean {
+  return cardUpdates.value[p.name]?.hasUpdate === true
+}
+
 // 计数只在「列表加载结束」的时刻更新：启停 / 卸载 / 重置后的重拉会先清空 store 里的
-// plugins 再置 loading（那条 dsh 命令要 1~3 秒）。直接按当前列表算计数，三个按钮和
+// plugins 再置 loading（那条 dsh 命令要 1~3 秒）。直接按当前列表算计数，四个按钮和
 // 搜索框会在重拉窗口里整个消失再出现；加载中沿用上一次的数量就没有这个闪烁。
-const filterCounts = ref<FilterCounts>({ all: 0, enabled: 0, disabled: 0 })
+// 「可更新」还跟着更新状态变（手动检查 / 后台轮询），所以把 cardUpdates 也作为依赖。
+const filterCounts = ref<FilterCounts>({ all: 0, enabled: 0, disabled: 0, updatable: 0 })
 watch(
-  [plugins, pluginsLoading],
-  ([list, loading]) => {
-    if (!loading) filterCounts.value = countByFilter(list)
+  [plugins, pluginsLoading, cardUpdates],
+  ([list, loading, updates]) => {
+    if (!loading) filterCounts.value = countByFilter(list, (p) => updates[p.name]?.hasUpdate === true)
   },
   { immediate: true }
 )
@@ -62,7 +104,7 @@ watch(showSearch, (show) => {
 })
 
 const visiblePlugins = computed(() =>
-  filterPlugins(plugins.value, pluginFilter.value, pluginQuery.value)
+  filterPlugins(plugins.value, pluginFilter.value, pluginQuery.value, isPluginUpdatable)
 )
 
 // 卸载/重置插件的确认弹窗状态
@@ -309,15 +351,8 @@ watch(installResult, () => void applyInstallResult(), { immediate: true })
 // 这张卡片；有更新时版本号右侧显示「→ 新版本」，卸载按钮左侧出现黄色「安装」。
 // 「安装」复用安装任务（dsh plugin add name@version）：先跑插件命令，再按既有流程重拉列表，
 // bundle 会挂出「重启生效」提示条。
-type UpdateCheckState = { status: 'checking' | 'done'; latest?: string; hasUpdate?: boolean }
-
-const updateChecks = ref<Record<string, UpdateCheckState>>({})
 const updatingPlugin = ref<string | null>(null)
 
-// 后台定时检测（每小时）的结果：市场/增强插件之外、其它插件在镜像源上有没有新版本。
-// 页面只轮询这份**内存缓存**（GET /api/plugins/updates，不联网、不起 `dsh plugin list`），
-// 拿到后直接体现在卡片上；手动点单卡检查的结果优先于它。
-const backgroundUpdates = ref<Record<string, PluginUpdateEntry>>({})
 const BACKGROUND_UPDATE_POLL_MS = 5 * 60 * 1000
 let backgroundTimer: number | null = null
 
@@ -333,24 +368,6 @@ async function loadBackgroundUpdates() {
 function isCheckingUpdate(name: string): boolean {
   return updateChecks.value[name]?.status === 'checking'
 }
-
-// cardUpdates 是模板用的合并视图：单卡手动检查 > 后台定时检测。
-// 后台结论要求 latest 与列表里的已装版本不同，避免装完（缓存尚未刷新）还挂着箭头。
-const cardUpdates = computed(() => {
-  const map: Record<string, { hasUpdate: boolean; latest: string }> = {}
-  for (const p of plugins.value) {
-    const manual = updateChecks.value[p.name]
-    if (manual?.status === 'done') {
-      map[p.name] = { hasUpdate: manual.hasUpdate === true, latest: manual.latest || '' }
-      continue
-    }
-    const bg = backgroundUpdates.value[p.name]
-    map[p.name] = bg?.hasUpdate && bg.latestVersion && bg.latestVersion !== p.version
-      ? { hasUpdate: true, latest: bg.latestVersion }
-      : { hasUpdate: false, latest: '' }
-  }
-  return map
-})
 
 function clearBackgroundUpdate(name: string) {
   if (!(name in backgroundUpdates.value)) return

@@ -239,8 +239,9 @@
   name+latest 去重，不会每小时重复刷）；单个插件检查失败只在本轮汇总记一条 WARN。
   前端在启停状态右侧加图标按钮（检查中转圈），有更新时版本号旁显示「→ 新版本」、卸载
   左侧出现黄色「安装」；「安装」复用安装任务（`name@version`），成功后由
-  `applyInstallResult` 清掉该卡片的更新标记并重拉列表。回归测试见
-  `backend/plugin_update_test.go`。
+  `applyInstallResult` 清掉该卡片的更新标记并重拉列表。顶栏下的「可更新」分组按同一份
+  合并结果（手动 > 后台）计数与过滤，数量为 0 时按既有规则隐藏，选中它时归零会自动回到
+  「全部」。回归测试见 `backend/plugin_update_test.go` / `frontend/src/utils/pluginFilter.test.ts`。
 - `release-notes` — **两条链路取日志的路子刻意不同，别混**：
   1. **dsh 版本列表**（`update.go` 的 `notesIndex` + `/api/dsh/versions/notes`）：取上游
      `deepseek-ai/deepseek-harness` 的 GitHub Release 正文（tag `dsh-v<版本>`，见

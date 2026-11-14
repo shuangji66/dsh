@@ -259,6 +259,17 @@ func TestHandlePluginDetailValidation(t *testing.T) {
 	}
 }
 
+// 没有 dsh manager（测试或未启用 dsh 的实例）：回 500 的 code，不要解引用 nil 崩掉连接。
+func TestHandlePluginDetailWithoutDshManager(t *testing.T) {
+	rec := getPluginDetail(t, &AdminMux{}, "name=demo&lang=zh")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("没有 dsh manager 应 500，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "err_plugin_detail_failed") {
+		t.Fatalf("应带 err_plugin_detail_failed，实际 %s", rec.Body.String())
+	}
+}
+
 func TestHandlePluginDetailSuccess(t *testing.T) {
 	m, profileWeb := detailMux(t)
 	writeDetailPackage(t, profileWeb, "demo-plugin", map[string]string{

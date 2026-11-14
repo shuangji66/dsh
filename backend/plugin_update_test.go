@@ -297,6 +297,17 @@ func TestHandlePluginUpdateCheckNonRegistryInstall(t *testing.T) {
 	}
 }
 
+// 没有 dsh manager（测试或未启用 dsh 的实例）：回 500 的 code，不要解引用 nil 崩掉连接。
+func TestHandlePluginUpdateCheckWithoutDshManager(t *testing.T) {
+	rec := getPluginUpdate(t, &AdminMux{}, "name=demo")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("没有 dsh manager 应 500，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "err_plugin_update_check_failed") {
+		t.Fatalf("应带 err_plugin_update_check_failed，实际 %s", rec.Body.String())
+	}
+}
+
 func TestHandlePluginUpdateCheckValidation(t *testing.T) {
 	f := newPluginUpdateFixture(t, `{"name":"demo","versions":{}}`)
 	if rec := getPluginUpdate(t, f.m, "name="); rec.Code != http.StatusBadRequest {
@@ -444,6 +455,44 @@ func (f *pageUpdateFixture) requestNames() []string {
 	return append([]string(nil), f.requests...)
 }
 
+// addUnpublishedPlugin 追加一个「插件列表与 profile 依赖里都有、但镜像源上查不到」的插件：
+// 它的请求必然失败（404），用来制造 worker goroutine 里的失败路径。
+//
+// 名字故意以 demo-4 开头：names 会排序，它在 manifest 读不出来的那个插件之前 spawn，
+// 于是「主 goroutine 失败」与「worker 失败」两处 failures 写入会真正并发（回归数据竞争）。
+func (f *pageUpdateFixture) addUnpublishedPlugin(t *testing.T, name, version string) {
+	t.Helper()
+	dir := filepath.Join(f.profileWeb, "node_modules", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"name":%q,"version":%q}`, name, version)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profPath := filepath.Join(f.profileWeb, "package.json")
+	raw, err := os.ReadFile(profPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prof map[string]interface{}
+	if err := json.Unmarshal(raw, &prof); err != nil {
+		t.Fatal(err)
+	}
+	deps, ok := prof["dependencies"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("profile 清单里没有 dependencies: %s", raw)
+	}
+	deps[name] = "^" + version
+	if raw, err = json.Marshal(prof); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.versions[name] = version
+}
+
 func TestCheckPagePluginsCachesOnlyUpdates(t *testing.T) {
 	f := newPageUpdateFixture(t, []pageUpdatePlugin{
 		{name: "demo-update", version: "1.0.0", latest: "1.1.0"},
@@ -511,6 +560,59 @@ func TestCheckPagePluginsLogsOnlyUpdatesAndDedupes(t *testing.T) {
 	}
 	if _, ok := f.um.pagePluginUpdates()["demo-update"]; ok {
 		t.Fatal("升级后缓存里的更新结论应被清掉")
+	}
+}
+
+// 检查失败的处理：不把「查不了」当成「没更新」（保留上一次的结论）、不影响同一轮里
+// 其它插件的结果、整轮只汇总记一条 WARN。
+//
+// 这条用例同时覆盖 plugin_update.go 里两处 failures 写入的并发：demo-404 在 worker
+// goroutine 里失败、demo-broken 在主 goroutine 里失败（names 排序后 worker 先 spawn），
+// 主 goroutine 不加锁 append 时 `go test -race` 会直接报数据竞争。
+func TestCheckPagePluginsKeepsCacheOnFailureAndLogsOneWarning(t *testing.T) {
+	f := newPageUpdateFixture(t, []pageUpdatePlugin{
+		{name: "demo-ok", version: "1.0.0", latest: "1.1.0"},
+		{name: "demo-broken", version: "1.0.0", latest: "1.1.0"},
+	}, 0)
+
+	// 上一轮已经查到 demo-broken 有更新：本轮它查不了时这条结论必须保留。
+	f.um.pageUpdatesMu.Lock()
+	f.um.pageUpdates = map[string]PluginUpdateInfo{
+		"demo-broken": {LatestVersion: "1.1.0", HasUpdate: true},
+	}
+	f.um.pageUpdatesMu.Unlock()
+
+	// demo-broken：manifest 读不出来（主 goroutine 里失败）。
+	if err := os.Remove(filepath.Join(f.profileWeb, "node_modules", "demo-broken", "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	// demo-404：镜像源上查不到（worker goroutine 里失败）。
+	f.addUnpublishedPlugin(t, "demo-404", "1.0.0")
+
+	out, _ := captureLogs(t)
+	f.um.checkPagePluginsWith(f.list())
+	logs := out.String()
+
+	updates := f.um.pagePluginUpdates()
+	if got := updates["demo-ok"]; got.LatestVersion != "1.1.0" || !got.HasUpdate {
+		t.Fatalf("同一轮里检查成功的插件应照常进缓存，实际 %+v", updates)
+	}
+	if got := updates["demo-broken"]; got.LatestVersion != "1.1.0" || !got.HasUpdate {
+		t.Fatalf("检查失败不应清掉上一次的结论，实际 %+v", updates)
+	}
+	if _, ok := updates["demo-404"]; ok {
+		t.Fatalf("检查失败的插件不应进缓存，实际 %+v", updates)
+	}
+
+	// 两条失败（manifest + 404）只汇总一行，且带上数量与镜像源 slug。
+	if n := strings.Count(logs, "update check failed"); n != 1 {
+		t.Fatalf("一轮失败应只记一条 WARN，实际 %d 条:\n%s", n, logs)
+	}
+	if !strings.Contains(logs, "for 2 plugin(s)") {
+		t.Fatalf("失败汇总应带数量 2，实际:\n%s", logs)
+	}
+	if !strings.Contains(logs, "registry test") {
+		t.Fatalf("失败汇总应带镜像源 slug，实际:\n%s", logs)
 	}
 }
 

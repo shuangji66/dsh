@@ -659,8 +659,18 @@ func TestDeleteVersionRules(t *testing.T) {
 
 func TestSwitchVersion(t *testing.T) {
 	dataDir := t.TempDir()
-	_, srv := newServerTestManager(t, dataDir)
+	upd, srv := newServerTestManager(t, dataDir)
 	fakeInstalledVersion(t, dataDir, "0.2.0-rc.2")
+
+	// 「其它插件可更新」的后台结论是按**当时选中的 dsh 版本**做兼容性筛选的
+	// （plugin_update.go 的 newestCompatiblePluginVersion）：换版本后必须作废。
+	seedPageUpdates := func() {
+		upd.pageUpdatesMu.Lock()
+		upd.pageUpdates = map[string]PluginUpdateInfo{"demo": {LatestVersion: "1.1.0", HasUpdate: true}}
+		upd.pageUpdateLog = map[string]string{"demo": "1.1.0"}
+		upd.pageUpdatesMu.Unlock()
+	}
+	seedPageUpdates()
 
 	// 调用序列要跨 goroutine 记录（启动 dsh 是异步的），故加锁。
 	var mu sync.Mutex
@@ -685,12 +695,19 @@ func TestSwitchVersion(t *testing.T) {
 	if got := snapshot(); got != "" {
 		t.Fatalf("被拒绝时不应动 dsh: %q", got)
 	}
+	if got := len(upd.pagePluginUpdates()); got != 1 {
+		t.Fatalf("被拒绝的切换不应清掉插件更新缓存，实际剩 %d 条", got)
+	}
 
 	if err := srv.Switch("0.2.0-rc.2"); err != nil {
 		t.Fatalf("切换失败: %v", err)
 	}
 	if got := GetConfig().DshVersion; got != "0.2.0-rc.2" {
 		t.Fatalf("配置里的选中版本 = %q, want 0.2.0-rc.2", got)
+	}
+	// 换版本后旧结论可能指向一个在新版本上不兼容的候选，必须作废。
+	if got := len(upd.pagePluginUpdates()); got != 0 {
+		t.Fatalf("切换版本后应清空「其它插件可更新」的缓存，实际剩 %d 条", got)
 	}
 	// 终端稳定入口必须跟着切到新版本（终端会话不会重算 PATH）。
 	if got, err := os.Readlink(serverShimDshFor(srv.renv)); err != nil || got != versionDshBinFor(srv.renv, "0.2.0-rc.2") {

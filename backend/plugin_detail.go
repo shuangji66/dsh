@@ -75,6 +75,12 @@ func (m *AdminMux) handlePluginDetail(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusBadRequest, "err_plugin_name_invalid", "插件名不合法（仅允许 npm 包名）")
 		return
 	}
+	// 没有 dsh 就没有 profile（测试或未启用 dsh 的实例）：回 500，不要解引用 nil。
+	if m.dsh == nil {
+		writeErrU(w, http.StatusInternalServerError, "err_plugin_detail_failed",
+			"读取插件详情失败：%s", "detail", "dsh manager is not available")
+		return
+	}
 	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
 	detail, err := readPluginDetail(profileWebDir, name, r.URL.Query().Get("lang"))
 	if err != nil {

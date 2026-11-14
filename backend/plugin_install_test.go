@@ -374,6 +374,27 @@ func TestInstallPluginRejectsInvalidSpecBeforeRunning(t *testing.T) {
 	}
 }
 
+// 请求体不是合法 JSON：400 + err_bad_request（不是误导性的「请输入要安装的插件」），
+// 且不得执行任何 dsh 命令。
+func TestInstallPluginRejectsMalformedBody(t *testing.T) {
+	f := newPluginInstallFixture(t, `printf '%s\n' "$*" >> "$HARNESS_TEST_OUT"`)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/plugins/install", strings.NewReader("{not json"))
+	req.Header.Set("Content-Type", "application/json")
+	f.m.handleInstallPlugin(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("坏请求体应 400，实际 %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "err_bad_request") {
+		t.Fatalf("应带 err_bad_request，实际 %s", rec.Body.String())
+	}
+	if calls := f.calls(t); calls != "" {
+		t.Fatalf("请求体不合法时不得执行 dsh 命令，实际记录:\n%s", calls)
+	}
+}
+
 // 已有安装任务在跑：409 忙拒绝，且不会把 applying 锁漏在手里。
 func TestInstallPluginRefusesWhenAlreadyRunning(t *testing.T) {
 	f := newPluginInstallFixture(t, `printf '%s\n' "$*" >> "$HARNESS_TEST_OUT"`)

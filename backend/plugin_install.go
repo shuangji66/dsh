@@ -146,7 +146,9 @@ type installPluginReq struct {
 func (m *AdminMux) handleInstallPlugin(w http.ResponseWriter, r *http.Request) {
 	var body installPluginReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErrOperation(w, uiErr("err_plugin_spec_empty", "请输入要安装的插件"))
+		// 请求本身不合法，不是「没填规格」：给通用的格式错误文案（带诊断原文），
+		// 别让用户对着「请输入要安装的插件」猜为什么。
+		writeErrU(w, http.StatusBadRequest, "err_bad_request", "请求格式错误: %s", "detail", err.Error())
 		return
 	}
 	spec, name, err := normalizePluginInstallInput(body.Spec)

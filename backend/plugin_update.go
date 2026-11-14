@@ -53,6 +53,13 @@ func (m *AdminMux) handlePluginUpdateCheck(w http.ResponseWriter, r *http.Reques
 		writeErrU(w, http.StatusBadRequest, "err_plugin_name_invalid", "插件名不合法（仅允许 npm 包名）")
 		return
 	}
+	// 没有 dsh 就没有 profile（测试或未启用 dsh 的实例）：回 500，不要解引用 nil。
+	if m.dsh == nil {
+		writeErrU(w, http.StatusInternalServerError, "err_plugin_update_check_failed",
+			"检查更新失败（镜像源：%s）：%s", "mirror", selectedNpmMirror().Slug,
+			"detail", "dsh manager is not available")
+		return
+	}
 	profileWebDir := filepath.Join(m.dsh.effectiveHome(), ".dsh", "profiles", "web")
 	spec, err := profileDependencySpec(profileWebDir, name)
 	if err != nil {
@@ -253,7 +260,11 @@ func (m *UpdateManager) checkPagePluginsWith(list pluginList) {
 		}
 		installed, err := readPluginManifest(profileWebDir, name)
 		if err != nil {
+			// 这里也走 mu：循环里已经 spawn 出去的 worker 会在锁内 append failures，
+			// 主 goroutine 不加锁地写同一个 slice 就是数据竞争（go test -race 必现）。
+			mu.Lock()
 			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+			mu.Unlock()
 			continue
 		}
 		wg.Add(1)

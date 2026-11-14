@@ -1306,6 +1306,13 @@ func (m *ServerManager) Switch(version string) error {
 	}
 	logInfo("[dsh] switching version %s -> %s", prev, version)
 
+	// 换版本后「其它插件可更新」的旧结论要作废：候选是按**当时选中的 dsh 版本**做兼容性
+	// 筛选的（plugin_update.go 的 newestCompatiblePluginVersion），旧结论可能指向一个在新
+	// 版本上已不兼容的版本。下一次小时级检测（或单卡手动检查）会重新算。
+	if m.upd != nil {
+		m.upd.clearPagePluginUpdates()
+	}
+
 	// 停旧、起新：停机与启动都走统一钩子（dshStopFn / startDshCapturedFn），与
 	// 「市场变更后重启 dsh」一致 —— 启动后必须经 captureDshSession 换取本代会话凭据，
 	// 否则反代永远停在等待页（见 AGENTS 的启动门禁一节）。

@@ -209,8 +209,9 @@
   `dsh plugin [--profile web] add <规格>` 命令；随后仍走
   `dsh plugin --profile web add <规格> --registry=<所选源>`（必须经 `RunPluginCommand`）。
   **异步执行 + 轮询**：pnpm 安装可能跑几十秒到几分钟，同步请求会被平台网关掐断（与 dsh
-  数据备份同一条边界，见 `update.go`）。安装结束后按 profile `dependencies` 的前后差异认出
-  包名/版本；bundle 或带客户端部分/原生依赖的包标 `restart`，前端复用「重启生效」提示条
+  数据备份同一条边界，见 `update.go`）。安装结束后认出包名/版本：registry 规格直接用规格里
+  的包名，Git 仓库 / 本地路径 / tarball 按 profile `dependencies` 的前后差异认（多于一个
+  新增项时不猜）；bundle 或带客户端部分/原生依赖的包标 `restart`，前端复用「重启生效」提示条
   —— **不自动重启 dsh**（会掐掉用户正在跑的会话）。任务与市场/更新/备份共用
   `applying` 锁（`TryLock`，拿不到回 409），并先过 `pluginProfileWriteBusy`。
   镜像源只能用设置页选中的那一个：命令里的 `--registry` 等选项一律拒绝，不静默丢弃。
@@ -235,15 +236,19 @@
   控制台启动那一次刻意不查（冷启动不对镜像源发一串请求），手动「检查更新」也不查；
   定时这一轮把插件列表里其余插件按**最多 3 个并发**查一遍，结果只进内存缓存
   （`GET /api/plugins/updates`，只读、不联网、不起 `dsh plugin list`），插件页每 5 分钟
-  轮询一次。装/卸/重置插件会清掉对应缓存。**日志只在确实有更新时记一行**（按
+  轮询一次。装/卸/重置插件会清掉对应缓存，**切换 dsh 版本也会清空**（候选的兼容性是按
+  当时选中的版本算的，见 `ServerManager.Switch`）。**日志只在确实有更新时记一行**（按
   name+latest 去重，不会每小时重复刷）；单个插件检查失败只在本轮汇总记一条 WARN。
   前端在启停状态右侧加图标按钮（检查中转圈），有更新时版本号旁显示「→ 新版本」、卸载
   左侧出现黄色「更新」；「安装」复用安装任务（`name@version`），成功后由
   `applyInstallResult` 清掉该卡片的更新标记并重拉列表。顶栏下的「可更新」分组按同一份
   合并结果（手动 > 后台）计数与过滤，数量为 0 时按既有规则隐藏，选中它时归零会自动回到
   「全部」。**手动检查的结果存在模块级 `usePluginUpdateChecks`（切子页面不丢；刷新页面才丢，
-  后台结果另有后端缓存兜底）**。回归测试见 `backend/plugin_update_test.go` /
-  `frontend/src/utils/pluginFilter.test.ts` / `frontend/src/composables/usePluginUpdateChecks.test.ts`。
+  后台结果另有后端缓存兜底）**，合并规则在纯函数 `utils/pluginUpdates.ts`：手动优先，但
+  检查时的 `current` 与列表里的已装版本不符即视为过期、回退后台结论（否则页面之外换过版本后
+  会给出降级箭头并真的装回旧版）。回归测试见 `backend/plugin_update_test.go` /
+  `frontend/src/utils/pluginFilter.test.ts` / `frontend/src/utils/pluginUpdates.test.ts` /
+  `frontend/src/composables/usePluginUpdateChecks.test.ts`。
 - `release-notes` — **两条链路取日志的路子刻意不同，别混**：
   1. **dsh 版本列表**（`update.go` 的 `notesIndex` + `/api/dsh/versions/notes`）：取上游
      `deepseek-ai/deepseek-harness` 的 GitHub Release 正文（tag `dsh-v<版本>`，见
@@ -854,8 +859,8 @@
   harness 击穿。**普通刷新不回源**：调 dsh 插件资源时看不到效果，先排查缓存，不要直接
   怀疑代码。注意反代**已不再改写任何 JS 产物**（曾经的 V8-only 比较改写、会话自愈探针、
   iOS 模型菜单失焦守卫都随 dsh 上游自修整体移除，见 README「反代对 dsh 产物的改写（已全部
-  移除）」），现在只有 HTML 会被注入与引擎无关的引导脚本（open-in-app 屏蔽）与可选的诊断
-  打点 —— HTML 每次刷新都回源。
+  移除）」），现在只有 HTML 会被注入：与引擎无关的引导脚本（open-in-app 屏蔽）和一条隐藏
+  dsh 设置页 `settings.action` 入口的样式 —— HTML 每次刷新都回源。
 - **控制台自己的前端资源缓存策略**（`admin.go` 的 `serveBytes`）—— 与上面 dsh 那套刻意相反，
   按「文件名有没有内容哈希」分成两类，**不要合并**：
   - `assets/**` 是 Vite 的内容哈希产物 → `public, max-age=31536000, immutable` 长期强缓存

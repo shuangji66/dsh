@@ -97,7 +97,7 @@ function close() {
             v-else
             class="max-h-[55vh] overflow-y-auto pr-3 select-text text-sm text-ink-soft dark:text-[#A6A6AD] leading-relaxed"
           >
-            <MarkdownText :source="markdown" />
+            <MarkdownText :source="markdown" drop-html />
           </div>
         </div>
       </div>

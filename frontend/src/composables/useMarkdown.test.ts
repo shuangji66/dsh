@@ -31,4 +31,28 @@ describe('renderMarkdown', () => {
     expect(renderMarkdown('- a\n- b')).toContain('<li>a</li>')
     expect(renderMarkdown('')).toBe('')
   })
+
+  // 插件详情：README 的徽章 HTML 块在控制台无法渲染，转义后的标签源码没人看 —— 整块藏掉。
+  it('hides raw HTML blocks when dropHtml is set', () => {
+    const source = [
+      '<p align="center"> <img src="https://img.shields.io/npm/v/x" alt="Version"> &nbsp; </p>',
+      '',
+      '# 正文',
+      '',
+      '这是说明。'
+    ].join('\n')
+    const html = renderMarkdown(source, { dropHtml: true })
+    expect(html).not.toContain('&lt;p')
+    expect(html).not.toContain('img.shields.io')
+    expect(html).toContain('<h1>正文</h1>')
+    expect(html).toContain('这是说明。')
+  })
+
+  it('drops inline HTML tags when dropHtml is set', () => {
+    const html = renderMarkdown('前文<br>后文', { dropHtml: true })
+    expect(html).not.toContain('&lt;br')
+    expect(html).not.toContain('<br')
+    expect(html).toContain('前文')
+    expect(html).toContain('后文')
+  })
 })

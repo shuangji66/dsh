@@ -5,9 +5,12 @@ import { renderMarkdown } from '@/composables/useMarkdown'
 // 轻量 Markdown 展示组件：把 Markdown 源文本安全渲染为 HTML（v-html 注入）。
 // 渲染安全性（原始 HTML 转义、链接协议白名单）见 useMarkdown.ts；
 // 本组件只负责展示与样式（列表/标题/代码块/链接等在两种主题下的排版）。
-const props = defineProps<{ source: string }>()
+//
+// drop-html：整块丢弃原始 HTML 而不是转义成文本（插件详情用 —— README 的徽章块在
+// 控制台不渲染，转义后只是满屏标签源码）。
+const props = defineProps<{ source: string; dropHtml?: boolean }>()
 
-const html = computed(() => renderMarkdown(props.source))
+const html = computed(() => renderMarkdown(props.source, { dropHtml: props.dropHtml === true }))
 </script>
 
 <template>

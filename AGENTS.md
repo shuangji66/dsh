@@ -223,7 +223,8 @@
   路径（无 scheme/反斜杠/`..`，以 .md/.markdown 结尾），文档上限 1 MiB，正文去掉 BOM 与
   YAML front matter。前端 `usePluginDetail.ts` 只在打开弹窗时请求（列表不预取）+ 模块级
   临时缓存（key 含语言；失败不缓存），弹窗是只读的 `PluginDetailDialog.vue`（无内容时显示
-  「无内容」）。回归测试见 `backend/plugin_detail_test.go`。
+  「无内容」；原始 HTML 用 `MarkdownText` 的 `drop-html` **整块隐藏**，不显示成标签源码）。
+  回归测试见 `backend/plugin_detail_test.go`。
 - `plugin_update.go` — 插件卡片的「检查更新」（`GET /api/plugins/update-check?name=`）：
   按官方插件中心的更新语义挑候选 —— 比已装版本新、非预发布、未废弃、与当前 dsh 版本
   兼容；已装的是 bundle 时候选也必须声明 `dsh.bundle`；取满足条件的最高版本。只对 profile

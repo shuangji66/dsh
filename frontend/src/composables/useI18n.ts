@@ -331,8 +331,10 @@ const zh = {
   plugin_check_update: '检查 {name} 的更新',
   plugin_update_none: '已是最新版本（{version}）',
   plugin_update_check_failed: '检查更新失败',
-  plugin_update_install: '安装',
-  plugin_update_install_aria: '把 {name} 安装到 {version}',
+  // 黄色按钮是「更新到新版本」，不是安装新插件（顶栏的安装才叫安装）
+  plugin_update: '更新',
+  plugin_update_aria: '把 {name} 更新到 {version}',
+  plugin_updating: '更新中…',
   // 启停开关（官方 dsh.profile.bundles bundle 层机制）
   plugin_enable: '启用',
   plugin_disable: '停用',
@@ -986,8 +988,10 @@ const en: Record<keyof typeof zh, string> = {
   plugin_check_update: 'Check for updates to {name}',
   plugin_update_none: 'Already up to date ({version})',
   plugin_update_check_failed: 'Could not check for updates',
-  plugin_update_install: 'Install',
-  plugin_update_install_aria: 'Install {name} {version}',
+  // The yellow button updates to the new version; it is not the "install a new plugin" action
+  plugin_update: 'Update',
+  plugin_update_aria: 'Update {name} to {version}',
+  plugin_updating: 'Updating…',
   // Enable/disable toggle (official dsh.profile.bundles bundle selection)
   plugin_enable: 'Enable',
   plugin_disable: 'Disable',

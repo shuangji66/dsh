@@ -660,10 +660,10 @@ onBeforeUnmount(() => {
                 v-if="cardUpdates[p.name]?.hasUpdate"
                 class="g-btn-warning h-8 px-3 text-xs"
                 :disabled="installingPlugin || updatingPlugin === p.name"
-                :aria-label="t('plugin_update_install_aria', { name: p.name, version: cardUpdates[p.name]?.latest })"
+                :aria-label="t('plugin_update_aria', { name: p.name, version: cardUpdates[p.name]?.latest })"
                 @click="installUpdate(p)"
               >
-                {{ updatingPlugin === p.name ? t('plugin_install_running') : t('plugin_update_install') }}
+                {{ updatingPlugin === p.name ? t('plugin_updating') : t('plugin_update') }}
               </button>
               <button
                 class="g-btn-danger h-8 px-3 text-xs"

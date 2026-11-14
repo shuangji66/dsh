@@ -195,6 +195,12 @@ export type UpdateKind = 'dsh' | 'market' | 'advanced'
 //
 // 安装是异步的：pnpm 下载/构建可能要几十秒到几分钟，同步请求会被平台网关掐断
 // （见后端 plugin_install.go）。POST 只负责入队，进度与结果都从这份状态读。
+// 后台定时检测缓存的单插件更新结论（GET /api/plugins/updates）。只有有更新的才在表里。
+export interface PluginUpdateEntry {
+  latestVersion: string
+  hasUpdate: boolean
+}
+
 // 插件更新检查（GET /api/plugins/update-check）。
 export interface PluginUpdateCheck {
   ok: boolean
@@ -565,6 +571,8 @@ export const api = {
   // 检查某个插件在所选镜像源上有没有更新（官方语义：非预发布、未废弃、与当前 dsh 兼容）
   pluginUpdateCheck: (name: string) =>
     request<PluginUpdateCheck>(`/api/plugins/update-check?name=${encodeURIComponent(name)}`),
+  // 后台定时检测出的「插件页其它插件」更新（内存缓存，只读、不联网）
+  pluginUpdates: () => request<{ ok: boolean; updates: Record<string, PluginUpdateEntry> }>('/api/plugins/updates'),
   removePlugin: (name: string) =>
     request<{ ok: boolean; removed: string; msg: string }>('/api/plugins/remove', {
       method: 'POST',

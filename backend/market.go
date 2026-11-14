@@ -427,7 +427,12 @@ func (m *UpdateManager) refreshMarketStatus() {
 //
 // 本地检测共用一次 `dsh plugin list`（两插件各跑一遍等于白等一个 1~3 秒的子进程）。
 func (m *UpdateManager) refreshManagedPluginStatuses() {
-	list := m.readPluginList()
+	m.refreshManagedPluginStatusesWith(m.readPluginList())
+}
+
+// refreshManagedPluginStatusesWith 用一次已经取好的插件列表刷新所有受管插件
+// （定时检测里与插件页的其它插件共用同一次 `dsh plugin list`）。
+func (m *UpdateManager) refreshManagedPluginStatusesWith(list pluginList) {
 	for _, p := range managedPlugins {
 		snap := snapshotFromPluginList(p, list)
 		m.storePluginSnapshot(p, snap)

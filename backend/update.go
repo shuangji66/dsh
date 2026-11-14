@@ -152,6 +152,13 @@ type UpdateManager struct {
 	checkLogMu   sync.Mutex
 	lastCheckSig map[updateKind]string
 
+	// pageUpdatesMu 保护 pageUpdates / pageUpdateLog：插件页里「市场与增强插件之外」的
+	// 插件最近一次定时检查出的新版本（只有确实有更新的才进表），以及已经打过日志的
+	// name -> latest（避免每小时重复打同一行）。见 plugin_update.go 的 checkPagePlugins。
+	pageUpdatesMu sync.Mutex
+	pageUpdates   map[string]PluginUpdateInfo
+	pageUpdateLog map[string]string
+
 	// dshNotes 是「按版本号查更新日志」的索引（见 notesIndex）：dsh 版本列表里点某个
 	// 版本号时按需拉取，结果缓存在这里。存的是构造函数而不是客户端实例。
 	// 受管插件（插件市场 / 增强插件）**不用索引**：它们只取「要装的那一版」的正文
@@ -183,6 +190,8 @@ func newUpdateManager(renv *RuntimeEnv, dsh *DshManager) *UpdateManager {
 	// 初始 Unavailable=true：这一刻还没检测过，界面显示「—」（而不是「未安装」）；
 	// 第一次检测出结论后由 applyPluginLocalResult 改掉。
 	m.statuses[updateKindMarket] = &UpdateStatus{Kind: updateKindMarket, Unavailable: true}
+	m.pageUpdates = make(map[string]PluginUpdateInfo)
+	m.pageUpdateLog = make(map[string]string)
 	m.statuses[updateKindAdvanced] = &UpdateStatus{Kind: updateKindAdvanced, Unavailable: true}
 	go func() {
 		// 稍等一会再检测：让启动流水线（含 dsh 自身的启动）先走完，避免与它抢 profile。
@@ -776,6 +785,24 @@ func (m *UpdateManager) checkOnce() {
 	// 插件市场 / 增强插件：版本来自 `dsh plugin list` + 镜像源，与 dsh 的版本列表是
 	// 两条独立链路。
 	m.refreshManagedPluginStatuses()
+	m.logCheckConclusions()
+}
+
+// checkScheduled 是**每小时**那一轮的后台检测：在 checkOnce 的基础上，把插件页里
+// 市场/增强插件之外的插件也一并检查（结果只进内存缓存，页面轮询 GET /api/plugins/updates）。
+//
+// 只在定时器里调用：控制台启动那一次刻意不查这些插件（冷启动时对镜像源发一串请求、
+// 与 dsh 启动抢资源），手动「检查更新」也不查（保持接口快速返回；单卡有检查按钮）。
+func (m *UpdateManager) checkScheduled() {
+	m.server.refreshVersions(true)
+	// 受管插件与其它插件共用同一次 `dsh plugin list`：这条命令要 1~3 秒。
+	list := m.readPluginList()
+	m.refreshManagedPluginStatusesWith(list)
+	m.checkPagePluginsWith(list)
+	m.logCheckConclusions()
+}
+
+func (m *UpdateManager) logCheckConclusions() {
 
 	// dsh、市场、增强插件各自一行，且只有**自己**的结论变化时才打印（三者的
 	// 「上次结论」分别记录）：三类更新是彼此独立的升级动作，合并成一行既难读、也没法
@@ -838,11 +865,13 @@ func (m *UpdateManager) startAutoCheck() {
 	go func() {
 		// 启动后先等一小段时间再首次检测，避免与后端冷启动争抢资源。
 		time.Sleep(15 * time.Second)
+		// 启动这一次只查 dsh 与两个受管插件；插件页的其它插件留给每小时那一轮
+		// （见 checkScheduled），避免冷启动时对镜像源发一串请求。
 		m.checkOnce()
 		ticker := time.NewTicker(updateCheckInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			m.checkOnce()
+			m.checkScheduled()
 		}
 	}()
 }

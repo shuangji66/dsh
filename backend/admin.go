@@ -889,6 +889,10 @@ func (m *AdminMux) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 		writeErrU(w, http.StatusInternalServerError, "err_plugin_remove_failed", "卸载失败: %s", "detail", err.Error())
 		return
 	}
+	// 定时检查的结论对已卸载的插件已经过期，顺手清掉（下次检查也会发现它不在了）。
+	if m.update != nil {
+		m.update.clearPagePluginUpdate(body.Name)
+	}
 	writeJSON(w, map[string]interface{}{"ok": true, "removed": body.Name, "msg": out})
 }
 
@@ -960,6 +964,11 @@ func (m *AdminMux) handleResetPlugins(w http.ResponseWriter, r *http.Request) {
 			"profilesDir":    profilesDir,
 		})
 		return
+	}
+
+	// 删除成功：定时检查的缓存已经没有意义（所有插件都没了），清空后再走重启。
+	if m.update != nil {
+		m.update.clearPagePluginUpdates()
 	}
 
 	// 删除成功：把「重启 dsh + node-pty 自动 patch」放到后台执行，立即回包。
@@ -1327,6 +1336,8 @@ func (m *AdminMux) buildHandler() http.Handler {
 			m.handlePluginDetail(w, r)
 		case p == "/api/plugins/update-check" && r.Method == http.MethodGet:
 			m.handlePluginUpdateCheck(w, r)
+		case p == "/api/plugins/updates" && r.Method == http.MethodGet:
+			m.handlePluginUpdates(w, r)
 		case p == "/api/plugins/install" && r.Method == http.MethodPost:
 			m.handleInstallPlugin(w, r)
 		case p == "/api/plugins/install/status" && r.Method == http.MethodGet:

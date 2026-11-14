@@ -234,6 +234,10 @@ func (m *AdminMux) runPluginInstall(spec, specName string) {
 
 	name, version, restart := detectInstalledPlugin(profileWebDir, specName, before)
 	pluginInstall.succeed(name, version, restart)
+	// 这个插件的版本刚刚变了：定时检查缓存里的「有新版本」结论已经过期。
+	if m.update != nil && name != "" {
+		m.update.clearPagePluginUpdate(name)
+	}
 	logInfo("[plugin] installed %s (name=%s version=%s restart=%v)", spec, name, version, restart)
 }
 

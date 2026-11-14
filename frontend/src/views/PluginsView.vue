@@ -5,7 +5,7 @@ import { usePluginsStore } from '@/stores/plugins'
 import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import { uiErrText, uiText, useI18n, type I18nKey } from '@/composables/useI18n'
-import { api, type PluginInfo } from '@/serverapi'
+import { api, type PluginInfo, type PluginUpdateEntry } from '@/serverapi'
 import { countByFilter, filterPlugins, type FilterCounts, type PluginFilter } from '@/utils/pluginFilter'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
@@ -124,6 +124,7 @@ async function removePlugin(name: string) {
     const p = await api.removePlugin(name)
     if (p.ok) {
       clearUpdateCheck(name)
+      clearBackgroundUpdate(name)
       // 卸载后清除缓存并重新拉取列表（保持滚动位置）
       await reloadKeepingScroll()
       toast.show(t('plugin_removed', { name: p.removed }), 'success')
@@ -152,6 +153,7 @@ async function resetPlugins() {
   } finally {
     resetting.value = false
     updateChecks.value = {}
+    backgroundUpdates.value = {}
     // 重置后清除缓存并重新拉取列表（保持滚动位置）
     await reloadKeepingScroll()
   }
@@ -289,7 +291,10 @@ async function applyInstallResult() {
   // 成功才关弹窗：失败时错误要留在弹窗里，用户改完规格可直接重试
   installDialogVisible.value = false
   // 装的就是这个包（可能是卡片上的「安装」升级）：它的「有新版本」标记已经过期
-  if (pending.status.name) clearUpdateCheck(pending.status.name)
+  if (pending.status.name) {
+    clearUpdateCheck(pending.status.name)
+    clearBackgroundUpdate(pending.status.name)
+  }
   if (pending.status.restart && pending.status.name) needsRestartPlugin.value = pending.status.name
   await reloadKeepingScroll()
 }
@@ -309,20 +314,49 @@ type UpdateCheckState = { status: 'checking' | 'done'; latest?: string; hasUpdat
 const updateChecks = ref<Record<string, UpdateCheckState>>({})
 const updatingPlugin = ref<string | null>(null)
 
-function updateState(name: string): UpdateCheckState | undefined {
-  return updateChecks.value[name]
+// 后台定时检测（每小时）的结果：市场/增强插件之外、其它插件在镜像源上有没有新版本。
+// 页面只轮询这份**内存缓存**（GET /api/plugins/updates，不联网、不起 `dsh plugin list`），
+// 拿到后直接体现在卡片上；手动点单卡检查的结果优先于它。
+const backgroundUpdates = ref<Record<string, PluginUpdateEntry>>({})
+const BACKGROUND_UPDATE_POLL_MS = 5 * 60 * 1000
+let backgroundTimer: number | null = null
+
+async function loadBackgroundUpdates() {
+  try {
+    const r = await api.pluginUpdates()
+    backgroundUpdates.value = r.updates || {}
+  } catch {
+    // 拿不到后台结论就当没有：不影响列表本身的加载与操作
+  }
 }
 
 function isCheckingUpdate(name: string): boolean {
   return updateChecks.value[name]?.status === 'checking'
 }
 
-function hasUpdate(name: string): boolean {
-  return updateChecks.value[name]?.hasUpdate === true
-}
+// cardUpdates 是模板用的合并视图：单卡手动检查 > 后台定时检测。
+// 后台结论要求 latest 与列表里的已装版本不同，避免装完（缓存尚未刷新）还挂着箭头。
+const cardUpdates = computed(() => {
+  const map: Record<string, { hasUpdate: boolean; latest: string }> = {}
+  for (const p of plugins.value) {
+    const manual = updateChecks.value[p.name]
+    if (manual?.status === 'done') {
+      map[p.name] = { hasUpdate: manual.hasUpdate === true, latest: manual.latest || '' }
+      continue
+    }
+    const bg = backgroundUpdates.value[p.name]
+    map[p.name] = bg?.hasUpdate && bg.latestVersion && bg.latestVersion !== p.version
+      ? { hasUpdate: true, latest: bg.latestVersion }
+      : { hasUpdate: false, latest: '' }
+  }
+  return map
+})
 
-function updateLatest(name: string): string {
-  return updateChecks.value[name]?.latest || ''
+function clearBackgroundUpdate(name: string) {
+  if (!(name in backgroundUpdates.value)) return
+  const next = { ...backgroundUpdates.value }
+  delete next[name]
+  backgroundUpdates.value = next
 }
 
 // clearUpdateCheck 丢掉某个插件的检查结果（装/卸之后它就过期了）。
@@ -339,7 +373,12 @@ async function checkPluginUpdate(name: string) {
   try {
     const r = await api.pluginUpdateCheck(name)
     updateChecks.value = { ...updateChecks.value, [name]: { status: 'done', latest: r.latest, hasUpdate: r.hasUpdate } }
-    if (!r.hasUpdate) toast.show(t('plugin_update_none', { version: r.current || '' }), 'info', 3000)
+    if (!r.hasUpdate) {
+      // 后台缓存里可能还挂着上一次的「有更新」，这次手查是更新的结论 —— 清掉它，
+      // 避免刷新页面后又冒出来（下一次小时级检查会重新算）。
+      clearBackgroundUpdate(name)
+      toast.show(t('plugin_update_none', { version: r.current || '' }), 'info', 3000)
+    }
   } catch (e) {
     // 失败不留「有更新」标记：换源或控制台恢复后重查即可
     const next = { ...updateChecks.value }
@@ -350,7 +389,7 @@ async function checkPluginUpdate(name: string) {
 }
 
 async function installUpdate(p: PluginInfo) {
-  const latest = updateLatest(p.name)
+  const latest = cardUpdates.value[p.name]?.latest || ''
   if (!latest || installingPlugin.value) return
   updatingPlugin.value = p.name
   try {
@@ -364,6 +403,10 @@ async function installUpdate(p: PluginInfo) {
 onMounted(() => {
   // 命中缓存则直接使用，避免切换子页面时重复命令拉取
   store.loadPlugins()
+  // 后台定时检测的结果（内存缓存）随页面打开同步一次，之后每 5 分钟拉一次：
+  // 接口只读缓存，不会起 `dsh plugin list` 子进程。
+  void loadBackgroundUpdates()
+  backgroundTimer = window.setInterval(() => void loadBackgroundUpdates(), BACKGROUND_UPDATE_POLL_MS)
   // 后台可能还有一次安装（切换页面回来 / 刷新页面）：接上进度，并直接把弹窗打开
   void resumeInstallIfRunning().then((running) => {
     if (running) installDialogVisible.value = true
@@ -384,6 +427,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   headerObserver?.disconnect()
   headerObserver = null
+  if (backgroundTimer !== null) {
+    window.clearInterval(backgroundTimer)
+    backgroundTimer = null
+  }
 })
 </script>
 
@@ -519,9 +566,9 @@ onBeforeUnmount(() => {
               <!-- 版本号：刻意不可复制、不可点击；检查到更新时在右侧追加「→ 新版本号」 -->
               <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5 flex flex-wrap items-center gap-1.5">
                 <span>{{ p.version }}</span>
-                <template v-if="hasUpdate(p.name)">
+                <template v-if="cardUpdates[p.name]?.hasUpdate">
                   <span aria-hidden="true">→</span>
-                  <span class="font-medium text-warning-ink dark:text-[#FBBF24]">{{ updateLatest(p.name) }}</span>
+                  <span class="font-medium text-warning-ink dark:text-[#FBBF24]">{{ cardUpdates[p.name]?.latest }}</span>
                 </template>
               </div>
             </div>
@@ -592,10 +639,10 @@ onBeforeUnmount(() => {
             <!-- 右侧动作：有新版本时黄色「安装」出现在卸载左侧 -->
             <div class="ml-auto flex flex-wrap items-center gap-2">
               <button
-                v-if="hasUpdate(p.name)"
+                v-if="cardUpdates[p.name]?.hasUpdate"
                 class="g-btn-warning h-8 px-3 text-xs"
                 :disabled="installingPlugin || updatingPlugin === p.name"
-                :aria-label="t('plugin_update_install_aria', { name: p.name, version: updateLatest(p.name) })"
+                :aria-label="t('plugin_update_install_aria', { name: p.name, version: cardUpdates[p.name]?.latest })"
                 @click="installUpdate(p)"
               >
                 {{ updatingPlugin === p.name ? t('plugin_install_running') : t('plugin_update_install') }}

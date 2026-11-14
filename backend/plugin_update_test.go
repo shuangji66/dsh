@@ -14,12 +14,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func manifestFromJSON(t *testing.T, raw string) *pluginManifest {
@@ -321,4 +324,267 @@ func TestProfileDependencySpec(t *testing.T) {
 	if _, err := profileDependencySpec(profileWeb, "absent"); err == nil {
 		t.Fatal("缺失的依赖应报错")
 	}
+}
+
+// --- 插件页其它插件的定时检查（后台）---
+
+// pageUpdatePlugin 描述一个测试插件：已装版本、profile 里的依赖写法、镜像源上是否有更高版本。
+type pageUpdatePlugin struct {
+	name    string
+	version string
+	spec    string
+	latest  string // 空 = 镜像源上没有更高版本
+}
+
+type pageUpdateFixture struct {
+	um          *UpdateManager
+	profileWeb  string
+	versions    map[string]string
+	delay       time.Duration
+	mu          sync.Mutex
+	requests    []string
+	inFlight    int
+	maxInFlight int
+}
+
+func newPageUpdateFixture(t *testing.T, plugins []pageUpdatePlugin, delay time.Duration) *pageUpdateFixture {
+	t.Helper()
+	home := t.TempDir()
+	profileWeb := filepath.Join(home, ".dsh", "profiles", "web")
+	deps := make(map[string]string, len(plugins))
+	byName := make(map[string]pageUpdatePlugin, len(plugins))
+	versions := make(map[string]string, len(plugins))
+	for _, p := range plugins {
+		dir := filepath.Join(profileWeb, "node_modules", p.name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := map[string]string{"name": p.name, "version": p.version}
+		raw, _ := json.Marshal(manifest)
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		spec := p.spec
+		if spec == "" {
+			spec = "^" + p.version
+		}
+		deps[p.name] = spec
+		byName[p.name] = p
+		versions[p.name] = p.version
+	}
+	profile, _ := json.Marshal(map[string]interface{}{
+		"name":         "dsh-profile-web",
+		"private":      true,
+		"dependencies": deps,
+		"dsh":          map[string]interface{}{"profile": map[string]interface{}{"bundles": []string{}}},
+	})
+	if err := os.WriteFile(filepath.Join(profileWeb, "package.json"), profile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &pageUpdateFixture{profileWeb: profileWeb, versions: versions, delay: delay}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		f.mu.Lock()
+		f.requests = append(f.requests, name)
+		f.inFlight++
+		if f.inFlight > f.maxInFlight {
+			f.maxInFlight = f.inFlight
+		}
+		f.mu.Unlock()
+		defer func() {
+			f.mu.Lock()
+			f.inFlight--
+			f.mu.Unlock()
+		}()
+		if f.delay > 0 {
+			time.Sleep(f.delay)
+		}
+		p, ok := byName[name]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		vs := map[string]interface{}{
+			p.version: map[string]string{"name": p.name, "version": p.version},
+		}
+		if p.latest != "" {
+			vs[p.latest] = map[string]string{"name": p.name, "version": p.latest}
+		}
+		raw, _ := json.Marshal(map[string]interface{}{"name": p.name, "versions": vs})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(raw)
+	}))
+	t.Cleanup(srv.Close)
+
+	prevMirrors := npmMirrors
+	prevCfg := GetConfig()
+	t.Cleanup(func() {
+		npmMirrors = prevMirrors
+		initConfig(&prevCfg)
+	})
+	npmMirrors = []npmMirror{{Name: "测试源", Slug: "test", URL: srv.URL}}
+	cfg := defaultConfig()
+	cfg.NpmRegistry = "test"
+	initConfig(&cfg)
+
+	dsh := newTestDshManager(home, "")
+	dsh.renv = &RuntimeEnv{Home: home}
+	f.um = &UpdateManager{dsh: dsh}
+	return f
+}
+
+func (f *pageUpdateFixture) list() pluginList {
+	return pluginList{versions: f.versions}
+}
+
+func (f *pageUpdateFixture) requestNames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requests...)
+}
+
+func TestCheckPagePluginsCachesOnlyUpdates(t *testing.T) {
+	f := newPageUpdateFixture(t, []pageUpdatePlugin{
+		{name: "demo-update", version: "1.0.0", latest: "1.1.0"},
+		{name: "demo-current", version: "2.0.0"},
+		{name: "demo-git", version: "0.1.0", spec: "github:owner/repo"},
+		{name: "dshmarket", version: "1.0.0", latest: "2.0.0"}, // 受管插件：不归这一轮检查
+	}, 0)
+
+	f.um.checkPagePluginsWith(f.list())
+
+	updates := f.um.pagePluginUpdates()
+	if len(updates) != 1 {
+		t.Fatalf("应只有 demo-update 进缓存，实际 %+v", updates)
+	}
+	if got := updates["demo-update"]; got.LatestVersion != "1.1.0" || !got.HasUpdate {
+		t.Fatalf("demo-update 的结论不对: %+v", got)
+	}
+	for _, name := range []string{"demo-current", "demo-git", "dshmarket"} {
+		if _, ok := updates[name]; ok {
+			t.Fatalf("%s 不应进缓存", name)
+		}
+	}
+	for _, name := range f.requestNames() {
+		if name == "demo-git" || name == "dshmarket" {
+			t.Fatalf("不应该请求 %s（非 registry 安装 / 受管插件）", name)
+		}
+	}
+}
+
+func TestCheckPagePluginsLogsOnlyUpdatesAndDedupes(t *testing.T) {
+	f := newPageUpdateFixture(t, []pageUpdatePlugin{
+		{name: "demo-update", version: "1.0.0", latest: "1.1.0"},
+		{name: "demo-current", version: "2.0.0"},
+	}, 0)
+	out, _ := captureLogs(t)
+
+	f.um.checkPagePluginsWith(f.list())
+	logs := out.String()
+	if !strings.Contains(logs, "update available: demo-update 1.0.0 -> 1.1.0") {
+		t.Fatalf("有更新时应记一行，实际:\n%s", logs)
+	}
+	if strings.Contains(logs, "demo-current") {
+		t.Fatalf("没更新不应记日志，实际:\n%s", logs)
+	}
+
+	// 同一结论的下一轮（每小时）不再重复打同一行
+	out.Reset()
+	f.um.checkPagePluginsWith(f.list())
+	if strings.Contains(out.String(), "update available") {
+		t.Fatalf("同一更新不应重复记日志，实际:\n%s", out.String())
+	}
+
+	// 更新消失（例如已升级）后清掉日志去重记录；再出现时重新记
+	out.Reset()
+	f.versions["demo-update"] = "1.1.0"
+	if err := os.WriteFile(
+		filepath.Join(f.profileWeb, "node_modules", "demo-update", "package.json"),
+		[]byte(`{"name":"demo-update","version":"1.1.0"}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	f.um.checkPagePluginsWith(f.list())
+	if strings.Contains(out.String(), "update available") {
+		t.Fatalf("升级后不应再报更新，实际:\n%s", out.String())
+	}
+	if _, ok := f.um.pagePluginUpdates()["demo-update"]; ok {
+		t.Fatal("升级后缓存里的更新结论应被清掉")
+	}
+}
+
+func TestCheckPagePluginsBoundsConcurrency(t *testing.T) {
+	var plugins []pageUpdatePlugin
+	for i := 0; i < 6; i++ {
+		plugins = append(plugins, pageUpdatePlugin{
+			name:    fmt.Sprintf("demo-%d", i),
+			version: "1.0.0",
+			latest:  "1.1.0",
+		})
+	}
+	f := newPageUpdateFixture(t, plugins, 40*time.Millisecond)
+	f.um.checkPagePluginsWith(f.list())
+
+	if got := len(f.um.pagePluginUpdates()); got != len(plugins) {
+		t.Fatalf("6 个插件都应有更新，实际缓存 %d 个", got)
+	}
+	f.mu.Lock()
+	max := f.maxInFlight
+	f.mu.Unlock()
+	if max > pagePluginCheckConcurrency {
+		t.Fatalf("并发上限应为 %d，实际峰值 %d", pagePluginCheckConcurrency, max)
+	}
+}
+
+func TestHandlePluginUpdatesEndpoint(t *testing.T) {
+	f := newPageUpdateFixture(t, []pageUpdatePlugin{
+		{name: "demo-update", version: "1.0.0", latest: "1.1.0"},
+	}, 0)
+	f.um.checkPagePluginsWith(f.list())
+
+	mux := &AdminMux{update: f.um}
+	rec := httptest.NewRecorder()
+	mux.handlePluginUpdates(rec, httptest.NewRequest(http.MethodGet, "/api/plugins/updates", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("应 200，实际 %d", rec.Code)
+	}
+	var body struct {
+		OK      bool                        `json:"ok"`
+		Updates map[string]PluginUpdateInfo `json:"updates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || body.Updates["demo-update"].LatestVersion != "1.1.0" {
+		t.Fatalf("响应不对: %s", rec.Body.String())
+	}
+}
+
+// 单卡检查（手动）同样只在有更新时记日志：没更新的点击不该刷日志。
+func TestHandlePluginUpdateCheckLogsOnlyOnUpdate(t *testing.T) {
+	t.Run("无更新不记日志", func(t *testing.T) {
+		f := newPluginUpdateFixture(t, `{"name":"demo","versions":{"1.0.0":{"name":"demo","version":"1.0.0"}}}`)
+		out, _ := captureLogs(t)
+		if rec := getPluginUpdate(t, f.m, "name=demo"); rec.Code != http.StatusOK {
+			t.Fatalf("应 200，实际 %d (%s)", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(out.String(), "update available") {
+			t.Fatalf("没更新不应记日志，实际:\n%s", out.String())
+		}
+	})
+
+	t.Run("有更新记一行", func(t *testing.T) {
+		f := newPluginUpdateFixture(t, `{"name":"demo","versions":{
+			"1.0.0":{"name":"demo","version":"1.0.0"},
+			"1.1.0":{"name":"demo","version":"1.1.0"}
+		}}`)
+		out, _ := captureLogs(t)
+		if rec := getPluginUpdate(t, f.m, "name=demo"); rec.Code != http.StatusOK {
+			t.Fatalf("应 200，实际 %d (%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(out.String(), "update available: demo 1.0.0 -> 1.1.0") {
+			t.Fatalf("有更新应记一行，实际:\n%s", out.String())
+		}
+	})
 }

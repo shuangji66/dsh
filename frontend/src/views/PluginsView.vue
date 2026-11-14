@@ -10,9 +10,12 @@ import { countByFilter, filterPlugins, type FilterCounts, type PluginFilter } fr
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import PluginInstallDialog from '@/components/PluginInstallDialog.vue'
+import PluginDetailDialog from '@/components/PluginDetailDialog.vue'
 import { icons } from '@/utils/icons'
 import { copyText } from '@/utils/clipboard'
 import { captureScroll, restoreScroll } from '@/utils/scroll'
+import { usePluginInstall } from '@/composables/usePluginInstall'
 
 const store = usePluginsStore()
 const { plugins, pluginsLoading } = storeToRefs(store)
@@ -241,9 +244,62 @@ async function executeRestart() {
   }
 }
 
+// --- 安装插件（顶栏「安装」按钮 + 弹窗）---
+//
+// 提交规格、轮询后台任务、进度/错误文案与结果提示都在 usePluginInstall 里（模块级单例：
+// 安装期间切子页面不丢进度，重新挂载也不会起出第二条轮询）。本页只负责三件事：
+// 弹窗可见性、「重启生效」提示条、装完重拉列表（保持滚动位置）。
+const {
+  installing: installingPlugin,
+  progress: installProgress,
+  error: installError,
+  result: installResult,
+  start: startPluginInstall,
+  resume: resumeInstallIfRunning,
+  pendingResult: pendingInstallResult,
+  consumeResult: consumeInstallResult,
+  clearError: clearInstallError
+} = usePluginInstall()
+
+const installDialogVisible = ref(false)
+
+// 插件详情弹窗：点信息按钮才读文档（懒加载），弹窗内展示 meta.detail 或 README。
+// 缓存/请求都在 usePluginDetail 里（模块级），关掉弹窗再打开同一插件不重复读盘。
+const detailDialogVisible = ref(false)
+const detailTarget = ref('')
+
+function openPluginDetail(name: string) {
+  detailTarget.value = name
+  detailDialogVisible.value = true
+}
+
+function onInstallClick() {
+  clearInstallError()
+  installDialogVisible.value = true
+}
+
+// 消费一次成功结果：需要重启的挂「重启生效」提示条（与启停开关同一条），然后重拉列表。
+// 失败结果已由 composable 弹过 toast 并留在弹窗里，这里不需要动作。
+async function applyInstallResult() {
+  const pending = pendingInstallResult()
+  if (!pending) return
+  consumeInstallResult(pending.seq)
+  // 成功才关弹窗：失败时错误要留在弹窗里，用户改完规格可直接重试
+  installDialogVisible.value = false
+  if (pending.status.restart && pending.status.name) needsRestartPlugin.value = pending.status.name
+  await reloadKeepingScroll()
+}
+
+// 结果可能在页面挂载期间落定，也可能在别的页面落定（回到本页时才消费）
+watch(installResult, () => void applyInstallResult(), { immediate: true })
+
 onMounted(() => {
   // 命中缓存则直接使用，避免切换子页面时重复命令拉取
   store.loadPlugins()
+  // 后台可能还有一次安装（切换页面回来 / 刷新页面）：接上进度，并直接把弹窗打开
+  void resumeInstallIfRunning().then((running) => {
+    if (running) installDialogVisible.value = true
+  })
 
   // 量顶栏高度并跟着它变（视口宽度、语言、按钮换行都会改高度）。
   // 组件根节点就是那层 sticky 遮罩，量它的高度 = 顶栏下沿到视口顶的距离（静止与固定时相同）。
@@ -267,6 +323,10 @@ onBeforeUnmount(() => {
   <div class="pt-3 sm:pt-4 pb-8 sm:pb-12 px-4 sm:px-8 max-w-6xl mx-auto">
     <!-- 页头（图标 + 标题 + 刷新/重置按钮）；ref 用于实测高度，给下面的 sticky 提示条定位 -->
     <PageHeader ref="headerRef" sticky class="mb-3" :title="t('nav_plugins')" :icon="icons.plugin">
+      <!-- 安装插件：打开弹窗填规格；安装进行中再次点开可看进度（任务在后台跑） -->
+      <button class="g-btn-secondary h-8 px-3 text-xs" @click="onInstallClick">
+        {{ t('plugin_install') }}
+      </button>
       <button class="g-btn-secondary h-8 px-3 text-xs" :disabled="pluginsLoading" @click="store.loadPlugins(true)">
         {{ t('plugin_refresh') }}
       </button>
@@ -371,22 +431,35 @@ onBeforeUnmount(() => {
 
       <template v-else>
         <div v-for="p in visiblePlugins" :key="p.name" class="g-card g-card-hover p-4 flex flex-col">
-          <div class="min-w-0">
-            <!-- 插件名：点击即复制（提 issue / 报错时要贴名字）。按钮化而不是可拖选 ——
-                 全局默认禁止文本选择（见 style.css），这里连 select-text 也不加，点击的
-                 语义就是「复制」，复制成功弹 toast。
-                 过长的插件名由 MarqueeText 自动向左循环滚动显示。 -->
+          <!-- 第一行：插件名 + 版本号（左）与详情按钮（右上角，无边框纯图标）。
+               详情按钮只负责打开弹窗 —— 文档在弹窗打开时才读（懒加载），不预取。 -->
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0 flex-1">
+              <!-- 插件名：点击即复制（提 issue / 报错时要贴名字）。按钮化而不是可拖选 ——
+                   全局默认禁止文本选择（见 style.css），这里连 select-text 也不加，点击的
+                   语义就是「复制」，复制成功弹 toast。
+                   过长的插件名由 MarqueeText 自动向左循环滚动显示。 -->
+              <button
+                type="button"
+                class="block w-full text-left font-mono text-sm font-medium text-ink dark:text-white hover:text-brand dark:hover:text-brand transition-colors"
+                :title="t('plugin_copy_name')"
+                :aria-label="t('plugin_copy_name')"
+                @click="copyPluginName(p.name)"
+              >
+                <MarqueeText :text="p.name" />
+              </button>
+              <!-- 版本号：刻意不可复制、不可点击 -->
+              <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ p.version }}</div>
+            </div>
             <button
               type="button"
-              class="block w-full text-left font-mono text-sm font-medium text-ink dark:text-white hover:text-brand dark:hover:text-brand transition-colors"
-              :title="t('plugin_copy_name')"
-              :aria-label="t('plugin_copy_name')"
-              @click="copyPluginName(p.name)"
+              class="g-btn-ghost -mr-1 -mt-1 h-8 w-8 flex-shrink-0 p-0"
+              :aria-label="t('plugin_detail_open', { name: p.name })"
+              :title="t('plugin_detail_open', { name: p.name })"
+              @click="openPluginDetail(p.name)"
             >
-              <MarqueeText :text="p.name" />
+              <span class="w-4 h-4" v-html="icons.info"></span>
             </button>
-            <!-- 版本号：刻意不可复制、不可点击 -->
-            <div class="text-xs text-ink-faint dark:text-[#8A8A92] mt-1.5">{{ p.version }}</div>
           </div>
 
           <!-- 第二栏：启停开关 + 状态标记（紧邻开关右侧，disabled 状态来自 dsh.profile.bundles）
@@ -437,6 +510,18 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </div>
+
+    <!-- 插件详情弹窗（只读）：打开才读文档；meta.detail 优先、README 兜底 -->
+    <PluginDetailDialog v-model:visible="detailDialogVisible" :name="detailTarget" />
+
+    <!-- 安装插件弹窗（安装是后台任务：关掉它不会中断，进度/结果由本页轮询） -->
+    <PluginInstallDialog
+      v-model:visible="installDialogVisible"
+      :installing="installingPlugin"
+      :progress="installProgress"
+      :error-text="installError"
+      @submit="startPluginInstall"
+    />
 
     <!-- 重启生效二次确认弹窗（与概览页重启逻辑一致：默认插槽里放原确认文案 +
          「有插件操作在跑」时的额外风险提示，弹窗结构与样式约定见 AGENTS 第 3 节） -->

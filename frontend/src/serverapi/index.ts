@@ -191,6 +191,38 @@ export interface UpdateStatus {
 
 export type UpdateKind = 'dsh' | 'market' | 'advanced'
 
+// 插件页「安装插件」的后台任务状态（GET /api/plugins/install/status）。
+//
+// 安装是异步的：pnpm 下载/构建可能要几十秒到几分钟，同步请求会被平台网关掐断
+// （见后端 plugin_install.go）。POST 只负责入队，进度与结果都从这份状态读。
+// 插件详情文档（GET /api/plugins/detail）。
+export interface PluginDetailPayload {
+  ok: boolean
+  // found：有正文；none：既没有 meta.detail 也没有 README
+  status: 'found' | 'none'
+  // locale：meta.detail 指定的文档；readme：兜底读到的 README
+  origin?: 'locale' | 'readme'
+  path?: string
+  markdown?: string
+}
+
+export interface PluginInstallStatus {
+  running: boolean
+  // installing（进行中）/ done（成功）/ failed（失败）
+  phase?: 'installing' | 'done' | 'failed'
+  spec?: string
+  // 装进来的包名与版本（Git 仓库/本地目录也能从 profile 清单里认出来；
+  // 认不出时为空，界面仍提示「安装完成」）
+  name?: string
+  version?: string
+  // 需要重启 dsh 服务新装的插件才会生效（bundle / 客户端插件 / 原生依赖）
+  restart?: boolean
+  message?: string
+  messageRef?: UIRef
+  error?: string
+  errorRef?: UIRef
+}
+
 // 由控制台管理的 profile 插件（同一套弹窗与动作流程，见 ManagedPluginDialog.vue）。
 export type ManagedPluginKind = 'market' | 'advanced'
 
@@ -510,6 +542,17 @@ export const api = {
     }),
   // 插件管理：列表 / 卸载 / 重置（dsh plugin --profile web）
   listPlugins: () => request<{ ok: boolean; plugins: PluginInfo[]; raw?: string }>('/api/plugins'),
+  // 安装插件：spec 支持包名 / 包名@版本 / 仓库地址 / 本地绝对路径 / 完整的
+  // `dsh plugin add …` 命令（解析与校验在后端）。只入队，结果经 pluginInstallStatus 轮询。
+  installPlugin: (spec: string) =>
+    request<{ ok: boolean; started?: boolean; spec?: string; name?: string }>('/api/plugins/install', {
+      method: 'POST',
+      body: JSON.stringify({ spec })
+    }),
+  pluginInstallStatus: () => request<{ ok: boolean } & PluginInstallStatus>('/api/plugins/install/status'),
+  // 插件详情：按官方顺序读（locale 的 meta.detail 优先，README 兜底）；status=none 表示无内容。
+  pluginDetail: (name: string, lang: string) =>
+    request<PluginDetailPayload>(`/api/plugins/detail?name=${encodeURIComponent(name)}&lang=${encodeURIComponent(lang)}`),
   removePlugin: (name: string) =>
     request<{ ok: boolean; removed: string; msg: string }>('/api/plugins/remove', {
       method: 'POST',

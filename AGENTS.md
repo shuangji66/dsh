@@ -203,6 +203,27 @@
   read-modify-write，pnpm 安装/卸载也在写同一个文件，不挡就会静默丢掉一端的改动（409）。
   `PluginInfo.Bundle` 表示「声明了 dsh.bundle.patch、可启停」，普通依赖不给开关。
   回归测试见 `backend/profile_test.go` / `admin_plugin_name_test.go` / `semver_test.go`。
+- `plugin_install.go` — **插件页的「安装插件」**（`POST /api/plugins/install` +
+  `GET /api/plugins/install/status`）：把用户输入归一化成 pnpm 认得的安装规格 —— 包名 /
+  包名@版本 / Git 仓库地址 / 本地绝对路径（目录或 .tgz）/ 完整的
+  `dsh plugin [--profile web] add <规格>` 命令；随后仍走
+  `dsh plugin --profile web add <规格> --registry=<所选源>`（必须经 `RunPluginCommand`）。
+  **异步执行 + 轮询**：pnpm 安装可能跑几十秒到几分钟，同步请求会被平台网关掐断（与 dsh
+  数据备份同一条边界，见 `update.go`）。安装结束后按 profile `dependencies` 的前后差异认出
+  包名/版本；bundle 或带客户端部分/原生依赖的包标 `restart`，前端复用「重启生效」提示条
+  —— **不自动重启 dsh**（会掐掉用户正在跑的会话）。任务与市场/更新/备份共用
+  `applying` 锁（`TryLock`，拿不到回 409），并先过 `pluginProfileWriteBusy`。
+  镜像源只能用设置页选中的那一个：命令里的 `--registry` 等选项一律拒绝，不静默丢弃。
+  回归测试见 `backend/plugin_install_test.go`。
+- `plugin_detail.go` — 插件卡片的信息按钮（`GET /api/plugins/detail?name=&lang=`）：按官方
+  `readBundleDetail` 的顺序读**已安装包**的详情文档 —— `locale/<语言>.json` 的 `meta.detail`
+  优先（语言链 zh-CN → zh → en，locale 文件名同时认 zh-CN.json / zh-cn.json），包根 README
+  兜底（README.md / readme.md / Readme.md / README.markdown / README，再按目录列举大小写
+  不敏感匹配）。**声明了 meta.detail 却读不到是错误、不回落 README**；路径必须是包内相对
+  路径（无 scheme/反斜杠/`..`，以 .md/.markdown 结尾），文档上限 1 MiB，正文去掉 BOM 与
+  YAML front matter。前端 `usePluginDetail.ts` 只在打开弹窗时请求（列表不预取）+ 模块级
+  临时缓存（key 含语言；失败不缓存），弹窗是只读的 `PluginDetailDialog.vue`（无内容时显示
+  「无内容」）。回归测试见 `backend/plugin_detail_test.go`。
 - `release-notes` — **两条链路取日志的路子刻意不同，别混**：
   1. **dsh 版本列表**（`update.go` 的 `notesIndex` + `/api/dsh/versions/notes`）：取上游
      `deepseek-ai/deepseek-harness` 的 GitHub Release 正文（tag `dsh-v<版本>`，见

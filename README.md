@@ -40,6 +40,11 @@
   网页授权页 `/app-auth/pick-user-file`，完成后由平台跳回本页；1.38.0 起官方修复了
   原生选择器，直接用宿主选择目录。
 - **插件管理** — 列出 / 启用 / 停用 / 卸载 / 重置 dsh web profile 的插件依赖（插件名点击即复制）；
+  顶栏「安装」按 dsh 官方方式装插件：包名、包名@版本、Git 仓库地址、本地绝对路径（目录或
+  `.tgz`），或直接粘贴整段 `dsh plugin add …` 命令；安装是后台任务（关掉弹窗继续跑，进度
+  经状态接口轮询），成功后按包类型提示「重启 dsh 生效」，镜像源固定用设置页选中的那一个；
+  卡片右上角的信息按钮按 dsh 官方顺序显示插件详情（`locale` 的 `meta.detail` 优先、README
+  兜底，跟随界面语言），点开才读、本次会话内临时缓存，没有文档时显示「无内容」；
   启停按官方 dsh 的 `dsh.profile.bundles` 选择（停用保留依赖，不写插件市场的
   `.dsh-market/state.json`），只有声明了 `dsh.bundle` 的包才给开关；启用前过官方的兼容性
   栅栏（`engines.dsh` / `@deepseek-ai/dsh*` peer 范围，`compatibility.json` 里的放行记录

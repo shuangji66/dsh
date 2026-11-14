@@ -16,6 +16,7 @@ import { icons } from '@/utils/icons'
 import { copyText } from '@/utils/clipboard'
 import { captureScroll, restoreScroll } from '@/utils/scroll'
 import { usePluginInstall } from '@/composables/usePluginInstall'
+import { usePluginUpdateChecks } from '@/composables/usePluginUpdateChecks'
 
 const store = usePluginsStore()
 const { plugins, pluginsLoading } = storeToRefs(store)
@@ -26,14 +27,14 @@ const { t } = useI18n()
 // --- 更新状态（手动单卡检查 + 后台定时检测）---
 //
 // 先声明合并视图：下面的「可更新」筛选与计数要用它。具体动作（请求 / 轮询 / 安装）见
-// 文件后面的「检查更新」一节。
+// 文件后面的「检查更新」一节。手动检查的结果存在模块级（见 usePluginUpdateChecks），
+// 切子页面回来仍然有效；后台结果由页面轮询后端缓存补齐。
 //
 // 与官方插件中心一致：只把「比当前版本新、非预发布、未废弃、与当前 dsh 兼容」的版本当作
 // 候选（判定在 backend/plugin_update.go）。手动检查按插件、异步；后台结果来自每小时的
 // 定时检测（内存缓存，页面轮询）。
-type UpdateCheckState = { status: 'checking' | 'done'; latest?: string; hasUpdate?: boolean }
-
-const updateChecks = ref<Record<string, UpdateCheckState>>({})
+// 手动检查的结果存模块级（切子页面不丢），见 usePluginUpdateChecks。
+const { checks: updateChecks } = usePluginUpdateChecks()
 
 // 后台定时检测（每小时）的结果：市场/增强插件之外、其它插件在镜像源上有没有新版本。
 // 页面只轮询这份**内存缓存**（GET /api/plugins/updates，不联网、不起 `dsh plugin list`），

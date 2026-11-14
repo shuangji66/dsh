@@ -191,10 +191,6 @@ export interface UpdateStatus {
 
 export type UpdateKind = 'dsh' | 'market' | 'advanced'
 
-// 插件页「安装插件」的后台任务状态（GET /api/plugins/install/status）。
-//
-// 安装是异步的：pnpm 下载/构建可能要几十秒到几分钟，同步请求会被平台网关掐断
-// （见后端 plugin_install.go）。POST 只负责入队，进度与结果都从这份状态读。
 // 后台定时检测缓存的单插件更新结论（GET /api/plugins/updates）。只有有更新的才在表里。
 export interface PluginUpdateEntry {
   latestVersion: string
@@ -221,6 +217,10 @@ export interface PluginDetailPayload {
   markdown?: string
 }
 
+// 插件页「安装插件」的后台任务状态（GET /api/plugins/install/status）。
+//
+// 安装是异步的：pnpm 下载/构建可能要几十秒到几分钟，同步请求会被平台网关掐断
+// （见后端 plugin_install.go）。POST 只负责入队，进度与结果都从这份状态读。
 export interface PluginInstallStatus {
   running: boolean
   // installing（进行中）/ done（成功）/ failed（失败）

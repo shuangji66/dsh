@@ -155,7 +155,7 @@ const zh = {
   console_language: '语言',
   // 移动端概览页「DeepSeek 账号」卡片的显隐（只存本浏览器，不影响登录状态）
   console_show_account_card: '显示 DeepSeek 账号卡片',
-  console_show_account_card_hint: '关闭后仅隐藏移动端概览页的这张卡片，不影响登录状态与账号数据',
+  console_show_account_card_hint: '关闭后仅隐藏移动端概览页的这张卡片，不影响登录状态与账号数据；偏好只保存在本浏览器',
   lang_zh: '中文',
   lang_en: 'English',
   saved: '配置已保存',
@@ -816,7 +816,7 @@ const en: Record<keyof typeof zh, string> = {
   console_language: 'Language',
   // Show/hide the mobile overview's DeepSeek account card (this browser only; sign-in state unaffected)
   console_show_account_card: 'Show DeepSeek account card',
-  console_show_account_card_hint: 'Hides this card on the mobile overview only — sign-in state and account data are unaffected',
+  console_show_account_card_hint: 'Hides this card on the mobile overview only — sign-in state and account data are unaffected; saved in this browser',
   lang_zh: '中文',
   lang_en: 'English',
   saved: 'Settings saved',

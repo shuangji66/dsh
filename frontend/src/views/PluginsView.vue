@@ -7,6 +7,7 @@ import { useToastStore } from '@/stores/toast'
 import { uiErrText, uiText, useI18n, type I18nKey } from '@/composables/useI18n'
 import { api, type PluginInfo, type PluginUpdateEntry } from '@/serverapi'
 import { countByFilter, filterPlugins, type FilterCounts, type PluginFilter } from '@/utils/pluginFilter'
+import { resolveCardUpdates } from '@/utils/pluginUpdates'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import MarqueeText from '@/components/MarqueeText.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -42,22 +43,11 @@ const { checks: updateChecks } = usePluginUpdateChecks()
 const backgroundUpdates = ref<Record<string, PluginUpdateEntry>>({})
 
 // cardUpdates 是模板用的合并视图：单卡手动检查 > 后台定时检测。
-// 后台结论要求 latest 与列表里的已装版本不同，避免装完（缓存尚未刷新）还挂着箭头。
-const cardUpdates = computed(() => {
-  const map: Record<string, { hasUpdate: boolean; latest: string }> = {}
-  for (const p of plugins.value) {
-    const manual = updateChecks.value[p.name]
-    if (manual?.status === 'done') {
-      map[p.name] = { hasUpdate: manual.hasUpdate === true, latest: manual.latest || '' }
-      continue
-    }
-    const bg = backgroundUpdates.value[p.name]
-    map[p.name] = bg?.hasUpdate && bg.latestVersion && bg.latestVersion !== p.version
-      ? { hasUpdate: true, latest: bg.latestVersion }
-      : { hasUpdate: false, latest: '' }
-  }
-  return map
-})
+// 规则（含「手动结论必须仍对得上已装版本，否则回退后台结论」）在 utils/pluginUpdates.ts，
+// 那里有单测 —— 页面之外换过版本时，旧的手动结论不能再生效，否则会给出降级箭头。
+const cardUpdates = computed(() =>
+  resolveCardUpdates(plugins.value, updateChecks.value, backgroundUpdates.value)
+)
 
 // --- 顶栏下的分类筛选 + 实时搜索（纯前端过滤已拉取的列表，不再跑 dsh 命令）---
 //
@@ -390,7 +380,10 @@ async function checkPluginUpdate(name: string) {
   updateChecks.value = { ...updateChecks.value, [name]: { status: 'checking' } }
   try {
     const r = await api.pluginUpdateCheck(name)
-    updateChecks.value = { ...updateChecks.value, [name]: { status: 'done', latest: r.latest, hasUpdate: r.hasUpdate } }
+    updateChecks.value = {
+      ...updateChecks.value,
+      [name]: { status: 'done', latest: r.latest, hasUpdate: r.hasUpdate, current: r.current }
+    }
     if (!r.hasUpdate) {
       // 后台缓存里可能还挂着上一次的「有更新」，这次手查是更新的结论 —— 清掉它，
       // 避免刷新页面后又冒出来（下一次小时级检查会重新算）。
